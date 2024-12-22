@@ -4,3 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+clap = { version = "4.2", features = ["derive"] }
+
+rnix = "0.11.0" # TODO: 11.1 is on github as of 12-19-24 but not released. Only added pipe operators
+rowan = "0.15"  # TODO: same as rnix, not sure if we need copying from nixdoc for now
