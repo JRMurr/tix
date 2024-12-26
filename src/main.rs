@@ -1,11 +1,16 @@
+mod comment;
+
 use std::fs;
 use std::{collections::HashMap, error::Error};
 
 use clap::Parser;
+use comment::get_expr_docs;
 use rnix::{
     SyntaxKind, SyntaxNode,
-    ast::{Attr, AttrpathValue, Expr, Inherit, LetIn},
+    ast::{Attr, AttrpathValue, Expr, HasEntry, Inherit, LetIn},
+    match_ast,
 };
+
 use rowan::{WalkEvent, ast::AstNode};
 
 use std::path::PathBuf;
@@ -102,25 +107,89 @@ struct Cli {
 // }
 
 fn collect_bindings(expr: Expr) {
-    match expr {
-        Expr::Apply(apply) => todo!(),
+    match dbg!(expr) {
+        Expr::Apply(apply) => {
+            if let Some(lambda) = apply.lambda() {
+                collect_bindings(lambda)
+            }
+
+            if let Some(argument) = apply.argument() {
+                collect_bindings(argument)
+            }
+        }
         Expr::Assert(assert) => todo!(),
         Expr::Error(error) => todo!(),
         Expr::IfElse(if_else) => todo!(),
-        Expr::Select(select) => todo!(),
-        Expr::Str(_) => todo!(),
+        Expr::Select(select) => {
+            // this seems to be doing "lookup" aka doing a "." on an attr like
+            // builtins.concatStringSep
+
+            // TODO - do something?
+        }
+        Expr::Str(_) => {
+            // TODO - do something?
+        }
         Expr::Path(path) => todo!(),
-        Expr::Literal(literal) => todo!(),
-        Expr::Lambda(lambda) => todo!(),
+        Expr::Literal(literal) => {
+            // TODO - do something?
+        }
+        Expr::Lambda(lambda) => {
+            if let Some(body) = lambda.body() {
+                collect_bindings(body)
+            }
+        }
         Expr::LegacyLet(legacy_let) => todo!(),
-        Expr::LetIn(let_in) => todo!(),
+        Expr::LetIn(let_in) => {
+            let s = let_in.syntax();
+            dbg!(get_expr_docs(s));
+
+            // these are the bindings used in the body
+            for entry in let_in.entries() {
+                match entry {
+                    rnix::ast::Entry::Inherit(inherit) => {}
+                    rnix::ast::Entry::AttrpathValue(attrpath_value) => {
+                        if let Some(v) = attrpath_value.value() {
+                            collect_bindings(v);
+                        }
+                    }
+                }
+            }
+
+            if let Some(body) = let_in.body() {
+                collect_bindings(body)
+            }
+        }
         Expr::List(list) => todo!(),
-        Expr::BinOp(bin_op) => todo!(),
+        Expr::BinOp(bin_op) => {
+            if let Some(lhs) = bin_op.lhs() {
+                collect_bindings(lhs)
+            }
+
+            if let Some(rhs) = bin_op.rhs() {
+                collect_bindings(rhs)
+            }
+        }
         Expr::Paren(paren) => todo!(),
         Expr::Root(root) => todo!(),
-        Expr::AttrSet(attr_set) => todo!(),
+        Expr::AttrSet(attr_set) => {
+            let s = attr_set.syntax();
+            dbg!(get_expr_docs(s));
+
+            for entry in attr_set.entries() {
+                match entry {
+                    rnix::ast::Entry::Inherit(inherit) => {}
+                    rnix::ast::Entry::AttrpathValue(attrpath_value) => {
+                        if let Some(v) = attrpath_value.value() {
+                            collect_bindings(v);
+                        }
+                    }
+                }
+            }
+        }
         Expr::UnaryOp(unary_op) => todo!(),
-        Expr::Ident(ident) => todo!(),
+        Expr::Ident(ident) => {
+            // nothing
+        }
         Expr::With(with) => todo!(),
         Expr::HasAttr(has_attr) => todo!(),
     }
@@ -137,7 +206,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // dbg!(nix.expr());
 
-    collect_bindings(dbg!(expr));
+    collect_bindings(expr);
 
     Ok(())
 }
