@@ -57,7 +57,6 @@ pub fn get_expr_docs(expr: &SyntaxNode) -> Option<String> {
 
             }
         }
-        // None
     } else {
         // There is no parent;
         // No further places where a doc-comment could be.

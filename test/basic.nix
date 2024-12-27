@@ -29,6 +29,8 @@ let
 
   addOne = add 1;
 
+  two = addOne 1;
+
   /*
     Concatenate a list of strings.
     # Type
@@ -39,5 +41,10 @@ let
   concatStrings = builtins.concatStringsSep "";
 in
 {
-  inherit add addOne concatStrings;
+  inherit
+    add
+    addOne
+    concatStrings
+    two
+    ;
 }
