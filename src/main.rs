@@ -1,6 +1,7 @@
 mod checker;
 mod comment;
 mod nix_file;
+mod symbols;
 
 use std::error::Error;
 use std::fs;
@@ -102,6 +103,10 @@ struct Cli {
 //             _ => (),
 //         }
 //     }
+// }
+
+// struct TypedExpr {
+//     env:
 // }
 
 fn collect_bindings(expr: Expr) {
