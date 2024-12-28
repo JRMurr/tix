@@ -98,6 +98,13 @@ pub enum Literal {
     Uri, // TODO:
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pat {
+    pub fields: Box<[(Option<NameId>, Option<ExprId>)]>,
+    pub ellipsis: bool,
+}
+pub type Attrpath = Box<[ExprId]>;
+
 type Param = String; // TODO: real type
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -105,24 +112,23 @@ pub enum Expr {
     Missing, // for an invalid parsed expression. Allows us to parse as much as we can and leave "holes"
     Apply {
         fun: ExprId,
-        args: ExprId, // TODO should args be a vec of exprs?
+        arg: ExprId,
     },
     Literal(Literal),
     Lambda {
-        params: Param,
+        param: Param,
         body: ExprId,
     },
     LetIn {
         bindings: Bindings,
         body: ExprId,
     },
-    List(Vec<ExprId>),
+    List(Box<[ExprId]>),
     BinOp {
         lhs: ExprId,
         rhs: ExprId,
         op: rnix::ast::BinOpKind,
     },
-    Paren(ExprId),
     AttrSet {
         is_rec: bool,
         bindings: Bindings,
@@ -132,6 +138,12 @@ pub enum Expr {
         expr: ExprId,
     },
     Reference(String),
+
+    Select {
+        set: ExprId,
+        attrpath: Attrpath,
+        default_expr: Option<ExprId>,
+    },
 
     StringInterpolation(Box<[InterpolPart<String>]>),
     PathInterpolation(Box<[InterpolPart<String>]>),

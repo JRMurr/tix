@@ -21,13 +21,16 @@ pub(super) fn get_str_literal(s: &ast::Str) -> Option<String> {
 
     let parts = s.normalized_parts();
 
-    if parts.len() != 1 {
-        panic!("There should only be one string part if there is no interpolation");
+    if parts.len() > 1 {
+        panic!(
+            "There should only be at most one string part if there is no interpolation\n{s}\n parts:{}",
+            parts.len()
+        );
     }
 
     let lit = match parts.first() {
         Some(ast::InterpolPart::Literal(lit)) => lit,
-        _ => panic!("No literal found"),
+        _ => "", // if not parts its an empty string
     };
 
     Some(lit.to_string())

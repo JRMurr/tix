@@ -6,8 +6,8 @@ use rnix::ast::{self, HasEntry};
 use rowan::ast::AstNode;
 
 use super::{
-    AstPtr, BindingValue, Bindings, Expr, ExprId, InterpolPart, Literal, Module, ModuleSourceMap,
-    Name, NameId,
+    AstPtr, Attrpath, BindingValue, Bindings, Expr, ExprId, InterpolPart, Literal, Module,
+    ModuleSourceMap, Name, NameId,
     ast_utils::{AttrKind, get_str_literal, name_of_ident},
 };
 
@@ -65,14 +65,21 @@ impl LowerCtx {
                 let fun = self.lower_expr_opt(apply.lambda());
                 let args = self.lower_expr_opt(apply.argument());
 
-                Expr::Apply { fun, args }
+                Expr::Apply { fun, arg: args }
             }
             ast::Expr::IfElse(if_else) => todo!(),
-            ast::Expr::Select(select) => todo!(),
-            ast::Expr::Str(_nix_str) => {
-                // TODO: real handling
-                Expr::Literal(Literal::String("TODO!".to_string()))
+            ast::Expr::Select(select) => {
+                let set = self.lower_expr_opt(select.expr());
+                let attrpath = self.lower_attrpath_opt(select.attrpath());
+                let default_expr = select.default_expr().map(|e| self.lower_expr(e));
+
+                Expr::Select {
+                    set,
+                    attrpath,
+                    default_expr,
+                }
             }
+            ast::Expr::Str(s) => return self.lower_string(s),
             ast::Expr::Path(_path) => {
                 // TODO: real handling
                 Expr::Literal(Literal::Path("TODO!".to_string()))
@@ -116,7 +123,7 @@ impl LowerCtx {
                 let body = self.lower_expr_opt(lambda.body());
 
                 Expr::Lambda {
-                    params: "TODO: REAL PARAMS".to_string(),
+                    param: "TODO: REAL PARAMS".to_string(),
                     body,
                 }
             }
@@ -125,7 +132,11 @@ impl LowerCtx {
                 let body = self.lower_expr_opt(let_in.body());
                 Expr::LetIn { bindings, body }
             }
-            ast::Expr::List(list) => todo!(),
+            ast::Expr::List(list) => {
+                let elems = list.items().map(|elem| self.lower_expr(elem));
+
+                Expr::List(elems.collect())
+            }
             ast::Expr::BinOp(bin_op) => {
                 let lhs = self.lower_expr_opt(bin_op.lhs());
 
@@ -136,7 +147,7 @@ impl LowerCtx {
 
                 Expr::BinOp { lhs, rhs, op }
             }
-            ast::Expr::Paren(paren) => Expr::Paren(self.lower_expr_opt(paren.expr())),
+            ast::Expr::Paren(paren) => return self.lower_expr_opt(paren.expr()),
             ast::Expr::AttrSet(attr_set) => {
                 let bindings = MergingSet::desugar(self, &attr_set).finish(self);
 
@@ -160,6 +171,22 @@ impl LowerCtx {
         };
 
         self.alloc_expr(expr, ptr)
+    }
+
+    fn lower_attrpath_opt(&mut self, attrpath: Option<ast::Attrpath>) -> Attrpath {
+        attrpath
+            .into_iter()
+            .flat_map(|attrpath| attrpath.attrs())
+            .map(|attr| match attr {
+                ast::Attr::Dynamic(d) => self.lower_expr_opt(d.expr()),
+                ast::Attr::Ident(ident) => {
+                    let name = name_of_ident(&ident).expect("Should have a name");
+                    let ptr = AstPtr::new(ident.syntax());
+                    self.alloc_expr(Expr::Literal(Literal::String(name)), ptr)
+                }
+                ast::Attr::Str(s) => self.lower_string(s),
+            })
+            .collect()
     }
 
     fn lower_string(&mut self, s: rnix::ast::Str) -> ExprId {

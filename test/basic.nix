@@ -31,20 +31,25 @@ let
 
   two = addOne 1;
 
+  three = add 1 2;
+
+  /*
+    Concatenate a list of strings.
+    # Type
+    ```
+    concatStrings :: [string] -> string
+    ```
+  */
+  concatStrings = builtins.concatStringsSep " ";
+
 in
-/*
-  Concatenate a list of strings.
-  # Type
-  ```
-  concatStrings :: [string] -> string
-  ```
-*/
-# concatStrings = builtins.concatStringsSep "";
+
 {
   inherit
     add
     addOne
-    # concatStrings
+    concatStrings
     two
+    three
     ;
 }
