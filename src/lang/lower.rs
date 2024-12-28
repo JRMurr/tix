@@ -5,6 +5,8 @@ use rnix::ast::{self, HasEntry};
 
 use rowan::ast::AstNode;
 
+use crate::lang::Pat;
+
 use super::{
     AstPtr, Attrpath, BindingValue, Bindings, Expr, ExprId, InterpolPart, Literal, Module,
     ModuleSourceMap, Name, NameId,
@@ -63,11 +65,20 @@ impl LowerCtx {
         let expr: Expr = match rnix_expr {
             ast::Expr::Apply(apply) => {
                 let fun = self.lower_expr_opt(apply.lambda());
-                let args = self.lower_expr_opt(apply.argument());
-
-                Expr::Apply { fun, arg: args }
+                let arg = self.lower_expr_opt(apply.argument());
+                Expr::Apply { fun, arg }
             }
-            ast::Expr::IfElse(if_else) => todo!(),
+            ast::Expr::IfElse(if_else) => {
+                let cond = self.lower_expr_opt(if_else.condition());
+                let then_body = self.lower_expr_opt(if_else.body());
+                let else_body = self.lower_expr_opt(if_else.else_body());
+
+                Expr::IfThenElse {
+                    cond,
+                    then_body,
+                    else_body,
+                }
+            }
             ast::Expr::Select(select) => {
                 let set = self.lower_expr_opt(select.expr());
                 let attrpath = self.lower_attrpath_opt(select.attrpath());
@@ -78,6 +89,17 @@ impl LowerCtx {
                     attrpath,
                     default_expr,
                 }
+            }
+            ast::Expr::With(with) => {
+                let env = self.lower_expr_opt(with.namespace());
+                let body = self.lower_expr_opt(with.body());
+                Expr::With { env, body }
+            }
+            ast::Expr::HasAttr(has_attr) => {
+                let set = self.lower_expr_opt(has_attr.expr());
+                let attrpath = self.lower_attrpath_opt(has_attr.attrpath());
+
+                Expr::HasAttr { set, attrpath }
             }
             ast::Expr::Str(s) => return self.lower_string(s),
             ast::Expr::Path(_path) => {
@@ -99,34 +121,7 @@ impl LowerCtx {
 
                 Expr::Literal(lit)
             }
-            ast::Expr::Lambda(lambda) => {
-                let params = lambda.param().expect("Should have lambda params");
-
-                match params {
-                    ast::Param::Pattern(p) => {
-                        // TODO: handle
-                        eprintln!("TODO: need to handle pattern params {p}")
-                    }
-                    ast::Param::IdentParam(ident_param) => {
-                        let ident = ident_param
-                            .ident()
-                            .expect("ident_param should have an ident...");
-                        let name = name_of_ident(&ident).expect("Should have name");
-
-                        // self.add_symbol(
-                        //     scope_id,
-                        //     Symbol::new(name.to_string(), "TODO: TYPE".to_string()),
-                        // );
-                    }
-                }
-
-                let body = self.lower_expr_opt(lambda.body());
-
-                Expr::Lambda {
-                    param: "TODO: REAL PARAMS".to_string(),
-                    body,
-                }
-            }
+            ast::Expr::Lambda(lambda) => return self.lower_lambda(lambda, ptr),
             ast::Expr::LetIn(let_in) => {
                 let bindings = MergingSet::desugar(self, &let_in).finish(self);
                 let body = self.lower_expr_opt(let_in.body());
@@ -156,17 +151,30 @@ impl LowerCtx {
                     bindings,
                 }
             }
-            ast::Expr::UnaryOp(unary_op) => todo!(),
+            ast::Expr::UnaryOp(unary_op) => {
+                let op = unary_op.operator().expect("Should have operator");
+
+                let expr = self.lower_expr_opt(unary_op.expr());
+
+                Expr::UnaryOp { op, expr }
+            }
             ast::Expr::Ident(ident) => {
                 Expr::Reference(name_of_ident(&ident).expect("Should have name"))
             }
+            ast::Expr::Assert(assert) => {
+                let cond = self.lower_expr_opt(assert.condition());
+                let body = self.lower_expr_opt(assert.body());
 
-            ast::Expr::Assert(assert) => todo!(),
-            ast::Expr::Error(error) => todo!(),
-            ast::Expr::With(with) => todo!(),
-            ast::Expr::HasAttr(has_attr) => todo!(),
-
-            ast::Expr::Root(_root) => todo!(),
+                Expr::Assert { cond, body }
+            }
+            ast::Expr::Error(error) => {
+                eprintln!("!!!!!!!!Hit error node {}", error.syntax());
+                Expr::Missing
+            }
+            ast::Expr::Root(root) => {
+                eprintln!("Handling root");
+                return self.lower_expr_opt(root.expr());
+            }
             ast::Expr::LegacyLet(_legacy_let) => todo!(),
         };
 
@@ -218,6 +226,47 @@ impl LowerCtx {
         parts: impl Iterator<Item = rnix::ast::InterpolPart<T>>,
     ) -> impl Iterator<Item = InterpolPart<T>> {
         parts.map(|p| self.lower_interpolation_part(p))
+    }
+
+    fn lower_lambda(&mut self, lam: ast::Lambda, ptr: AstPtr) -> ExprId {
+        // let mut param_locs = HashMap::new();
+        let lower_name = |this: &mut Self, node: ast::Ident| -> NameId {
+            let ptr = AstPtr::new(node.syntax());
+            let text = name_of_ident(&node).expect("Should have name");
+            this.alloc_name(text, ptr)
+        };
+
+        let (param, pat) = lam.param().map_or((None, None), |param| match param {
+            ast::Param::IdentParam(ident_param) => {
+                let param = ident_param.ident().map(|i| lower_name(self, i));
+                (param, None)
+            }
+            ast::Param::Pattern(pattern) => {
+                let param = pattern
+                    .pat_bind()
+                    .and_then(|ident_param| ident_param.ident())
+                    .map(|i| lower_name(self, i));
+
+                let fields = pattern
+                    .pat_entries()
+                    .map(|entry| {
+                        let name = entry.ident().map(|i| lower_name(self, i));
+                        let default_expr = entry.default().map(|e| self.lower_expr(e));
+
+                        (name, default_expr)
+                    })
+                    .collect();
+
+                let pat = Pat {
+                    fields,
+                    ellipsis: pattern.ellipsis_token().is_some(),
+                };
+
+                (param, Some(pat))
+            }
+        });
+        let body = self.lower_expr_opt(lam.body());
+        self.alloc_expr(Expr::Lambda { param, pat, body }, ptr)
     }
 }
 

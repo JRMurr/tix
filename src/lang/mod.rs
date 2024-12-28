@@ -105,8 +105,6 @@ pub struct Pat {
 }
 pub type Attrpath = Box<[ExprId]>;
 
-type Param = String; // TODO: real type
-
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Expr {
     Missing, // for an invalid parsed expression. Allows us to parse as much as we can and leave "holes"
@@ -114,9 +112,16 @@ pub enum Expr {
         fun: ExprId,
         arg: ExprId,
     },
+    IfThenElse {
+        cond: ExprId,
+        then_body: ExprId,
+        else_body: ExprId,
+    },
     Literal(Literal),
     Lambda {
-        param: Param,
+        // at least one of these should be set
+        param: Option<NameId>,
+        pat: Option<Pat>,
         body: ExprId,
     },
     LetIn {
@@ -138,24 +143,25 @@ pub enum Expr {
         expr: ExprId,
     },
     Reference(String),
-
     Select {
         set: ExprId,
         attrpath: Attrpath,
         default_expr: Option<ExprId>,
     },
-
+    HasAttr {
+        set: ExprId,
+        attrpath: Attrpath,
+    },
+    With {
+        env: ExprId,
+        body: ExprId,
+    },
+    Assert {
+        cond: ExprId,
+        body: ExprId,
+    },
     StringInterpolation(Box<[InterpolPart<String>]>),
     PathInterpolation(Box<[InterpolPart<String>]>),
-    // not mapped yet
-    // Select
-    // Error
-    // Assert
-    // With
-    // HasAttr
-
-    // not sure if needed
-    // Root
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
