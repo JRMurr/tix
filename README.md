@@ -5,5 +5,8 @@ A very simple/basic type checker for nix.
 
 
 ## links
+- https://github.com/oxalica/nil
+  - does some level of type inference but doest support annotations (at least for now)
+  - read over its source a lot and took some code from there to get started
+  - Long term would be nice to merge into their. For now re-implementing for my own understanding and ease of messing around
 - https://github.com/nix-community/nixdoc stole some parsing logic from there
-- https://github.com/oxalica/nil does some level of type inference but doest support annotations (at least for now)

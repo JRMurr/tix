@@ -1,62 +1,10 @@
+use id_arena::{Arena, Id};
 use rnix::ast::{HasEntry, Ident};
 use std::collections::HashMap;
 
-use id_arena::{Arena, Id};
+use crate::lang::Literal;
 
-pub type ExprId = Id<Expr>;
-
-#[derive(Debug, PartialEq)]
-pub enum Literal {
-    Float(f64),
-    Integer(i64),
-    Uri, // TODO:
-}
-
-type Param = String; // TODO: real type
-
-#[derive(Debug, PartialEq)]
-pub enum Expr {
-    Apply {
-        fun: ExprId,
-        args: ExprId, // TODO should args be a vec of exprs?
-    },
-    Str(String),  // TODO: handle interpolation
-    Path(String), // TODO: handle interpolation
-    Literal(Literal),
-    Func {
-        params: Param,
-        body: ExprId,
-    },
-    LetIn {
-        bindings: Vec<ExprId>, // TODO: should we include the keys/attrpaths here or would the scope info hold that?
-        body: ExprId,
-    },
-    List(Vec<ExprId>),
-    BinOp {
-        lhs: ExprId,
-        rhs: ExprId,
-        op: rnix::ast::BinOpKind,
-    },
-    Paren(ExprId),
-    AttrSet {
-        is_rec: bool,
-        entries: Vec<ExprId>, // TODO: should we include the keys/attrpaths here or would the scope info hold that?
-    },
-    UnaryOp {
-        op: rnix::ast::UnaryOpKind,
-        expr: ExprId,
-    },
-    Identifier(String),
-    // not mapped yet
-    // Select
-    // Error
-    // Assert
-    // With
-    // HasAttr
-
-    // not sure if needed
-    // Root
-}
+use super::{Expr, ExprId};
 
 // TODO: real type;
 pub type SymbolType = String;
@@ -194,7 +142,8 @@ impl ExprTable {
             ast::Expr::Literal(literal) => {
                 let lit = match literal.kind() {
                     ast::LiteralKind::Float(float) => {
-                        Literal::Float(float.value().expect("should be valid float"))
+                        let val = float.value().expect("should be valid float");
+                        Literal::Float(ordered_float::OrderedFloat(val))
                     }
                     ast::LiteralKind::Integer(integer) => {
                         Literal::Integer(integer.value().expect("should be valid integer"))
@@ -229,7 +178,7 @@ impl ExprTable {
 
                 let body = self.transform_ast(body, Some(scope_id));
 
-                Expr::Func {
+                Expr::Lambda {
                     params: "TODO: REAL PARAMS".to_string(),
                     body,
                 }
