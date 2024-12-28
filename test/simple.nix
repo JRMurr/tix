@@ -25,4 +25,6 @@
       : The second number
   */
   add = a: b: a + b;
+
+  addOne = (a: b: a + b) 1;
 }
