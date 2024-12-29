@@ -3,6 +3,7 @@
 
 // pub mod expr_table;
 pub mod lower;
+mod nameres;
 
 mod ast_utils;
 
@@ -11,8 +12,9 @@ use std::{collections::HashMap, ops};
 use ast_utils::{flatten_paren, get_str_literal, name_of_ident};
 use id_arena::{Arena, Id};
 use rnix::NixLanguage;
+use smol_str::SmolStr;
 
-pub type Name = String; // TODO: might need other stuff?
+pub type Name = SmolStr; // TODO: might need other stuff?
 
 pub type ExprId = Id<Expr>;
 pub type NameId = Id<Name>;
@@ -93,7 +95,7 @@ type NixPath = String; // TODO: realt type
 pub enum Literal {
     Float(ordered_float::OrderedFloat<f64>),
     Integer(i64),
-    String(String),
+    String(SmolStr),
     Path(NixPath),
     Uri, // TODO:
 }
@@ -142,7 +144,7 @@ pub enum Expr {
         op: rnix::ast::UnaryOpKind,
         expr: ExprId,
     },
-    Reference(String),
+    Reference(SmolStr),
     Select {
         set: ExprId,
         attrpath: Attrpath,
@@ -160,8 +162,85 @@ pub enum Expr {
         cond: ExprId,
         body: ExprId,
     },
-    StringInterpolation(Box<[InterpolPart<String>]>),
-    PathInterpolation(Box<[InterpolPart<String>]>),
+    StringInterpolation(Box<[InterpolPart<SmolStr>]>),
+    PathInterpolation(Box<[InterpolPart<SmolStr>]>),
+}
+
+impl Expr {
+    pub fn walk_child_exprs(&self, mut f: impl FnMut(ExprId)) {
+        match self {
+            Self::Missing | Self::Reference(_) | Self::Literal(_) => {}
+            Self::Lambda {
+                pat,
+                body,
+                param: _,
+            } => {
+                if let Some(p) = pat {
+                    p.fields
+                        .iter()
+                        .filter_map(|&(_, default_expr)| default_expr)
+                        .for_each(&mut f);
+                }
+                f(*body);
+            }
+            Self::UnaryOp { expr, op: _ } => f(*expr),
+            Self::Assert { body: a, cond: b }
+            | Self::With { env: a, body: b }
+            | Self::BinOp {
+                lhs: a,
+                rhs: b,
+                op: _,
+            }
+            | Self::Apply { fun: a, arg: b } => {
+                f(*a);
+                f(*b);
+            }
+            Self::IfThenElse {
+                cond,
+                then_body,
+                else_body,
+            } => {
+                f(*cond);
+                f(*then_body);
+                f(*else_body);
+            }
+            Self::HasAttr { set, attrpath } => {
+                f(*set);
+                attrpath.iter().copied().for_each(f);
+            }
+            Self::Select {
+                set,
+                attrpath,
+                default_expr,
+            } => {
+                f(*set);
+                attrpath.iter().copied().for_each(&mut f);
+                if let &Some(e) = default_expr {
+                    f(e);
+                }
+            }
+            Self::List(xs) => {
+                xs.iter().copied().for_each(f);
+            }
+            Self::LetIn { bindings, body } => {
+                bindings.walk_child_exprs(&mut f);
+                f(*body);
+            }
+            Self::AttrSet {
+                is_rec: _,
+                bindings,
+            } => {
+                bindings.walk_child_exprs(f);
+            }
+            Self::StringInterpolation(parts) | Self::PathInterpolation(parts) => {
+                for part in parts.iter() {
+                    if let InterpolPart::Interpol(e) = part {
+                        f(*e)
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -169,6 +248,15 @@ pub enum InterpolPart<T> {
     Literal(T),
     Interpol(ExprId),
 }
+
+// impl<T, U> From<T> for InterpolPart<U>
+// where
+//     T: Into<U>,
+// {
+//     fn from(value: T) -> Self {
+//         todo!()
+//     }
+// }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bindings {

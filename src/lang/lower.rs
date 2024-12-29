@@ -4,6 +4,7 @@ use id_arena::Arena;
 use rnix::ast::{self, HasEntry};
 
 use rowan::ast::AstNode;
+use smol_str::SmolStr;
 
 use crate::lang::Pat;
 
@@ -45,7 +46,7 @@ impl LowerCtx {
         id
     }
 
-    fn alloc_name(&mut self, text: String, ptr: AstPtr) -> NameId {
+    fn alloc_name(&mut self, text: SmolStr, ptr: AstPtr) -> NameId {
         let id = self.names.alloc(text);
         self.source_map.insert_name(id, ptr);
         id
@@ -201,31 +202,24 @@ impl LowerCtx {
         let ptr = AstPtr::new(s.syntax());
 
         let expr = if let Some(lit) = get_str_literal(&s) {
-            Expr::Literal(Literal::String(lit))
+            Expr::Literal(Literal::String(lit.into()))
         } else {
             let parts = s.normalized_parts();
-            Expr::StringInterpolation(self.lower_interpolation(parts.into_iter()).collect())
+            Expr::StringInterpolation(self.lower_string_interpolation(parts.into_iter()).collect())
         };
         self.alloc_expr(expr, ptr)
     }
 
-    fn lower_interpolation_part<T: Clone>(
+    fn lower_string_interpolation(
         &mut self,
-        part: rnix::ast::InterpolPart<T>,
-    ) -> InterpolPart<T> {
-        match part {
-            ast::InterpolPart::Literal(lit) => InterpolPart::Literal(lit),
+        parts: impl Iterator<Item = rnix::ast::InterpolPart<String>>,
+    ) -> impl Iterator<Item = InterpolPart<SmolStr>> {
+        parts.map(|p| match p {
+            ast::InterpolPart::Literal(lit) => InterpolPart::Literal(lit.into()),
             ast::InterpolPart::Interpolation(interpol) => {
                 InterpolPart::Interpol(self.lower_expr_opt(interpol.expr()))
             }
-        }
-    }
-
-    fn lower_interpolation<T: Clone>(
-        &mut self,
-        parts: impl Iterator<Item = rnix::ast::InterpolPart<T>>,
-    ) -> impl Iterator<Item = InterpolPart<T>> {
-        parts.map(|p| self.lower_interpolation_part(p))
+        })
     }
 
     fn lower_lambda(&mut self, lam: ast::Lambda, ptr: AstPtr) -> ExprId {
@@ -273,7 +267,7 @@ impl LowerCtx {
 #[derive(Debug)]
 struct MergingSet {
     ptr: AstPtr,
-    statics: HashMap<String, MergingEntry>,
+    statics: HashMap<SmolStr, MergingEntry>,
     inherit_froms: Vec<ExprId>,
     dynamics: Vec<(ExprId, ExprId)>,
 }
@@ -390,7 +384,7 @@ impl MergingSet {
     fn merge_static_value(
         &mut self,
         ctx: &mut LowerCtx,
-        key: String,
+        key: SmolStr,
         attr_ptr: AstPtr,
         value: BindingValue,
     ) {

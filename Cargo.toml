@@ -11,4 +11,5 @@ ordered-float = "4.6.0"
 
 rnix = "0.11.0" # TODO: 11.1 is on github as of 12-19-24 but not released. Only added pipe operators
 rowan = "0.15"  # TODO: same as rnix, not sure if we need copying from nixdoc for now
+smol_str = "0.3.2"
 thiserror = "2.0.9"

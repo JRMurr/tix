@@ -1,4 +1,5 @@
 use rnix::ast::{self, HasEntry};
+use smol_str::SmolStr;
 
 pub fn flatten_paren(expr: ast::Expr) -> Option<ast::Expr> {
     let mut cur = Some(expr);
@@ -8,8 +9,8 @@ pub fn flatten_paren(expr: ast::Expr) -> Option<ast::Expr> {
     cur
 }
 
-pub(super) fn name_of_ident(ident: &ast::Ident) -> Option<String> {
-    ident.ident_token().map(|i| i.text().to_string())
+pub(super) fn name_of_ident(ident: &ast::Ident) -> Option<SmolStr> {
+    ident.ident_token().map(|i| i.text().into())
 }
 
 pub(super) fn get_str_literal(s: &ast::Str) -> Option<String> {
@@ -38,7 +39,7 @@ pub(super) fn get_str_literal(s: &ast::Str) -> Option<String> {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum AttrKind {
-    Static(Option<String>),
+    Static(Option<SmolStr>),
     Dynamic(Option<rnix::ast::Expr>),
 }
 
@@ -56,7 +57,7 @@ impl AttrKind {
         };
 
         match get_str_literal(&s) {
-            Some(lit) => Self::Static(Some(lit)),
+            Some(lit) => Self::Static(Some(lit.into())),
             None => Self::Dynamic(Some(rnix::ast::Expr::Str(s))),
         }
     }
