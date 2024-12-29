@@ -1,4 +1,4 @@
-use rnix::ast::{self, HasEntry};
+use rnix::ast::{self};
 use smol_str::SmolStr;
 
 use super::NameKind;

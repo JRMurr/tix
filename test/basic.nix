@@ -1,4 +1,6 @@
-{ pkgs }:
+{
+  pkgs ? <nixpkgs>,
+}:
 let
   /**
       This function adds two numbers

@@ -2,14 +2,16 @@
 // https://github.com/oxalica/nil/tree/main/crates/ide/src/def
 
 // pub mod expr_table;
+mod db;
 pub mod lower;
 mod nameres;
 
 mod ast_utils;
 
+pub use db::Db;
+
 use std::{collections::HashMap, ops};
 
-use ast_utils::{flatten_paren, get_str_literal, name_of_ident};
 use id_arena::{Arena, Id};
 use rnix::NixLanguage;
 use smol_str::SmolStr;
@@ -42,8 +44,28 @@ pub type NameId = Id<Name>;
 pub struct Module {
     exprs: Arena<Expr>,
     names: Arena<Name>,
-    entry_expr: ExprId,
+    pub entry_expr: ExprId,
 }
+
+impl Module {
+    pub fn iter_exprs(&self) -> impl Iterator<Item = (ExprId, &Expr)> {
+        self.exprs.iter()
+    }
+
+    pub fn iter_names(&self) -> impl Iterator<Item = (NameId, &Name)> {
+        self.names.iter()
+    }
+}
+
+// impl Module {
+//     pub fn walk_module(&self, mut f: impl FnMut(&Expr)) {
+//         let expr = &self.exprs[self.entry_expr];
+//         expr.walk_child_exprs(|child| {
+//             let child_expr = &self.exprs[child];
+//             child_expr.walk_child_exprs(f);
+//         });
+//     }
+// }
 
 impl ops::Index<ExprId> for Module {
     type Output = Expr;
@@ -108,7 +130,18 @@ impl ModuleSourceMap {
     }
 }
 
-type NixPath = String; // TODO: realt type
+// fn module_with_source_map(
+//     db: &dyn crate::Db,
+//     file_id: FileId,
+// ) -> (Arc<Module>, Arc<ModuleSourceMap>) {
+//     let parse = db.parse(file_id);
+//     let (mut module, mut source_map) = lower::lower(db, file_id, parse);
+//     module.shrink_to_fit();
+//     source_map.shrink_to_fit();
+//     (Arc::new(module), Arc::new(source_map))
+// }
+
+type NixPath = String; // TODO: real type
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Literal {
@@ -267,15 +300,6 @@ pub enum InterpolPart<T> {
     Literal(T),
     Interpol(ExprId),
 }
-
-// impl<T, U> From<T> for InterpolPart<U>
-// where
-//     T: Into<U>,
-// {
-//     fn from(value: T) -> Self {
-//         todo!()
-//     }
-// }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bindings {

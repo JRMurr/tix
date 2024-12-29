@@ -103,9 +103,9 @@ impl LowerCtx {
                 Expr::HasAttr { set, attrpath }
             }
             ast::Expr::Str(s) => return self.lower_string(s),
-            ast::Expr::Path(_path) => {
+            ast::Expr::Path(path) => {
                 // TODO: real handling
-                Expr::Literal(Literal::Path("TODO!".to_string()))
+                Expr::Literal(Literal::Path(path.syntax().to_string()))
             }
             ast::Expr::Literal(literal) => {
                 // TODO: no expect...., should do missing if its sad..
@@ -454,7 +454,7 @@ impl MergingSet {
         self.dynamics.push((key_expr, value_expr));
     }
 
-    fn finish(self, ctx: &mut LowerCtx) -> Bindings {
+    fn finish(self, _ctx: &mut LowerCtx) -> Bindings {
         Bindings {
             statics: self
                 .statics
