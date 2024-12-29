@@ -164,6 +164,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f46ad14479a25103f283c0f10005961cf086d8dc42205bb44c46ac563475dca6"
 
 [[package]]
+name = "cli"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "lang",
+ "miette",
+ "rnix",
+ "thiserror 2.0.9",
+]
+
+[[package]]
 name = "colorchoice"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -220,6 +231,18 @@ name = "is_terminal_polyfill"
 version = "1.70.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7943c866cc5cd64cbc25b2e01621d07fa8eb2a1a23160ee81ce38704e97b8ecf"
+
+[[package]]
+name = "lang"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "id-arena",
+ "ordered-float",
+ "rnix",
+ "rowan",
+ "smol_str",
+]
 
 [[package]]
 name = "libc"
@@ -508,20 +531,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
-]
-
-[[package]]
-name = "tix"
-version = "0.1.0"
-dependencies = [
- "clap",
- "id-arena",
- "miette",
- "ordered-float",
- "rnix",
- "rowan",
- "smol_str",
- "thiserror 2.0.9",
 ]
 
 [[package]]

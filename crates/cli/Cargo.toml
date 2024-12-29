@@ -1,0 +1,17 @@
+
+[package]
+name = "cli"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4.2", features = ["derive"] }
+miette = { version = "7.4.0", features = ["fancy"] }
+thiserror = "2.0.9"
+rnix = "0.11.0"
+lang = { path = "../lang" }
+
+
+[[bin]]
+name = "tix-cli"
+path = "src/main.rs"

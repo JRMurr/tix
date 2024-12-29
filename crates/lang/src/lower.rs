@@ -6,12 +6,12 @@ use rnix::ast::{self, HasEntry};
 use rowan::ast::AstNode;
 use smol_str::SmolStr;
 
-use crate::lang::Pat;
+use crate::Pat;
 
 use super::{
     AstPtr, Attrpath, BindingValue, Bindings, Expr, ExprId, InterpolPart, Literal, Module,
-    ModuleSourceMap, Name, NameId,
-    ast_utils::{AttrKind, get_str_literal, name_of_ident},
+    ModuleSourceMap, Name, NameId, NameKind,
+    ast_utils::{AttrKind, get_str_literal, name_kind_of_set, name_of_ident},
 };
 
 struct LowerCtx {
@@ -46,8 +46,8 @@ impl LowerCtx {
         id
     }
 
-    fn alloc_name(&mut self, text: SmolStr, ptr: AstPtr) -> NameId {
-        let id = self.names.alloc(text);
+    fn alloc_name(&mut self, text: SmolStr, kind: NameKind, ptr: AstPtr) -> NameId {
+        let id = self.names.alloc(Name { text, kind });
         self.source_map.insert_name(id, ptr);
         id
     }
@@ -124,7 +124,7 @@ impl LowerCtx {
             }
             ast::Expr::Lambda(lambda) => return self.lower_lambda(lambda, ptr),
             ast::Expr::LetIn(let_in) => {
-                let bindings = MergingSet::desugar(self, &let_in).finish(self);
+                let bindings = MergingSet::desugar(self, NameKind::LetIn, &let_in).finish(self);
                 let body = self.lower_expr_opt(let_in.body());
                 Expr::LetIn { bindings, body }
             }
@@ -145,7 +145,8 @@ impl LowerCtx {
             }
             ast::Expr::Paren(paren) => return self.lower_expr_opt(paren.expr()),
             ast::Expr::AttrSet(attr_set) => {
-                let bindings = MergingSet::desugar(self, &attr_set).finish(self);
+                let bindings =
+                    MergingSet::desugar(self, name_kind_of_set(&attr_set), &attr_set).finish(self);
 
                 Expr::AttrSet {
                     is_rec: attr_set.rec_token().is_some(),
@@ -224,27 +225,31 @@ impl LowerCtx {
 
     fn lower_lambda(&mut self, lam: ast::Lambda, ptr: AstPtr) -> ExprId {
         // let mut param_locs = HashMap::new();
-        let lower_name = |this: &mut Self, node: ast::Ident| -> NameId {
+        let lower_name = |this: &mut Self, node: ast::Ident, kind: NameKind| -> NameId {
             let ptr = AstPtr::new(node.syntax());
             let text = name_of_ident(&node).expect("Should have name");
-            this.alloc_name(text, ptr)
+            this.alloc_name(text, kind, ptr)
         };
 
         let (param, pat) = lam.param().map_or((None, None), |param| match param {
             ast::Param::IdentParam(ident_param) => {
-                let param = ident_param.ident().map(|i| lower_name(self, i));
+                let param = ident_param
+                    .ident()
+                    .map(|i| lower_name(self, i, NameKind::Param));
                 (param, None)
             }
             ast::Param::Pattern(pattern) => {
                 let param = pattern
                     .pat_bind()
                     .and_then(|ident_param| ident_param.ident())
-                    .map(|i| lower_name(self, i));
+                    .map(|i| lower_name(self, i, NameKind::Param));
 
                 let fields = pattern
                     .pat_entries()
                     .map(|entry| {
-                        let name = entry.ident().map(|i| lower_name(self, i));
+                        let name = entry
+                            .ident()
+                            .map(|i| lower_name(self, i, NameKind::PatField));
                         let default_expr = entry.default().map(|e| self.lower_expr(e));
 
                         (name, default_expr)
@@ -267,6 +272,7 @@ impl LowerCtx {
 #[derive(Debug)]
 struct MergingSet {
     ptr: AstPtr,
+    name_kind: NameKind,
     statics: HashMap<SmolStr, MergingEntry>,
     inherit_froms: Vec<ExprId>,
     dynamics: Vec<(ExprId, ExprId)>,
@@ -294,18 +300,19 @@ pub enum BindingValueKind {
 }
 
 impl MergingSet {
-    fn new(ptr: AstPtr) -> Self {
+    fn new(name_kind: NameKind, ptr: AstPtr) -> Self {
         Self {
             ptr,
+            name_kind,
             statics: HashMap::new(),
             inherit_froms: Vec::new(),
             dynamics: Vec::new(),
         }
     }
 
-    fn desugar(ctx: &mut LowerCtx, node: &impl HasEntry) -> Self {
+    fn desugar(ctx: &mut LowerCtx, name_kind: NameKind, node: &impl HasEntry) -> Self {
         let ptr = AstPtr::new(node.syntax());
-        let mut this = Self::new(ptr);
+        let mut this = Self::new(name_kind, ptr);
         this.merge_bindings(ctx, node);
         this
     }
@@ -407,7 +414,7 @@ impl MergingSet {
                 // );
             })
             .or_insert_with(|| MergingEntry {
-                name: ctx.alloc_name(key, attr_ptr),
+                name: ctx.alloc_name(key, self.name_kind, attr_ptr),
                 set: None,
                 value: Some((attr_ptr, value)),
             });

@@ -1,6 +1,8 @@
 use rnix::ast::{self, HasEntry};
 use smol_str::SmolStr;
 
+use super::NameKind;
+
 pub fn flatten_paren(expr: ast::Expr) -> Option<ast::Expr> {
     let mut cur = Some(expr);
     while let Some(ast::Expr::Paren(p)) = cur {
@@ -35,6 +37,14 @@ pub(super) fn get_str_literal(s: &ast::Str) -> Option<String> {
     };
 
     Some(lit.to_string())
+}
+
+pub(super) fn name_kind_of_set(set: &ast::AttrSet) -> NameKind {
+    if set.rec_token().is_some() {
+        NameKind::RecAttrset
+    } else {
+        NameKind::PlainAttrset
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

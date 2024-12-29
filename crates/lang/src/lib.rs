@@ -14,7 +14,26 @@ use id_arena::{Arena, Id};
 use rnix::NixLanguage;
 use smol_str::SmolStr;
 
-pub type Name = SmolStr; // TODO: might need other stuff?
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Name {
+    pub text: SmolStr,
+    pub kind: NameKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NameKind {
+    LetIn,
+    PlainAttrset,
+    RecAttrset,
+    Param,
+    PatField,
+}
+
+impl NameKind {
+    pub fn is_definition(self) -> bool {
+        !matches!(self, Self::PlainAttrset)
+    }
+}
 
 pub type ExprId = Id<Expr>;
 pub type NameId = Id<Name>;
@@ -296,6 +315,6 @@ impl Bindings {
     pub fn get(&self, name: &str, module: &Module) -> Option<BindingValue> {
         self.statics
             .iter()
-            .find_map(|&(name_id, value)| (module[name_id] == name).then_some(value))
+            .find_map(|&(name_id, value)| (module[name_id].text == name).then_some(value))
     }
 }

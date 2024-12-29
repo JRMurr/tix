@@ -1,6 +1,4 @@
-mod checker;
 mod comment;
-mod lang;
 mod nix_file;
 
 use std::error::Error;
