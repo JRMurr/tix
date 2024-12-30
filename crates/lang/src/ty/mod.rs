@@ -168,17 +168,11 @@ impl TypeTable {
                     orig_expr: expr_id,
                 })
             }
-
-            Expr::Apply { fun, arg } => {
-                // self.generate_equations(module, *fun);
-                // self.generate_equations(module, *arg);
-
-                self.equations.push(TypeEquation {
-                    lhs: self.expr_ty(fun),
-                    rhs: self.expr_ty(arg),
-                    orig_expr: expr_id,
-                })
-            }
+            Expr::Apply { fun, arg } => self.equations.push(TypeEquation {
+                lhs: self.expr_ty(fun),
+                rhs: self.expr_ty(arg),
+                orig_expr: expr_id,
+            }),
             Expr::IfThenElse {
                 cond,
                 then_body,
@@ -201,14 +195,100 @@ impl TypeTable {
                 });
             }
             Expr::Lambda { param, pat, body } => {
-                // let mut handle_name
+                let param_ty = self.types.alloc(Ty::Unknown);
 
-                if let Some(param) = param {}
+                if let Some(param) = param {
+                    self.equations.push(TypeEquation {
+                        lhs: self.name_ty(param),
+                        rhs: param_ty,
+                        orig_expr: expr_id,
+                    });
+                }
 
-                todo!("Need to make sure i make valid equations for the param and pat cases");
+                if let Some(pat) = pat {
+                    let mut fields = BTreeMap::new();
+                    for &(name, default_expr) in pat.fields.iter() {
+                        let Some(name) = name else { continue };
+                        let default_ty = default_expr.map(|e| self.expr_ty(&e));
+
+                        let name_ty = self.name_ty(&name);
+                        if let Some(default_ty) = default_ty {
+                            self.equations.push(TypeEquation {
+                                lhs: name_ty,
+                                rhs: default_ty,
+                                orig_expr: default_expr.unwrap(),
+                            })
+                        }
+
+                        let field_text = module[name].text.clone();
+                        fields.insert(field_text, self.types.alloc(Ty::Unknown));
+                    }
+
+                    let attr_set = AttrSetTy {
+                        fields,
+                        dyn_ty: None,
+                    };
+                    self.equations.push(TypeEquation {
+                        lhs: param_ty,
+                        rhs: self.types.alloc(Ty::AttrSet(attr_set)),
+                        orig_expr: expr_id,
+                    });
+                }
+
+                let body_ty = self.expr_ty(body);
+
+                let lam_ty = self.types.alloc(Ty::Lambda {
+                    param: param_ty,
+                    body: body_ty,
+                });
+
+                self.equations.push(TypeEquation {
+                    lhs: expr_ty,
+                    rhs: lam_ty,
+                    orig_expr: expr_id,
+                });
             }
-            Expr::List(_) => todo!(),
-            Expr::BinOp { lhs, rhs, op } => todo!(),
+            Expr::List(lst) => {
+                let list_elm_ty = self.types.alloc(Ty::Unknown);
+                for elem in lst.iter() {
+                    self.equations.push(TypeEquation {
+                        lhs: list_elm_ty,
+                        rhs: self.expr_ty(elem),
+                        orig_expr: expr_id,
+                    });
+                }
+
+                self.equations.push(TypeEquation {
+                    lhs: expr_ty,
+                    rhs: self.types.alloc(Ty::List(list_elm_ty)),
+                    orig_expr: expr_id,
+                });
+            }
+            Expr::BinOp { lhs, rhs, op } => {
+                let lhs_ty = self.expr_ty(lhs);
+                let rhs_ty = self.expr_ty(rhs);
+
+                // https://nix.dev/manual/nix/2.23/language/operators
+                match op {
+                    rnix::ast::BinOpKind::Concat => todo!(),
+                    rnix::ast::BinOpKind::Update => todo!(),
+                    rnix::ast::BinOpKind::Add => todo!(),
+                    rnix::ast::BinOpKind::Sub => todo!(),
+                    rnix::ast::BinOpKind::Mul => todo!(),
+                    rnix::ast::BinOpKind::Div => todo!(),
+                    rnix::ast::BinOpKind::And => todo!(),
+                    rnix::ast::BinOpKind::Equal => todo!(),
+                    rnix::ast::BinOpKind::Implication => todo!(),
+                    rnix::ast::BinOpKind::Less => todo!(),
+                    rnix::ast::BinOpKind::LessOrEq => todo!(),
+                    rnix::ast::BinOpKind::More => todo!(),
+                    rnix::ast::BinOpKind::MoreOrEq => todo!(),
+                    rnix::ast::BinOpKind::NotEqual => todo!(),
+                    rnix::ast::BinOpKind::Or => todo!(),
+                }
+
+                todo!()
+            }
             Expr::UnaryOp { op, expr } => todo!(),
 
             Expr::Select {
@@ -225,12 +305,17 @@ impl TypeTable {
         }
     }
 
-    fn gen_bidnings_equations(&mut self, module: &Module, bindings: &Bindings) -> AttrSetTy {
-        let inherit_from_tys = bindings
-            .inherit_froms
-            .iter()
-            .map(|from_expr| self.expr_ty(from_expr))
-            .collect::<Vec<_>>();
+    fn gen_bidnings_equations(
+        &mut self,
+        module: &Module,
+        bindings: &Bindings,
+        parent_expr: ExprId,
+    ) -> AttrSetTy {
+        // let _inherit_from_tys = bindings
+        //     .inherit_froms
+        //     .iter()
+        //     .map(|from_expr| self.expr_ty(from_expr))
+        //     .collect::<Vec<_>>();
 
         let mut fields = BTreeMap::new();
 
@@ -240,7 +325,7 @@ impl TypeTable {
             let name_text = module[name].text.clone();
             let value_ty = match value {
                 BindingValue::Inherit(e) | BindingValue::Expr(e) => self.expr_ty(&e),
-                BindingValue::InheritFrom(i) => todo!(), // self.infer_set_field(
+                BindingValue::InheritFrom(_) => todo!(), // self.infer_set_field(
                                                          //     inherit_from_tys[i],
                                                          //     Some(name_text.clone()),
                                                          //     AttrSource::Name(name),
@@ -249,10 +334,8 @@ impl TypeTable {
             self.equations.push(TypeEquation {
                 lhs: name_ty,
                 rhs: value_ty,
-                orig_expr: todo!("probably need to yeet this debug field or make it optional?"),
+                orig_expr: parent_expr, // TODO: kind of a lie, would be nice to have the expr of the key but this is good enough
             });
-            // self.unify_var(name_ty, value_ty);
-            // let src = AttrSource::Name(name);
             fields.insert(name_text, value_ty);
         }
 
@@ -261,6 +344,8 @@ impl TypeTable {
             dyn_ty: None,
         }
     }
+
+    fn gen_attr_set_field_equations(&mut self, set_ty: TyId, field: Option<SmolStr>) {}
 
     pub fn update_type(&mut self, id: TyId, new_ty: Ty) {
         let value = self.types.get_mut(id).unwrap();
