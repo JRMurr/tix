@@ -5,6 +5,7 @@
 mod db;
 mod lower;
 mod nameres;
+mod ty;
 
 mod ast_utils;
 
@@ -188,7 +189,7 @@ pub enum Expr {
     },
     Literal(Literal),
     Lambda {
-        // at least one of these should be set
+        // at least one of these should be set, if both are they should be the same "type"
         param: Option<NameId>,
         pat: Option<Pat>,
         body: ExprId,

@@ -59,26 +59,30 @@ pub enum ResolveResult {
 #[salsa::tracked]
 pub fn scopes(db: &dyn crate::Db, file: NixFile) -> ModuleScopes {
     let module = crate::module(db, file);
-    let mut ms = ModuleScopes {
-        scopes: Arena::new(),
-        scope_by_expr: HashMap::with_capacity(module.exprs.len()),
-    };
-    let root_scope = ms.scopes.alloc(ScopeData {
-        parent: None,
-        kind: ScopeKind::Definitions(Default::default()),
-    });
-    ms.traverse_expr(&module, module.entry_expr, root_scope);
-
-    ms
+    ModuleScopes::new(module)
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct ModuleScopes {
-    scopes: Arena<ScopeData>,
-    scope_by_expr: HashMap<ExprId, ScopeId>,
+    pub scopes: Arena<ScopeData>,
+    pub scope_by_expr: HashMap<ExprId, ScopeId>,
 }
 
 impl ModuleScopes {
+    pub fn new(module: Module) -> Self {
+        let mut ms = ModuleScopes {
+            scopes: Arena::new(),
+            scope_by_expr: HashMap::with_capacity(module.exprs.len()),
+        };
+        let root_scope = ms.scopes.alloc(ScopeData {
+            parent: None,
+            kind: ScopeKind::Definitions(Default::default()),
+        });
+        ms.traverse_expr(&module, module.entry_expr, root_scope);
+
+        ms
+    }
+
     pub fn scope_for_expr(&self, expr_id: ExprId) -> Option<ScopeId> {
         self.scope_by_expr.get(&expr_id).copied()
     }
