@@ -5,13 +5,14 @@ use smol_str::SmolStr;
 
 use crate::{
     BindingValue, Bindings, Expr, ExprId, Module, NameId,
+    db::NixFile,
     nameres::{NameResolution, ResolveResult},
 };
 
 pub type TyId = Id<Ty>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Ty {
+pub enum Ty {
     Unknown,
 
     // TODO: could we track literals in the type system like typescript does?
@@ -60,7 +61,7 @@ struct Constraint {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct TypeTable {
+pub struct TypeTable {
     types: Arena<Ty>,
 
     constraints: Vec<Constraint>,
@@ -160,7 +161,13 @@ impl TypeTable {
                 is_rec: _,
                 bindings,
             } => {
-                self.generate_bindings_constraints(module, bindings, expr_id);
+                let attr_set = self.generate_bindings_constraints(module, bindings, expr_id);
+
+                self.constraints.push(Constraint {
+                    lhs: expr_ty,
+                    rhs: self.types.alloc(Ty::AttrSet(attr_set)),
+                    orig_expr: expr_id,
+                });
             }
             Expr::LetIn { bindings: _, body } => {
                 // TODO: can i ignore bindings, name res *should* have handled it?
@@ -389,4 +396,15 @@ impl InferCtx {
             types,
         }
     }
+}
+
+#[salsa::tracked]
+pub fn infer_file_debug(db: &dyn crate::Db, file: NixFile) -> TypeTable {
+    let module = crate::module(db, file);
+
+    let name_res = crate::nameres::name_resolution(db, file);
+
+    let infer_ctx = InferCtx::new(module, name_res);
+
+    infer_ctx.types
 }

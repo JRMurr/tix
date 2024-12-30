@@ -1,7 +1,6 @@
 use clap::Parser;
-use lang::{Db, RootDatabase, module_and_source_maps};
+use lang::{Db, RootDatabase, infer_file_debug};
 use std::error::Error;
-use std::fs;
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
@@ -18,11 +17,13 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let file = db.read_file(args.file_path)?;
 
-    let (module, _source_map) = module_and_source_maps(&db, file);
+    dbg!(infer_file_debug(&db, file));
 
-    // dbg!(module, source_map);
+    // let (module, _source_map) = module_and_source_maps(&db, file);
 
-    dbg!(module);
+    // // dbg!(module, source_map);
+
+    // dbg!(module);
 
     // for (id, expr) in module.iter_exprs() {
     //     if let Expr::Lambda { param, pat, body } = expr {
