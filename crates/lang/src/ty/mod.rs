@@ -159,7 +159,9 @@ impl TypeTable {
             Expr::AttrSet {
                 is_rec: _,
                 bindings,
-            } => {}
+            } => {
+                self.generate_bindings_constraints(module, bindings, expr_id);
+            }
             Expr::LetIn { bindings: _, body } => {
                 // TODO: can i ignore bindings, name res *should* have handled it?
                 self.constraints.push(Constraint {
@@ -270,32 +272,52 @@ impl TypeTable {
 
                 // https://nix.dev/manual/nix/2.23/language/operators
                 match op {
-                    rnix::ast::BinOpKind::Concat => todo!(),
-                    rnix::ast::BinOpKind::Update => todo!(),
-                    rnix::ast::BinOpKind::Add => todo!(),
-                    rnix::ast::BinOpKind::Sub => todo!(),
-                    rnix::ast::BinOpKind::Mul => todo!(),
-                    rnix::ast::BinOpKind::Div => todo!(),
-                    rnix::ast::BinOpKind::And => todo!(),
-                    rnix::ast::BinOpKind::Equal => todo!(),
-                    rnix::ast::BinOpKind::Implication => todo!(),
-                    rnix::ast::BinOpKind::Less => todo!(),
-                    rnix::ast::BinOpKind::LessOrEq => todo!(),
-                    rnix::ast::BinOpKind::More => todo!(),
-                    rnix::ast::BinOpKind::MoreOrEq => todo!(),
-                    rnix::ast::BinOpKind::NotEqual => todo!(),
-                    rnix::ast::BinOpKind::Or => todo!(),
+                    // TODO: need to handle operator overloading or polymorphism here....
+                    // for now you cant concat strings and adding only works on ints...
+                    rnix::ast::BinOpKind::Add => {
+                        // force sides are equal (will need to remove once we allow mixing types on both sides)
+                        self.constraints.push(Constraint {
+                            lhs: lhs_ty,
+                            rhs: rhs_ty,
+                            orig_expr: expr_id,
+                        });
+
+                        // they should both be numbers (for now)
+                        self.constraints.push(Constraint {
+                            lhs: lhs_ty,
+                            rhs: self.types.alloc(Ty::Int),
+                            orig_expr: expr_id,
+                        });
+
+                        self.constraints.push(Constraint {
+                            lhs: rhs_ty,
+                            rhs: self.types.alloc(Ty::Int),
+                            orig_expr: expr_id,
+                        });
+                    }
+                    o => todo!("Need to handle operator {o:?}"),
                 }
-
-                todo!()
             }
-            Expr::UnaryOp { op, expr } => todo!(),
-
             Expr::Select {
                 set,
                 attrpath,
                 default_expr,
-            } => todo!(),
+            } => {
+                let set_ty = self.expr_ty(set);
+
+                let ret_t = attrpath.iter().fold(set_ty, |set_ty, attr| {
+                    let attr_ty = self.expr_ty(attr);
+                    self.constraints.push(Constraint {
+                        lhs: attr_ty,
+                        rhs: self.types.alloc(Ty::String),
+                        orig_expr: expr_id,
+                    });
+                    todo!();
+                });
+
+                todo!();
+            }
+            Expr::UnaryOp { op, expr } => todo!(),
             Expr::HasAttr { set, attrpath } => todo!(),
             Expr::With { env, body } => todo!(),
             Expr::Assert { cond, body } => todo!(),
@@ -304,7 +326,7 @@ impl TypeTable {
         }
     }
 
-    fn generate_bidnings_constraints(
+    fn generate_bindings_constraints(
         &mut self,
         module: &Module,
         bindings: &Bindings,
