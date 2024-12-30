@@ -68,7 +68,6 @@ impl Db for RootDatabase {
     // TODO: I don't think this will be tracked by salsa so will re-parse if called many times
     // Root is !Send + !Sync so having it tracked by salsa is sad.
     // Could store it in the db itself but would need to handle re-parsing on file change
-    // This is probably fine since we generally will be getting a module which will be tracked
     fn parse_file(&self, file: NixFile) -> Root {
         let src = file.contents(self);
         rnix::Root::parse(src).tree()

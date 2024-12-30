@@ -3,7 +3,7 @@
 
 // pub mod expr_table;
 mod db;
-pub mod lower;
+mod lower;
 mod nameres;
 
 mod ast_utils;
@@ -11,6 +11,7 @@ mod ast_utils;
 use db::NixFile;
 pub use db::{Db, RootDatabase};
 use lower::lower;
+pub use nameres::scopes;
 
 use std::{collections::HashMap, ops};
 
@@ -23,6 +24,11 @@ pub fn module_and_source_maps(db: &dyn crate::Db, file: NixFile) -> (Module, Mod
     let root = db.parse_file(file);
 
     lower(root)
+}
+
+#[salsa::tracked]
+pub fn module(db: &dyn crate::Db, file: NixFile) -> Module {
+    module_and_source_maps(db, file).0
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -57,11 +63,11 @@ pub struct Module {
 }
 
 impl Module {
-    pub fn iter_exprs(&self) -> impl Iterator<Item = (ExprId, &Expr)> {
+    pub fn exprs(&self) -> impl ExactSizeIterator<Item = (ExprId, &Expr)> {
         self.exprs.iter()
     }
 
-    pub fn iter_names(&self) -> impl Iterator<Item = (NameId, &Name)> {
+    pub fn names(&self) -> impl ExactSizeIterator<Item = (NameId, &Name)> {
         self.names.iter()
     }
 }

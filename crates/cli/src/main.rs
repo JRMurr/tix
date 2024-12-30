@@ -1,5 +1,5 @@
 use clap::Parser;
-use lang::{Db, Expr, RootDatabase, lower::lower, module_and_source_maps};
+use lang::{Db, RootDatabase, module_and_source_maps};
 use std::error::Error;
 use std::fs;
 use std::path::PathBuf;
@@ -18,7 +18,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let file = db.read_file(args.file_path)?;
 
-    let (module, _source_map) = module_and_source_maps(&db, file)?;
+    let (module, _source_map) = module_and_source_maps(&db, file);
 
     // dbg!(module, source_map);
 

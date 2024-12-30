@@ -3,7 +3,7 @@ use std::{collections::HashMap, iter, ops};
 use id_arena::{Arena, Id};
 use smol_str::SmolStr;
 
-use crate::Bindings;
+use crate::{Bindings, db::NixFile, module};
 
 use super::{BindingValue, Expr, ExprId, Module, NameId};
 
@@ -54,6 +54,22 @@ pub enum ResolveResult {
     /// Attr of one of some `with` expressions, from innermost to outermost.
     /// It must not be empty.
     WithExprs(Vec<ExprId>),
+}
+
+#[salsa::tracked]
+pub fn scopes(db: &dyn crate::Db, file: NixFile) -> ModuleScopes {
+    let module = crate::module(db, file);
+    let mut ms = ModuleScopes {
+        scopes: Arena::new(),
+        scope_by_expr: HashMap::with_capacity(module.exprs.len()),
+    };
+    let root_scope = ms.scopes.alloc(ScopeData {
+        parent: None,
+        kind: ScopeKind::Definitions(Default::default()),
+    });
+    ms.traverse_expr(&module, module.entry_expr, root_scope);
+
+    ms
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
@@ -212,4 +228,32 @@ pub struct NameResolution {
     // inherited_builtins: HashSet<NameId>,
 }
 
-impl NameResolution {}
+#[salsa::tracked]
+pub fn name_resolution(db: &dyn crate::Db, file: NixFile) -> NameResolution {
+    let module = module(db, file);
+    let scopes = scopes(db, file);
+    let resolve_map = module
+        .exprs()
+        .filter_map(|(e, kind)| {
+            match kind {
+                // Inherited attrs are also translated into Expr::References.
+                Expr::Reference(name) => Some((e, scopes.resolve_name(e, name))),
+                _ => None,
+            }
+        })
+        .collect::<HashMap<_, _>>();
+
+    NameResolution { resolve_map }
+}
+
+impl NameResolution {
+    pub fn get(&self, expr: ExprId) -> Option<&ResolveResult> {
+        self.resolve_map.get(&expr)?.as_ref()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (ExprId, &'_ ResolveResult)> + '_ {
+        self.resolve_map
+            .iter()
+            .filter_map(|(e, res)| Some((*e, res.as_ref()?)))
+    }
+}
