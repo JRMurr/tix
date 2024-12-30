@@ -8,13 +8,25 @@ mod nameres;
 
 mod ast_utils;
 
-pub use db::Db;
+pub use db::{Db, RootDatabase};
+use db::{NixFile, ParseError};
+use lower::lower;
 
 use std::{collections::HashMap, ops};
 
 use id_arena::{Arena, Id};
 use rnix::NixLanguage;
 use smol_str::SmolStr;
+
+#[salsa::tracked]
+pub fn module_and_source_maps(
+    db: &dyn crate::Db,
+    file: NixFile,
+) -> Result<(Module, ModuleSourceMap), ParseError> {
+    let root = db.parse_file(file)?;
+
+    Ok(lower(root))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Name {

@@ -1,25 +1,36 @@
 use std::path::PathBuf;
 
 use dashmap::DashMap;
+use rnix::{Parse, Root};
 use salsa::{self, Event};
+use thiserror::Error;
 
 #[salsa::input]
-pub struct File {
+pub struct NixFile {
     path: PathBuf,
     #[return_ref]
     contents: String,
 }
 
+// Wrapping this to add some traits salsa needs
+#[derive(Error, Clone, Debug, PartialEq)]
+#[error(transparent)]
+pub struct ParseError(#[from] rnix::parser::ParseError);
+
+impl Eq for ParseError {}
+
 #[salsa::db]
 pub trait Db: salsa::Database {
-    fn input(&self, path: PathBuf) -> Result<File, std::io::Error>;
+    fn read_file(&self, path: PathBuf) -> Result<NixFile, std::io::Error>;
+
+    fn parse_file(&self, file: NixFile) -> Result<Root, ParseError>;
 }
 
 #[derive(Default, Clone)]
 #[salsa::db]
-pub(crate) struct RootDatabase {
+pub struct RootDatabase {
     storage: salsa::Storage<Self>,
-    files: DashMap<PathBuf, File>,
+    files: DashMap<PathBuf, NixFile>,
 }
 
 #[salsa::db]
@@ -35,5 +46,31 @@ impl salsa::Database for RootDatabase {
         // }
 
         // tracing::trace!("Salsa event: {event:?}");
+    }
+}
+
+#[salsa::db]
+impl Db for RootDatabase {
+    fn read_file(&self, path: PathBuf) -> Result<NixFile, std::io::Error> {
+        let path = path.canonicalize()?;
+
+        let file = match self.files.entry(path.clone()) {
+            dashmap::Entry::Occupied(entry) => *entry.get(),
+            dashmap::Entry::Vacant(entry) => {
+                let contents = std::fs::read_to_string(&path)?;
+                *entry.insert(NixFile::new(self, path, contents))
+            }
+        };
+
+        Ok(file)
+    }
+
+    // TODO: I don't think this will be tracked by salsa so will re-parse if called many times
+    // Root is !Send + !Sync so having it tracked by salsa is sad.
+    // Could store it in the db itself but would need to handle re-parsing on file change
+    // This is probably fine since we generally will be getting a module which will be tracked
+    fn parse_file(&self, file: NixFile) -> Result<Root, ParseError> {
+        let src = file.contents(self);
+        Ok(rnix::Root::parse(src).ok()?)
     }
 }

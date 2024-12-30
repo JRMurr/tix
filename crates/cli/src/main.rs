@@ -1,5 +1,5 @@
 use clap::Parser;
-use lang::{Expr, lower::lower};
+use lang::{Db, Expr, RootDatabase, lower::lower, module_and_source_maps};
 use std::error::Error;
 use std::fs;
 use std::path::PathBuf;
@@ -14,12 +14,11 @@ struct Cli {
 fn main() -> Result<(), Box<dyn Error>> {
     let args = Cli::parse();
 
-    let src = fs::read_to_string(&args.file_path)?;
+    let db: RootDatabase = Default::default();
 
-    // TODO: move this out of here so this crate doesn't need rnix as a dep
-    let nix = rnix::Root::parse(&src).ok()?;
+    let file = db.read_file(args.file_path)?;
 
-    let (module, _source_map) = lower(nix);
+    let (module, _source_map) = module_and_source_maps(&db, file)?;
 
     // dbg!(module, source_map);
 
