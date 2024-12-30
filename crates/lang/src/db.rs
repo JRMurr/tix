@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use dashmap::DashMap;
-use rnix::{Parse, Root};
+use rnix::Root;
 use salsa::{self, Event};
 use thiserror::Error;
 
@@ -12,18 +12,18 @@ pub struct NixFile {
     contents: String,
 }
 
-// Wrapping this to add some traits salsa needs
-#[derive(Error, Clone, Debug, PartialEq)]
-#[error(transparent)]
-pub struct ParseError(#[from] rnix::parser::ParseError);
+// // Wrapping this to add some traits salsa needs
+// #[derive(Error, Clone, Debug, PartialEq)]
+// #[error(transparent)]
+// pub struct ParseError(#[from] rnix::parser::ParseError);
 
-impl Eq for ParseError {}
+// impl Eq for ParseError {}
 
 #[salsa::db]
 pub trait Db: salsa::Database {
     fn read_file(&self, path: PathBuf) -> Result<NixFile, std::io::Error>;
 
-    fn parse_file(&self, file: NixFile) -> Result<Root, ParseError>;
+    fn parse_file(&self, file: NixFile) -> Root;
 }
 
 #[derive(Default, Clone)]
@@ -69,8 +69,8 @@ impl Db for RootDatabase {
     // Root is !Send + !Sync so having it tracked by salsa is sad.
     // Could store it in the db itself but would need to handle re-parsing on file change
     // This is probably fine since we generally will be getting a module which will be tracked
-    fn parse_file(&self, file: NixFile) -> Result<Root, ParseError> {
+    fn parse_file(&self, file: NixFile) -> Root {
         let src = file.contents(self);
-        Ok(rnix::Root::parse(src).ok()?)
+        rnix::Root::parse(src).tree()
     }
 }
