@@ -53,7 +53,7 @@ struct AttrSetTy {
 // https://github.com/eliben/code-for-blog/blob/8bdb91bfc007ceef5ba3499502b3ecb67aec3ec7/2018/type-inference/typing.py#L172
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct TypeEquation {
+struct Constraint {
     lhs: TyId,
     rhs: TyId,
     orig_expr: ExprId, // for debugging
@@ -63,7 +63,7 @@ struct TypeEquation {
 struct TypeTable {
     types: Arena<Ty>,
 
-    equations: Vec<TypeEquation>,
+    constraints: Vec<Constraint>,
 
     by_name: HashMap<NameId, TyId>,
     by_expr: HashMap<ExprId, TyId>,
@@ -92,7 +92,7 @@ impl TypeTable {
 
         let mut types = Arena::new();
 
-        let equations = Vec::new();
+        let constraints = Vec::new();
 
         for (name_id, _) in module.names() {
             let ty_id = types.alloc(Ty::Unknown);
@@ -111,10 +111,10 @@ impl TypeTable {
             types,
             by_name,
             by_expr,
-            equations,
+            constraints,
         };
 
-        table.generate_equations(module, module.entry_expr);
+        table.generate_constraints(module, module.entry_expr);
 
         table
     }
@@ -133,7 +133,7 @@ impl TypeTable {
             .expect("All names should have a type mapping")
     }
 
-    fn generate_equations(&mut self, module: &Module, expr_id: ExprId) {
+    fn generate_constraints(&mut self, module: &Module, expr_id: ExprId) {
         let expr_ty = self.expr_ty(&expr_id);
 
         let expr = &module[expr_id];
@@ -141,16 +141,16 @@ impl TypeTable {
         // https://github.com/eliben/code-for-blog/blob/8bdb91bfc007ceef5ba3499502b3ecb67aec3ec7/2018/type-inference/typing.py#L203
         // does the walk before handling the current node.
         // not sure why but ill do the same..
-        expr.walk_child_exprs(|e| self.generate_equations(module, e));
+        expr.walk_child_exprs(|e| self.generate_constraints(module, e));
 
         match expr {
             Expr::Reference(_) | Expr::Missing => {
                 // do nothing
             }
-            // could this be done above to avoid an equation for each literal?
+            // could this be done above to avoid a constraint for each literal?
             Expr::Literal(lit) => {
                 let lit: Ty = lit.clone().into();
-                self.equations.push(TypeEquation {
+                self.constraints.push(Constraint {
                     lhs: expr_ty,
                     rhs: self.types.alloc(lit),
                     orig_expr: expr_id,
@@ -162,13 +162,13 @@ impl TypeTable {
             } => {}
             Expr::LetIn { bindings: _, body } => {
                 // TODO: can i ignore bindings, name res *should* have handled it?
-                self.equations.push(TypeEquation {
+                self.constraints.push(Constraint {
                     lhs: expr_ty,
                     rhs: self.expr_ty(body),
                     orig_expr: expr_id,
                 })
             }
-            Expr::Apply { fun, arg } => self.equations.push(TypeEquation {
+            Expr::Apply { fun, arg } => self.constraints.push(Constraint {
                 lhs: self.expr_ty(fun),
                 rhs: self.expr_ty(arg),
                 orig_expr: expr_id,
@@ -178,17 +178,17 @@ impl TypeTable {
                 then_body,
                 else_body,
             } => {
-                self.equations.push(TypeEquation {
+                self.constraints.push(Constraint {
                     lhs: self.expr_ty(cond),
                     rhs: self.types.alloc(Ty::Bool),
                     orig_expr: expr_id,
                 });
-                self.equations.push(TypeEquation {
+                self.constraints.push(Constraint {
                     lhs: expr_ty,
                     rhs: self.expr_ty(then_body),
                     orig_expr: expr_id,
                 });
-                self.equations.push(TypeEquation {
+                self.constraints.push(Constraint {
                     lhs: expr_ty,
                     rhs: self.expr_ty(else_body),
                     orig_expr: expr_id,
@@ -198,7 +198,7 @@ impl TypeTable {
                 let param_ty = self.types.alloc(Ty::Unknown);
 
                 if let Some(param) = param {
-                    self.equations.push(TypeEquation {
+                    self.constraints.push(Constraint {
                         lhs: self.name_ty(param),
                         rhs: param_ty,
                         orig_expr: expr_id,
@@ -213,7 +213,7 @@ impl TypeTable {
 
                         let name_ty = self.name_ty(&name);
                         if let Some(default_ty) = default_ty {
-                            self.equations.push(TypeEquation {
+                            self.constraints.push(Constraint {
                                 lhs: name_ty,
                                 rhs: default_ty,
                                 orig_expr: default_expr.unwrap(),
@@ -228,7 +228,7 @@ impl TypeTable {
                         fields,
                         dyn_ty: None,
                     };
-                    self.equations.push(TypeEquation {
+                    self.constraints.push(Constraint {
                         lhs: param_ty,
                         rhs: self.types.alloc(Ty::AttrSet(attr_set)),
                         orig_expr: expr_id,
@@ -242,7 +242,7 @@ impl TypeTable {
                     body: body_ty,
                 });
 
-                self.equations.push(TypeEquation {
+                self.constraints.push(Constraint {
                     lhs: expr_ty,
                     rhs: lam_ty,
                     orig_expr: expr_id,
@@ -251,14 +251,14 @@ impl TypeTable {
             Expr::List(lst) => {
                 let list_elm_ty = self.types.alloc(Ty::Unknown);
                 for elem in lst.iter() {
-                    self.equations.push(TypeEquation {
+                    self.constraints.push(Constraint {
                         lhs: list_elm_ty,
                         rhs: self.expr_ty(elem),
                         orig_expr: expr_id,
                     });
                 }
 
-                self.equations.push(TypeEquation {
+                self.constraints.push(Constraint {
                     lhs: expr_ty,
                     rhs: self.types.alloc(Ty::List(list_elm_ty)),
                     orig_expr: expr_id,
@@ -301,11 +301,10 @@ impl TypeTable {
             Expr::Assert { cond, body } => todo!(),
             Expr::StringInterpolation(_) => todo!(),
             Expr::PathInterpolation(_) => todo!(),
-            // e => e.walk_child_exprs(|e| self.generate_equations(module, e)),
         }
     }
 
-    fn gen_bidnings_equations(
+    fn generate_bidnings_constraints(
         &mut self,
         module: &Module,
         bindings: &Bindings,
@@ -331,7 +330,7 @@ impl TypeTable {
                                                          //     AttrSource::Name(name),
                                                          // ),
             };
-            self.equations.push(TypeEquation {
+            self.constraints.push(Constraint {
                 lhs: name_ty,
                 rhs: value_ty,
                 orig_expr: parent_expr, // TODO: kind of a lie, would be nice to have the expr of the key but this is good enough
@@ -344,8 +343,6 @@ impl TypeTable {
             dyn_ty: None,
         }
     }
-
-    fn gen_attr_set_field_equations(&mut self, set_ty: TyId, field: Option<SmolStr>) {}
 
     pub fn update_type(&mut self, id: TyId, new_ty: Ty) {
         let value = self.types.get_mut(id).unwrap();
