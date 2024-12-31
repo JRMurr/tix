@@ -29,6 +29,10 @@ let
   */
   add = a: b: a + b;
 
+  apply = fn: args: fn args;
+
+  addTwo = apply add 2;
+
   addOne = add 1;
 
   two = addOne 1;
@@ -53,5 +57,7 @@ in
     concatStrings
     two
     three
+    apply
+    addTwo
     ;
 }

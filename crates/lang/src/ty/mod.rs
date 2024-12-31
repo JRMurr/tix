@@ -12,7 +12,7 @@ use thiserror::Error;
 use union_find::UnionFind;
 
 use crate::{
-    BindingValue, Bindings, Expr, ExprId, Module, NameId,
+    BindingValue, Bindings, Expr, ExprId, Literal, Module, NameId,
     db::NixFile,
     module,
     nameres::{NameResolution, ResolveResult},
@@ -337,6 +337,27 @@ impl<'db> InferCtx<'db> {
                     o => todo!("Need to handle operator {o:?}"),
                 }
             }
+            Expr::Select {
+                set,
+                attrpath,
+                default_expr,
+            } => {
+                let set_ty = self.infer_expr(*set);
+                let ret_ty = attrpath.iter().fold(set_ty, |set_ty, &attr| {
+                    let attr_ty = self.infer_expr(attr);
+                    self.unify_var_ty(attr_ty, Ty::String);
+                    let opt_key = match &self.module[attr] {
+                        Expr::Literal(Literal::String(key)) => Some(key.clone()),
+                        _ => None,
+                    };
+                    self.infer_set_field(set_ty, opt_key)
+                });
+                if let Some(default_expr) = *default_expr {
+                    let default_ty = self.infer_expr(default_expr);
+                    self.unify_var(ret_ty, default_ty);
+                }
+                ret_ty
+            }
             Expr::IfThenElse {
                 cond,
                 then_body,
@@ -344,11 +365,7 @@ impl<'db> InferCtx<'db> {
             } => todo!(),
             Expr::List(_) => todo!(),
             Expr::UnaryOp { op, expr } => todo!(),
-            Expr::Select {
-                set,
-                attrpath,
-                default_expr,
-            } => todo!(),
+
             Expr::HasAttr { set, attrpath } => todo!(),
             Expr::With { env, body } => todo!(),
             Expr::Assert { cond, body } => todo!(),
