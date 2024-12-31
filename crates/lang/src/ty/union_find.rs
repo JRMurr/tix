@@ -1,36 +1,33 @@
 use core::panic;
-use std::{fmt::Debug, marker::PhantomData};
+use std::fmt::Debug;
 
-#[derive(Debug)]
-pub struct UnionIdx<T> {
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct UnionIdx {
     idx: u32,
-    _ty: PhantomData<fn() -> T>,
+    // _ty: PhantomData<fn() -> T>,
 }
 
-impl<T> Copy for UnionIdx<T> {}
+// impl<T> Copy for UnionIdx {}
 
-impl<T> Clone for UnionIdx<T> {
-    #[inline]
-    fn clone(&self) -> UnionIdx<T> {
-        *self
-    }
-}
+// impl<T> Clone for UnionIdx {
+//     #[inline]
+//     fn clone(&self) -> UnionIdx {
+//         *self
+//     }
+// }
 
-impl<T> PartialEq for UnionIdx<T> {
-    #[inline]
-    fn eq(&self, rhs: &Self) -> bool {
-        self.idx == rhs.idx
-    }
-}
+// impl<T> PartialEq for UnionIdx {
+//     #[inline]
+//     fn eq(&self, rhs: &Self) -> bool {
+//         self.idx == rhs.idx
+//     }
+// }
 
-impl<T> Eq for UnionIdx<T> {}
+// impl<T> Eq for UnionIdx {}
 
-impl<T> UnionIdx<T> {
+impl UnionIdx {
     pub fn new(idx: u32) -> Self {
-        Self {
-            idx,
-            _ty: PhantomData,
-        }
+        Self { idx }
     }
 
     #[inline]
@@ -44,7 +41,7 @@ struct UnionFindNode<T> {
     /// The value associated with this node (if it exists).
     value: Option<T>,
     /// The index of this node's parent (or itself if it's a root).
-    parent: UnionIdx<T>,
+    parent: UnionIdx,
     /// The rank is used to optimize union operations (to avoid deep trees).
     rank: u8,
 }
@@ -55,7 +52,7 @@ pub struct UnionFind<T> {
 }
 
 impl<T: Debug + Clone> UnionFind<T> {
-    pub fn new(len: usize, mut make_default: impl FnMut(UnionIdx<T>) -> T) -> Self {
+    pub fn new(len: usize, mut make_default: impl FnMut(UnionIdx) -> T) -> Self {
         let len = u32::try_from(len).expect("Length overflow");
         Self {
             nodes: (0..len)
@@ -72,7 +69,7 @@ impl<T: Debug + Clone> UnionFind<T> {
         self.nodes.len()
     }
 
-    pub fn push_with_idx(&mut self, init: impl FnOnce(UnionIdx<T>) -> T) -> UnionIdx<T> {
+    pub fn push_with_idx(&mut self, init: impl FnOnce(UnionIdx) -> T) -> UnionIdx {
         let i = self.nodes.len() as u32;
         let _ = i.checked_add(1).expect("Length overflow");
         let idx = UnionIdx::new(i);
@@ -84,11 +81,11 @@ impl<T: Debug + Clone> UnionFind<T> {
         idx
     }
 
-    pub fn push(&mut self, value: T) -> UnionIdx<T> {
+    pub fn push(&mut self, value: T) -> UnionIdx {
         self.push_with_idx(|_| value)
     }
 
-    pub fn find(&mut self, x: UnionIdx<T>) -> UnionIdx<T> {
+    pub fn find(&mut self, x: UnionIdx) -> UnionIdx {
         let parent = self.nodes[x.idx()].parent;
         if parent != x {
             let root = self.find(parent);
@@ -99,11 +96,11 @@ impl<T: Debug + Clone> UnionFind<T> {
         }
     }
 
-    // pub fn get(&self, x: UnionIdx<T>) -> UnionIdx<T> {
+    // pub fn get(&self, x: UnionIdx) -> UnionIdx {
 
     // }
 
-    pub fn get_mut(&mut self, x: UnionIdx<T>) -> &mut T {
+    pub fn get_mut(&mut self, x: UnionIdx) -> &mut T {
         let root = self.find(x);
 
         // let nodes = self.nodes.clone();
@@ -117,7 +114,7 @@ impl<T: Debug + Clone> UnionFind<T> {
         }
     }
 
-    pub fn unify(&mut self, a: UnionIdx<T>, b: UnionIdx<T>) -> (UnionIdx<T>, Option<T>) {
+    pub fn unify(&mut self, a: UnionIdx, b: UnionIdx) -> (UnionIdx, Option<T>) {
         let (a, b) = (self.find(a), self.find(b));
 
         if a == b {

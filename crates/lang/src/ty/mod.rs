@@ -14,17 +14,17 @@ use union_find::UnionFind;
 use crate::{
     BindingValue, Bindings, Expr, ExprId, Literal, Module, NameId,
     db::NixFile,
-    module,
     nameres::{NameResolution, ResolveResult},
 };
 
 /// Reference to the type in the arena
-pub type TyId = union_find::UnionIdx<Ty>;
+pub type TyId = union_find::UnionIdx;
 
 // the mono type
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Ty {
+pub enum Ty<RefType> {
     /// A type quantifier (ie the `a` in `a -> a`)
+    #[allow(clippy::enum_variant_names)]
     TyVar(usize),
 
     // TODO: could we track literals in the type system like typescript does?
@@ -36,21 +36,21 @@ pub enum Ty {
     Path,
     Uri,
 
-    List(TyId),
+    List(RefType),
     Lambda {
-        param: TyId,
-        body: TyId,
+        param: RefType,
+        body: RefType,
     },
-    AttrSet(AttrSetTy),
+    AttrSet(AttrSetTy<RefType>),
 }
 
-impl Ty {
+impl Ty<TyId> {
     fn intern(self, ctx: &mut InferCtx) -> TyId {
         ctx.table.push(self)
     }
 }
 
-impl From<crate::Literal> for Ty {
+impl<T> From<crate::Literal> for Ty<T> {
     fn from(value: crate::Literal) -> Self {
         match value {
             crate::Literal::Float(_) => Ty::Float,
@@ -63,14 +63,23 @@ impl From<crate::Literal> for Ty {
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct AttrSetTy {
+pub struct AttrSetTy<RefType> {
     // TODO: i think the value here needs to be a TyId or Schema
-    fields: BTreeMap<SmolStr, TyId>,
+    fields: BTreeMap<SmolStr, RefType>,
 
     // Merge with fields, this is for all the dynamic fields
-    dyn_ty: Option<TyId>,
+    dyn_ty: Option<RefType>,
     // TODO: should track if there is an ... (should only exist on patterns)
     // dyn_ty might be enough for that?
+}
+
+impl<RefType> AttrSetTy<RefType> {
+    pub fn new() -> Self {
+        Self {
+            fields: Default::default(),
+            dyn_ty: None,
+        }
+    }
 }
 
 // the poly type
@@ -85,7 +94,7 @@ type Substitutions = HashMap<usize, TyId>;
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 enum InferenceError {
     #[error("Could not union {0:?} and {1:?}")]
-    InvalidUnion(Ty, Ty),
+    InvalidUnion(Ty<TyId>, Ty<TyId>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,7 +102,7 @@ pub struct InferCtx<'db> {
     module: &'db Module,
     name_res: &'db NameResolution,
 
-    table: UnionFind<Ty>,
+    table: UnionFind<Ty<TyId>>,
 
     poly_type_env: HashMap<NameId, TySchema>,
 }
@@ -243,7 +252,7 @@ impl<'db> InferCtx<'db> {
         match expr {
             Expr::Missing => self.new_ty_var(),
             Expr::Literal(lit) => {
-                let lit: Ty = lit.clone().into();
+                let lit: Ty<TyId> = lit.clone().into();
                 lit.intern(self)
             }
             // TODO: I think this will work fine with the type schema.
@@ -271,7 +280,7 @@ impl<'db> InferCtx<'db> {
                 }
 
                 if let Some(pat) = pat {
-                    self.unify_var_ty(param_ty, Ty::AttrSet(AttrSetTy::default()));
+                    self.unify_var_ty(param_ty, Ty::AttrSet(AttrSetTy::new()));
                     for &(name, default_expr) in pat.fields.iter() {
                         // Always infer default_expr.
                         let default_ty = default_expr.map(|e| self.infer_expr(e));
@@ -374,7 +383,7 @@ impl<'db> InferCtx<'db> {
         }
     }
 
-    fn infer_bindings(&mut self, bindings: &Bindings) -> AttrSetTy {
+    fn infer_bindings(&mut self, bindings: &Bindings) -> AttrSetTy<TyId> {
         let inherit_from_tys = bindings
             .inherit_froms
             .iter()
@@ -458,7 +467,7 @@ impl<'db> InferCtx<'db> {
     }
 
     // TODO: When we don't just panic on errors we might want to do the table unify after the type unify call
-    fn unify_var_ty(&mut self, var: TyId, rhs: Ty) {
+    fn unify_var_ty(&mut self, var: TyId, rhs: Ty<TyId>) {
         let lhs = mem::replace(self.table.get_mut(var), Ty::TyVar(var.idx()));
         let ret = self.unify(lhs, rhs).expect("Unify error");
         *self.table.get_mut(var) = ret;
@@ -471,7 +480,7 @@ impl<'db> InferCtx<'db> {
         self.unify_var_ty(var, rhs);
     }
 
-    fn unify(&mut self, lhs: Ty, rhs: Ty) -> Result<Ty, InferenceError> {
+    fn unify(&mut self, lhs: Ty<TyId>, rhs: Ty<TyId>) -> Result<Ty<TyId>, InferenceError> {
         if lhs == rhs {
             return Ok(lhs);
         }
@@ -572,18 +581,18 @@ impl<'db> InferCtx<'db> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InferenceResult {
-    name_ty_map: HashMap<NameId, Ty>,
-    expr_ty_map: HashMap<ExprId, Ty>,
+    name_ty_map: HashMap<NameId, Ty<TyId>>,
+    expr_ty_map: HashMap<ExprId, Ty<TyId>>,
 
-    table: UnionFind<Ty>, // TODO: the finish step should just make a normal arena from this or something?
+    table: UnionFind<Ty<TyId>>, // TODO: the finish step should just make a normal arena from this or something?
 }
 
 impl InferenceResult {
-    pub fn ty_for_name(&self, name: NameId) -> Ty {
+    pub fn ty_for_name(&self, name: NameId) -> Ty<TyId> {
         self.name_ty_map.get(&name).unwrap().clone()
     }
 
-    pub fn ty_for_expr(&self, expr: ExprId) -> Ty {
+    pub fn ty_for_expr(&self, expr: ExprId) -> Ty<TyId> {
         self.expr_ty_map.get(&expr).unwrap().clone()
     }
 }
