@@ -1,7 +1,8 @@
 mod union_find;
 
+use core::panic;
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     mem,
 };
 
@@ -60,17 +61,18 @@ impl From<crate::Literal> for Ty {
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct AttrSetTy {
-    // TODO: should be able to have TyId's as keys to handle dynamic keys?
+    // TODO: i think the value here needs to be a TyId or Schema
     fields: BTreeMap<SmolStr, TyId>,
 
     // Merge with fields, this is for all the dynamic fields
     dyn_ty: Option<TyId>,
+    // TODO: should track if there is an ... (should only exist on patterns)
 }
 
 // the poly type
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TyScheme {
-    pub vars: Vec<usize>, // Each usize corresponds to a Ty::TyVar(x)
+pub struct TySchema {
+    pub vars: HashSet<usize>, // Each usize corresponds to a Ty::TyVar(x)
     pub ty: TyId,
 }
 
@@ -408,13 +410,16 @@ pub struct InferCtx<'db> {
 
     table: UnionFind<Ty>,
 
-    poly_type_env: HashMap<NameId, TyScheme>,
+    poly_type_env: HashMap<NameId, TySchema>,
 }
 
 impl<'db> InferCtx<'db> {
     pub fn new(module: &'db Module, name_res: &'db NameResolution) -> Self {
         // let types = TypeTable::new(&module, &name_res);
 
+        // Init the table with placeholder types for all names and expressions
+        // adding names here allows for recursive references
+        // After we infer a name's value it should be added to the poly_type_env
         let table = UnionFind::new(module.names().len() + module.exprs().len(), |idx| {
             Ty::TyVar(idx.idx())
         });
@@ -432,8 +437,16 @@ impl<'db> InferCtx<'db> {
         self.table.push_with_idx(|idx| Ty::TyVar(idx.idx()))
     }
 
-    fn ty_for_name(&self, i: NameId) -> TyId {
-        TyId::new(u32::try_from(i.index()).expect("Name id too big"))
+    fn ty_for_name(&mut self, name: NameId) -> TyId {
+        let ty_schema = self.poly_type_env.get(&name).cloned();
+
+        if let Some(ty_schema) = ty_schema {
+            return self.instantiate(&ty_schema);
+        }
+
+        // NOTE: this should only happen during the inference of the value for the name
+        // after inferring we should add the name to the poly type env
+        TyId::new(u32::try_from(name.index()).expect("Name id too big"))
     }
 
     fn ty_for_expr(&self, i: ExprId) -> TyId {
@@ -442,7 +455,7 @@ impl<'db> InferCtx<'db> {
         )
     }
 
-    fn instantiate(&mut self, scheme: &TyScheme) -> TyId {
+    fn instantiate(&mut self, scheme: &TySchema) -> TyId {
         let mut substitutions = HashMap::new();
         for &var in &scheme.vars {
             substitutions.insert(var, self.new_ty_var());
@@ -496,6 +509,43 @@ impl<'db> InferCtx<'db> {
         new_ty.intern(self)
     }
 
+    fn generalize(&mut self, ty: TyId) -> TySchema {
+        let free_vars = self.free_type_vars(ty);
+        TySchema {
+            vars: free_vars,
+            ty,
+        }
+    }
+
+    fn free_type_vars(&mut self, ty_id: TyId) -> HashSet<usize> {
+        let ty = self.table.get_mut(ty_id).clone();
+
+        let mut set = HashSet::new();
+
+        match ty {
+            Ty::TyVar(x) => {
+                set.insert(x);
+            }
+            Ty::List(inner) => set.extend(&self.free_type_vars(inner)),
+            Ty::Lambda { param, body } => {
+                set.extend(&self.free_type_vars(param));
+                set.extend(&self.free_type_vars(body));
+            }
+            Ty::AttrSet(attr_set_ty) => {
+                attr_set_ty.fields.values().for_each(|v| {
+                    set.extend(&self.free_type_vars(*v));
+                });
+
+                if let Some(dyn_ty) = attr_set_ty.dyn_ty {
+                    set.extend(&self.free_type_vars(dyn_ty));
+                }
+            }
+            _ => {}
+        }
+
+        set
+    }
+
     fn infer_expr(&mut self, e: ExprId) -> TyId {
         let ty = self.infer_expr_inner(e);
         let placeholder_ty = self.ty_for_expr(e);
@@ -511,6 +561,9 @@ impl<'db> InferCtx<'db> {
                 let lit: Ty = lit.clone().into();
                 lit.intern(self)
             }
+            // TODO: I think this will work fine with the type schema.
+            // this should be resolved before we make the copy so the name res should work
+            // but if stuff gets weird, check here...
             Expr::Reference(_) => match self.name_res.get(e) {
                 None => self.new_ty_var(),
                 Some(res) => match res {
@@ -528,7 +581,8 @@ impl<'db> InferCtx<'db> {
                 let param_ty = self.new_ty_var();
 
                 if let Some(name) = *param {
-                    self.unify_var(param_ty, self.ty_for_name(name));
+                    let name_ty = self.ty_for_name(name);
+                    self.unify_var(param_ty, name_ty);
                 }
 
                 if let Some(pat) = pat {
@@ -566,6 +620,10 @@ impl<'db> InferCtx<'db> {
                 self.unify_var(arg_ty, param_ty);
                 ret_ty
             }
+            Expr::LetIn { bindings, body } => {
+                self.infer_bindings(bindings);
+                self.infer_expr(*body)
+            }
             Expr::AttrSet {
                 is_rec: _,
                 bindings,
@@ -578,7 +636,6 @@ impl<'db> InferCtx<'db> {
                 then_body,
                 else_body,
             } => todo!(),
-            Expr::LetIn { bindings, body } => todo!(),
             Expr::List(_) => todo!(),
             Expr::BinOp { lhs, rhs, op } => todo!(),
             Expr::UnaryOp { op, expr } => todo!(),
@@ -613,25 +670,69 @@ impl<'db> InferCtx<'db> {
                 }
             };
             self.unify_var(name_ty, value_ty);
+            // TODO: i feel like i'll need to store the result of generalization on the fields or something..
+            // but i think its fine?
+            // TODO: i might want to do generlization after all the bindings
+            // have been handled if stuff is mutually recursive?
+            let generalized_val = self.generalize(value_ty);
+            if self.poly_type_env.contains_key(&name) {
+                panic!("poly_type_env already has mapping for {name:?}\t {name_text}");
+            }
+            self.poly_type_env.insert(name, generalized_val);
             fields.insert(name_text, value_ty);
         }
 
         let dyn_ty = (!bindings.dynamics.is_empty()).then(|| {
-            let dyn_ty = self.new_ty_var();
-            for &(k, v) in bindings.dynamics.iter() {
-                let name_ty = self.infer_expr(k);
-                self.unify_var_ty(name_ty, Ty::String);
-                let value_ty = self.infer_expr(v);
-                self.unify_var(value_ty, dyn_ty);
-            }
-            dyn_ty
+            todo!()
+
+            // let dyn_ty = self.new_ty_var();
+            // for &(k, v) in bindings.dynamics.iter() {
+            //     let name_ty = self.infer_expr(k);
+            //     self.unify_var_ty(name_ty, Ty::String);
+            //     let value_ty = self.infer_expr(v);
+            //     self.unify_var(value_ty, dyn_ty);
+            // }
+            // dyn_ty
         });
 
         AttrSetTy { fields, dyn_ty }
     }
 
     fn infer_set_field(&mut self, set_ty: TyId, field: Option<SmolStr>) -> TyId {
-        todo!()
+        use std::collections::btree_map::Entry;
+        let next_ty = TyId::new(self.table.len() as u32);
+        match self.table.get_mut(set_ty) {
+            Ty::AttrSet(set) => match field {
+                Some(field) => match set.fields.entry(field) {
+                    Entry::Occupied(mut ent) => {
+                        let ty = ent.get_mut();
+                        // prev_src.unify(src);
+                        return *ty;
+                    }
+                    Entry::Vacant(ent) => {
+                        ent.insert(next_ty);
+                    }
+                },
+                None => match set.dyn_ty {
+                    Some(dyn_ty) => return dyn_ty,
+                    None => set.dyn_ty = Some(next_ty),
+                },
+            },
+            k @ Ty::TyVar(_) => {
+                *k = Ty::AttrSet(match field {
+                    Some(field) => AttrSetTy {
+                        fields: [(field, next_ty)].into_iter().collect(),
+                        dyn_ty: None,
+                    },
+                    None => AttrSetTy {
+                        fields: BTreeMap::new(),
+                        dyn_ty: Some(next_ty),
+                    },
+                });
+            }
+            _ => {}
+        }
+        self.new_ty_var()
     }
 
     fn unify_var_ty(&mut self, var: TyId, rhs: Ty) {
@@ -650,17 +751,17 @@ impl<'db> InferCtx<'db> {
         if lhs == rhs {
             return lhs;
         }
-
-        match (lhs, rhs) {
-            (Ty::TyVar(x), Ty::TyVar(y)) => {
-                if x == y {
-                    lhs
-                } else {
-                    panic!("TODO: invalid unification")
-                }
-            }
-            _ => todo!(),
-        }
+        todo!()
+        // match (lhs, rhs) {
+        //     (Ty::TyVar(x), Ty::TyVar(y)) => {
+        //         if x == y {
+        //             lhs
+        //         } else {
+        //             panic!("TODO: invalid unification")
+        //         }
+        //     }
+        //     _ => todo!(),
+        // }
     }
 
     // fn finish(mut self) -> InferenceResult {
