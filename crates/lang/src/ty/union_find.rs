@@ -1,4 +1,5 @@
-use std::marker::PhantomData;
+use core::panic;
+use std::{fmt::Debug, marker::PhantomData};
 
 #[derive(Debug)]
 pub struct UnionIdx<T> {
@@ -53,7 +54,7 @@ pub struct UnionFind<T> {
     nodes: Vec<UnionFindNode<T>>,
 }
 
-impl<T> UnionFind<T> {
+impl<T: Debug + Clone> UnionFind<T> {
     pub fn new(len: usize, mut make_default: impl FnMut(UnionIdx<T>) -> T) -> Self {
         let len = u32::try_from(len).expect("Length overflow");
         Self {
@@ -104,44 +105,58 @@ impl<T> UnionFind<T> {
 
     pub fn get_mut(&mut self, x: UnionIdx<T>) -> &mut T {
         let root = self.find(x);
-        self.nodes[root.idx()].value.as_mut().unwrap()
+
+        // let nodes = self.nodes.clone();
+
+        if let Some(value) = self.nodes[root.idx()].value.as_mut() {
+            value
+        } else {
+            panic!("Root node {:?} does not have a value", root)
+            // println!("root: {}, x: {}, len: {}", root.idx(), x.idx(), nodes.len());
+            // panic!("nodes: {:?}", nodes.clone())
+        }
     }
 
     pub fn unify(&mut self, a: UnionIdx<T>, b: UnionIdx<T>) -> (UnionIdx<T>, Option<T>) {
-        let (root_a, root_b) = (self.find(a), self.find(b));
+        let (a, b) = (self.find(a), self.find(b));
 
-        if root_a == root_b {
-            return (root_a, None);
+        if a == b {
+            return (a, None);
         }
 
         // TODO: should probably make sure the idxs exist but probably fine...
         let (node_a, node_b) = unsafe {
             let ptr = self.nodes.as_mut_ptr();
 
-            let node_a = &mut *ptr.add(root_a.idx());
-            let node_b = &mut *ptr.add(root_b.idx());
+            let node_a = &mut *ptr.add(a.idx());
+            let node_b = &mut *ptr.add(b.idx());
 
             (node_a, node_b)
         };
 
+        let lhs = node_a.value.take().unwrap();
+        let rhs = node_b.value.take().unwrap();
+
         // Union by rank
-        match node_a.rank.cmp(&node_b.rank) {
+        let idx = match node_a.rank.cmp(&node_b.rank) {
             std::cmp::Ordering::Less => {
-                node_a.parent = root_b;
-                node_b.value = node_a.value.take();
-                (root_b, node_b.value.take())
+                node_a.parent = b;
+                node_b.value = Some(lhs);
+                b
             }
             std::cmp::Ordering::Greater => {
-                node_b.parent = root_a;
-                node_a.value = node_b.value.take();
-                (root_a, node_a.value.take())
+                node_b.parent = a;
+                node_a.value = Some(lhs);
+                a
             }
             std::cmp::Ordering::Equal => {
-                node_a.parent = root_b;
+                node_a.parent = b;
                 node_b.rank += 1;
-                node_b.value = node_a.value.take();
-                (root_b, node_b.value.take())
+                node_b.value = Some(lhs);
+                b
             }
-        }
+        };
+
+        (idx, Some(rhs))
     }
 }
