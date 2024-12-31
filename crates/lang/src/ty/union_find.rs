@@ -22,6 +22,8 @@ impl<T> PartialEq for UnionIdx<T> {
     }
 }
 
+impl<T> Eq for UnionIdx<T> {}
+
 impl<T> UnionIdx<T> {
     pub fn new(idx: u32) -> Self {
         Self {
@@ -36,7 +38,7 @@ impl<T> UnionIdx<T> {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct UnionFindNode<T> {
     /// The value associated with this node (if it exists).
     value: Option<T>,
@@ -46,7 +48,7 @@ struct UnionFindNode<T> {
     rank: u8,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UnionFind<T> {
     nodes: Vec<UnionFindNode<T>>,
 }
@@ -69,15 +71,20 @@ impl<T> UnionFind<T> {
         self.nodes.len()
     }
 
-    pub fn push(&mut self, value: T) -> u32 {
+    pub fn push_with_idx(&mut self, init: impl FnOnce(UnionIdx<T>) -> T) -> UnionIdx<T> {
         let i = self.nodes.len() as u32;
         let _ = i.checked_add(1).expect("Length overflow");
+        let idx = UnionIdx::new(i);
         self.nodes.push(UnionFindNode {
-            value: Some(value),
-            parent: UnionIdx::new(i),
+            value: Some(init(idx)),
+            parent: idx,
             rank: 0,
         });
-        i
+        idx
+    }
+
+    pub fn push(&mut self, value: T) -> UnionIdx<T> {
+        self.push_with_idx(|_| value)
     }
 
     pub fn find(&mut self, x: UnionIdx<T>) -> UnionIdx<T> {
