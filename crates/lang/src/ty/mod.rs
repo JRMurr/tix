@@ -54,7 +54,7 @@ struct AttrSetTy {
 // https://github.com/eliben/code-for-blog/blob/8bdb91bfc007ceef5ba3499502b3ecb67aec3ec7/2018/type-inference/typing.py#L172
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Constraint {
+pub struct Constraint {
     lhs: TyId,
     rhs: TyId,
     orig_expr: ExprId, // for debugging
@@ -377,9 +377,20 @@ impl TypeTable {
         let value = self.types.get_mut(id).unwrap();
         *value = new_ty;
     }
+
+    // pub fn tys_for_constraint(&self, constraint: Constraint) -> (Ty, Ty) {
+    //     let lhs = constraint.lhs;
+    //     let rhs = constraint.rhs;
+
+    //     (
+    //         self.types[constraint.lhs].clone(),
+    //         self.types[constraint.rhs].clone(),
+    //     )
+    // }
 }
 
-struct InferCtx {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InferCtx {
     module: Module,
     name_res: NameResolution,
 
@@ -399,12 +410,9 @@ impl InferCtx {
 }
 
 #[salsa::tracked]
-pub fn infer_file_debug(db: &dyn crate::Db, file: NixFile) -> TypeTable {
+pub fn infer_file_debug(db: &dyn crate::Db, file: NixFile) -> InferCtx {
     let module = crate::module(db, file);
 
     let name_res = crate::nameres::name_resolution(db, file);
-
-    let infer_ctx = InferCtx::new(module, name_res);
-
-    infer_ctx.types
+    InferCtx::new(module, name_res)
 }
