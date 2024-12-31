@@ -98,6 +98,10 @@ impl<T> UnionFind<T> {
         }
     }
 
+    // pub fn get(&self, x: UnionIdx<T>) -> UnionIdx<T> {
+
+    // }
+
     pub fn get_mut(&mut self, x: UnionIdx<T>) -> &mut T {
         let root = self.find(x);
         self.nodes[root.idx()].value.as_mut().unwrap()

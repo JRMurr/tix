@@ -9,14 +9,15 @@ use smol_str::SmolStr;
 use union_find::UnionFind;
 
 use crate::{
-    ExprId, Module, NameId,
+    BindingValue, Bindings, Expr, ExprId, Module, NameId,
     db::NixFile,
-    nameres::NameResolution,
+    nameres::{NameResolution, ResolveResult},
 };
 
 /// Reference to the type in the arena
 pub type TyId = union_find::UnionIdx<Ty>;
 
+// the mono type
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ty {
     /// A type quantifier (ie the `a` in `a -> a`)
@@ -39,6 +40,12 @@ pub enum Ty {
     AttrSet(AttrSetTy),
 }
 
+impl Ty {
+    fn intern(self, ctx: &mut InferCtx) -> TyId {
+        ctx.table.push(self)
+    }
+}
+
 impl From<crate::Literal> for Ty {
     fn from(value: crate::Literal) -> Self {
         match value {
@@ -51,7 +58,7 @@ impl From<crate::Literal> for Ty {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct AttrSetTy {
     // TODO: should be able to have TyId's as keys to handle dynamic keys?
     fields: BTreeMap<SmolStr, TyId>,
@@ -60,25 +67,11 @@ pub struct AttrSetTy {
     dyn_ty: Option<TyId>,
 }
 
-// following inference alg from https://eli.thegreenplace.net/2018/type-inference/
-// https://github.com/eliben/code-for-blog/blob/8bdb91bfc007ceef5ba3499502b3ecb67aec3ec7/2018/type-inference/typing.py#L172
-
+// the poly type
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Constraint {
-    lhs: TyId,
-    rhs: TyId,
-    orig_expr: ExprId, // for debugging
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TypeTable {
-    types: UnionFind<Ty>,
-
-    // constraints: Vec<Constraint>,
-    by_name: HashMap<NameId, TyId>,
-    by_expr: HashMap<ExprId, TyId>,
-
-    ty_var_count: usize,
+pub struct TyScheme {
+    pub vars: Vec<usize>, // Each usize corresponds to a Ty::TyVar(x)
+    pub ty: TyId,
 }
 
 // impl std::ops::Index<TyId> for TypeTable {
@@ -407,16 +400,19 @@ pub struct TypeTable {
 //     // }
 // }
 
+type Substitutions = HashMap<usize, TyId>;
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InferCtx {
-    module: Module,
-    name_res: NameResolution,
+pub struct InferCtx<'db> {
+    module: &'db Module,
+    name_res: &'db NameResolution,
 
     table: UnionFind<Ty>,
+
+    poly_type_env: HashMap<NameId, TyScheme>,
 }
 
-impl InferCtx {
-    pub fn new(module: Module, name_res: NameResolution) -> Self {
+impl<'db> InferCtx<'db> {
+    pub fn new(module: &'db Module, name_res: &'db NameResolution) -> Self {
         // let types = TypeTable::new(&module, &name_res);
 
         let table = UnionFind::new(module.names().len() + module.exprs().len(), |idx| {
@@ -428,6 +424,7 @@ impl InferCtx {
             module,
             name_res,
             table,
+            poly_type_env: HashMap::new(),
         }
     }
 
@@ -445,6 +442,60 @@ impl InferCtx {
         )
     }
 
+    fn instantiate(&mut self, scheme: &TyScheme) -> TyId {
+        let mut substitutions = HashMap::new();
+        for &var in &scheme.vars {
+            substitutions.insert(var, self.new_ty_var());
+        }
+
+        self.instantiate_ty(scheme.ty, &substitutions)
+    }
+
+    fn instantiate_ty(&mut self, ty_id: TyId, substitutions: &Substitutions) -> TyId {
+        let ty = self.table.get_mut(ty_id).clone();
+
+        let new_ty = match ty {
+            Ty::TyVar(x) => {
+                if let Some(&replacement) = substitutions.get(&x) {
+                    return replacement;
+                }
+                // this should have been unified by now...
+                panic!("No substitution found for Ty::TyVar({x})")
+            }
+            Ty::Lambda { param, body } => {
+                let new_param = self.instantiate_ty(param, substitutions);
+                let new_body = self.instantiate_ty(body, substitutions);
+                Ty::Lambda {
+                    param: new_param,
+                    body: new_body,
+                }
+            }
+            Ty::List(inner) => {
+                let new_inner = self.instantiate_ty(inner, substitutions);
+                Ty::List(new_inner)
+            }
+            Ty::AttrSet(attr_set_ty) => {
+                let new_fields = attr_set_ty
+                    .fields
+                    .into_iter()
+                    .map(|(k, v)| (k, self.instantiate_ty(v, substitutions)))
+                    .collect();
+                let new_dyn_ty = attr_set_ty
+                    .dyn_ty
+                    .map(|v| self.instantiate_ty(v, substitutions));
+
+                Ty::AttrSet(AttrSetTy {
+                    fields: new_fields,
+                    dyn_ty: new_dyn_ty,
+                })
+            }
+            // TODO: should list them all just incase we add stuff
+            rest => rest, // all leaf types
+        };
+
+        new_ty.intern(self)
+    }
+
     fn infer_expr(&mut self, e: ExprId) -> TyId {
         let ty = self.infer_expr_inner(e);
         let placeholder_ty = self.ty_for_expr(e);
@@ -453,6 +504,133 @@ impl InferCtx {
     }
 
     fn infer_expr_inner(&mut self, e: ExprId) -> TyId {
+        let expr = &self.module[e];
+        match expr {
+            Expr::Missing => self.new_ty_var(),
+            Expr::Literal(lit) => {
+                let lit: Ty = lit.clone().into();
+                lit.intern(self)
+            }
+            Expr::Reference(_) => match self.name_res.get(e) {
+                None => self.new_ty_var(),
+                Some(res) => match res {
+                    &ResolveResult::Definition(name) => self.ty_for_name(name),
+                    ResolveResult::WithExprs(_) => {
+                        // TODO: With names.
+                        self.new_ty_var()
+                    }
+                    ResolveResult::Builtin(_name) => {
+                        todo!()
+                    }
+                },
+            },
+            Expr::Lambda { param, pat, body } => {
+                let param_ty = self.new_ty_var();
+
+                if let Some(name) = *param {
+                    self.unify_var(param_ty, self.ty_for_name(name));
+                }
+
+                if let Some(pat) = pat {
+                    self.unify_var_ty(param_ty, Ty::AttrSet(AttrSetTy::default()));
+                    for &(name, default_expr) in pat.fields.iter() {
+                        // Always infer default_expr.
+                        let default_ty = default_expr.map(|e| self.infer_expr(e));
+                        let Some(name) = name else { continue };
+                        let name_ty = self.ty_for_name(name);
+                        if let Some(default_ty) = default_ty {
+                            self.unify_var(name_ty, default_ty);
+                        }
+                        let field_text = self.module[name].text.clone();
+                        let param_field_ty = self.infer_set_field(param_ty, Some(field_text));
+                        self.unify_var(param_field_ty, name_ty);
+                    }
+                }
+
+                let body_ty = self.infer_expr(*body);
+                Ty::Lambda {
+                    param: param_ty,
+                    body: body_ty,
+                }
+                .intern(self)
+            }
+            Expr::Apply { fun, arg } => {
+                let param_ty = self.new_ty_var();
+                let ret_ty = self.new_ty_var();
+                let lam_ty = self.infer_expr(*fun);
+                self.unify_var_ty(lam_ty, Ty::Lambda {
+                    param: param_ty,
+                    body: ret_ty,
+                });
+                let arg_ty = self.infer_expr(*arg);
+                self.unify_var(arg_ty, param_ty);
+                ret_ty
+            }
+            Expr::AttrSet {
+                is_rec: _,
+                bindings,
+            } => {
+                let set = self.infer_bindings(bindings);
+                Ty::AttrSet(set).intern(self)
+            }
+            Expr::IfThenElse {
+                cond,
+                then_body,
+                else_body,
+            } => todo!(),
+            Expr::LetIn { bindings, body } => todo!(),
+            Expr::List(_) => todo!(),
+            Expr::BinOp { lhs, rhs, op } => todo!(),
+            Expr::UnaryOp { op, expr } => todo!(),
+            Expr::Select {
+                set,
+                attrpath,
+                default_expr,
+            } => todo!(),
+            Expr::HasAttr { set, attrpath } => todo!(),
+            Expr::With { env, body } => todo!(),
+            Expr::Assert { cond, body } => todo!(),
+            Expr::StringInterpolation(_) => todo!(),
+            Expr::PathInterpolation(_) => todo!(),
+        }
+    }
+
+    fn infer_bindings(&mut self, bindings: &Bindings) -> AttrSetTy {
+        let inherit_from_tys = bindings
+            .inherit_froms
+            .iter()
+            .map(|&from_expr| self.infer_expr(from_expr))
+            .collect::<Vec<_>>();
+
+        let mut fields = BTreeMap::new();
+        for &(name, value) in bindings.statics.iter() {
+            let name_ty = self.ty_for_name(name);
+            let name_text = self.module[name].text.clone();
+            let value_ty = match value {
+                BindingValue::Inherit(e) | BindingValue::Expr(e) => self.infer_expr(e),
+                BindingValue::InheritFrom(i) => {
+                    self.infer_set_field(inherit_from_tys[i], Some(name_text.clone()))
+                }
+            };
+            self.unify_var(name_ty, value_ty);
+            fields.insert(name_text, value_ty);
+        }
+
+        let dyn_ty = (!bindings.dynamics.is_empty()).then(|| {
+            let dyn_ty = self.new_ty_var();
+            for &(k, v) in bindings.dynamics.iter() {
+                let name_ty = self.infer_expr(k);
+                self.unify_var_ty(name_ty, Ty::String);
+                let value_ty = self.infer_expr(v);
+                self.unify_var(value_ty, dyn_ty);
+            }
+            dyn_ty
+        });
+
+        AttrSetTy { fields, dyn_ty }
+    }
+
+    fn infer_set_field(&mut self, set_ty: TyId, field: Option<SmolStr>) -> TyId {
         todo!()
     }
 
@@ -469,14 +647,51 @@ impl InferCtx {
     }
 
     fn unify(&mut self, lhs: Ty, rhs: Ty) -> Ty {
-        todo!()
+        if lhs == rhs {
+            return lhs;
+        }
+
+        match (lhs, rhs) {
+            (Ty::TyVar(x), Ty::TyVar(y)) => {
+                if x == y {
+                    lhs
+                } else {
+                    panic!("TODO: invalid unification")
+                }
+            }
+            _ => todo!(),
+        }
     }
+
+    // fn finish(mut self) -> InferenceResult {
+    //     let mut i = Collector::new(&mut self.table);
+
+    //     let name_cnt = self.module.names().len();
+    //     let expr_cnt = self.module.exprs().len();
+    //     let mut name_ty_map = ArenaMap::with_capacity(name_cnt);
+    //     let mut expr_ty_map = ArenaMap::with_capacity(expr_cnt);
+    //     for (name, _) in self.module.names() {
+    //         let ty = TyVar(u32::from(name.into_raw()));
+    //         name_ty_map.insert(name, i.collect(ty));
+    //     }
+    //     for (expr, _) in self.module.exprs() {
+    //         let ty = TyVar(name_cnt as u32 + u32::from(expr.into_raw()));
+    //         expr_ty_map.insert(expr, i.collect(ty));
+    //     }
+
+    //     InferenceResult {
+    //         name_ty_map,
+    //         expr_ty_map,
+    //     }
+    // }
 }
 
 #[salsa::tracked]
-pub fn infer_file_debug(db: &dyn crate::Db, file: NixFile) -> InferCtx {
+pub fn infer_file_debug(db: &dyn crate::Db, file: NixFile) -> UnionFind<Ty> {
     let module = crate::module(db, file);
 
     let name_res = crate::nameres::name_resolution(db, file);
-    InferCtx::new(module, name_res)
+    let infer = InferCtx::new(&module, &name_res);
+
+    infer.table
 }
