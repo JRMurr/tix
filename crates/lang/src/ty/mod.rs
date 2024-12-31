@@ -5,14 +5,13 @@ use std::{
     mem,
 };
 
-use id_arena::{Arena, Id};
 use smol_str::SmolStr;
 use union_find::UnionFind;
 
 use crate::{
-    BindingValue, Bindings, Expr, ExprId, Module, NameId,
+    ExprId, Module, NameId,
     db::NixFile,
-    nameres::{NameResolution, ResolveResult},
+    nameres::NameResolution,
 };
 
 /// Reference to the type in the arena

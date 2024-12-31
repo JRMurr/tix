@@ -3,7 +3,6 @@ use std::path::PathBuf;
 use dashmap::DashMap;
 use rnix::Root;
 use salsa::{self, Event};
-use thiserror::Error;
 
 #[salsa::input]
 pub struct NixFile {
