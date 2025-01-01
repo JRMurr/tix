@@ -1,7 +1,7 @@
 use core::panic;
 use std::fmt::Debug;
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct UnionIdx {
     idx: u32,
     // _ty: PhantomData<fn() -> T>,

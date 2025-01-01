@@ -11,9 +11,10 @@ use crate::{
     BindingValue, Bindings, Expr, ExprId, Literal, Module, NameId,
     db::NixFile,
     nameres::{NameResolution, ResolveResult},
+    ty::TyRef,
 };
 
-use super::{AttrSetTy, Ty, union_find};
+use super::{ArcTy, AttrSetTy, Ty, union_find};
 
 /// Reference to the type in the arena
 pub type TyId = union_find::UnionIdx;
@@ -476,66 +477,119 @@ impl<'db> InferCtx<'db> {
     }
 
     fn finish(mut self) -> InferenceResult {
-        let mut name_ty_map = HashMap::new();
-        let mut expr_ty_map = HashMap::new();
+        // need to instantiate all names first since it will modify the table
+        let name_tys: Vec<_> = self
+            .module
+            .names()
+            .map(|(name, _)| {
+                let ty = self.ty_for_name(name);
+                (name, ty)
+            })
+            .collect();
 
-        for (name, _) in self.module.names() {
-            let name_ty = self.ty_for_name(name);
-            let ty = self.table.get_mut(name_ty).clone();
-            name_ty_map.insert(name, ty);
+        let expr_tys: Vec<_> = self
+            .module
+            .exprs()
+            .map(|(expr, _)| {
+                let ty = self.ty_for_expr(expr);
+                (expr, ty)
+            })
+            .collect();
+
+        let mut i = Collector::new(&mut self.table);
+
+        let name_cnt = self.module.names().len();
+        let expr_cnt = self.module.exprs().len();
+        let mut name_ty_map = HashMap::with_capacity(name_cnt);
+        let mut expr_ty_map = HashMap::with_capacity(expr_cnt);
+        for (name, ty) in name_tys {
+            name_ty_map.insert(name, i.collect(ty));
         }
-
-        for (expr, _) in self.module.exprs() {
-            let expr_ty = self.ty_for_expr(expr);
-            let ty = self.table.get_mut(expr_ty).clone();
-            expr_ty_map.insert(expr, ty);
+        for (expr, ty) in expr_tys {
+            expr_ty_map.insert(expr, i.collect(ty));
         }
 
         InferenceResult {
             name_ty_map,
             expr_ty_map,
-            table: self.table,
         }
     }
-
-    // fn finish(mut self) -> InferenceResult {
-    //     let mut i = Collector::new(&mut self.table);
-
-    //     let name_cnt = self.module.names().len();
-    //     let expr_cnt = self.module.exprs().len();
-    //     let mut name_ty_map = ArenaMap::with_capacity(name_cnt);
-    //     let mut expr_ty_map = ArenaMap::with_capacity(expr_cnt);
-    //     for (name, _) in self.module.names() {
-    //         let ty = TyVar(u32::from(name.into_raw()));
-    //         name_ty_map.insert(name, i.collect(ty));
-    //     }
-    //     for (expr, _) in self.module.exprs() {
-    //         let ty = TyVar(name_cnt as u32 + u32::from(expr.into_raw()));
-    //         expr_ty_map.insert(expr, i.collect(ty));
-    //     }
-
-    //     InferenceResult {
-    //         name_ty_map,
-    //         expr_ty_map,
-    //     }
-    // }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InferenceResult {
-    name_ty_map: HashMap<NameId, Ty<TyId>>,
-    expr_ty_map: HashMap<ExprId, Ty<TyId>>,
-
-    table: UnionFind<Ty<TyId>>, // TODO: the finish step should just make a normal arena from this or something?
+    name_ty_map: HashMap<NameId, ArcTy>,
+    expr_ty_map: HashMap<ExprId, ArcTy>,
+    // table: UnionFind<Ty<TyId>>, // TODO: the finish step should just make a normal arena from this or something?
 }
 
 impl InferenceResult {
-    pub fn ty_for_name(&self, name: NameId) -> Ty<TyId> {
+    pub fn ty_for_name(&self, name: NameId) -> ArcTy {
         self.name_ty_map.get(&name).unwrap().clone()
     }
 
-    pub fn ty_for_expr(&self, expr: ExprId) -> Ty<TyId> {
+    pub fn ty_for_expr(&self, expr: ExprId) -> ArcTy {
         self.expr_ty_map.get(&expr).unwrap().clone()
+    }
+}
+
+/// Traverse the table and freeze all `Ty`s into immutable ones.
+struct Collector<'a> {
+    cache: HashMap<TyId, ArcTy>,
+    table: &'a mut UnionFind<Ty<TyId>>,
+}
+
+impl<'a> Collector<'a> {
+    fn new(table: &'a mut UnionFind<Ty<TyId>>) -> Self {
+        Self {
+            cache: HashMap::with_capacity(table.len()),
+            table,
+        }
+    }
+
+    fn collect(&mut self, ty: TyId) -> ArcTy {
+        let i = self.table.find(ty);
+        if let Some(ty) = self.cache.get(&i).cloned() {
+            return ty;
+        }
+
+        let ret = self.collect_uncached(ty);
+        self.cache.insert(i, ret.clone());
+        ret
+    }
+
+    fn collect_uncached(&mut self, i: TyId) -> ArcTy {
+        let ty = self.table.get_mut(i).clone();
+        match ty {
+            Ty::TyVar(x) => ArcTy::TyVar(x),
+            Ty::Null => ArcTy::Null,
+            Ty::Uri => ArcTy::Uri,
+            Ty::Bool => ArcTy::Bool,
+            Ty::Int => ArcTy::Int,
+            Ty::Float => ArcTy::Float,
+            Ty::String => ArcTy::String,
+            Ty::Path => ArcTy::Path,
+            Ty::List(a) => ArcTy::List(self.collect(a).into()),
+            Ty::Lambda { param, body } => {
+                let param = self.collect(param).into();
+                let body = self.collect(body).into();
+                ArcTy::Lambda { param, body }
+            }
+            Ty::AttrSet(fields) => {
+                let fields = fields
+                    .fields
+                    .into_iter()
+                    .map(|(name, ty)| {
+                        let ty_ref: TyRef = self.collect(ty).into();
+                        (name, ty_ref)
+                    })
+                    .collect();
+                Ty::AttrSet(AttrSetTy {
+                    fields,
+                    dyn_ty: None,
+                })
+            }
+        }
     }
 }
 

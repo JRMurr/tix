@@ -1,6 +1,6 @@
 mod infer;
 mod union_find;
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, ops::Deref, sync::Arc};
 
 // use miette::Diagnostic;
 use smol_str::SmolStr;
@@ -60,5 +60,26 @@ impl<RefType> AttrSetTy<RefType> {
             fields: Default::default(),
             dyn_ty: None,
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TyRef(Arc<Ty<TyRef>>);
+
+// impl Deref for TyRef {
+//     type Target = Ty<Arc<Ty<TyRef>>>;
+
+//     fn deref(&self) -> &Self::Target {
+//         &self.0
+//     }
+// }
+
+// type ArcTyInnerRef =
+
+pub type ArcTy = Ty<TyRef>;
+
+impl From<ArcTy> for TyRef {
+    fn from(value: ArcTy) -> Self {
+        TyRef(Arc::new(value))
     }
 }
