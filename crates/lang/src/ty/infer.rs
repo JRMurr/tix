@@ -520,7 +520,6 @@ impl<'db> InferCtx<'db> {
 pub struct InferenceResult {
     name_ty_map: HashMap<NameId, ArcTy>,
     expr_ty_map: HashMap<ExprId, ArcTy>,
-    // table: UnionFind<Ty<TyId>>, // TODO: the finish step should just make a normal arena from this or something?
 }
 
 impl InferenceResult {
@@ -559,6 +558,8 @@ impl<'a> Collector<'a> {
     }
 
     fn collect_uncached(&mut self, i: TyId) -> ArcTy {
+        // TODO: not sure if we need to worry about cycles
+        // I think it should be fine? If so worth trying Arc::new_cyclic to handle it?
         let ty = self.table.get_mut(i).clone();
         match ty {
             Ty::TyVar(x) => ArcTy::TyVar(x),
