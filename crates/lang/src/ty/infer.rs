@@ -139,8 +139,7 @@ impl<'db> InferCtx<'db> {
                     dyn_ty: new_dyn_ty,
                 })
             }
-            // TODO: should list them all just incase we add stuff
-            rest => rest, // all leaf types
+            Ty::Null | Ty::Bool | Ty::Int | Ty::Float | Ty::String | Ty::Path | Ty::Uri => ty,
         };
 
         new_ty.intern(self)
@@ -177,7 +176,7 @@ impl<'db> InferCtx<'db> {
                     set.extend(&self.free_type_vars(dyn_ty));
                 }
             }
-            _ => {}
+            Ty::Null | Ty::Bool | Ty::Int | Ty::Float | Ty::String | Ty::Path | Ty::Uri => {}
         }
 
         set
