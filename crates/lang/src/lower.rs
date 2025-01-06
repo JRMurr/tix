@@ -169,12 +169,8 @@ impl LowerCtx {
 
                 Expr::Assert { cond, body }
             }
-            ast::Expr::Error(error) => {
-                eprintln!("!!!!!!!!Hit error node {}", error.syntax());
-                Expr::Missing
-            }
+            ast::Expr::Error(_error) => Expr::Missing,
             ast::Expr::Root(root) => {
-                eprintln!("Handling root");
                 return self.lower_expr_opt(root.expr());
             }
             ast::Expr::LegacyLet(_legacy_let) => todo!(),

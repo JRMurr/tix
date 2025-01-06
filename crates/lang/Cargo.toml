@@ -18,5 +18,6 @@ thiserror = { workspace = true }
 # TODO: lock to a commit...
 salsa = { git = "https://github.com/salsa-rs/salsa", rev = "88a1d7774d78f048fbd77d40abca9ebd729fd1f0" }
 dashmap = "6.1.0"
+petgraph = "0.7.0"
 [lib]
 path = "src/lib.rs"

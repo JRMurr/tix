@@ -1,6 +1,6 @@
 mod infer;
 mod union_find;
-use std::{collections::BTreeMap, ops::Deref, sync::Arc};
+use std::{collections::BTreeMap, sync::Arc};
 
 // use miette::Diagnostic;
 use smol_str::SmolStr;

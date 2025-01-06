@@ -3,6 +3,7 @@
 
 // pub mod expr_table;
 mod db;
+mod group_def;
 mod lower;
 mod nameres;
 mod ty;
@@ -55,6 +56,8 @@ impl NameKind {
     }
 }
 
+// TODO: @OPTIMIZATION look into using a custom Id type. Since the default Id from id-arena has the arena id in
+// salsa will basically always have a cache miss since every parse will cause a new arena to spawn
 pub type ExprId = Id<Expr>;
 pub type NameId = Id<Name>;
 
@@ -236,6 +239,59 @@ pub enum Expr {
     PathInterpolation(Box<[InterpolPart<SmolStr>]>),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Bindings {
+    pub statics: Box<[(NameId, BindingValue)]>,
+    pub inherit_froms: Box<[ExprId]>,
+    pub dynamics: Box<[(ExprId, ExprId)]>,
+}
+
+impl Bindings {
+    /// Returns (name, value_expr) for all non dynamic bindings
+    pub fn name_values(&self) -> impl Iterator<Item = (NameId, ExprId)> {
+        self.statics.iter().map(|(name, bv)| match &bv {
+            BindingValue::Expr(id) => (*name, *id),
+            BindingValue::Inherit(id) => (*name, *id),
+            BindingValue::InheritFrom(idx) => (*name, self.inherit_froms[*idx]),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BindingValue {
+    Expr(ExprId),
+    Inherit(ExprId),
+    // TODO: could we just have a ref to the expr id directly here
+    // this approach makes sure we only "deal" with the expr inside the inherit once
+    // and makes walking the tree a little nicer
+    InheritFrom(usize), // index in the inherit_froms list
+}
+
+impl Bindings {
+    pub fn walk_child_exprs(&self, mut f: impl FnMut(ExprId)) {
+        for (_, value) in self.statics.iter() {
+            match value {
+                BindingValue::Inherit(e) | BindingValue::Expr(e) => f(*e),
+                BindingValue::InheritFrom(_idx) => {}
+            }
+        }
+        for &e in self.inherit_froms.iter() {
+            f(e);
+        }
+        for &(k, v) in self.dynamics.iter() {
+            f(k);
+            f(v);
+        }
+    }
+
+    // FIXME: This is currently O(n).
+    pub fn get(&self, name: &str, module: &Module) -> Option<BindingValue> {
+        self.statics
+            .iter()
+            .find_map(|&(name_id, value)| (module[name_id].text == name).then_some(value))
+    }
+}
+
 impl Expr {
     pub fn walk_child_exprs(&self, mut f: impl FnMut(ExprId)) {
         match self {
@@ -317,46 +373,4 @@ impl Expr {
 pub enum InterpolPart<T> {
     Literal(T),
     Interpol(ExprId),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Bindings {
-    pub statics: Box<[(NameId, BindingValue)]>,
-    pub inherit_froms: Box<[ExprId]>,
-    pub dynamics: Box<[(ExprId, ExprId)]>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum BindingValue {
-    Expr(ExprId),
-    Inherit(ExprId),
-    // TODO: could we just have a ref to the expr id directly here
-    // this approach makes sure we only "deal" with the expr inside the inherit once
-    // and makes walking the tree a little nicer
-    InheritFrom(usize), // index in the inherit_froms list
-}
-
-impl Bindings {
-    pub fn walk_child_exprs(&self, mut f: impl FnMut(ExprId)) {
-        for (_, value) in self.statics.iter() {
-            match value {
-                BindingValue::Inherit(e) | BindingValue::Expr(e) => f(*e),
-                BindingValue::InheritFrom(_idx) => {}
-            }
-        }
-        for &e in self.inherit_froms.iter() {
-            f(e);
-        }
-        for &(k, v) in self.dynamics.iter() {
-            f(k);
-            f(v);
-        }
-    }
-
-    // FIXME: This is currently O(n).
-    pub fn get(&self, name: &str, module: &Module) -> Option<BindingValue> {
-        self.statics
-            .iter()
-            .find_map(|&(name_id, value)| (module[name_id].text == name).then_some(value))
-    }
 }

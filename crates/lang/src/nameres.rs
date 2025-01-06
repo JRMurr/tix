@@ -1,6 +1,10 @@
 use std::{collections::HashMap, iter, ops};
 
 use id_arena::{Arena, Id};
+use petgraph::{
+    csr::DefaultIx,
+    graph::{DiGraph, NodeIndex},
+};
 use smol_str::SmolStr;
 
 use crate::{Bindings, db::NixFile, module};
@@ -191,6 +195,7 @@ impl ModuleScopes {
             }
         }
 
+        // TODO: If this is a non-rec attr i don't think this scope should be used below?
         let scope = if defs.is_empty() {
             scope
         } else {
@@ -260,4 +265,176 @@ impl NameResolution {
             .iter()
             .filter_map(|(e, res)| Some((*e, res.as_ref()?)))
     }
+}
+
+/// Names that should be inferred and generalized as a group since the defs inside are mutually dependent
+type DependentGroup = Vec<NameId>;
+
+pub type GroupedDefs = Vec<DependentGroup>;
+
+type DepGraph = DiGraph<(), ()>;
+
+// #[derive(Debug, PartialEq, Eq, Clone, Copy)]
+// struct NameIdWrapped(NameId);
+
+// // impl NodeIndex for NameIdWrapped {}
+
+// #[derive(Debug, PartialEq, Eq, Clone)]
+// struct NameEdge {
+//     from: NameId,
+//     to: NameId,
+// }
+
+// impl IntoWeightedEdge<()> for NameEdge {
+//     type NodeId = NameId;
+
+//     fn into_weighted_edge(self) -> (Self::NodeId, Self::NodeId, ()) {
+//         (self.from, self.to, ())
+//     }
+// }
+
+// TODO: need a way to also track dynamic attrset keys when the attrset is defined as rec
+// could abstract to a "Identifiable" type thats NameId | ExprID
+// figuring out deps could get weird but doesn't seem wild
+
+#[derive(Debug)]
+struct NameDependencies {
+    edges: Vec<(NameId, NameId)>, // (from, to)
+    // dep_graph: DepGraph,
+    name_to_expr: HashMap<NameId, ExprId>,
+    // name_to_node_id: HashMap<NameId, NodeIndex<DefaultIx>>,
+}
+
+impl NameDependencies {
+    pub fn new(module: &Module, name_res: &NameResolution) -> Self {
+        // let num_names = module.names.len(); // number of nodes
+        let num_refs = name_res.resolve_map.len(); // upper bound on the number of edges
+
+        // let mut dep_graph = DepGraph::with_capacity(num_names, num_refs);
+        // let mut name_to_node_id = HashMap::new();
+
+        // for (name_id, _) in module.names() {
+        //     let node_id = dep_graph.add_node(());
+        //     name_to_node_id.insert(name_id, node_id);
+        // }
+
+        let mut name_deps = Self {
+            edges: Vec::with_capacity(num_refs),
+            // dep_graph,
+            name_to_expr: HashMap::new(),
+            // name_to_node_id,
+        };
+
+        name_deps.traverse_expr(&module, &name_res, module.entry_expr, None);
+
+        name_deps
+    }
+
+    fn traverse_expr(
+        &mut self,
+        module: &Module,
+        name_res: &NameResolution,
+        expr: ExprId,
+        curr_binding: Option<NameId>,
+    ) {
+        match &module[expr] {
+            // If we are not in a let block (ie not curr_binding)
+            // we can ignore references (just referencing the args of a root function)
+            Expr::Reference(_) if curr_binding.is_some() => {
+                let curr_binding = curr_binding.unwrap();
+                let resolve_res = if let Some(name_ref) = name_res.get(expr) {
+                    name_ref
+                } else {
+                    // TODO: should error, missing name
+                    return;
+                };
+
+                match resolve_res {
+                    ResolveResult::Definition(id) => {
+                        self.edges.push((curr_binding, *id));
+                    }
+                    ResolveResult::Builtin(_) => todo!(),
+                    ResolveResult::WithExprs(_vec) => todo!(),
+                }
+
+                todo!()
+            }
+            Expr::LetIn { bindings, body } => {
+                self.traverse_bindings(module, name_res, bindings);
+                self.traverse_expr(module, name_res, *body, curr_binding);
+            }
+            Expr::AttrSet { bindings, is_rec } => {
+                // if its not recursive we wont do generalization on each key
+                // TODO: this might be weird but seems like a good approach for now
+                if *is_rec {
+                    self.traverse_bindings(module, name_res, bindings)
+                } else {
+                    bindings.walk_child_exprs(|e| {
+                        self.traverse_expr(module, name_res, e, curr_binding)
+                    });
+                }
+            }
+            e => e.walk_child_exprs(|e| self.traverse_expr(module, name_res, e, curr_binding)),
+        }
+    }
+
+    fn traverse_bindings(
+        &mut self,
+        module: &Module,
+        name_res: &NameResolution,
+        bindings: &Bindings,
+        // expr: ExprId,
+    ) {
+        // TODO: skipping dynamics here
+        for (name, expr) in bindings.name_values() {
+            self.name_to_expr.insert(name, expr);
+            self.traverse_expr(module, name_res, expr, Some(name));
+        }
+        for (_name_expr, _value_expr) in bindings.dynamics.iter() {
+            todo!()
+        }
+    }
+}
+
+#[salsa::tracked]
+pub fn group_def(db: &dyn crate::Db, file: NixFile) -> GroupedDefs {
+    let module = module(db, file);
+    let name_res = name_resolution(db, file);
+
+    let name_deps = NameDependencies::new(&module, &name_res);
+
+    let num_names = module.names.len(); // number of nodes
+    let num_refs = name_res.resolve_map.len(); // upper bound on the number of edges
+
+    let mut dep_graph = DepGraph::with_capacity(num_names, num_refs);
+    // TODO: there is def a better way to do this but don't care right now
+    let mut name_to_node_id = HashMap::new();
+    let mut node_id_to_name = HashMap::new();
+
+    for (name_id, _) in module.names() {
+        let node_id = dep_graph.add_node(());
+        name_to_node_id.insert(name_id, node_id);
+        node_id_to_name.insert(node_id, name_id);
+    }
+
+    for (from, to) in name_deps.edges {
+        let from = name_to_node_id.get(&from).unwrap();
+        let to = name_to_node_id.get(&to).unwrap();
+
+        dep_graph.add_edge(*from, *to, ());
+    }
+
+    let scc = petgraph::algo::tarjan_scc(&dep_graph);
+
+    let scc: GroupedDefs = scc
+        .iter()
+        .map(|group| {
+            group
+                .iter()
+                .map(|n| *node_id_to_name.get(n).unwrap())
+                .collect()
+        })
+        .collect();
+
+    scc
 }

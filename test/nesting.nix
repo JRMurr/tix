@@ -11,6 +11,7 @@ let
     # can't make this nested attr  rec b/c of the implicit above
     a = {
       other = 1;
+      # other2 = a;
       #  other2 = other;
     };
     ${if weird.var == 12 then "dyn_key" else null} = {
