@@ -1,3 +1,4 @@
+mod check;
 mod infer;
 mod union_find;
 use std::{collections::BTreeMap, sync::Arc};
@@ -10,6 +11,7 @@ pub use infer::infer_file_debug;
 // the mono type
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ty<RefType> {
+    // TODO: should specify whats a unification var vs type var
     /// A type quantifier (ie the `a` in `a -> a`)
     #[allow(clippy::enum_variant_names)]
     TyVar(usize),
