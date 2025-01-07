@@ -267,32 +267,6 @@ impl NameResolution {
     }
 }
 
-/// Names that should be inferred and generalized as a group since the defs inside are mutually dependent
-type DependentGroup = Vec<NameId>;
-
-pub type GroupedDefs = Vec<DependentGroup>;
-
-type DepGraph = DiGraph<(), ()>;
-
-// #[derive(Debug, PartialEq, Eq, Clone, Copy)]
-// struct NameIdWrapped(NameId);
-
-// // impl NodeIndex for NameIdWrapped {}
-
-// #[derive(Debug, PartialEq, Eq, Clone)]
-// struct NameEdge {
-//     from: NameId,
-//     to: NameId,
-// }
-
-// impl IntoWeightedEdge<()> for NameEdge {
-//     type NodeId = NameId;
-
-//     fn into_weighted_edge(self) -> (Self::NodeId, Self::NodeId, ()) {
-//         (self.from, self.to, ())
-//     }
-// }
-
 // TODO: need a way to also track dynamic attrset keys when the attrset is defined as rec
 // could abstract to a "Identifiable" type thats NameId | ExprID
 // figuring out deps could get weird but doesn't seem wild
@@ -325,7 +299,7 @@ impl NameDependencies {
             // name_to_node_id,
         };
 
-        name_deps.traverse_expr(&module, &name_res, module.entry_expr, None);
+        name_deps.traverse_expr(module, name_res, module.entry_expr, None);
 
         name_deps
     }
@@ -340,24 +314,24 @@ impl NameDependencies {
         match &module[expr] {
             // If we are not in a let block (ie not curr_binding)
             // we can ignore references (just referencing the args of a root function)
-            Expr::Reference(_) if curr_binding.is_some() => {
+            Expr::Reference(_name_str) if curr_binding.is_some() => {
                 let curr_binding = curr_binding.unwrap();
                 let resolve_res = if let Some(name_ref) = name_res.get(expr) {
                     name_ref
                 } else {
-                    // TODO: should error, missing name
                     return;
                 };
 
                 match resolve_res {
                     ResolveResult::Definition(id) => {
+                        // TODO: we don't want to push an edge if the resolved ref
+                        // is a function param. For now we filter it out when walking the
+                        // scc but would be nice to do from the beginning
                         self.edges.push((curr_binding, *id));
                     }
                     ResolveResult::Builtin(_) => todo!(),
                     ResolveResult::WithExprs(_vec) => todo!(),
                 }
-
-                todo!()
             }
             Expr::LetIn { bindings, body } => {
                 self.traverse_bindings(module, name_res, bindings);
@@ -374,7 +348,9 @@ impl NameDependencies {
                     });
                 }
             }
-            e => e.walk_child_exprs(|e| self.traverse_expr(module, name_res, e, curr_binding)),
+            expr => {
+                expr.walk_child_exprs(|e| self.traverse_expr(module, name_res, e, curr_binding))
+            }
         }
     }
 
@@ -396,6 +372,18 @@ impl NameDependencies {
     }
 }
 
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct TypeDef {
+    name: NameId,
+    value: ExprId,
+}
+
+/// Names that should be inferred and generalized as a group since the defs inside are mutually dependent
+type DependentGroup = Vec<TypeDef>;
+
+pub type GroupedDefs = Vec<DependentGroup>;
+type DepGraph = DiGraph<NameId, ()>;
+
 #[salsa::tracked]
 pub fn group_def(db: &dyn crate::Db, file: NixFile) -> GroupedDefs {
     let module = module(db, file);
@@ -403,19 +391,28 @@ pub fn group_def(db: &dyn crate::Db, file: NixFile) -> GroupedDefs {
 
     let name_deps = NameDependencies::new(&module, &name_res);
 
-    let num_names = module.names.len(); // number of nodes
-    let num_refs = name_res.resolve_map.len(); // upper bound on the number of edges
+    let num_names = name_deps.name_to_expr.len();
+    let num_refs = name_deps.edges.len();
 
     let mut dep_graph = DepGraph::with_capacity(num_names, num_refs);
     // TODO: there is def a better way to do this but don't care right now
     let mut name_to_node_id = HashMap::new();
-    let mut node_id_to_name = HashMap::new();
+    // let mut node_id_to_name = HashMap::new();
+
+    // let tmp: Vec<_> = module.names().collect();
+    // dbg!(tmp);
 
     for (name_id, _) in module.names() {
-        let node_id = dep_graph.add_node(());
+        let node_id = dep_graph.add_node(name_id);
         name_to_node_id.insert(name_id, node_id);
-        node_id_to_name.insert(node_id, name_id);
     }
+
+    // for name_id in name_deps.name_to_expr.keys() {
+    //     // dbg!((name_id, name));
+    //     let node_id = dep_graph.add_node(*name_id);
+    //     name_to_node_id.insert(name_id, node_id);
+    //     // node_id_to_name.insert(node_id, name_id);
+    // }
 
     for (from, to) in name_deps.edges {
         let from = name_to_node_id.get(&from).unwrap();
@@ -428,11 +425,22 @@ pub fn group_def(db: &dyn crate::Db, file: NixFile) -> GroupedDefs {
 
     let scc: GroupedDefs = scc
         .iter()
-        .map(|group| {
-            group
+        .flat_map(|group| {
+            let mapped_group: Vec<_> = group
                 .iter()
-                .map(|n| *node_id_to_name.get(n).unwrap())
-                .collect()
+                .flat_map(|n| {
+                    let name = dep_graph[*n];
+                    let expr = name_deps.name_to_expr.get(&name);
+                    // TODO: do this check earlier, at the very least could be done when we add edges
+                    // If the expr is not found for the name then it was a func param we can ignore
+                    expr.map(|e| TypeDef { name, value: *e })
+                })
+                .collect();
+            if mapped_group.is_empty() {
+                None
+            } else {
+                Some(mapped_group)
+            }
         })
         .collect();
 

@@ -598,6 +598,11 @@ pub fn infer_file_debug(db: &dyn crate::Db, file: NixFile) -> InferenceResult {
     let module = crate::module(db, file);
 
     let name_res = crate::nameres::name_resolution(db, file);
+
+    let grouped_defs = crate::nameres::group_def(db, file);
+
+    dbg!(grouped_defs);
+
     let mut infer = InferCtx::new(&module, &name_res);
 
     infer.infer_expr(module.entry_expr);
