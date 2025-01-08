@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 clap = { version = "4.2", features = ["derive"] }
-id-arena = "2.2.1"
+# id-arena = "2.2.1"
 ordered-float = "4.6.0"
 # TODO: 11.1 is on github as of 12-19-24 but not released. Only added pipe operators
 rnix = "0.11.0"
@@ -19,5 +19,7 @@ thiserror = { workspace = true }
 salsa = { git = "https://github.com/salsa-rs/salsa", rev = "88a1d7774d78f048fbd77d40abca9ebd729fd1f0" }
 dashmap = "6.1.0"
 petgraph = "0.7.0"
+la-arena = "0.3.1"
+
 [lib]
 path = "src/lib.rs"

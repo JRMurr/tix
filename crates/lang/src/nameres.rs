@@ -1,6 +1,6 @@
 use std::{collections::HashMap, iter, ops};
 
-use id_arena::{Arena, Id};
+use la_arena::{Arena, Idx as Id};
 use petgraph::graph::DiGraph;
 use smol_str::SmolStr;
 

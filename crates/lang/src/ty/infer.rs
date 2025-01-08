@@ -83,13 +83,11 @@ impl<'db> InferCtx<'db> {
 
         // NOTE: this should only happen during the inference of the value for the name
         // after inferring we should add the name to the poly type env
-        TyId::new(u32::try_from(name.index()).expect("Name id too big"))
+        TyId::new(u32::from(name.into_raw()))
     }
 
     fn ty_for_expr(&self, i: ExprId) -> TyId {
-        TyId::new(
-            self.module.names().len() as u32 + u32::try_from(i.index()).expect("Expr id too big"),
-        )
+        TyId::new(self.module.names().len() as u32 + u32::from(i.into_raw()))
     }
 
     fn instantiate(&mut self, scheme: &TySchema) -> TyId {

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use id_arena::Arena;
+use la_arena::Arena;
 use rnix::ast::{self, HasEntry};
 
 use rowan::ast::AstNode;

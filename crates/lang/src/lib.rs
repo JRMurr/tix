@@ -3,7 +3,6 @@
 
 // pub mod expr_table;
 mod db;
-mod group_def;
 mod lower;
 mod nameres;
 mod ty;
@@ -19,7 +18,7 @@ pub use ty::infer_file_debug;
 
 use std::{collections::HashMap, ops};
 
-use id_arena::{Arena, Id};
+use la_arena::{Arena, Idx as Id};
 use rnix::NixLanguage;
 use smol_str::SmolStr;
 
