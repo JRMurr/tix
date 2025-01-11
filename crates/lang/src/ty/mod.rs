@@ -6,7 +6,7 @@ use std::{collections::BTreeMap, sync::Arc};
 // use miette::Diagnostic;
 use smol_str::SmolStr;
 
-pub use infer::infer_file_debug;
+pub use check::check_file_debug;
 
 // the mono type
 #[derive(Debug, Clone, PartialEq, Eq)]

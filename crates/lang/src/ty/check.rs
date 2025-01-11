@@ -1,16 +1,21 @@
 // TODO: this should replace infer.rs
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    mem,
+};
 
 use smol_str::SmolStr;
+use thiserror::Error;
 
 use crate::{
     BindingValue, Bindings, Expr, ExprId, Literal, Module, NameId,
-    nameres::{NameResolution, ResolveResult},
+    db::NixFile,
+    nameres::{DependentGroup, GroupedDefs, NameResolution, ResolveResult},
 };
 
 use super::{
-    AttrSetTy, PrimitiveTy, Ty,
+    ArcTy, AttrSetTy, PrimitiveTy, Ty,
     union_find::{self, UnionFind},
 };
 
@@ -91,6 +96,28 @@ impl ConstraintCtx {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InferenceResult {
+    name_ty_map: HashMap<NameId, ArcTy>,
+    expr_ty_map: HashMap<ExprId, ArcTy>,
+}
+
+impl InferenceResult {
+    pub fn ty_for_name(&self, name: NameId) -> ArcTy {
+        self.name_ty_map.get(&name).unwrap().clone()
+    }
+
+    pub fn ty_for_expr(&self, expr: ExprId) -> ArcTy {
+        self.expr_ty_map.get(&expr).unwrap().clone()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+enum InferenceError {
+    #[error("Could not union {0:?} and {1:?}")]
+    InvalidUnion(Ty<TyId>, Ty<TyId>),
+}
+
 impl<'db> CheckCtx<'db> {
     pub fn new(module: &'db Module, name_res: &'db NameResolution) -> Self {
         // let types = TypeTable::new(&module, &name_res);
@@ -110,6 +137,35 @@ impl<'db> CheckCtx<'db> {
             poly_type_env: HashMap::new(),
         }
     }
+
+    pub fn infer_prog(&mut self, groups: GroupedDefs) -> InferenceResult {
+        for group in groups {
+            self.infer_scc_group(group);
+        }
+
+        todo!("finalize!!!")
+    }
+
+    fn infer_scc_group(&mut self, group: DependentGroup) {
+        let mut constraints = ConstraintCtx::new();
+
+        for def in &group {
+            self.generate_constraints(&mut constraints, def.expr());
+        }
+
+        self.solve_constraints(constraints)
+            .expect("TODO: solve error aka type error");
+
+        for def in &group {
+            let name_ty = self.ty_for_name(def.name());
+            let generalized_val = self.generalize(name_ty);
+            self.poly_type_env.insert(def.name(), generalized_val);
+        }
+    }
+
+    // ---------------------------------
+    // GENERATION
+    // ---------------------------------
 
     fn new_ty_var(&mut self) -> TyId {
         self.table.push_with_idx(|idx| Ty::TyVar(idx.idx()))
@@ -449,4 +505,102 @@ impl<'db> CheckCtx<'db> {
             rest: None,
         }
     }
+
+    // ---------------------------------
+    // Solving
+    // ---------------------------------
+
+    fn solve_constraints(&mut self, constraints: ConstraintCtx) -> Result<(), InferenceError> {
+        // TODO: this really should loop over multiple times
+        // we might not be able to solve all constraints from the start
+        // so we need to keep looping until we do a loop without doing anything
+        for constraint in constraints.constraints {
+            match constraint.kind {
+                ConstraintKind::Eq(lhs, TyRef::Id(rhs)) => self.unify_var(lhs, rhs)?,
+                ConstraintKind::Eq(lhs, TyRef::Ref(rhs)) => self.unify_var_ty(lhs, rhs)?,
+            }
+        }
+
+        Ok(())
+    }
+
+    fn unify_var_ty(&mut self, var: TyId, rhs: Ty<TyId>) -> Result<(), InferenceError> {
+        let lhs = mem::replace(self.table.get_mut(var), Ty::TyVar(var.idx()));
+        let ret = self.unify(lhs, rhs)?;
+        *self.table.get_mut(var) = ret;
+        Ok(())
+    }
+
+    fn unify_var(&mut self, lhs: TyId, rhs: TyId) -> Result<(), InferenceError> {
+        // dbg!(&lhs, &rhs);
+        let (var, rhs) = self.table.unify(lhs, rhs);
+        let Some(rhs) = rhs else { return Ok(()) };
+        self.unify_var_ty(var, rhs)
+    }
+
+    fn unify(&mut self, lhs: Ty<TyId>, rhs: Ty<TyId>) -> Result<Ty<TyId>, InferenceError> {
+        if lhs == rhs {
+            return Ok(lhs);
+        }
+        let ty = match (lhs, rhs) {
+            // TODO: Don't think i need a contains in check since how i init the type vars should handle that
+            // i things are sad will need to do that and error
+            (Ty::TyVar(_), other) | (other, Ty::TyVar(_)) => other,
+            (Ty::List(a), Ty::List(b)) => {
+                self.unify_var(a, b);
+                Ty::List(a)
+            }
+            (
+                Ty::Lambda {
+                    param: arg1,
+                    body: ret1,
+                },
+                Ty::Lambda {
+                    param: arg2,
+                    body: ret2,
+                },
+            ) => {
+                self.unify_var(arg1, arg2);
+                self.unify_var(ret1, ret2);
+                Ty::Lambda {
+                    param: arg1,
+                    body: ret1,
+                }
+            }
+            // TODO: this might be wack, look into https://bernsteinbear.com/blog/row-poly/
+            (Ty::AttrSet(mut a), Ty::AttrSet(b)) => {
+                use std::collections::btree_map::Entry;
+                for (field, ty2) in b.fields {
+                    match a.fields.entry(field) {
+                        Entry::Vacant(ent) => {
+                            ent.insert(ty2);
+                        }
+                        Entry::Occupied(mut ent) => {
+                            let ty1 = ent.get_mut();
+                            // src1.unify(src2);
+                            self.unify_var(*ty1, ty2);
+                        }
+                    }
+                }
+                Ty::AttrSet(a)
+            }
+            (l, r) if l == r => l,
+            (l, r) => return Err(InferenceError::InvalidUnion(l, r)),
+        };
+
+        Ok(ty)
+    }
+}
+
+#[salsa::tracked]
+pub fn check_file_debug(db: &dyn crate::Db, file: NixFile) -> InferenceResult {
+    let module = crate::module(db, file);
+
+    let name_res = crate::nameres::name_resolution(db, file);
+
+    let grouped_defs = crate::nameres::group_def(db, file);
+
+    let mut check = CheckCtx::new(&module, &name_res);
+
+    check.infer_prog(grouped_defs)
 }

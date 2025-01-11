@@ -375,8 +375,18 @@ pub struct TypeDef {
     value: ExprId,
 }
 
+impl TypeDef {
+    pub fn expr(&self) -> ExprId {
+        self.value
+    }
+
+    pub fn name(&self) -> NameId {
+        self.name
+    }
+}
+
 /// Names that should be inferred and generalized as a group since the defs inside are mutually dependent
-type DependentGroup = Vec<TypeDef>;
+pub type DependentGroup = Vec<TypeDef>;
 
 pub type GroupedDefs = Vec<DependentGroup>;
 type DepGraph = DiGraph<NameId, ()>;
