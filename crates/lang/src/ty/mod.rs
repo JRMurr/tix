@@ -17,13 +17,7 @@ pub enum Ty<RefType> {
     TyVar(usize),
 
     // TODO: could we track literals in the type system like typescript does?
-    Null,
-    Bool,
-    Int,
-    Float,
-    String,
-    Path,
-    Uri,
+    Primitive(PrimitiveTy),
 
     List(RefType),
     Lambda {
@@ -33,15 +27,38 @@ pub enum Ty<RefType> {
     AttrSet(AttrSetTy<RefType>),
 }
 
-impl<T> From<crate::Literal> for Ty<T> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrimitiveTy {
+    Null,
+    Bool,
+    Int,
+    Float,
+    String,
+    Path,
+    Uri,
+}
+
+impl From<crate::Literal> for PrimitiveTy {
     fn from(value: crate::Literal) -> Self {
         match value {
-            crate::Literal::Float(_) => Ty::Float,
-            crate::Literal::Integer(_) => Ty::Int,
-            crate::Literal::String(_) => Ty::String,
-            crate::Literal::Path(_) => Ty::Path,
-            crate::Literal::Uri => Ty::Uri,
+            crate::Literal::Float(_) => PrimitiveTy::Float,
+            crate::Literal::Integer(_) => PrimitiveTy::Int,
+            crate::Literal::String(_) => PrimitiveTy::String,
+            crate::Literal::Path(_) => PrimitiveTy::Path,
+            crate::Literal::Uri => PrimitiveTy::Uri,
         }
+    }
+}
+
+impl<T> From<crate::Literal> for Ty<T> {
+    fn from(value: crate::Literal) -> Self {
+        Ty::Primitive(value.into())
+    }
+}
+
+impl<T> From<PrimitiveTy> for Ty<T> {
+    fn from(value: PrimitiveTy) -> Self {
+        Ty::Primitive(value)
     }
 }
 

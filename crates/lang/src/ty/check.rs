@@ -8,7 +8,7 @@ use crate::{
 };
 
 use super::{
-    AttrSetTy, Ty,
+    AttrSetTy, PrimitiveTy, Ty,
     union_find::{self, UnionFind},
 };
 
@@ -169,7 +169,7 @@ impl<'db> CheckCtx<'db> {
                     dyn_ty: new_dyn_ty,
                 })
             }
-            Ty::Null | Ty::Bool | Ty::Int | Ty::Float | Ty::String | Ty::Path | Ty::Uri => ty,
+            Ty::Primitive(_) => ty,
         };
 
         new_ty.intern_ty(self)
@@ -206,7 +206,7 @@ impl<'db> CheckCtx<'db> {
                     set.extend(&self.free_type_vars(dyn_ty));
                 }
             }
-            Ty::Null | Ty::Bool | Ty::Int | Ty::Float | Ty::String | Ty::Path | Ty::Uri => {}
+            Ty::Primitive(_) => {}
         }
 
         set
@@ -296,7 +296,10 @@ impl<'db> CheckCtx<'db> {
                         // For now require that they are ints...
                         // could be smarter later...
                         constraints.add(Constraint {
-                            kind: ConstraintKind::Eq(lhs_ty, TyRef::Ref(Ty::Int)),
+                            kind: ConstraintKind::Eq(
+                                lhs_ty,
+                                TyRef::Ref(Ty::Primitive(PrimitiveTy::Int)),
+                            ),
                             location: e,
                         });
                         lhs_ty
@@ -313,7 +316,6 @@ impl<'db> CheckCtx<'db> {
             Expr::AttrSet { is_rec, bindings } => todo!(),
 
             Expr::List(_) => todo!(),
-            Expr::BinOp { lhs, rhs, op } => todo!(),
             Expr::UnaryOp { op, expr } => todo!(),
             Expr::Select {
                 set,
@@ -342,11 +344,17 @@ impl<'db> CheckCtx<'db> {
 
         let mut fields = BTreeMap::new();
         for &(name, value) in bindings.statics.iter() {
-            // TODO: should short circuit here if we already checked this binding
-            // could check poly_type_env but might be weird when we have a SCC group with
-            // more than 1 element in it
-            let name_ty = self.ty_for_name(name);
             let name_text = self.module[name].text.clone();
+            // if we already have this name in poly_type_env
+            // we checked before on a previous SCC group
+            // so we can skip generating constraints
+            if let Some(ty_schema) = self.poly_type_env.get(&name).cloned() {
+                let value_ty = self.instantiate(&ty_schema);
+                fields.insert(name_text, value_ty);
+                continue;
+            }
+
+            let name_ty = self.ty_for_name(name);
             let value_ty = match value {
                 BindingValue::Inherit(e) | BindingValue::Expr(e) => {
                     self.generate_constraints(constraints, e)

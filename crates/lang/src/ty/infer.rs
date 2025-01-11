@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     mem,
+    sync::Arc,
 };
 
 use smol_str::SmolStr;
@@ -14,7 +15,7 @@ use crate::{
     ty::TyRef,
 };
 
-use super::{ArcTy, AttrSetTy, Ty, union_find};
+use super::{ArcTy, AttrSetTy, PrimitiveTy, Ty, union_find};
 
 /// Reference to the type in the arena
 pub type TyId = union_find::UnionIdx;
@@ -137,7 +138,7 @@ impl<'db> InferCtx<'db> {
                     dyn_ty: new_dyn_ty,
                 })
             }
-            Ty::Null | Ty::Bool | Ty::Int | Ty::Float | Ty::String | Ty::Path | Ty::Uri => ty,
+            Ty::Primitive(_) => ty,
         };
 
         new_ty.intern(self)
@@ -174,7 +175,7 @@ impl<'db> InferCtx<'db> {
                     set.extend(&self.free_type_vars(dyn_ty));
                 }
             }
-            Ty::Null | Ty::Bool | Ty::Int | Ty::Float | Ty::String | Ty::Path | Ty::Uri => {}
+            Ty::Primitive(_) => {}
         }
 
         set
@@ -278,7 +279,7 @@ impl<'db> InferCtx<'db> {
 
                         // For now require that they are ints...
                         // could be smarter later...
-                        let int_ty = Ty::Int.intern(self);
+                        let int_ty = Ty::Primitive(PrimitiveTy::Int).intern(self);
                         self.unify_var(lhs_ty, int_ty);
 
                         lhs_ty
@@ -294,7 +295,7 @@ impl<'db> InferCtx<'db> {
                 let set_ty = self.infer_expr(*set);
                 let ret_ty = attrpath.iter().fold(set_ty, |set_ty, &attr| {
                     let attr_ty = self.infer_expr(attr);
-                    self.unify_var_ty(attr_ty, Ty::String);
+                    self.unify_var_ty(attr_ty, PrimitiveTy::String.into());
                     let opt_key = match &self.module[attr] {
                         Expr::Literal(Literal::String(key)) => Some(key.clone()),
                         _ => None,
@@ -560,13 +561,7 @@ impl<'a> Collector<'a> {
         let ty = self.table.get_mut(i).clone();
         match ty {
             Ty::TyVar(x) => ArcTy::TyVar(x),
-            Ty::Null => ArcTy::Null,
-            Ty::Uri => ArcTy::Uri,
-            Ty::Bool => ArcTy::Bool,
-            Ty::Int => ArcTy::Int,
-            Ty::Float => ArcTy::Float,
-            Ty::String => ArcTy::String,
-            Ty::Path => ArcTy::Path,
+            Ty::Primitive(x) => ArcTy::Primitive(x),
             Ty::List(a) => ArcTy::List(self.collect(a).into()),
             Ty::Lambda { param, body } => {
                 let param = self.collect(param).into();
