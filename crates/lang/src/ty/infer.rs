@@ -136,6 +136,7 @@ impl<'db> InferCtx<'db> {
                 Ty::AttrSet(AttrSetTy {
                     fields: new_fields,
                     dyn_ty: new_dyn_ty,
+                    rest: None,
                 })
             }
             Ty::Primitive(_) => ty,
@@ -367,7 +368,11 @@ impl<'db> InferCtx<'db> {
             // dyn_ty
         });
 
-        AttrSetTy { fields, dyn_ty }
+        AttrSetTy {
+            fields,
+            dyn_ty,
+            rest: None,
+        }
     }
 
     fn infer_set_field(&mut self, set_ty: TyId, field: Option<SmolStr>) -> TyId {
@@ -395,10 +400,12 @@ impl<'db> InferCtx<'db> {
                     Some(field) => AttrSetTy {
                         fields: [(field, next_ty)].into_iter().collect(),
                         dyn_ty: None,
+                        rest: None,
                     },
                     None => AttrSetTy {
                         fields: BTreeMap::new(),
                         dyn_ty: Some(next_ty),
+                        rest: None,
                     },
                 });
             }
@@ -580,6 +587,7 @@ impl<'a> Collector<'a> {
                 Ty::AttrSet(AttrSetTy {
                     fields,
                     dyn_ty: None,
+                    rest: None,
                 })
             }
         }

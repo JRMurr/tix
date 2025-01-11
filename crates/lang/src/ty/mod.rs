@@ -67,10 +67,13 @@ pub struct AttrSetTy<RefType> {
     // TODO: i think the value here needs to be a TyId or Schema
     fields: BTreeMap<SmolStr, RefType>,
 
-    // Merge with fields, this is for all the dynamic fields
+    // TODO: this only allows for one dynamic field
+    // once type level literals work we should support a map of these
     dyn_ty: Option<RefType>,
-    // TODO: should track if there is an ... (should only exist on patterns)
-    // dyn_ty might be enough for that?
+
+    // TODO: only really used in type inference
+    // https://bernsteinbear.com/blog/row-poly/
+    rest: Option<RefType>,
 }
 
 impl<RefType> AttrSetTy<RefType> {
@@ -78,6 +81,7 @@ impl<RefType> AttrSetTy<RefType> {
         Self {
             fields: Default::default(),
             dyn_ty: None,
+            rest: None,
         }
     }
 }

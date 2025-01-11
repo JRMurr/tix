@@ -2,8 +2,10 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use smol_str::SmolStr;
+
 use crate::{
-    BindingValue, Bindings, Expr, ExprId, Module, NameId,
+    BindingValue, Bindings, Expr, ExprId, Literal, Module, NameId,
     nameres::{NameResolution, ResolveResult},
 };
 
@@ -78,6 +80,13 @@ impl ConstraintCtx {
         self.constraints.push(Constraint {
             location: e,
             kind: ConstraintKind::Eq(lhs, TyRef::Id(rhs)),
+        });
+    }
+
+    pub fn unify_var_ty(&mut self, e: ExprId, lhs: TyId, rhs: Ty<TyId>) {
+        self.constraints.push(Constraint {
+            location: e,
+            kind: ConstraintKind::Eq(lhs, TyRef::Ref(rhs)),
         });
     }
 }
@@ -167,6 +176,7 @@ impl<'db> CheckCtx<'db> {
                 Ty::AttrSet(AttrSetTy {
                     fields: new_fields,
                     dyn_ty: new_dyn_ty,
+                    rest: None,
                 })
             }
             Ty::Primitive(_) => ty,
@@ -312,16 +322,51 @@ impl<'db> CheckCtx<'db> {
                 then_body,
                 else_body,
             } => todo!("gen if then else"),
-            Expr::LetIn { bindings, body } => todo!(),
-            Expr::AttrSet { is_rec, bindings } => todo!(),
+            Expr::LetIn { bindings, body } => {
+                // TODO: we might be doing instantiates twice here
+                // once in the gen bind call then in the body
+                // maybe in the gen we can fully skip already "evaluated" names?
+                self.generate_bind_constraints(constraints, bindings, e);
+                self.generate_constraints(constraints, *body)
+            }
+            Expr::AttrSet {
+                is_rec: _,
+                bindings,
+            } => {
+                let attr_ty = self.generate_bind_constraints(constraints, bindings, e);
 
-            Expr::List(_) => todo!(),
-            Expr::UnaryOp { op, expr } => todo!(),
+                Ty::AttrSet(attr_ty).intern_ty(self)
+            }
             Expr::Select {
                 set,
                 attrpath,
                 default_expr,
-            } => todo!(),
+            } => {
+                let set_ty = self.generate_constraints(constraints, *set);
+                let ret_ty = attrpath.iter().fold(set_ty, |set_ty, &attr| {
+                    let attr_ty = self.generate_constraints(constraints, attr);
+                    constraints.unify_var_ty(e, attr_ty, PrimitiveTy::String.into());
+                    let opt_key = match &self.module[attr] {
+                        Expr::Literal(Literal::String(key)) => key.clone(),
+                        _ => todo!("Dyanmic attr fields not supported yet in select"),
+                    };
+                    let (attr_with_field, value_ty) = self.attr_with_field(opt_key);
+                    // this will make sure the set has the field we asked for
+                    constraints.unify_var_ty(e, set_ty, Ty::AttrSet(attr_with_field));
+                    // returns the value for the field we asked for
+                    value_ty
+                });
+                if let Some(default_expr) = *default_expr {
+                    let default_ty = self.generate_constraints(constraints, default_expr);
+                    constraints.unify_var(e, ret_ty, default_ty);
+                }
+
+                ret_ty
+            }
+
+            Expr::List(_) => todo!(),
+            Expr::UnaryOp { op, expr } => todo!(),
+
             Expr::HasAttr { set, attrpath } => todo!(),
             Expr::With { env, body } => todo!(),
             Expr::Assert { cond, body } => todo!(),
@@ -330,7 +375,18 @@ impl<'db> CheckCtx<'db> {
         }
     }
 
-    fn generate_bind_contraints(
+    // makes an attrset with a single field and open rest field to allow for unification later on
+    fn attr_with_field(&mut self, field: SmolStr) -> (AttrSetTy<TyId>, TyId) {
+        let field_ty = self.new_ty_var();
+        let set = AttrSetTy {
+            fields: [(field, field_ty)].into_iter().collect(),
+            dyn_ty: None,
+            rest: Some(self.new_ty_var()),
+        };
+        (set, field_ty)
+    }
+
+    fn generate_bind_constraints(
         &mut self,
         constraints: &mut ConstraintCtx,
         bindings: &Bindings,
@@ -387,6 +443,10 @@ impl<'db> CheckCtx<'db> {
             // dyn_ty
         });
 
-        AttrSetTy { fields, dyn_ty }
+        AttrSetTy {
+            fields,
+            dyn_ty,
+            rest: None,
+        }
     }
 }
