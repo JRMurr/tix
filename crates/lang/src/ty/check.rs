@@ -516,6 +516,7 @@ impl<'db> CheckCtx<'db> {
         // so we need to keep looping until we do a loop without doing anything
         for constraint in constraints.constraints {
             match constraint.kind {
+                // TODO: should really see if these could be unified first then update the table if its possible
                 ConstraintKind::Eq(lhs, TyRef::Id(rhs)) => self.unify_var(lhs, rhs)?,
                 ConstraintKind::Eq(lhs, TyRef::Ref(rhs)) => self.unify_var_ty(lhs, rhs)?,
             }
@@ -567,22 +568,9 @@ impl<'db> CheckCtx<'db> {
                     body: ret1,
                 }
             }
-            // TODO: this might be wack, look into https://bernsteinbear.com/blog/row-poly/
+            // TODO: https://bernsteinbear.com/blog/row-poly/
             (Ty::AttrSet(mut a), Ty::AttrSet(b)) => {
-                use std::collections::btree_map::Entry;
-                for (field, ty2) in b.fields {
-                    match a.fields.entry(field) {
-                        Entry::Vacant(ent) => {
-                            ent.insert(ty2);
-                        }
-                        Entry::Occupied(mut ent) => {
-                            let ty1 = ent.get_mut();
-                            // src1.unify(src2);
-                            self.unify_var(*ty1, ty2);
-                        }
-                    }
-                }
-                Ty::AttrSet(a)
+                todo!("attr set row poly")
             }
             (l, r) if l == r => l,
             (l, r) => return Err(InferenceError::InvalidUnion(l, r)),
