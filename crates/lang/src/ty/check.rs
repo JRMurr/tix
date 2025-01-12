@@ -642,15 +642,6 @@ impl<'db> CheckCtx<'db> {
         Ok(())
     }
 
-    /*
-        TODO: on solving
-
-        When solving a constraint it would be nice to be able to do unification/substitution
-        as I go but if it fails undo them
-
-
-    */
-
     fn unify(&mut self, lhs: Ty<TyId>, rhs: Ty<TyId>) -> Result<Ty<TyId>, InferenceError> {
         if lhs == rhs {
             return Ok(lhs);
@@ -658,7 +649,18 @@ impl<'db> CheckCtx<'db> {
         let ty = match (lhs, rhs) {
             // TODO: Don't think i need a contains in check since how i init the type vars should handle that
             // i things are sad will need to do that and error
-            (Ty::TyVar(_), other) | (other, Ty::TyVar(_)) => other,
+            (Ty::TyVar(a), Ty::TyVar(b)) => {
+                self.unify_var(TyId::from(a as u32), TyId::from(b as u32))?;
+                Ty::TyVar(a)
+            }
+            (Ty::TyVar(var), other) | (other, Ty::TyVar(var)) => {
+                // TODO: not confident on this logic
+                // I really would want to have the other as its TyId to make sure the unification spreads properly
+                // could maybe handle this arm in unify_var
+                let id = TyId::from(var as u32);
+                self.unify_var_ty(id, other.clone())?;
+                other
+            }
             (Ty::List(a), Ty::List(b)) => {
                 self.unify_var(a, b)?;
                 Ty::List(a)
@@ -681,14 +683,20 @@ impl<'db> CheckCtx<'db> {
                 }
             }
             // TODO: https://bernsteinbear.com/blog/row-poly/
-            (Ty::AttrSet(mut a), Ty::AttrSet(b)) => {
-                todo!("attr set row poly")
-            }
+            (Ty::AttrSet(a), Ty::AttrSet(b)) => self.unify_attr(a, b)?,
             (l, r) if l == r => l,
             (l, r) => return Err(InferenceError::InvalidUnion(l, r)),
         };
 
         Ok(ty)
+    }
+
+    fn unify_attr(
+        &mut self,
+        lhs: AttrSetTy<TyId>,
+        rhs: AttrSetTy<TyId>,
+    ) -> Result<Ty<TyId>, InferenceError> {
+        todo!()
     }
 }
 
