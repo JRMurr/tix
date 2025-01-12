@@ -5,6 +5,7 @@ use std::{
     mem,
 };
 
+use ena::unify::{self, InPlaceUnificationTable, UnificationTableStorage, UnifyKey, UnifyValue};
 use smol_str::SmolStr;
 use thiserror::Error;
 
@@ -20,7 +21,79 @@ use super::{
 };
 
 /// Reference to the type in the arena
-pub type TyId = union_find::UnionIdx;
+// pub type TyId = union_find::UnionIdx;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TyId(u32);
+
+impl From<u32> for TyId {
+    fn from(value: u32) -> Self {
+        Self(value)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum TypeVariableValue {
+    Known(Ty<TyId>),
+    Unknown,
+}
+
+impl UnifyKey for TyId {
+    type Value = TypeVariableValue;
+
+    fn index(&self) -> u32 {
+        self.0
+    }
+
+    fn from_index(u: u32) -> Self {
+        Self(u)
+    }
+
+    fn tag() -> &'static str {
+        "TyId"
+    }
+}
+
+impl UnifyValue for TypeVariableValue {
+    type Error = unify::NoError;
+
+    fn unify_values(value1: &Self, value2: &Self) -> Result<Self, Self::Error> {
+        match (value1, value2) {
+            // We never equate two type variables, both of which
+            // have known types. Instead, we recursively equate
+            // those types.
+            (&TypeVariableValue::Known { .. }, &TypeVariableValue::Known { .. }) => {
+                unreachable!("equating two type variables, both of which have known types")
+            }
+            // If one side is known, prefer that one.
+            (&TypeVariableValue::Known { .. }, &TypeVariableValue::Unknown) => Ok(value1.clone()),
+            (&TypeVariableValue::Unknown, &TypeVariableValue::Known { .. }) => Ok(value1.clone()),
+
+            // both unknown, doesn't matter
+            (&TypeVariableValue::Unknown, &TypeVariableValue::Unknown) => {
+                Ok(TypeVariableValue::Unknown)
+            }
+        }
+    }
+}
+
+impl TypeVariableValue {
+    /// If this value is known, returns the type it is known to be.
+    /// Otherwise, `None`.
+    pub(crate) fn known(&self) -> Option<Ty<TyId>> {
+        match self {
+            TypeVariableValue::Unknown => None,
+            TypeVariableValue::Known(value) => Some(value.clone()),
+        }
+    }
+
+    pub(crate) fn is_unknown(&self) -> bool {
+        match *self {
+            TypeVariableValue::Unknown => true,
+            TypeVariableValue::Known { .. } => false,
+        }
+    }
+}
 
 // the poly type
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,7 +104,7 @@ pub struct TySchema {
 
 impl Ty<TyId> {
     fn intern_ty(self, ctx: &mut CheckCtx) -> TyId {
-        ctx.table.push(self)
+        ctx.table.new_key(TypeVariableValue::Known(self))
     }
 }
 
@@ -55,12 +128,12 @@ pub enum ConstraintKind {
 
 type Substitutions = HashMap<usize, TyId>;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct CheckCtx<'db> {
     module: &'db Module,
     name_res: &'db NameResolution,
 
-    table: UnionFind<Ty<TyId>>,
+    table: InPlaceUnificationTable<TyId>,
 
     poly_type_env: HashMap<NameId, TySchema>,
 }
@@ -122,18 +195,18 @@ impl<'db> CheckCtx<'db> {
     pub fn new(module: &'db Module, name_res: &'db NameResolution) -> Self {
         // let types = TypeTable::new(&module, &name_res);
 
-        // Init the table with placeholder types for all names and expressions
-        // adding names here allows for recursive references
-        // After we infer a name's value it should be added to the poly_type_env
-        let table = UnionFind::new(module.names().len() + module.exprs().len(), |idx| {
-            Ty::TyVar(idx.idx())
-        });
+        // // Init the table with placeholder types for all names and expressions
+        // // adding names here allows for recursive references
+        // // After we infer a name's value it should be added to the poly_type_env
+        // let table = UnionFind::new(module.names().len() + module.exprs().len(), |idx| {
+        //     Ty::TyVar(idx.idx())
+        // });
 
         // let types = UnionFind::new(len, make_default);
         Self {
             module,
             name_res,
-            table,
+            table: InPlaceUnificationTable::new(),
             poly_type_env: HashMap::new(),
         }
     }
@@ -168,7 +241,7 @@ impl<'db> CheckCtx<'db> {
     // ---------------------------------
 
     fn new_ty_var(&mut self) -> TyId {
-        self.table.push_with_idx(|idx| Ty::TyVar(idx.idx()))
+        self.table.new_key(TypeVariableValue::Unknown)
     }
 
     fn ty_for_name(&mut self, name: NameId) -> TyId {
@@ -180,11 +253,12 @@ impl<'db> CheckCtx<'db> {
 
         // NOTE: this should only happen during the inference of the value for the name
         // after inferring we should add the name to the poly type env
-        TyId::new(u32::from(name.into_raw()))
+        u32::from(name.into_raw()).into()
     }
 
     fn ty_for_expr(&self, i: ExprId) -> TyId {
-        TyId::new(self.module.names().len() as u32 + u32::from(i.into_raw()))
+        let idx = self.module.names().len() as u32 + u32::from(i.into_raw());
+        idx.into()
     }
 
     fn instantiate(&mut self, scheme: &TySchema) -> TyId {
@@ -197,7 +271,9 @@ impl<'db> CheckCtx<'db> {
     }
 
     fn instantiate_ty(&mut self, ty_id: TyId, substitutions: &Substitutions) -> TyId {
-        let ty = self.table.get_mut(ty_id).clone();
+        let Some(ty) = self.table.probe_value(ty_id).known() else {
+            panic!("TODO instantiate_ty: not sure if it could be unknown by here...")
+        };
 
         let new_ty = match ty {
             Ty::TyVar(x) => {
@@ -250,9 +326,11 @@ impl<'db> CheckCtx<'db> {
     }
 
     fn free_type_vars(&mut self, ty_id: TyId) -> HashSet<usize> {
-        let ty = self.table.get_mut(ty_id).clone();
-
         let mut set = HashSet::new();
+
+        let Some(ty) = self.table.probe_value(ty_id).known() else {
+            panic!("TODO FTV: not sure if it could be unknown by here in...")
+        };
 
         match ty {
             Ty::TyVar(x) => {
@@ -515,29 +593,63 @@ impl<'db> CheckCtx<'db> {
         // we might not be able to solve all constraints from the start
         // so we need to keep looping until we do a loop without doing anything
         for constraint in constraints.constraints {
-            match constraint.kind {
-                // TODO: should really see if these could be unified first then update the table if its possible
-                ConstraintKind::Eq(lhs, TyRef::Id(rhs)) => self.unify_var(lhs, rhs)?,
-                ConstraintKind::Eq(lhs, TyRef::Ref(rhs)) => self.unify_var_ty(lhs, rhs)?,
+            self.solve_constraint(constraint)?;
+        }
+
+        Ok(())
+    }
+
+    fn solve_constraint(&mut self, constraint: Constraint) -> Result<(), InferenceError> {
+        let snapshot = self.table.snapshot();
+
+        let res = match constraint.kind {
+            ConstraintKind::Eq(lhs, TyRef::Id(rhs)) => self.unify_var(lhs, rhs),
+            ConstraintKind::Eq(lhs, TyRef::Ref(rhs)) => self.unify_var_ty(lhs, rhs),
+        };
+
+        match res {
+            Ok(()) => {
+                self.table.commit(snapshot);
+                Ok(())
+            }
+            Err(e) => {
+                self.table.rollback_to(snapshot);
+                Err(e)
+            }
+        }
+    }
+
+    fn unify_var_ty(&mut self, var: TyId, rhs: Ty<TyId>) -> Result<(), InferenceError> {
+        let lhs = Ty::TyVar(var.0 as usize);
+        let ret = self.unify(lhs, rhs.clone())?;
+        self.table.union_value(var, TypeVariableValue::Known(ret));
+        Ok(())
+    }
+
+    fn unify_var(&mut self, lhs: TyId, rhs: TyId) -> Result<(), InferenceError> {
+        let lhs_val = self.table.inlined_probe_value(lhs);
+        let rhs_val = self.table.inlined_probe_value(rhs);
+
+        match (lhs_val, rhs_val) {
+            (TypeVariableValue::Known(l), TypeVariableValue::Known(r)) => {
+                self.unify(l, r)?;
+            }
+            _ => {
+                self.table.union(lhs, rhs);
             }
         }
 
         Ok(())
     }
 
-    fn unify_var_ty(&mut self, var: TyId, rhs: Ty<TyId>) -> Result<(), InferenceError> {
-        let lhs = mem::replace(self.table.get_mut(var), Ty::TyVar(var.idx()));
-        let ret = self.unify(lhs, rhs)?;
-        *self.table.get_mut(var) = ret;
-        Ok(())
-    }
+    /*
+        TODO: on solving
 
-    fn unify_var(&mut self, lhs: TyId, rhs: TyId) -> Result<(), InferenceError> {
-        // dbg!(&lhs, &rhs);
-        let (var, rhs) = self.table.unify(lhs, rhs);
-        let Some(rhs) = rhs else { return Ok(()) };
-        self.unify_var_ty(var, rhs)
-    }
+        When solving a constraint it would be nice to be able to do unification/substitution
+        as I go but if it fails undo them
+
+
+    */
 
     fn unify(&mut self, lhs: Ty<TyId>, rhs: Ty<TyId>) -> Result<Ty<TyId>, InferenceError> {
         if lhs == rhs {
@@ -548,7 +660,7 @@ impl<'db> CheckCtx<'db> {
             // i things are sad will need to do that and error
             (Ty::TyVar(_), other) | (other, Ty::TyVar(_)) => other,
             (Ty::List(a), Ty::List(b)) => {
-                self.unify_var(a, b);
+                self.unify_var(a, b)?;
                 Ty::List(a)
             }
             (
@@ -561,8 +673,8 @@ impl<'db> CheckCtx<'db> {
                     body: ret2,
                 },
             ) => {
-                self.unify_var(arg1, arg2);
-                self.unify_var(ret1, ret2);
+                self.unify_var(arg1, arg2)?;
+                self.unify_var(ret1, ret2)?;
                 Ty::Lambda {
                     param: arg1,
                     body: ret1,

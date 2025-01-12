@@ -20,6 +20,7 @@ salsa = { git = "https://github.com/salsa-rs/salsa", rev = "88a1d7774d78f048fbd7
 dashmap = "6.1.0"
 petgraph = "0.7.0"
 la-arena = "0.3.1"
+ena = "0.14.3"
 
 [lib]
 path = "src/lib.rs"
