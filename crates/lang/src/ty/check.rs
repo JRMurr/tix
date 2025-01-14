@@ -2,10 +2,11 @@
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    mem,
+    marker::PhantomData,
 };
 
-use ena::unify::{self, InPlaceUnificationTable, UnificationTableStorage, UnifyKey, UnifyValue};
+use ena::unify::{self, InPlaceUnificationTable, UnifyKey, UnifyValue};
+use la_arena::{Arena, Idx as Id, RawIdx};
 use smol_str::SmolStr;
 use thiserror::Error;
 
@@ -15,42 +16,59 @@ use crate::{
     nameres::{DependentGroup, GroupedDefs, NameResolution, ResolveResult},
 };
 
-use super::{
-    ArcTy, AttrSetTy, PrimitiveTy, Ty,
-    union_find::{self, UnionFind},
-};
+use super::{ArcTy, AttrSetTy, PrimitiveTy, Ty};
 
-/// Reference to the type in the arena
-// pub type TyId = union_find::UnionIdx;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TyId(u32);
+#[derive(Debug, Clone, PartialEq, Eq, Copy)]
+pub struct TyId(Id<Ty<TyId>>);
 
 impl From<u32> for TyId {
+    #[inline]
     fn from(value: u32) -> Self {
+        let id: RawIdx = value.into();
+        Self(Id::from_raw(id))
+    }
+}
+
+pub type Types = Arena<Ty<TyId>>;
+
+impl From<Id<Ty<TyId>>> for TyId {
+    fn from(value: Id<Ty<TyId>>) -> Self {
         Self(value)
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct TyIdEqKey {
+    id: TyId,
+}
+
+impl From<TyId> for TyIdEqKey {
+    #[inline]
+    fn from(value: TyId) -> Self {
+        Self { id: value }
     }
 }
 
 #[derive(Clone, Debug)]
 pub enum TypeVariableValue {
-    Known(Ty<TyId>),
+    Known(TyId),
     Unknown,
 }
 
-impl UnifyKey for TyId {
+impl UnifyKey for TyIdEqKey {
     type Value = TypeVariableValue;
 
     fn index(&self) -> u32 {
-        self.0
+        self.id.0.into_raw().into_u32()
     }
 
     fn from_index(u: u32) -> Self {
-        Self(u)
+        let id: TyId = u.into();
+        id.into()
     }
 
     fn tag() -> &'static str {
-        "TyId"
+        "TyIdEqKey"
     }
 }
 
@@ -80,7 +98,7 @@ impl UnifyValue for TypeVariableValue {
 impl TypeVariableValue {
     /// If this value is known, returns the type it is known to be.
     /// Otherwise, `None`.
-    pub(crate) fn known(&self) -> Option<Ty<TyId>> {
+    pub(crate) fn known(&self) -> Option<TyId> {
         match self {
             TypeVariableValue::Unknown => None,
             TypeVariableValue::Known(value) => Some(value.clone()),
@@ -104,7 +122,7 @@ pub struct TySchema {
 
 impl Ty<TyId> {
     fn intern_ty(self, ctx: &mut CheckCtx) -> TyId {
-        ctx.table.new_key(TypeVariableValue::Known(self))
+        ctx.alloc_ty(Some(self))
     }
 }
 
@@ -114,16 +132,14 @@ pub struct Constraint {
     location: ExprId,
 }
 
-#[derive(Debug, PartialEq, Eq, Clone)]
-
-pub enum TyRef {
-    Id(TyId),      // unification var
-    Ref(Ty<TyId>), // a type
-}
-
+// #[derive(Debug, PartialEq, Eq, Clone)]
+// // pub enum TyRef {
+// //     Id(TyId),      // unification var
+// //     Ref(Ty<TyId>), // a type
+// // }
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum ConstraintKind {
-    Eq(TyId, TyRef),
+    Eq(TyId, TyId),
 }
 
 type Substitutions = HashMap<usize, TyId>;
@@ -133,7 +149,9 @@ pub struct CheckCtx<'db> {
     module: &'db Module,
     name_res: &'db NameResolution,
 
-    table: InPlaceUnificationTable<TyId>,
+    table: InPlaceUnificationTable<TyIdEqKey>,
+
+    arena: Types,
 
     poly_type_env: HashMap<NameId, TySchema>,
 }
@@ -157,16 +175,16 @@ impl ConstraintCtx {
     pub fn unify_var(&mut self, e: ExprId, lhs: TyId, rhs: TyId) {
         self.constraints.push(Constraint {
             location: e,
-            kind: ConstraintKind::Eq(lhs, TyRef::Id(rhs)),
+            kind: ConstraintKind::Eq(lhs, rhs),
         });
     }
 
-    pub fn unify_var_ty(&mut self, e: ExprId, lhs: TyId, rhs: Ty<TyId>) {
-        self.constraints.push(Constraint {
-            location: e,
-            kind: ConstraintKind::Eq(lhs, TyRef::Ref(rhs)),
-        });
-    }
+    // pub fn unify_var_ty(&mut self, e: ExprId, lhs: TyId, rhs: Ty<TyId>) {
+    //     self.constraints.push(Constraint {
+    //         location: e,
+    //         kind: ConstraintKind::Eq(lhs, rhs),
+    //     });
+    // }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -206,6 +224,7 @@ impl<'db> CheckCtx<'db> {
         Self {
             module,
             name_res,
+            arena: Types::new(),
             table: InPlaceUnificationTable::new(),
             poly_type_env: HashMap::new(),
         }
@@ -240,8 +259,24 @@ impl<'db> CheckCtx<'db> {
     // GENERATION
     // ---------------------------------
 
+    fn alloc_ty(&mut self, ty: Option<Ty<TyId>>) -> TyId {
+        let id = if let Some(t) = ty {
+            self.arena.alloc(t)
+        } else {
+            let next_idx = self.arena.len();
+            let t = Ty::TyVar(next_idx);
+            self.arena.alloc(t)
+        };
+
+        TyId(id)
+    }
+
     fn new_ty_var(&mut self) -> TyId {
-        self.table.new_key(TypeVariableValue::Unknown)
+        let idx = self.alloc_ty(None);
+        let eq_key = self.table.new_key(TypeVariableValue::Unknown);
+        debug_assert_eq!(eq_key.id, idx);
+
+        idx
     }
 
     fn ty_for_name(&mut self, name: NameId) -> TyId {
@@ -261,6 +296,10 @@ impl<'db> CheckCtx<'db> {
         idx.into()
     }
 
+    fn get_ty(&self, id: TyId) -> Ty<TyId> {
+        self.arena[id.0].clone()
+    }
+
     fn instantiate(&mut self, scheme: &TySchema) -> TyId {
         let mut substitutions = HashMap::new();
         for &var in &scheme.vars {
@@ -271,9 +310,11 @@ impl<'db> CheckCtx<'db> {
     }
 
     fn instantiate_ty(&mut self, ty_id: TyId, substitutions: &Substitutions) -> TyId {
-        let Some(ty) = self.table.probe_value(ty_id).known() else {
+        let Some(ty_id) = self.table.probe_value(ty_id).known() else {
             panic!("TODO instantiate_ty: not sure if it could be unknown by here...")
         };
+
+        let ty = self.arena[ty_id.0].clone();
 
         let new_ty = match ty {
             Ty::TyVar(x) => {
@@ -328,9 +369,11 @@ impl<'db> CheckCtx<'db> {
     fn free_type_vars(&mut self, ty_id: TyId) -> HashSet<usize> {
         let mut set = HashSet::new();
 
-        let Some(ty) = self.table.probe_value(ty_id).known() else {
+        let Some(ty_id) = self.table.probe_value(ty_id).known() else {
             panic!("TODO FTV: not sure if it could be unknown by here in...")
         };
+
+        let ty = self.arena[ty_id.0].clone();
 
         match ty {
             Ty::TyVar(x) => {
@@ -384,10 +427,11 @@ impl<'db> CheckCtx<'db> {
                 constraints.add(Constraint {
                     kind: ConstraintKind::Eq(
                         fun_ty,
-                        TyRef::Ref(Ty::Lambda {
+                        Ty::Lambda {
                             param: arg_ty,
                             body: ret_ty,
-                        }),
+                        }
+                        .intern_ty(self),
                     ),
                     location: e,
                 });
@@ -442,7 +486,7 @@ impl<'db> CheckCtx<'db> {
                         constraints.add(Constraint {
                             kind: ConstraintKind::Eq(
                                 lhs_ty,
-                                TyRef::Ref(Ty::Primitive(PrimitiveTy::Int)),
+                                Ty::Primitive(PrimitiveTy::Int).intern_ty(self),
                             ),
                             location: e,
                         });
@@ -477,16 +521,22 @@ impl<'db> CheckCtx<'db> {
                 default_expr,
             } => {
                 let set_ty = self.generate_constraints(constraints, *set);
+
+                // TODO: would be nice to have primitives like this cached
+                // is that fine to share?
+                let str_ty: Ty<TyId> = PrimitiveTy::String.into();
+                let str_ty = str_ty.intern_ty(self);
+
                 let ret_ty = attrpath.iter().fold(set_ty, |set_ty, &attr| {
                     let attr_ty = self.generate_constraints(constraints, attr);
-                    constraints.unify_var_ty(e, attr_ty, PrimitiveTy::String.into());
+                    constraints.unify_var(e, attr_ty, str_ty);
                     let opt_key = match &self.module[attr] {
                         Expr::Literal(Literal::String(key)) => key.clone(),
                         _ => todo!("Dyanmic attr fields not supported yet in select"),
                     };
                     let (attr_with_field, value_ty) = self.attr_with_field(opt_key);
                     // this will make sure the set has the field we asked for
-                    constraints.unify_var_ty(e, set_ty, Ty::AttrSet(attr_with_field));
+                    constraints.unify_var(e, set_ty, Ty::AttrSet(attr_with_field).intern_ty(self));
                     // returns the value for the field we asked for
                     value_ty
                 });
@@ -603,8 +653,8 @@ impl<'db> CheckCtx<'db> {
         let snapshot = self.table.snapshot();
 
         let res = match constraint.kind {
-            ConstraintKind::Eq(lhs, TyRef::Id(rhs)) => self.unify_var(lhs, rhs),
-            ConstraintKind::Eq(lhs, TyRef::Ref(rhs)) => self.unify_var_ty(lhs, rhs),
+            ConstraintKind::Eq(lhs, rhs) => self.unify_var(lhs, rhs),
+            // ConstraintKind::Eq(lhs, TyRef::Ref(rhs)) => self.unify_var_ty(lhs, rhs),
         };
 
         match res {
@@ -619,12 +669,12 @@ impl<'db> CheckCtx<'db> {
         }
     }
 
-    fn unify_var_ty(&mut self, var: TyId, rhs: Ty<TyId>) -> Result<(), InferenceError> {
-        let lhs = Ty::TyVar(var.0 as usize);
-        let ret = self.unify(lhs, rhs.clone())?;
-        self.table.union_value(var, TypeVariableValue::Known(ret));
-        Ok(())
-    }
+    // fn unify_var_ty(&mut self, var: TyId, rhs: Ty<TyId>) -> Result<(), InferenceError> {
+    //     let lhs = Ty::TyVar(var.0 as usize);
+    //     let ret = self.unify(lhs, rhs.clone())?;
+    //     self.table.union_value(var, TypeVariableValue::Known(ret));
+    //     Ok(())
+    // }
 
     fn unify_var(&mut self, lhs: TyId, rhs: TyId) -> Result<(), InferenceError> {
         let lhs_val = self.table.inlined_probe_value(lhs);
@@ -642,11 +692,12 @@ impl<'db> CheckCtx<'db> {
         Ok(())
     }
 
-    fn unify(&mut self, lhs: Ty<TyId>, rhs: Ty<TyId>) -> Result<Ty<TyId>, InferenceError> {
+    fn unify(&mut self, lhs: TyId, rhs: TyId) -> Result<(), InferenceError> {
         if lhs == rhs {
-            return Ok(lhs);
+            return Ok(());
         }
-        let ty = match (lhs, rhs) {
+
+        match (self.get_ty(lhs), self.get_ty(rhs)) {
             // TODO: Don't think i need a contains in check since how i init the type vars should handle that
             // i things are sad will need to do that and error
             (Ty::TyVar(a), Ty::TyVar(b)) => {
@@ -654,11 +705,8 @@ impl<'db> CheckCtx<'db> {
                 Ty::TyVar(a)
             }
             (Ty::TyVar(var), other) | (other, Ty::TyVar(var)) => {
-                // TODO: not confident on this logic
-                // I really would want to have the other as its TyId to make sure the unification spreads properly
-                // could maybe handle this arm in unify_var
                 let id = TyId::from(var as u32);
-                self.unify_var_ty(id, other.clone())?;
+                self.unify_var(id, rhs)?;
                 other
             }
             (Ty::List(a), Ty::List(b)) => {
@@ -688,7 +736,7 @@ impl<'db> CheckCtx<'db> {
             (l, r) => return Err(InferenceError::InvalidUnion(l, r)),
         };
 
-        Ok(ty)
+        Ok(())
     }
 
     fn unify_attr(
