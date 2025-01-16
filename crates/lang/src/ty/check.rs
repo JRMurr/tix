@@ -266,9 +266,18 @@ impl<'db> CheckCtx<'db> {
             self.infer_scc_group(group);
         }
 
+        self.infer_root();
+
         let mut collector = Collector::new(self);
 
         collector.finalize_inference()
+    }
+
+    fn infer_root(&mut self) {
+        let mut constraints = ConstraintCtx::new();
+        self.generate_constraints(&mut constraints, self.module.entry_expr);
+        self.solve_constraints(constraints)
+            .expect("TODO: solve error aka type error");
     }
 
     fn infer_scc_group(&mut self, group: DependentGroup) {
