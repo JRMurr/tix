@@ -14,7 +14,7 @@ pub enum Ty<RefType> {
     // TODO: should specify whats a unification var vs type var
     /// A type quantifier (ie the `a` in `a -> a`)
     #[allow(clippy::enum_variant_names)]
-    TyVar(usize), // TODO: should make this u32
+    TyVar(u32), // TODO: should make this u32
 
     // TODO: could we track literals in the type system like typescript does?
     Primitive(PrimitiveTy),

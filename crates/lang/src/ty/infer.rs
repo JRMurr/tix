@@ -23,7 +23,7 @@ pub type TyId = union_find::UnionIdx;
 // the poly type
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TySchema {
-    pub vars: HashSet<usize>, // Each usize corresponds to a Ty::TyVar(x)
+    pub vars: HashSet<u32>, // Each u32 corresponds to a Ty::TyVar(x)
     pub ty: TyId,
 }
 
@@ -33,7 +33,7 @@ impl Ty<TyId> {
     }
 }
 
-type Substitutions = HashMap<usize, TyId>;
+type Substitutions = HashMap<u32, TyId>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 enum InferenceError {
@@ -59,7 +59,7 @@ impl<'db> InferCtx<'db> {
         // adding names here allows for recursive references
         // After we infer a name's value it should be added to the poly_type_env
         let table = UnionFind::new(module.names().len() + module.exprs().len(), |idx| {
-            Ty::TyVar(idx.idx())
+            Ty::TyVar(idx.idx() as u32)
         });
 
         // let types = UnionFind::new(len, make_default);
@@ -72,7 +72,7 @@ impl<'db> InferCtx<'db> {
     }
 
     fn new_ty_var(&mut self) -> TyId {
-        self.table.push_with_idx(|idx| Ty::TyVar(idx.idx()))
+        self.table.push_with_idx(|idx| Ty::TyVar(idx.idx() as u32))
     }
 
     fn ty_for_name(&mut self, name: NameId) -> TyId {
@@ -153,7 +153,7 @@ impl<'db> InferCtx<'db> {
         }
     }
 
-    fn free_type_vars(&mut self, ty_id: TyId) -> HashSet<usize> {
+    fn free_type_vars(&mut self, ty_id: TyId) -> HashSet<u32> {
         let ty = self.table.get_mut(ty_id).clone();
 
         let mut set = HashSet::new();
@@ -416,7 +416,7 @@ impl<'db> InferCtx<'db> {
 
     // TODO: When we don't just panic on errors we might want to do the table unify after the type unify call
     fn unify_var_ty(&mut self, var: TyId, rhs: Ty<TyId>) {
-        let lhs = mem::replace(self.table.get_mut(var), Ty::TyVar(var.idx()));
+        let lhs = mem::replace(self.table.get_mut(var), Ty::TyVar(var.idx() as u32));
         let ret = self.unify(lhs, rhs).expect("Unify error");
         *self.table.get_mut(var) = ret;
     }
