@@ -84,6 +84,65 @@ impl<RefType> AttrSetTy<RefType> {
             rest: None,
         }
     }
+
+    pub fn from_rest(rest: RefType) -> Self {
+        Self {
+            fields: Default::default(),
+            dyn_ty: None,
+            rest: Some(rest),
+        }
+    }
+
+    pub fn keys(&self) -> std::collections::btree_map::Keys<'_, SmolStr, RefType> {
+        self.fields.keys()
+    }
+
+    pub fn get(&self, key: &SmolStr) -> Option<&RefType> {
+        self.fields.get(key)
+    }
+}
+
+impl<RefType: Clone> AttrSetTy<RefType> {
+    pub fn merge(self, other: Self) -> Self {
+        // TODO: handle dyn_ty
+        // TODO: not sure if this will always be the case but for now it is
+        assert!(
+            self.rest.is_some(),
+            "tried to merge but we don't have a rest type"
+        );
+        // assert!(
+        //     other.rest.is_none(),
+        //     "tried to merge but other has a rest field still"
+        // );
+
+        // TODO: not sure if this should error if other has fields with the same key as self
+
+        let mut fields: BTreeMap<SmolStr, RefType> = BTreeMap::new();
+
+        for (k, v) in self.fields.iter().chain(other.fields.iter()) {
+            fields.insert(k.clone(), v.clone());
+        }
+
+        Self {
+            fields,
+            dyn_ty: None, // TODO: handle
+            rest: other.rest,
+        }
+    }
+
+    pub fn get_sub_set(&self, keys: impl Iterator<Item = SmolStr>) -> Self {
+        let mut fields = BTreeMap::new();
+        for key in keys {
+            let value = self.get(&key).expect("Missing key {key}");
+            fields.insert(key, value.clone());
+        }
+
+        Self {
+            fields,
+            dyn_ty: self.dyn_ty.clone(),
+            rest: self.rest.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1,9 +1,6 @@
 // TODO: this should replace infer.rs
 
-use std::{
-    collections::{BTreeMap, HashMap, HashSet},
-    marker::PhantomData,
-};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use ena::unify::{self, InPlaceUnificationTable, UnifyKey, UnifyValue};
 use la_arena::{Arena, Idx as Id, RawIdx};
@@ -26,6 +23,13 @@ impl From<u32> for TyId {
     fn from(value: u32) -> Self {
         let id: RawIdx = value.into();
         Self(Id::from_raw(id))
+    }
+}
+
+impl From<usize> for TyId {
+    #[inline]
+    fn from(value: usize) -> Self {
+        (value as u32).into()
     }
 }
 
@@ -101,7 +105,7 @@ impl TypeVariableValue {
     pub(crate) fn known(&self) -> Option<TyId> {
         match self {
             TypeVariableValue::Unknown => None,
-            TypeVariableValue::Known(value) => Some(value.clone()),
+            TypeVariableValue::Known(value) => Some(*value),
         }
     }
 
@@ -207,6 +211,12 @@ impl InferenceResult {
 enum InferenceError {
     #[error("Could not union {0:?} and {1:?}")]
     InvalidUnion(Ty<TyId>, Ty<TyId>),
+
+    #[error("Unifying attr set {0:?} with empty ")]
+    UnifyEmptyRest(AttrSetTy<TyId>),
+
+    #[error("Could union attr set {0:?} and  {1:?}")]
+    InvalidAttrUnion(AttrSetTy<TyId>, AttrSetTy<TyId>),
 }
 
 impl<'db> CheckCtx<'db> {
@@ -296,8 +306,10 @@ impl<'db> CheckCtx<'db> {
         idx.into()
     }
 
-    fn get_ty(&self, id: TyId) -> Ty<TyId> {
-        self.arena[id.0].clone()
+    fn get_ty(&mut self, id: TyId) -> Ty<TyId> {
+        let probed = self.table.find(id);
+
+        self.arena[probed.id.0].clone()
     }
 
     fn instantiate(&mut self, scheme: &TySchema) -> TyId {
@@ -669,12 +681,13 @@ impl<'db> CheckCtx<'db> {
         }
     }
 
-    // fn unify_var_ty(&mut self, var: TyId, rhs: Ty<TyId>) -> Result<(), InferenceError> {
-    //     let lhs = Ty::TyVar(var.0 as usize);
-    //     let ret = self.unify(lhs, rhs.clone())?;
-    //     self.table.union_value(var, TypeVariableValue::Known(ret));
-    //     Ok(())
-    // }
+    fn unify_var_ty(&mut self, var: TyId, rhs: Ty<TyId>) -> Result<(), InferenceError> {
+        // let ret = self.unify(var, rhs.clone())?;
+        let rhs = rhs.intern_ty(self);
+        self.unify(var, rhs)?;
+        self.table.union_value(var, TypeVariableValue::Known(rhs));
+        Ok(())
+    }
 
     fn unify_var(&mut self, lhs: TyId, rhs: TyId) -> Result<(), InferenceError> {
         let lhs_val = self.table.inlined_probe_value(lhs);
@@ -731,7 +744,11 @@ impl<'db> CheckCtx<'db> {
                 }
             }
             // TODO: https://bernsteinbear.com/blog/row-poly/
-            (Ty::AttrSet(a), Ty::AttrSet(b)) => self.unify_attr(a, b)?,
+            (Ty::AttrSet(_), Ty::AttrSet(_)) => {
+                let lhs = self.flatten_attr(lhs);
+                let rhs = self.flatten_attr(rhs);
+                return self.unify_attr(lhs, rhs);
+            }
             (l, r) if l == r => l,
             (l, r) => return Err(InferenceError::InvalidUnion(l, r)),
         };
@@ -739,12 +756,92 @@ impl<'db> CheckCtx<'db> {
         Ok(())
     }
 
+    fn flatten_attr(&mut self, ty_id: TyId) -> AttrSetTy<TyId> {
+        let ty = self.get_ty(ty_id);
+
+        match ty {
+            Ty::TyVar(v) => {
+                let probed = self.get_ty(v.into());
+                if let Ty::TyVar(rest) = probed {
+                    return AttrSetTy::from_rest(rest.into());
+                }
+                unreachable!("Rest type {ty:?} did not resolve to a type variable")
+            }
+            Ty::AttrSet(attr) => {
+                let rest = attr.rest.map(|rest| self.flatten_attr(rest));
+
+                if let Some(rest) = rest {
+                    attr.merge(rest)
+                } else {
+                    attr
+                }
+            }
+            _ => unreachable!("Saw {ty:?} when flattening attr, only expecting TyVar or AttrSet"),
+        }
+    }
+
     fn unify_attr(
         &mut self,
         lhs: AttrSetTy<TyId>,
         rhs: AttrSetTy<TyId>,
-    ) -> Result<Ty<TyId>, InferenceError> {
-        todo!()
+    ) -> Result<(), InferenceError> {
+        use itertools::Itertools;
+        let lhs_keys: HashSet<&SmolStr> = lhs.keys().collect();
+        let rhs_keys: HashSet<&SmolStr> = rhs.keys().collect();
+
+        let shared_keys: HashSet<&SmolStr> = lhs_keys.intersection(&rhs_keys).cloned().collect();
+
+        for k in shared_keys.iter().sorted() {
+            let lhs_val = lhs.get(k).unwrap();
+            let rhs_val = rhs.get(k).unwrap();
+            self.unify(*lhs_val, *rhs_val)?;
+        }
+
+        let get_missing = |attr: &AttrSetTy<TyId>, key_set: &HashSet<&SmolStr>| {
+            let missing_keys = shared_keys.difference(key_set).cloned().cloned();
+            attr.get_sub_set(missing_keys)
+        };
+
+        if lhs_keys == rhs_keys {
+            // both have the same fields, just need to unify the rest
+            return match (lhs.rest, rhs.rest) {
+                (Some(lhs_rest), Some(rhs_rest)) => self.unify(lhs_rest, rhs_rest),
+                _ => Err(InferenceError::InvalidAttrUnion(lhs, rhs)),
+            };
+        } else if lhs_keys.is_subset(&rhs_keys) {
+            // lhs is missing keys the rhs has
+            let lhs_missing = get_missing(&lhs, &lhs_keys);
+
+            if let Some(rest) = rhs.rest {
+                // let rhs = self.flatten_attr(rest);
+                // return self.unify_attr(lhs_missing, rhs);
+                return self.unify_var_ty(rest, Ty::AttrSet(lhs_missing));
+            }
+            return Err(InferenceError::UnifyEmptyRest(lhs_missing));
+        } else if rhs_keys.is_subset(&lhs_keys) {
+            // rhs is missing keys the lhs has
+            let rhs_missing = get_missing(&rhs, &rhs_keys);
+
+            if let Some(rest) = lhs.rest {
+                return self.unify_var_ty(rest, Ty::AttrSet(rhs_missing));
+            }
+            return Err(InferenceError::UnifyEmptyRest(rhs_missing));
+        }
+
+        // both are missing stuff so need to unify the two
+        match (lhs.rest, rhs.rest) {
+            (Some(_), Some(_)) => {
+                let lhs_missing = get_missing(&lhs, &lhs_keys);
+                let rhs_missing = get_missing(&rhs, &rhs_keys);
+
+                let rest = self.alloc_ty(None);
+
+                self.unify_var_ty(rest, Ty::AttrSet(lhs_missing))?;
+                self.unify_var_ty(rest, Ty::AttrSet(rhs_missing))?;
+                Ok(())
+            }
+            _ => Err(InferenceError::InvalidAttrUnion(lhs, rhs)),
+        }
     }
 }
 
