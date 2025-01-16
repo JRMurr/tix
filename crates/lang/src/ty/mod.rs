@@ -18,7 +18,7 @@ pub enum Ty<RefType> {
     TyVar(u32), // TODO: should make this u32
 
     // TODO: could we track literals in the type system like typescript does?
-    #[debug("Primitive({_0:?})")]
+    #[debug("{_0:?}")]
     Primitive(PrimitiveTy),
 
     #[debug("List({_0:?})")]
