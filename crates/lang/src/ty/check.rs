@@ -1,13 +1,13 @@
 // TODO: this should replace infer.rs
 
+use derive_more::Debug;
+use ena::unify::{self, InPlaceUnificationTable, UnifyKey, UnifyValue};
+use la_arena::{Arena, Idx as Id, RawIdx};
+use smol_str::SmolStr;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fmt,
 };
-
-use ena::unify::{self, InPlaceUnificationTable, UnifyKey, UnifyValue};
-use la_arena::{Arena, Idx as Id, RawIdx};
-use smol_str::SmolStr;
 use thiserror::Error;
 
 use crate::{
@@ -18,7 +18,8 @@ use crate::{
 
 use super::{ArcTy, AttrSetTy, PrimitiveTy, Ty, TyRef};
 
-#[derive(Clone, PartialEq, Eq, Copy, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Copy, Hash)]
+#[debug("TyId({_0:?})")]
 pub struct TyId(u32);
 // pub struct TyId(Id<Ty<TyId>>);
 
@@ -33,12 +34,6 @@ impl From<usize> for TyId {
     #[inline]
     fn from(value: usize) -> Self {
         (value as u32).into()
-    }
-}
-
-impl fmt::Debug for TyId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "TyId::({})", self.0)
     }
 }
 

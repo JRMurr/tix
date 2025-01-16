@@ -148,6 +148,7 @@ impl<RefType: Clone> AttrSetTy<RefType> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[debug("TyRef({_0:?})")]
 pub struct TyRef(Arc<Ty<TyRef>>);
 
 // impl Deref for TyRef {
