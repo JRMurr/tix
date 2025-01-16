@@ -97,7 +97,7 @@ impl UnifyValue for TypeVariableValue {
             }
             // If one side is known, prefer that one.
             (&TypeVariableValue::Known { .. }, &TypeVariableValue::Unknown) => Ok(value1.clone()),
-            (&TypeVariableValue::Unknown, &TypeVariableValue::Known { .. }) => Ok(value1.clone()),
+            (&TypeVariableValue::Unknown, &TypeVariableValue::Known { .. }) => Ok(value2.clone()),
 
             // both unknown, doesn't matter
             (&TypeVariableValue::Unknown, &TypeVariableValue::Unknown) => {
@@ -123,6 +123,25 @@ impl TypeVariableValue {
             TypeVariableValue::Known { .. } => false,
         }
     }
+
+    // pub(crate) fn maybe_unify(&self, other: &Self) -> Result<Self, InferenceError> {
+    //     match (self, other) {
+    //         // We never equate two type variables, both of which
+    //         // have known types. Instead, we recursively equate
+    //         // those types.
+    //         (&TypeVariableValue::Known { .. }, &TypeVariableValue::Known { .. }) => {
+    //             unreachable!("equating two type variables, both of which have known types")
+    //         }
+    //         // If one side is known, prefer that one.
+    //         (&TypeVariableValue::Known { .. }, &TypeVariableValue::Unknown) => Ok(value1.clone()),
+    //         (&TypeVariableValue::Unknown, &TypeVariableValue::Known { .. }) => Ok(value1.clone()),
+
+    //         // both unknown, doesn't matter
+    //         (&TypeVariableValue::Unknown, &TypeVariableValue::Unknown) => {
+    //             Ok(TypeVariableValue::Unknown)
+    //         }
+    //     }
+    // }
 }
 
 // impl From<Option<Ty<TyId>>> for TypeVariableValue {
