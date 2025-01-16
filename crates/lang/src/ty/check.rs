@@ -275,7 +275,9 @@ impl<'db> CheckCtx<'db> {
         let mut constraints = ConstraintCtx::new();
 
         for def in &group {
-            self.generate_constraints(&mut constraints, def.expr());
+            let ty = self.generate_constraints(&mut constraints, def.expr());
+            // TODO: might not be needed just trying this out...
+            constraints.unify_var(def.expr(), self.ty_for_name(def.name()), ty);
         }
 
         self.solve_constraints(constraints)
