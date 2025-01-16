@@ -13,9 +13,9 @@ use crate::{
     nameres::{DependentGroup, GroupedDefs, NameResolution, ResolveResult},
 };
 
-use super::{ArcTy, AttrSetTy, PrimitiveTy, Ty};
+use super::{ArcTy, AttrSetTy, PrimitiveTy, Ty, TyRef};
 
-#[derive(Debug, Clone, PartialEq, Eq, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, Copy, Hash)]
 pub struct TyId(Id<Ty<TyId>>);
 
 impl From<u32> for TyId {
@@ -240,12 +240,19 @@ impl<'db> CheckCtx<'db> {
         }
     }
 
-    pub fn infer_prog(&mut self, groups: GroupedDefs) -> InferenceResult {
+    pub fn infer_prog(mut self, groups: GroupedDefs) -> InferenceResult {
+        let len = self.module.names().len() + self.module.exprs().len();
+        for _ in 0..len {
+            self.new_ty_var();
+        }
+
         for group in groups {
             self.infer_scc_group(group);
         }
 
-        todo!("finalize!!!")
+        let mut collector = Collector::new(self);
+
+        collector.finalize_inference()
     }
 
     fn infer_scc_group(&mut self, group: DependentGroup) {
@@ -270,23 +277,28 @@ impl<'db> CheckCtx<'db> {
     // ---------------------------------
 
     fn alloc_ty(&mut self, ty: Option<Ty<TyId>>) -> TyId {
-        let id = if let Some(t) = ty {
-            self.arena.alloc(t)
+        let id = if let Some(t) = &ty {
+            self.arena.alloc(t.clone())
         } else {
             let next_idx = self.arena.len();
             let t = Ty::TyVar(next_idx);
             self.arena.alloc(t)
         };
+        let idx = TyId(id);
 
-        TyId(id)
-    }
+        let eq_key = if ty.is_none() {
+            self.table.new_key(TypeVariableValue::Unknown)
+        } else {
+            self.table.new_key(TypeVariableValue::Known(idx))
+        };
 
-    fn new_ty_var(&mut self) -> TyId {
-        let idx = self.alloc_ty(None);
-        let eq_key = self.table.new_key(TypeVariableValue::Unknown);
         debug_assert_eq!(eq_key.id, idx);
 
         idx
+    }
+
+    fn new_ty_var(&mut self) -> TyId {
+        self.alloc_ty(None)
     }
 
     fn ty_for_name(&mut self, name: NameId) -> TyId {
@@ -307,9 +319,11 @@ impl<'db> CheckCtx<'db> {
     }
 
     fn get_ty(&mut self, id: TyId) -> Ty<TyId> {
-        let probed = self.table.find(id);
+        let probed = self.table.inlined_probe_value(id);
 
-        self.arena[probed.id.0].clone()
+        let id = probed.known().unwrap_or(id);
+
+        self.arena[id.0].clone()
     }
 
     fn instantiate(&mut self, scheme: &TySchema) -> TyId {
@@ -322,11 +336,7 @@ impl<'db> CheckCtx<'db> {
     }
 
     fn instantiate_ty(&mut self, ty_id: TyId, substitutions: &Substitutions) -> TyId {
-        let Some(ty_id) = self.table.probe_value(ty_id).known() else {
-            panic!("TODO instantiate_ty: not sure if it could be unknown by here...")
-        };
-
-        let ty = self.arena[ty_id.0].clone();
+        let ty = self.get_ty(ty_id);
 
         let new_ty = match ty {
             Ty::TyVar(x) => {
@@ -381,11 +391,7 @@ impl<'db> CheckCtx<'db> {
     fn free_type_vars(&mut self, ty_id: TyId) -> HashSet<usize> {
         let mut set = HashSet::new();
 
-        let Some(ty_id) = self.table.probe_value(ty_id).known() else {
-            panic!("TODO FTV: not sure if it could be unknown by here in...")
-        };
-
-        let ty = self.arena[ty_id.0].clone();
+        let ty = self.get_ty(ty_id);
 
         match ty {
             Ty::TyVar(x) => {
@@ -670,7 +676,7 @@ impl<'db> CheckCtx<'db> {
         };
 
         match res {
-            Ok(()) => {
+            Ok(_) => {
                 self.table.commit(snapshot);
                 Ok(())
             }
@@ -681,45 +687,55 @@ impl<'db> CheckCtx<'db> {
         }
     }
 
-    fn unify_var_ty(&mut self, var: TyId, rhs: Ty<TyId>) -> Result<(), InferenceError> {
+    fn unify_var_ty(&mut self, var: TyId, rhs: Ty<TyId>) -> Result<Ty<TyId>, InferenceError> {
         // let ret = self.unify(var, rhs.clone())?;
-        let rhs = rhs.intern_ty(self);
-        self.unify(var, rhs)?;
-        self.table.union_value(var, TypeVariableValue::Known(rhs));
-        Ok(())
+        let rhs_id = rhs.clone().intern_ty(self);
+        self.unify(var, rhs_id)?;
+        self.table
+            .union_value(var, TypeVariableValue::Known(rhs_id));
+        Ok(rhs)
     }
 
-    fn unify_var(&mut self, lhs: TyId, rhs: TyId) -> Result<(), InferenceError> {
+    // TODO: Should switch back to just the table holding the the tys and not the arena...
+    // when we try to union if both are know we just need to call unify on them
+    // if not we can use `union_value` to update the unknown type
+    // other wise we would need a lot of duplication to make sure the root key in the union table
+    // points to a valid type in the arena
+    fn unify_var(&mut self, lhs: TyId, rhs: TyId) -> Result<Ty<TyId>, InferenceError> {
         let lhs_val = self.table.inlined_probe_value(lhs);
         let rhs_val = self.table.inlined_probe_value(rhs);
 
-        match (lhs_val, rhs_val) {
-            (TypeVariableValue::Known(l), TypeVariableValue::Known(r)) => {
-                self.unify(l, r)?;
-            }
+        let val = self.unify(lhs, rhs)?;
+
+        let (l, r) = match (lhs_val, rhs_val) {
+            (TypeVariableValue::Known(l), TypeVariableValue::Known(r)) => (l, r),
+
             _ => {
                 self.table.union(lhs, rhs);
+                (lhs, rhs)
             }
-        }
+        };
+        let val = self.unify(l, r)?;
 
-        Ok(())
+        todo!()
     }
 
-    fn unify(&mut self, lhs: TyId, rhs: TyId) -> Result<(), InferenceError> {
+    fn unify(&mut self, lhs: TyId, rhs: TyId) -> Result<Ty<TyId>, InferenceError> {
         if lhs == rhs {
-            return Ok(());
+            return Ok(self.get_ty(lhs));
         }
 
-        match (self.get_ty(lhs), self.get_ty(rhs)) {
+        let ty = match (self.get_ty(lhs), self.get_ty(rhs)) {
             // TODO: Don't think i need a contains in check since how i init the type vars should handle that
             // i things are sad will need to do that and error
-            (Ty::TyVar(a), Ty::TyVar(b)) => {
-                self.unify_var(TyId::from(a as u32), TyId::from(b as u32))?;
-                Ty::TyVar(a)
-            }
+            // (Ty::TyVar(a), Ty::TyVar(b)) => {
+            //     // self.unify_var(TyId::from(a as u32), TyId::from(b as u32))?;
+            //     // Ty::TyVar(a)
+            //     return Ok(());
+            // }
             (Ty::TyVar(var), other) | (other, Ty::TyVar(var)) => {
-                let id = TyId::from(var as u32);
-                self.unify_var(id, rhs)?;
+                // let id = TyId::from(var as u32);
+                // self.unify_var(id, rhs)?;
                 other
             }
             (Ty::List(a), Ty::List(b)) => {
@@ -747,13 +763,14 @@ impl<'db> CheckCtx<'db> {
             (Ty::AttrSet(_), Ty::AttrSet(_)) => {
                 let lhs = self.flatten_attr(lhs);
                 let rhs = self.flatten_attr(rhs);
-                return self.unify_attr(lhs, rhs);
+                self.unify_attr(lhs, rhs)?;
+                todo!()
             }
             (l, r) if l == r => l,
             (l, r) => return Err(InferenceError::InvalidUnion(l, r)),
         };
 
-        Ok(())
+        Ok(ty)
     }
 
     fn flatten_attr(&mut self, ty_id: TyId) -> AttrSetTy<TyId> {
@@ -782,14 +799,15 @@ impl<'db> CheckCtx<'db> {
 
     fn unify_attr(
         &mut self,
-        lhs: AttrSetTy<TyId>,
-        rhs: AttrSetTy<TyId>,
-    ) -> Result<(), InferenceError> {
+        mut lhs: AttrSetTy<TyId>,
+        mut rhs: AttrSetTy<TyId>,
+    ) -> Result<AttrSetTy<TyId>, InferenceError> {
         use itertools::Itertools;
         let lhs_keys: HashSet<&SmolStr> = lhs.keys().collect();
         let rhs_keys: HashSet<&SmolStr> = rhs.keys().collect();
 
         let shared_keys: HashSet<&SmolStr> = lhs_keys.intersection(&rhs_keys).cloned().collect();
+        let all_keys: HashSet<&SmolStr> = lhs_keys.union(&rhs_keys).cloned().collect();
 
         for k in shared_keys.iter().sorted() {
             let lhs_val = lhs.get(k).unwrap();
@@ -798,16 +816,22 @@ impl<'db> CheckCtx<'db> {
         }
 
         let get_missing = |attr: &AttrSetTy<TyId>, key_set: &HashSet<&SmolStr>| {
-            let missing_keys = shared_keys.difference(key_set).cloned().cloned();
+            let missing_keys = all_keys.difference(key_set).cloned().cloned();
             attr.get_sub_set(missing_keys)
         };
 
         if lhs_keys == rhs_keys {
             // both have the same fields, just need to unify the rest
-            return match (lhs.rest, rhs.rest) {
-                (Some(lhs_rest), Some(rhs_rest)) => self.unify(lhs_rest, rhs_rest),
-                _ => Err(InferenceError::InvalidAttrUnion(lhs, rhs)),
+            let rest = match (lhs.rest, rhs.rest) {
+                (Some(lhs_rest), Some(rhs_rest)) => {
+                    Some(self.unify(lhs_rest, rhs_rest)?.intern_ty(self))
+                }
+                // both have no rest => done
+                (None, None) => None,
+                _ => return Err(InferenceError::InvalidAttrUnion(lhs, rhs)),
             };
+            lhs.rest = rest;
+            return Ok(lhs);
         } else if lhs_keys.is_subset(&rhs_keys) {
             // lhs is missing keys the rhs has
             let lhs_missing = get_missing(&lhs, &lhs_keys);
@@ -815,7 +839,11 @@ impl<'db> CheckCtx<'db> {
             if let Some(rest) = rhs.rest {
                 // let rhs = self.flatten_attr(rest);
                 // return self.unify_attr(lhs_missing, rhs);
-                return self.unify_var_ty(rest, Ty::AttrSet(lhs_missing));
+                let new_rest = self
+                    .unify_var_ty(rest, Ty::AttrSet(lhs_missing))?
+                    .intern_ty(self);
+                rhs.rest = Some(new_rest);
+                return Ok(rhs);
             }
             return Err(InferenceError::UnifyEmptyRest(lhs_missing));
         } else if rhs_keys.is_subset(&lhs_keys) {
@@ -823,7 +851,11 @@ impl<'db> CheckCtx<'db> {
             let rhs_missing = get_missing(&rhs, &rhs_keys);
 
             if let Some(rest) = lhs.rest {
-                return self.unify_var_ty(rest, Ty::AttrSet(rhs_missing));
+                let new_rest = self
+                    .unify_var_ty(rest, Ty::AttrSet(rhs_missing))?
+                    .intern_ty(self);
+                lhs.rest = Some(new_rest);
+                return Ok(lhs);
             }
             return Err(InferenceError::UnifyEmptyRest(rhs_missing));
         }
@@ -834,14 +866,138 @@ impl<'db> CheckCtx<'db> {
                 let lhs_missing = get_missing(&lhs, &lhs_keys);
                 let rhs_missing = get_missing(&rhs, &rhs_keys);
 
-                let rest = self.alloc_ty(None);
+                let new_rest = self.alloc_ty(None);
 
-                self.unify_var_ty(rest, Ty::AttrSet(lhs_missing))?;
-                self.unify_var_ty(rest, Ty::AttrSet(rhs_missing))?;
-                Ok(())
+                self.unify_var_ty(new_rest, Ty::AttrSet(lhs_missing))?;
+                self.unify_var_ty(new_rest, Ty::AttrSet(rhs_missing))?;
+                let mut new_attr = lhs.merge(rhs);
+                new_attr.rest = Some(new_rest);
+                Ok(new_attr)
             }
             _ => Err(InferenceError::InvalidAttrUnion(lhs, rhs)),
         }
+    }
+}
+
+/// Traverse the table and freeze all `Ty`s into immutable ones.
+struct Collector<'db> {
+    cache: HashMap<TyId, ArcTy>,
+    ctx: CheckCtx<'db>,
+}
+
+impl<'db> Collector<'db> {
+    fn new(ctx: CheckCtx<'db>) -> Self {
+        Self {
+            cache: HashMap::with_capacity(ctx.arena.len()),
+            ctx,
+        }
+    }
+
+    fn finalize_inference(&mut self) -> InferenceResult {
+        let ctx = &mut self.ctx;
+
+        let name_tys: Vec<_> = ctx
+            .module
+            .names()
+            .map(|(name, _)| {
+                let ty = ctx.ty_for_name(name);
+                (name, ty)
+            })
+            .collect();
+
+        let expr_tys: Vec<_> = ctx
+            .module
+            .exprs()
+            .map(|(expr, _)| {
+                let ty = ctx.ty_for_expr(expr);
+                (expr, ty)
+            })
+            .collect();
+
+        let name_cnt = ctx.module.names().len();
+        let expr_cnt = ctx.module.exprs().len();
+        let mut name_ty_map = HashMap::with_capacity(name_cnt);
+        let mut expr_ty_map = HashMap::with_capacity(expr_cnt);
+        for (name, ty) in name_tys {
+            name_ty_map.insert(name, self.canonicalize_type(ty));
+        }
+        for (expr, ty) in expr_tys {
+            expr_ty_map.insert(expr, self.canonicalize_type(ty));
+        }
+
+        InferenceResult {
+            name_ty_map,
+            expr_ty_map,
+        }
+    }
+
+    fn canonicalize_type(&mut self, ty: TyId) -> ArcTy {
+        let i = self.ctx.table.find(ty).id;
+        if let Some(ty) = self.cache.get(&i).cloned() {
+            return ty;
+        }
+
+        let ret = self.canonicalize_type_uncached(ty);
+        self.cache.insert(i, ret.clone());
+        ret
+    }
+
+    fn canonicalize_type_uncached(&mut self, ty_id: TyId) -> ArcTy {
+        let ty = self.ctx.get_ty(ty_id);
+
+        match ty {
+            // Ty::TyVar(var_idx) => {
+            //     // If you want to do naming of free vars:
+            //     //   1) check your map, or
+            //     //   2) produce ArcTy::Var(format!("t{}", var_idx))
+            //     // ArcTy::Var(format!("t{}", var_idx))
+            // }
+            Ty::TyVar(x) => ArcTy::TyVar(x),
+            Ty::List(inner_id) => {
+                let c_inner = self.canonicalize_type(inner_id);
+                ArcTy::List(c_inner.into())
+            }
+            Ty::Lambda { param, body } => {
+                let c_param = self.canonicalize_type(param).into();
+                let c_body = self.canonicalize_type(body).into();
+                ArcTy::Lambda {
+                    param: c_param,
+                    body: c_body,
+                }
+            }
+            Ty::AttrSet(attr_set_ty) => {
+                // let c_attr = self.canonicalize_attrset(attr_set_ty);
+                // ArcTy::AttrSet(c_attr)
+                // ArcTy::AttrSet(AttrSetTy {
+                //     fields: BTreeMap::new(),
+                //     dyn_ty: None,
+                //     rest: None,
+                // })
+                self.canonicalize_attrset(attr_set_ty)
+            }
+            Ty::Primitive(p) => ArcTy::Primitive(p),
+        }
+    }
+
+    fn canonicalize_attrset(&mut self, attr_set_ty: AttrSetTy<TyId>) -> ArcTy {
+        let mut new_fields = BTreeMap::<SmolStr, TyRef>::new();
+        for (k, &v_id) in &attr_set_ty.fields {
+            let field_ty = self.canonicalize_type(v_id).into();
+            new_fields.insert(k.clone(), field_ty);
+        }
+        let c_dyn_ty = attr_set_ty
+            .dyn_ty
+            .map(|d_id| self.canonicalize_type(d_id).into());
+        // TODO: merge this in with fields
+        let c_rest = attr_set_ty
+            .rest
+            .map(|r_id| self.canonicalize_type(r_id).into());
+
+        ArcTy::AttrSet(AttrSetTy {
+            fields: new_fields,
+            dyn_ty: c_dyn_ty,
+            rest: c_rest,
+        })
     }
 }
 
@@ -853,7 +1009,7 @@ pub fn check_file_debug(db: &dyn crate::Db, file: NixFile) -> InferenceResult {
 
     let grouped_defs = crate::nameres::group_def(db, file);
 
-    let mut check = CheckCtx::new(&module, &name_res);
+    let check = CheckCtx::new(&module, &name_res);
 
     check.infer_prog(grouped_defs)
 }
