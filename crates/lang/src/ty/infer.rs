@@ -1,7 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     mem,
-    sync::Arc,
 };
 
 use smol_str::SmolStr;

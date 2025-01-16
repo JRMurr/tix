@@ -2,12 +2,8 @@
 
 use derive_more::Debug;
 use ena::unify::{self, InPlaceUnificationTable, UnifyKey, UnifyValue};
-use la_arena::{Arena, Idx as Id, RawIdx};
 use smol_str::SmolStr;
-use std::{
-    collections::{BTreeMap, HashMap, HashSet},
-    fmt,
-};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use thiserror::Error;
 
 use crate::{
