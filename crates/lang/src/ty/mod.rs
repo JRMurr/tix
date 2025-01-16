@@ -1,8 +1,8 @@
 mod check;
 mod infer;
 mod union_find;
+use derive_more::Debug;
 use std::{collections::BTreeMap, sync::Arc};
-
 // use miette::Diagnostic;
 use smol_str::SmolStr;
 
@@ -14,16 +14,18 @@ pub enum Ty<RefType> {
     // TODO: should specify whats a unification var vs type var
     /// A type quantifier (ie the `a` in `a -> a`)
     #[allow(clippy::enum_variant_names)]
+    #[debug("TyVar({_0})")]
     TyVar(u32), // TODO: should make this u32
 
     // TODO: could we track literals in the type system like typescript does?
+    #[debug("Primitive({_0:?})")]
     Primitive(PrimitiveTy),
 
+    #[debug("List({_0:?})")]
     List(RefType),
-    Lambda {
-        param: RefType,
-        body: RefType,
-    },
+    #[debug("Lambda({param:?} -> {body:?})")]
+    Lambda { param: RefType, body: RefType },
+    #[debug("{_0:?}")]
     AttrSet(AttrSetTy<RefType>),
 }
 

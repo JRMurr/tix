@@ -144,15 +144,6 @@ impl TypeVariableValue {
     // }
 }
 
-// impl From<Option<Ty<TyId>>> for TypeVariableValue {
-//     fn from(value: Option<Ty<TyId>>) -> Self {
-//         match value {
-//             Some(t) => TypeVariableValue::Known(t),
-//             None => TypeVariableValue::Unknown,
-//         }
-//     }
-// }
-
 // the poly type
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TySchema {
@@ -172,11 +163,6 @@ pub struct Constraint {
     location: ExprId,
 }
 
-// #[derive(Debug, PartialEq, Eq, Clone)]
-// // pub enum TyRef {
-// //     Id(TyId),      // unification var
-// //     Ref(Ty<TyId>), // a type
-// // }
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum ConstraintKind {
     Eq(TyId, TyId),
@@ -303,9 +289,7 @@ impl<'db> CheckCtx<'db> {
         let mut constraints = ConstraintCtx::new();
 
         for def in &group {
-            let ty = self.generate_constraints(&mut constraints, def.expr());
-            // TODO: might not be needed just trying this out...
-            constraints.unify_var(def.expr(), self.ty_for_name(def.name()), ty);
+            self.generate_constraints(&mut constraints, def.expr());
         }
 
         self.solve_constraints(constraints)
@@ -355,12 +339,6 @@ impl<'db> CheckCtx<'db> {
     }
 
     fn get_ty(&mut self, id: TyId) -> Ty<TyId> {
-        // let probed = self.table.inlined_probe_value(id);
-
-        // let id = probed.known().unwrap_or(id);
-
-        // self.arena[id.0].clone()
-
         self.table
             .inlined_probe_value(id)
             .known()
@@ -753,27 +731,28 @@ impl<'db> CheckCtx<'db> {
 
         let res = self.unify(lhs, rhs)?;
 
-        let is_ty_var = matches!(res, Ty::TyVar(_));
+        // let is_ty_var = matches!(res, Ty::TyVar(_));
 
         match (lhs_val, rhs_val) {
             (TypeVariableValue::Known(_), TypeVariableValue::Known(_)) => {}
-            (TypeVariableValue::Known(_), TypeVariableValue::Unknown) => {
-                self.table.union(lhs, rhs);
-                // self.table
-                //     .union_value(rhs, TypeVariableValue::Known(res.clone()));
-            }
-            (TypeVariableValue::Unknown, TypeVariableValue::Known(_)) => {
-                self.table.union(lhs, rhs);
-                // self.table
-                //     .union_value(lhs, TypeVariableValue::Known(res.clone()));
-            }
-            (TypeVariableValue::Unknown, TypeVariableValue::Unknown) => {
-                if !is_ty_var {
-                    self.table
-                        .union_value(lhs, TypeVariableValue::Known(res.clone()));
-                }
-                self.table.union(lhs, rhs);
-            }
+            _ => self.table.union(lhs, rhs),
+            // (TypeVariableValue::Known(_), TypeVariableValue::Unknown) => {
+            //     self.table.union(lhs, rhs);
+            //     // self.table
+            //     //     .union_value(rhs, TypeVariableValue::Known(res.clone()));
+            // }
+            // (TypeVariableValue::Unknown, TypeVariableValue::Known(_)) => {
+            //     self.table.union(lhs, rhs);
+            //     // self.table
+            //     //     .union_value(lhs, TypeVariableValue::Known(res.clone()));
+            // }
+            // (TypeVariableValue::Unknown, TypeVariableValue::Unknown) => {
+            //     if !is_ty_var {
+            //         self.table
+            //             .union_value(lhs, TypeVariableValue::Known(res.clone()));
+            //     }
+            //     self.table.union(lhs, rhs);
+            // }
         }
 
         Ok(res)
