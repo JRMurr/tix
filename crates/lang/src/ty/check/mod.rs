@@ -14,7 +14,7 @@ use crate::{
     nameres::{DependentGroup, GroupedDefs, NameResolution},
 };
 
-use super::{ArcTy, AttrSetTy, Ty};
+use super::{ArcTy, AttrSetTy, PrimitiveTy, Ty};
 
 #[derive(Debug, Clone, PartialEq, Eq, Copy, Hash)]
 #[debug("TyId({_0:?})")]
@@ -123,17 +123,6 @@ pub enum ConstraintKind {
 
 type Substitutions = HashMap<u32, TyId>;
 
-#[derive(Debug, Clone)]
-pub struct CheckCtx<'db> {
-    module: &'db Module,
-    name_res: &'db NameResolution,
-
-    table: InPlaceUnificationTable<TyId>,
-
-    // arena: Types,
-    poly_type_env: HashMap<NameId, TySchema>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConstraintCtx {
     constraints: Vec<Constraint>,
@@ -186,6 +175,18 @@ enum InferenceError {
     InvalidAttrUnion(AttrSetTy<TyId>, AttrSetTy<TyId>),
 }
 
+#[derive(Debug, Clone)]
+pub struct CheckCtx<'db> {
+    module: &'db Module,
+    name_res: &'db NameResolution,
+
+    table: InPlaceUnificationTable<TyId>,
+
+    poly_type_env: HashMap<NameId, TySchema>,
+
+    prim_cache: HashMap<PrimitiveTy, TyId>,
+}
+
 impl<'db> CheckCtx<'db> {
     pub fn new(module: &'db Module, name_res: &'db NameResolution) -> Self {
         Self {
@@ -193,6 +194,7 @@ impl<'db> CheckCtx<'db> {
             name_res,
             table: InPlaceUnificationTable::new(),
             poly_type_env: HashMap::new(),
+            prim_cache: HashMap::new(),
         }
     }
 
@@ -247,7 +249,16 @@ impl<'db> CheckCtx<'db> {
                 let id = TyId(idx);
                 self.table.find(id)
             }
-            Some(t) => self.table.new_key(TypeVariableValue::Known(t)),
+            Some(ref ty @ Ty::Primitive(ref prim)) => {
+                if let Some(t) = self.prim_cache.get(prim) {
+                    *t
+                } else {
+                    let id = self.table.new_key(TypeVariableValue::Known(ty.clone()));
+                    self.prim_cache.insert(prim.clone(), id);
+                    id
+                }
+            }
+            Some(ty) => self.table.new_key(TypeVariableValue::Known(ty)),
             None => self.table.new_key(TypeVariableValue::Unknown),
         }
     }
@@ -322,10 +333,14 @@ impl<'db> CheckCtx<'db> {
                     .dyn_ty
                     .map(|v| self.instantiate_ty(v, substitutions));
 
+                let new_rest_ty = attr_set_ty
+                    .rest
+                    .map(|v| self.instantiate_ty(v, substitutions));
+
                 Ty::AttrSet(AttrSetTy {
                     fields: new_fields,
                     dyn_ty: new_dyn_ty,
-                    rest: None, // TODO: check rest?
+                    rest: new_rest_ty,
                 })
             }
             Ty::Primitive(_) => ty,

@@ -54,7 +54,7 @@ impl<'db> Collector<'db> {
             expr_ty_map.insert(expr, self.canonicalize_type(ty));
         }
 
-        // dbg!(&self.ctx.table);
+        dbg!(&self.ctx.table);
 
         InferenceResult {
             name_ty_map,
@@ -130,18 +130,38 @@ impl<'db> Collector<'db> {
             let field_ty = self.canonicalize_type(v_id).into();
             new_fields.insert(k.clone(), field_ty);
         }
-        let c_dyn_ty = attr_set_ty
+        let dyn_ty = attr_set_ty
             .dyn_ty
             .map(|d_id| self.canonicalize_type(d_id).into());
-        // TODO: merge this in with fields
-        let c_rest = attr_set_ty
-            .rest
-            .map(|r_id| self.canonicalize_type(r_id).into());
 
-        ArcTy::AttrSet(AttrSetTy {
-            fields: new_fields,
-            dyn_ty: c_dyn_ty,
-            rest: c_rest,
-        })
+        // if let Some(rest @ Ty::AttrSet(_)) = attr_set_ty.rest.map(|r| self.ctx.get_ty(r)) {
+        //     let curr = AttrSetTy {
+        //         fields: new_fields,
+        //         dyn_ty: c_dyn_ty,
+        //         rest: None,
+        //     };
+
+        //     let other = self.canonicalize_type(rest);
+        // }
+
+        // TODO: merge this in with fields
+        let rest = attr_set_ty.rest.map(|r_id| self.canonicalize_type(r_id));
+
+        match dbg!(rest.clone()) {
+            Some(Ty::AttrSet(other)) => {
+                let curr = AttrSetTy {
+                    fields: new_fields,
+                    dyn_ty,
+                    rest: None,
+                };
+
+                ArcTy::AttrSet(curr.merge(other))
+            }
+            _ => ArcTy::AttrSet(AttrSetTy {
+                fields: new_fields,
+                dyn_ty,
+                rest: rest.map(|r| r.into()),
+            }),
+        }
     }
 }

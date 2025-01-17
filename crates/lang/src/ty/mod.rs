@@ -29,7 +29,7 @@ pub enum Ty<RefType> {
     AttrSet(AttrSetTy<RefType>),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PrimitiveTy {
     Null,
     Bool,
@@ -104,14 +104,14 @@ impl<RefType> AttrSetTy<RefType> {
     }
 }
 
-impl<RefType: Clone> AttrSetTy<RefType> {
+impl<RefType: Clone + Debug> AttrSetTy<RefType> {
     pub fn merge(self, other: Self) -> Self {
         // TODO: handle dyn_ty
         // TODO: not sure if this will always be the case but for now it is
-        assert!(
-            self.rest.is_some(),
-            "tried to merge but we don't have a rest type"
-        );
+        // assert!(
+        //     self.rest.is_some(),
+        //     "tried to merge but we don't have a rest type"
+        // );
         // assert!(
         //     other.rest.is_none(),
         //     "tried to merge but other has a rest field still"
@@ -135,7 +135,9 @@ impl<RefType: Clone> AttrSetTy<RefType> {
     pub fn get_sub_set(&self, keys: impl Iterator<Item = SmolStr>) -> Self {
         let mut fields = BTreeMap::new();
         for key in keys {
-            let value = self.get(&key).expect("Missing key {key}");
+            let value = self
+                .get(&key)
+                .unwrap_or_else(|| panic!("Missing key {key}"));
             fields.insert(key, value.clone());
         }
 
