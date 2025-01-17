@@ -432,8 +432,17 @@ impl<'db> CheckCtx<'db> {
     }
 
     fn generate_constraints(&mut self, constraints: &mut ConstraintCtx, e: ExprId) -> TyId {
+        let ty = self.generate_constraints_inner(constraints, e);
+        constraints.add(Constraint {
+            kind: ConstraintKind::Eq(self.ty_for_expr(e), ty),
+            location: e,
+        });
+        ty
+    }
+
+    fn generate_constraints_inner(&mut self, constraints: &mut ConstraintCtx, e: ExprId) -> TyId {
         let expr = &self.module[e];
-        let ty = match expr {
+        match expr {
             Expr::Missing => self.new_ty_var(),
             Expr::Literal(lit) => {
                 let lit: Ty<TyId> = lit.clone().into();
@@ -601,14 +610,7 @@ impl<'db> CheckCtx<'db> {
             Expr::Assert { cond, body } => todo!(),
             Expr::StringInterpolation(_) => todo!(),
             Expr::PathInterpolation(_) => todo!(),
-        };
-
-        constraints.add(Constraint {
-            kind: ConstraintKind::Eq(self.ty_for_expr(e), ty),
-            location: e,
-        });
-
-        ty
+        }
     }
 
     // makes an attrset with a single field and open rest field to allow for unification later on
@@ -1009,18 +1011,16 @@ impl<'db> Collector<'db> {
         };
 
         match ty {
-            // Ty::TyVar(var_idx) => {
-            //     // If you want to do naming of free vars:
-            //     //   1) check your map, or
-            //     //   2) produce ArcTy::Var(format!("t{}", var_idx))
-            //     // ArcTy::Var(format!("t{}", var_idx))
-            // }
             Ty::TyVar(x) => {
-                if x != ty_id.0 {
-                    self.canonicalize_type(TyId::from(x))
-                } else {
-                    ArcTy::TyVar(x)
-                }
+                // TODO: this should just be a generic param at this point
+                // should eventually normalize the vars so they start from 0
+                // could maybe do that as a final pass on the name?
+                ArcTy::TyVar(x)
+                // if x != ty_id.0 {
+                //     self.canonicalize_type(TyId::from(x))
+                // } else {
+                //     ArcTy::TyVar(x)
+                // }
             }
             Ty::List(inner_id) => {
                 let c_inner = self.canonicalize_type(inner_id);
