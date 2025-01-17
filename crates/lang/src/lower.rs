@@ -266,6 +266,7 @@ impl LowerCtx {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 struct MergingSet {
     ptr: AstPtr,
     name_kind: NameKind,
@@ -289,6 +290,7 @@ struct MergingEntry {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum BindingValueKind {
     Expr(Option<ast::Expr>),
     ImplicitSet, // TODO: handle this for real
@@ -457,7 +459,7 @@ impl MergingSet {
                 .into_values()
                 .map(|entry| {
                     let value = match entry.set {
-                        Some(set) => todo!(), //BindingValue::Expr(set.finish_expr(ctx)),
+                        Some(_set) => todo!(), //BindingValue::Expr(set.finish_expr(ctx)),
                         None => entry.value.unwrap().1,
                     };
                     (entry.name, value)

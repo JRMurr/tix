@@ -51,6 +51,7 @@ pub enum ResolveResult {
     /// Reference to a Name.
     Definition(NameId),
     /// Reference to a builtin value.
+    #[allow(dead_code)]
     Builtin(&'static str),
     /// Attr of one of some `with` expressions, from innermost to outermost.
     /// It must not be empty.
@@ -257,6 +258,7 @@ impl NameResolution {
         self.resolve_map.get(&expr)?.as_ref()
     }
 
+    #[allow(dead_code)]
     pub fn iter(&self) -> impl Iterator<Item = (ExprId, &'_ ResolveResult)> + '_ {
         self.resolve_map
             .iter()

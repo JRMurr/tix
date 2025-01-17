@@ -137,7 +137,27 @@ impl CheckCtx<'_> {
                 cond,
                 then_body,
                 else_body,
-            } => todo!("gen if then else"),
+            } => {
+                let cond_ty = self.generate_constraints(constraints, *cond);
+
+                constraints.add(Constraint {
+                    kind: ConstraintKind::Eq(
+                        cond_ty,
+                        Ty::Primitive(PrimitiveTy::Bool).intern_ty(self),
+                    ),
+                    location: e,
+                });
+
+                let then_ty = self.generate_constraints(constraints, *then_body);
+                let else_ty = self.generate_constraints(constraints, *else_body);
+
+                constraints.add(Constraint {
+                    kind: ConstraintKind::Eq(then_ty, else_ty),
+                    location: e,
+                });
+
+                then_ty
+            }
             Expr::LetIn { bindings, body } => {
                 // TODO: we might be doing instantiates twice here
                 // once in the gen bind call then in the body
@@ -170,7 +190,7 @@ impl CheckCtx<'_> {
                     constraints.unify_var(e, attr_ty, str_ty);
                     let opt_key = match &self.module[attr] {
                         Expr::Literal(Literal::String(key)) => key.clone(),
-                        _ => todo!("Dyanmic attr fields not supported yet in select"),
+                        _ => todo!("Dynamic attr fields not supported yet in select"),
                     };
                     let (attr_with_field, value_ty) = self.attr_with_field(opt_key);
                     // this will make sure the set has the field we asked for
@@ -186,12 +206,58 @@ impl CheckCtx<'_> {
                 ret_ty
             }
 
-            Expr::List(_) => todo!(),
-            Expr::UnaryOp { op, expr } => todo!(),
+            Expr::List(inner) => {
+                let list_ty = self.new_ty_var();
+                for elem in inner {
+                    let elem_ty = self.generate_constraints(constraints, *elem);
+                    constraints.unify_var(*elem, list_ty, elem_ty);
+                }
 
-            Expr::HasAttr { set, attrpath } => todo!(),
-            Expr::With { env, body } => todo!(),
-            Expr::Assert { cond, body } => todo!(),
+                list_ty
+            }
+            Expr::UnaryOp { op, expr } => {
+                let ty = self.generate_constraints(constraints, *expr);
+                let expected_ty = match op {
+                    rnix::ast::UnaryOpKind::Invert => {
+                        Ty::Primitive(PrimitiveTy::Bool).intern_ty(self)
+                    }
+                    rnix::ast::UnaryOpKind::Negate => {
+                        // TODO: could be a float...
+                        Ty::Primitive(PrimitiveTy::Int).intern_ty(self)
+                    }
+                };
+                constraints.unify_var(*expr, ty, expected_ty);
+                ty
+            }
+
+            Expr::HasAttr { set, attrpath: _ } => {
+                let set_ty = self.generate_constraints(constraints, *set);
+
+                // TODO: attrpath could be used for narrowing
+                let any_attr = Ty::AttrSet(AttrSetTy {
+                    fields: BTreeMap::new(),
+                    dyn_ty: None,
+                    rest: Some(self.new_ty_var()),
+                })
+                .intern_ty(self);
+
+                constraints.unify_var(*set, set_ty, any_attr);
+
+                set_ty
+            }
+            Expr::Assert { cond, body } => {
+                let cond_ty = self.generate_constraints(constraints, *cond);
+
+                constraints.unify_var(
+                    *cond,
+                    cond_ty,
+                    Ty::Primitive(PrimitiveTy::Bool).intern_ty(self),
+                );
+
+                self.generate_constraints(constraints, *body)
+            }
+
+            Expr::With { env, body } => todo!("handle with {env:?} {body:?}"),
             Expr::StringInterpolation(_) => todo!(),
             Expr::PathInterpolation(_) => todo!(),
         }
