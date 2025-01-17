@@ -174,7 +174,7 @@ impl CheckCtx<'_> {
             self.unify_var(*lhs_val, *rhs_val)?;
         }
 
-        dbg!(&lhs_keys, &rhs_keys, &shared_keys, &all_keys);
+        // dbg!(&lhs_keys, &rhs_keys, &shared_keys, &all_keys);
 
         let get_missing = |attr: &AttrSetTy<TyId>, key_set: &HashSet<&SmolStr>| {
             let missing_keys = all_keys.difference(key_set).cloned().cloned();
@@ -240,12 +240,12 @@ impl CheckCtx<'_> {
                 lhs_missing.rest = Some(new_rest);
                 rhs_missing.rest = Some(new_rest);
 
-                dbg!(self.unify_var_ty(dbg!(l_rest), Ty::AttrSet(dbg!(lhs_missing)))?);
-                self.unify_var_ty(r_rest, Ty::AttrSet(dbg!(rhs_missing)))?;
+                self.unify_var_ty(l_rest, Ty::AttrSet(lhs_missing))?;
+                self.unify_var_ty(r_rest, Ty::AttrSet(rhs_missing))?;
 
                 let mut new_attr = lhs.merge(rhs);
                 new_attr.rest = Some(new_rest);
-                Ok(dbg!(new_attr))
+                Ok(new_attr)
             }
             _ => Err(InferenceError::InvalidAttrUnion(lhs, rhs)),
         }

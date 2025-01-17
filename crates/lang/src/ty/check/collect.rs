@@ -54,7 +54,7 @@ impl<'db> Collector<'db> {
             expr_ty_map.insert(expr, self.canonicalize_type(ty));
         }
 
-        dbg!(&self.ctx.table);
+        // dbg!(&self.ctx.table);
 
         InferenceResult {
             name_ty_map,
@@ -134,20 +134,13 @@ impl<'db> Collector<'db> {
             .dyn_ty
             .map(|d_id| self.canonicalize_type(d_id).into());
 
-        // if let Some(rest @ Ty::AttrSet(_)) = attr_set_ty.rest.map(|r| self.ctx.get_ty(r)) {
-        //     let curr = AttrSetTy {
-        //         fields: new_fields,
-        //         dyn_ty: c_dyn_ty,
-        //         rest: None,
-        //     };
-
-        //     let other = self.canonicalize_type(rest);
-        // }
-
-        // TODO: merge this in with fields
         let rest = attr_set_ty.rest.map(|r_id| self.canonicalize_type(r_id));
 
-        match dbg!(rest.clone()) {
+        // TODO: not sure if still needs this explicit merge
+        // also need to figure out how to track "open" records like patterns
+        // right now if the rest points to an "unknown" type var not sure if that means it would be closed
+        // thats the case for row_poly.nix
+        match rest {
             Some(Ty::AttrSet(other)) => {
                 let curr = AttrSetTy {
                     fields: new_fields,
