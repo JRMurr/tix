@@ -1,0 +1,1 @@
+- need to have cases like `{}@arg: arg.baz` type error at func def
