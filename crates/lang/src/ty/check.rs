@@ -280,7 +280,11 @@ impl<'db> CheckCtx<'db> {
         let mut constraints = ConstraintCtx::new();
 
         for def in &group {
-            self.generate_constraints(&mut constraints, def.expr());
+            let ty = self.generate_constraints(&mut constraints, def.expr());
+            constraints.add(Constraint {
+                kind: ConstraintKind::Eq(self.ty_for_name(def.name()), ty),
+                location: def.expr(),
+            });
         }
 
         self.solve_constraints(constraints)
@@ -381,7 +385,7 @@ impl<'db> CheckCtx<'db> {
                 Ty::AttrSet(AttrSetTy {
                     fields: new_fields,
                     dyn_ty: new_dyn_ty,
-                    rest: None,
+                    rest: None, // TODO: check rest?
                 })
             }
             Ty::Primitive(_) => ty,
@@ -474,21 +478,34 @@ impl<'db> CheckCtx<'db> {
                     constraints.unify_var(e, param_ty, name_ty);
                 }
 
-                if let Some(_pat) = pat {
-                    todo!("generate constrains for lambda pattern")
-                    // self.unify_var_ty(param_ty, Ty::AttrSet(AttrSetTy::new()));
-                    // for &(name, default_expr) in pat.fields.iter() {
-                    //     // Always infer default_expr.
-                    //     let default_ty = default_expr.map(|e| self.infer_expr(e));
-                    //     let Some(name) = name else { continue };
-                    //     let name_ty = self.ty_for_name(name);
-                    //     if let Some(default_ty) = default_ty {
-                    //         self.unify_var(name_ty, default_ty);
-                    //     }
-                    //     let field_text = self.module[name].text.clone();
-                    //     let param_field_ty = self.infer_set_field(param_ty, Some(field_text));
-                    //     self.unify_var(param_field_ty, name_ty);
-                    // }
+                if let Some(pat) = pat {
+                    let mut fields = BTreeMap::new();
+
+                    for &(name, default_expr) in pat.fields.iter() {
+                        // Always infer default_expr.
+                        let default_ty =
+                            default_expr.map(|e| self.generate_constraints(constraints, e));
+                        let Some(name) = name else { continue };
+                        let name_ty = self.ty_for_name(name);
+                        if let Some(default_ty) = default_ty {
+                            constraints.unify_var(e, name_ty, default_ty);
+                        }
+                        let field_text = self.module[name].text.clone();
+                        let param_field_ty = self.new_ty_var();
+                        constraints.unify_var(e, param_field_ty, name_ty);
+                        fields.insert(field_text, param_field_ty);
+                    }
+
+                    let rest = pat.ellipsis.then(|| self.new_ty_var());
+
+                    let attr = Ty::AttrSet(AttrSetTy {
+                        fields,
+                        rest,
+                        dyn_ty: None,
+                    })
+                    .intern_ty(self);
+
+                    constraints.unify_var(e, param_ty, attr);
                 }
 
                 let body_ty = self.generate_constraints(constraints, *body);
@@ -518,7 +535,7 @@ impl<'db> CheckCtx<'db> {
                             ),
                             location: e,
                         });
-                        lhs_ty
+                        Ty::Primitive(PrimitiveTy::Int).intern_ty(self)
                     }
                     o => todo!("Need to handle operator {o:?}"),
                 }
@@ -586,7 +603,6 @@ impl<'db> CheckCtx<'db> {
             Expr::PathInterpolation(_) => todo!(),
         };
 
-        // TODO: not sure i need this but probably helps?
         constraints.add(Constraint {
             kind: ConstraintKind::Eq(self.ty_for_expr(e), ty),
             location: e,
@@ -625,6 +641,7 @@ impl<'db> CheckCtx<'db> {
             // we checked before on a previous SCC group
             // so we can skip generating constraints
             if let Some(ty_schema) = self.poly_type_env.get(&name).cloned() {
+                // println!("got poly {ty_schema:?} for name {name:?}");
                 let value_ty = self.instantiate(&ty_schema);
                 fields.insert(name_text, value_ty);
                 continue;
@@ -722,28 +739,30 @@ impl<'db> CheckCtx<'db> {
 
         let res = self.unify(lhs, rhs)?;
 
-        // let is_ty_var = matches!(res, Ty::TyVar(_));
+        let is_ty_var = matches!(res, Ty::TyVar(_));
 
         match (lhs_val, rhs_val) {
             (TypeVariableValue::Known(_), TypeVariableValue::Known(_)) => {}
-            _ => self.table.union(lhs, rhs),
-            // (TypeVariableValue::Known(_), TypeVariableValue::Unknown) => {
-            //     self.table.union(lhs, rhs);
-            //     // self.table
-            //     //     .union_value(rhs, TypeVariableValue::Known(res.clone()));
-            // }
-            // (TypeVariableValue::Unknown, TypeVariableValue::Known(_)) => {
-            //     self.table.union(lhs, rhs);
-            //     // self.table
-            //     //     .union_value(lhs, TypeVariableValue::Known(res.clone()));
-            // }
-            // (TypeVariableValue::Unknown, TypeVariableValue::Unknown) => {
-            //     if !is_ty_var {
-            //         self.table
-            //             .union_value(lhs, TypeVariableValue::Known(res.clone()));
-            //     }
-            //     self.table.union(lhs, rhs);
-            // }
+            // _ => self.table.union(lhs, rhs),
+            (TypeVariableValue::Known(_), TypeVariableValue::Unknown) => {
+                self.table.union(lhs, rhs);
+                // self.table
+                //     .union_value(rhs, TypeVariableValue::Known(res.clone()));
+            }
+            (TypeVariableValue::Unknown, TypeVariableValue::Known(_)) => {
+                self.table.union(lhs, rhs);
+                // self.table
+                //     .union_value(lhs, TypeVariableValue::Known(res.clone()));
+            }
+            (TypeVariableValue::Unknown, TypeVariableValue::Unknown) => {
+                if !is_ty_var {
+                    self.table
+                        .union_value(lhs, TypeVariableValue::Known(res.clone()));
+                }
+                // self.table
+                //     .union_value(lhs, TypeVariableValue::Known(res.clone()));
+                self.table.union(lhs, rhs);
+            }
         }
 
         Ok(res)
@@ -754,7 +773,7 @@ impl<'db> CheckCtx<'db> {
             return Ok(self.get_ty(lhs));
         }
 
-        let ty = match dbg!((self.get_ty(lhs), self.get_ty(rhs))) {
+        let ty = match (self.get_ty(lhs), self.get_ty(rhs)) {
             // TODO: Don't think i need a contains in check since how i init the type vars should handle that
             // i things are sad will need to do that and error
             // (Ty::TyVar(a), Ty::TyVar(b)) => {
@@ -929,7 +948,10 @@ impl<'db> Collector<'db> {
             .module
             .names()
             .map(|(name, _)| {
-                let ty = ctx.ty_for_name(name);
+                // TODO: i think this is causing a new instantiation?
+                // let ty = ctx.ty_for_name(name);
+                // dbg!(&(name, name_txt));
+                let ty = u32::from(name.into_raw()).into();
                 (name, ty)
             })
             .collect();
@@ -954,6 +976,8 @@ impl<'db> Collector<'db> {
             expr_ty_map.insert(expr, self.canonicalize_type(ty));
         }
 
+        // dbg!(&self.ctx.table);
+
         InferenceResult {
             name_ty_map,
             expr_ty_map,
@@ -972,7 +996,17 @@ impl<'db> Collector<'db> {
     }
 
     fn canonicalize_type_uncached(&mut self, ty_id: TyId) -> ArcTy {
-        let ty = self.ctx.get_ty(ty_id);
+        // let ty = self.ctx.get_ty(ty_id);
+
+        let ty = self.ctx.table.inlined_probe_value(ty_id).known();
+
+        let ty = if let Some(t) = ty {
+            t
+        } else {
+            let root = self.ctx.table.find(ty_id);
+            // eprintln!("{ty_id:?} is unknown\troot: {root:?}");
+            Ty::TyVar(root.0)
+        };
 
         match ty {
             // Ty::TyVar(var_idx) => {
@@ -981,7 +1015,13 @@ impl<'db> Collector<'db> {
             //     //   2) produce ArcTy::Var(format!("t{}", var_idx))
             //     // ArcTy::Var(format!("t{}", var_idx))
             // }
-            Ty::TyVar(x) => ArcTy::TyVar(x),
+            Ty::TyVar(x) => {
+                if x != ty_id.0 {
+                    self.canonicalize_type(TyId::from(x))
+                } else {
+                    ArcTy::TyVar(x)
+                }
+            }
             Ty::List(inner_id) => {
                 let c_inner = self.canonicalize_type(inner_id);
                 ArcTy::List(c_inner.into())
@@ -1039,6 +1079,8 @@ pub fn check_file_debug(db: &dyn crate::Db, file: NixFile) -> InferenceResult {
     let grouped_defs = crate::nameres::group_def(db, file);
 
     let check = CheckCtx::new(&module, &name_res);
+
+    // dbg!(&grouped_defs);
 
     check.infer_prog(grouped_defs)
 }
