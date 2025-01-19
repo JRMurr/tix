@@ -13,6 +13,7 @@ rnix = "0.11.0"
 rowan = "0.15"
 smol_str = "0.3.2"
 thiserror = { workspace = true }
+miette = { workspace = true }
 
 
 # TODO: lock to a commit...
@@ -23,6 +24,7 @@ la-arena = "0.3.1"
 ena = "0.14.3"
 itertools = "0.14.0"
 derive_more = { version = "1.0.0", features = ["debug"] }
+indoc = "2.0.5"
 
 [lib]
 path = "src/lib.rs"

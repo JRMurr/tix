@@ -6,7 +6,7 @@ use std::{collections::BTreeMap, sync::Arc};
 // use miette::Diagnostic;
 use smol_str::SmolStr;
 
-pub use check::check_file_debug;
+pub use check::check_file;
 
 // the mono type
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,20 +153,85 @@ impl<RefType: Clone + Debug> AttrSetTy<RefType> {
 #[debug("{_0:?}")]
 pub struct TyRef(Arc<Ty<TyRef>>);
 
-// impl Deref for TyRef {
-//     type Target = Ty<Arc<Ty<TyRef>>>;
-
-//     fn deref(&self) -> &Self::Target {
-//         &self.0
-//     }
-// }
-
-// type ArcTyInnerRef =
-
 pub type ArcTy = Ty<TyRef>;
 
 impl From<ArcTy> for TyRef {
     fn from(value: ArcTy) -> Self {
         TyRef(Arc::new(value))
     }
+}
+
+#[macro_export]
+macro_rules! arc_ty {
+    // -- Match on known primitives -----------------------------------------
+    (Null) => {
+        $crate::ty::Ty::<$crate::ty::TyRef>::Primitive($crate::ty::PrimitiveTy::Null)
+    };
+    (Bool) => {
+        $crate::ty::Ty::<$crate::ty::TyRef>::Primitive($crate::ty::PrimitiveTy::Bool)
+    };
+    (Int) => {
+        $crate::ty::Ty::<$crate::ty::TyRef>::Primitive($crate::ty::PrimitiveTy::Int)
+    };
+    (Float) => {
+        $crate::ty::Ty::<$crate::ty::TyRef>::Primitive($crate::ty::PrimitiveTy::Float)
+    };
+    (String) => {
+        $crate::ty::Ty::<$crate::ty::TyRef>::Primitive($crate::ty::PrimitiveTy::String)
+    };
+    (Path) => {
+        $crate::ty::Ty::<$crate::ty::TyRef>::Primitive($crate::ty::PrimitiveTy::Path)
+    };
+    (Uri) => {
+        $crate::ty::Ty::<$crate::ty::TyRef>::Primitive($crate::ty::PrimitiveTy::Uri)
+    };
+
+    // -- Lambda syntax: (T1) -> (T2) ---------------------------------------
+    (
+        ($($param:tt)*) -> ($($body:tt)*)
+    ) => {
+        $crate::ty::Ty::<$crate::ty::TyRef>::Lambda {
+            param: $crate::ty::TyRef::from($crate::arc_ty!($($param)*)),
+            body: $crate::ty::TyRef::from($crate::arc_ty!($($body)*)),
+        }
+    };
+
+    // -- List syntax: List(T) ---------------------------------------------
+    (List($($elem:tt)*)) => {
+        $crate::ty::Ty::<$crate::ty::TyRef>::List($crate::ty::TyRef::from($crate::arc_ty!($($elem)*)))
+    };
+
+    // -- AttrSet syntax: { key1: Ty1, key2: Ty2, ... } ---------------------
+    (
+        {
+            $($key:ident : $val:tt),* $(,)?
+        }
+    ) => {{
+        // Construct the fields BTreeMap and wrap in Ty::AttrSet
+        let mut map = ::std::collections::BTreeMap::new();
+        $(
+            map.insert(
+                ::smol_str::SmolStr::new_inline(stringify!($key)),
+                $crate::ty::TyRef::from($crate::arc_ty!($val))
+            );
+        )*
+
+        $crate::ty::Ty::<$crate::ty::TyRef>::AttrSet($crate::ty::AttrSetTy {
+            fields: map,
+            dyn_ty: None,
+            rest: None,
+        })
+    }};
+
+    // -- TyVar syntax: TyVar(N) --------------------------------------------
+    (TyVar($n:expr)) => {
+        $crate::ty::Ty::<$crate::ty::TyRef>::TyVar($n)
+    };
+
+    // -- Fallback ----------------------------------------------------------
+    // You can add a fallback rule if you want an explicit error
+    // message on unrecognized patterns:
+    // ( $other:tt ) => {
+    //     compile_error!("arc_ty!: Unrecognized pattern");
+    // };
 }

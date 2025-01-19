@@ -25,7 +25,7 @@ impl CheckCtx<'_> {
         let snapshot = self.table.snapshot();
 
         let res = match constraint.kind {
-            ConstraintKind::Eq(lhs, rhs) => self.unify_var(lhs, rhs),
+            ConstraintKind::Eq(lhs, rhs) => self.unify(lhs, rhs),
             // ConstraintKind::Eq(lhs, TyRef::Ref(rhs)) => self.unify_var_ty(lhs, rhs),
         };
 
@@ -44,14 +44,14 @@ impl CheckCtx<'_> {
     fn unify_var_ty(&mut self, lhs: TyId, rhs: Ty<TyId>) -> Result<Ty<TyId>, InferenceError> {
         // let ret = self.unify(var, rhs.clone())?;
         let rhs_id = rhs.clone().intern_ty(self);
-        self.unify_var(lhs, rhs_id)
+        self.unify(lhs, rhs_id)
     }
 
-    fn unify_var(&mut self, lhs: TyId, rhs: TyId) -> Result<Ty<TyId>, InferenceError> {
+    fn unify(&mut self, lhs: TyId, rhs: TyId) -> Result<Ty<TyId>, InferenceError> {
         let lhs_val = self.table.inlined_probe_value(lhs);
         let rhs_val = self.table.inlined_probe_value(rhs);
 
-        let res = self.unify((lhs, rhs))?;
+        let res = self.unify_inner(lhs, rhs)?;
 
         let is_ty_var = matches!(res, Ty::TyVar(_));
 
@@ -77,8 +77,7 @@ impl CheckCtx<'_> {
         Ok(res)
     }
 
-    // TODO: making the type sig a little weird to avoid calling it when should call unify_var
-    fn unify(&mut self, (lhs, rhs): (TyId, TyId)) -> Result<Ty<TyId>, InferenceError> {
+    fn unify_inner(&mut self, lhs: TyId, rhs: TyId) -> Result<Ty<TyId>, InferenceError> {
         if lhs == rhs {
             return Ok(self.get_ty(lhs));
         }
@@ -97,7 +96,7 @@ impl CheckCtx<'_> {
                 other
             }
             (Ty::List(a), Ty::List(b)) => {
-                self.unify_var(a, b)?;
+                self.unify(a, b)?;
                 Ty::List(a)
             }
             (
@@ -110,8 +109,8 @@ impl CheckCtx<'_> {
                     body: ret2,
                 },
             ) => {
-                self.unify_var(arg1, arg2)?;
-                self.unify_var(ret1, ret2)?;
+                self.unify(arg1, arg2)?;
+                self.unify(ret1, ret2)?;
                 Ty::Lambda {
                     param: arg1,
                     body: ret1,
@@ -171,7 +170,7 @@ impl CheckCtx<'_> {
         for k in shared_keys.iter().sorted() {
             let lhs_val = lhs.get(k).unwrap();
             let rhs_val = rhs.get(k).unwrap();
-            self.unify_var(*lhs_val, *rhs_val)?;
+            self.unify(*lhs_val, *rhs_val)?;
         }
 
         // dbg!(&lhs_keys, &rhs_keys, &shared_keys, &all_keys);
@@ -188,7 +187,7 @@ impl CheckCtx<'_> {
             // both have the same fields, just need to unify the rest
             let rest = match (lhs.rest, rhs.rest) {
                 (Some(lhs_rest), Some(rhs_rest)) => {
-                    Some(self.unify_var(lhs_rest, rhs_rest)?.intern_ty(self))
+                    Some(self.unify(lhs_rest, rhs_rest)?.intern_ty(self))
                 }
                 // both have no rest => done
                 (None, None) => None,

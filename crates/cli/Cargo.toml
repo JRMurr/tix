@@ -6,7 +6,7 @@ edition = "2024"
 
 [dependencies]
 clap = { version = "4.2", features = ["derive"] }
-miette = { version = "7.4.0", features = ["fancy"] }
+miette = { workspace = true, features = ["fancy"] }
 thiserror = { workspace = true }
 lang = { path = "../lang" }
 

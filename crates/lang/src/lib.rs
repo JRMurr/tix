@@ -2,19 +2,21 @@
 // https://github.com/oxalica/nil/tree/main/crates/ide/src/def
 
 // pub mod expr_table;
+mod ast_utils;
 mod db;
 mod lower;
 mod nameres;
 mod ty;
 
-mod ast_utils;
+#[cfg(test)]
+mod tests;
 
 use db::NixFile;
 pub use db::{Db, RootDatabase};
 use lower::lower;
 pub use nameres::scopes;
 
-pub use ty::check_file_debug;
+pub use ty::check_file;
 
 use std::{collections::HashMap, ops};
 

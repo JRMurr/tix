@@ -8,7 +8,7 @@ use salsa::{self, Event};
 pub struct NixFile {
     path: PathBuf,
     #[return_ref]
-    contents: String,
+    pub contents: String,
 }
 
 // // Wrapping this to add some traits salsa needs
@@ -20,7 +20,7 @@ pub struct NixFile {
 
 #[salsa::db]
 pub trait Db: salsa::Database {
-    fn read_file(&self, path: PathBuf) -> Result<NixFile, std::io::Error>;
+    // fn read_file(&self, path: PathBuf) -> Result<NixFile, std::io::Error>;
 
     fn parse_file(&self, file: NixFile) -> Root;
 }
@@ -50,7 +50,18 @@ impl salsa::Database for RootDatabase {
 
 #[salsa::db]
 impl Db for RootDatabase {
-    fn read_file(&self, path: PathBuf) -> Result<NixFile, std::io::Error> {
+    // TODO: I don't think this will be tracked by salsa so will re-parse if called many times
+    // Root is !Send + !Sync so having it tracked by salsa is sad.
+    // Could store it in the db itself but would need to handle re-parsing on file change
+    fn parse_file(&self, file: NixFile) -> Root {
+        let src = file.contents(self);
+        rnix::Root::parse(src).tree()
+    }
+}
+
+#[salsa::tracked]
+impl RootDatabase {
+    pub fn read_file(&self, path: PathBuf) -> Result<NixFile, std::io::Error> {
         let path = path.canonicalize()?;
 
         let file = match self.files.entry(path.clone()) {
@@ -62,13 +73,5 @@ impl Db for RootDatabase {
         };
 
         Ok(file)
-    }
-
-    // TODO: I don't think this will be tracked by salsa so will re-parse if called many times
-    // Root is !Send + !Sync so having it tracked by salsa is sad.
-    // Could store it in the db itself but would need to handle re-parsing on file change
-    fn parse_file(&self, file: NixFile) -> Root {
-        let src = file.contents(self);
-        rnix::Root::parse(src).tree()
     }
 }

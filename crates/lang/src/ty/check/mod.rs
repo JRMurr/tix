@@ -2,6 +2,9 @@ mod collect;
 mod generate;
 mod solve;
 
+#[cfg(test)]
+mod tests;
+
 use collect::Collector;
 use derive_more::Debug;
 use ena::unify::{self, InPlaceUnificationTable, UnifyKey, UnifyValue};
@@ -388,7 +391,7 @@ impl<'db> CheckCtx<'db> {
 }
 
 #[salsa::tracked]
-pub fn check_file_debug(db: &dyn crate::Db, file: NixFile) -> InferenceResult {
+pub fn check_file(db: &dyn crate::Db, file: NixFile) -> InferenceResult {
     let module = crate::module(db, file);
 
     let name_res = crate::nameres::name_resolution(db, file);
