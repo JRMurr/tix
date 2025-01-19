@@ -1,5 +1,5 @@
 use clap::Parser;
-use lang::{Db, RootDatabase};
+use lang::RootDatabase;
 use std::error::Error;
 use std::path::PathBuf;
 

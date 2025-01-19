@@ -92,6 +92,7 @@ impl TypeVariableValue {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn is_unknown(&self) -> bool {
         match *self {
             TypeVariableValue::Unknown => true,
