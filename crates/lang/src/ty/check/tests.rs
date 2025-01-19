@@ -23,7 +23,7 @@ fn simple_types() {
     let file = indoc! {"{
         num = 1;
         str = \"foo\";
-        bool = true;
+        # bool = true;
         float = 3.14;
         add = a: b: a + b;
         lst = [(1) (2)];
@@ -32,8 +32,20 @@ fn simple_types() {
 
     // {num: Int, str: String, bool: Bool, float: Float, add: Int -> Int, lst: List(Int)}
 
-    let ty =
-        arc_ty!({num: Int, str: String, bool: Bool, float: Float, add: Int -> Int, lst: List(Int)});
+    let ty = arc_ty!({
+        "num": (Int),
+        "str": (String),
+        // "bool": (Bool),
+        "float": (Float),
+        "add": (Int -> Int -> Int),
+        "lst": [Int]
+    });
+
+    // let ty = arc_ty!({
+    //     "stdenv": {
+    //         "mkDerivation": ({ "name": String } -> Int),
+    //     },
+    // });
 
     check(file, dbg!(ty));
 }

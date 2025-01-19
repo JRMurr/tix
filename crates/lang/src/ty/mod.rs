@@ -161,6 +161,30 @@ impl From<ArcTy> for TyRef {
     }
 }
 
+impl AttrSetTy<TyRef> {
+    pub fn from_internal<'a>(
+        iter: impl IntoIterator<Item = (&'a str, Ty<TyRef>)>,
+        rest: Option<TyRef>,
+    ) -> Self {
+        let fields: BTreeMap<SmolStr, TyRef> = iter
+            .into_iter()
+            .map(|(name, ty)| (SmolStr::from(name), ty.into()))
+            .collect();
+        // Arc::get_mut(&mut fields)
+        //     .unwrap()
+        //     .sort_by(|(lhs, ..), (rhs, ..)| lhs.cmp(rhs));
+        // assert!(
+        //     fields.windows(2).all(|w| w[0].0 != w[1].0),
+        //     "Duplicated fields",
+        // );
+        Self {
+            fields,
+            rest,
+            dyn_ty: None,
+        }
+    }
+}
+
 #[macro_export]
 macro_rules! arc_ty {
     // -- Match on known primitives -----------------------------------------
@@ -185,53 +209,43 @@ macro_rules! arc_ty {
     (Uri) => {
         $crate::ty::Ty::<$crate::ty::TyRef>::Primitive($crate::ty::PrimitiveTy::Uri)
     };
-
-    // -- Lambda syntax: (T1) -> (T2) ---------------------------------------
-    (
-        ($($param:tt)*) -> ($($body:tt)*)
-    ) => {
-        $crate::ty::Ty::<$crate::ty::TyRef>::Lambda {
-            param: $crate::ty::TyRef::from($crate::arc_ty!($($param)*)),
-            body: $crate::ty::TyRef::from($crate::arc_ty!($($body)*)),
-        }
-    };
-
-    // -- List syntax: List(T) ---------------------------------------------
-    (List($($elem:tt)*)) => {
-        $crate::ty::Ty::<$crate::ty::TyRef>::List($crate::ty::TyRef::from($crate::arc_ty!($($elem)*)))
-    };
-
-    // -- AttrSet syntax: { key1: Ty1, key2: Ty2, ... } ---------------------
-    (
-        {
-            $($key:ident : $val:tt),* $(,)?
-        }
-    ) => {{
-        // Construct the fields BTreeMap and wrap in Ty::AttrSet
-        let mut map = ::std::collections::BTreeMap::new();
-        $(
-            map.insert(
-                ::smol_str::SmolStr::new_inline(stringify!($key)),
-                $crate::ty::TyRef::from($crate::arc_ty!($val))
-            );
-        )*
-
-        $crate::ty::Ty::<$crate::ty::TyRef>::AttrSet($crate::ty::AttrSetTy {
-            fields: map,
-            dyn_ty: None,
-            rest: None,
-        })
-    }};
-
     // -- TyVar syntax: TyVar(N) --------------------------------------------
     (TyVar($n:expr)) => {
         $crate::ty::Ty::<$crate::ty::TyRef>::TyVar($n)
     };
 
-    // -- Fallback ----------------------------------------------------------
-    // You can add a fallback rule if you want an explicit error
-    // message on unrecognized patterns:
-    // ( $other:tt ) => {
-    //     compile_error!("arc_ty!: Unrecognized pattern");
+    // // -- List syntax: List(T) ---------------------------------------------
+    // (List($elem:tt)) => {
+    //     $crate::ty::Ty::<$crate::ty::TyRef>::List($crate::ty::TyRef::from($crate::arc_ty!($elem)))
     // };
+    (($($inner:tt)*)) => { $crate::arc_ty!($($inner)*) };
+    ([$($inner:tt)*]) => { $crate::ty::Ty::<$crate::ty::TyRef>::List($crate::ty::TyRef::from($crate::arc_ty!($($inner)*)))};
+
+    ({ $($key:literal : $ty:tt),* $(,)? }) => {{
+        $crate::ty::Ty::<$crate::ty::TyRef>::AttrSet($crate::ty::AttrSetTy::<$crate::ty::TyRef>::from_internal(
+            [
+                $(($key, $crate::arc_ty!($ty)),)*
+            ],
+            None,
+        ))
+    }};
+
+    // ({ $($key:literal : $ty:tt),* $(,)? }) => {{
+    //     $crate::ty::Ty::Attrset($crate::ty::Attrset::from_internal(
+    //         [
+    //             $(($key, ty!($ty), $crate::ty::AttrSource::Unknown),)*
+    //         ],
+    //         None,
+    //     ))
+    // }};
+
+    ($arg:tt -> $($ret:tt)*) => {
+        $crate::ty::Ty::<$crate::ty::TyRef>::Lambda {
+            param: $crate::ty::TyRef::from($crate::arc_ty!($arg)),
+            body: $crate::ty::TyRef::from($crate::arc_ty!($($ret)*)),
+        }
+    };
+
+
+
 }
