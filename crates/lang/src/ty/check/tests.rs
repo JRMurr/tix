@@ -30,8 +30,6 @@ fn simple_types() {
     }
     "};
 
-    // {num: Int, str: String, bool: Bool, float: Float, add: Int -> Int, lst: List(Int)}
-
     let ty = arc_ty!({
         "num": (Int),
         "str": (String),

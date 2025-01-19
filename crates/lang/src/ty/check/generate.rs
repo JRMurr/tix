@@ -207,13 +207,13 @@ impl CheckCtx<'_> {
             }
 
             Expr::List(inner) => {
-                let list_ty = self.new_ty_var();
+                let list_elem_ty = self.new_ty_var();
                 for elem in inner {
                     let elem_ty = self.generate_constraints(constraints, *elem);
-                    constraints.unify_var(*elem, list_ty, elem_ty);
+                    constraints.unify_var(*elem, list_elem_ty, elem_ty);
                 }
 
-                list_ty
+                Ty::List(list_elem_ty).intern_ty(self)
             }
             Expr::UnaryOp { op, expr } => {
                 let ty = self.generate_constraints(constraints, *expr);
