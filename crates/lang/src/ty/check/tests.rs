@@ -23,7 +23,8 @@ fn simple_types() {
     let file = indoc! {"{
         num = 1;
         str = \"foo\";
-        # bool = true;
+        bool = true;
+        null = null;
         float = 3.14;
         add = a: b: a + b;
         lst = [(1) (2)];
@@ -33,7 +34,8 @@ fn simple_types() {
     let ty = arc_ty!({
         "num": (Int),
         "str": (String),
-        // "bool": (Bool),
+        "bool": (Bool),
+        "null": (Null),
         "float": (Float),
         "add": (Int -> Int -> Int),
         "lst": [Int]

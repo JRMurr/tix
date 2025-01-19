@@ -32,8 +32,16 @@ impl CheckCtx<'_> {
                 let lit: Ty<TyId> = lit.clone().into();
                 lit.intern_ty(self)
             }
-            Expr::Reference(_) => match self.name_res.get(e) {
-                None => self.new_ty_var(),
+            Expr::Reference(var_name) => match self.name_res.get(e) {
+                None => {
+                    // true, false, and null can be shadowed...
+                    // so if theres no hit on them return the normal types
+                    match var_name.as_str() {
+                        "true" | "false" => Ty::Primitive(PrimitiveTy::Bool).intern_ty(self),
+                        "null" => Ty::Primitive(PrimitiveTy::Null).intern_ty(self),
+                        _ => self.new_ty_var(),
+                    }
+                }
                 Some(res) => match res {
                     &ResolveResult::Definition(name) => self.ty_for_name(name),
                     ResolveResult::WithExprs(_) => {
