@@ -83,7 +83,6 @@ impl CheckCtx<'_> {
                     let mut fields = BTreeMap::new();
 
                     for &(name, default_expr) in pat.fields.iter() {
-                        // Always infer default_expr.
                         let default_ty =
                             default_expr.map(|e| self.generate_constraints(constraints, e));
                         let Some(name) = name else { continue };
@@ -122,9 +121,9 @@ impl CheckCtx<'_> {
 
                 // https://nix.dev/manual/nix/2.23/language/operators
                 match op {
-                    // TODO: need to handle operator overloading or polymorphism here....
+                    // TODO: need to handle operator overloading
                     // for now you cant concat strings and adding only works on ints...
-                    rnix::ast::BinOpKind::Add => {
+                    rnix::ast::BinOpKind::Add | rnix::ast::BinOpKind::Sub => {
                         constraints.unify_var(e, lhs_ty, rhs_ty);
 
                         // For now require that they are ints...
@@ -137,6 +136,11 @@ impl CheckCtx<'_> {
                             location: e,
                         });
                         Ty::Primitive(PrimitiveTy::Int).intern_ty(self)
+                    }
+                    rnix::ast::BinOpKind::Equal => {
+                        constraints.unify_var(e, lhs_ty, rhs_ty);
+
+                        Ty::Primitive(PrimitiveTy::Bool).intern_ty(self)
                     }
                     o => todo!("Need to handle operator {o:?}"),
                 }

@@ -240,6 +240,10 @@ impl<'db> CheckCtx<'db> {
         self.solve_constraints(constraints)
             .expect("TODO: solve error aka type error");
 
+        // TODO: could there be cases where mutually dependent TypeDefs
+        // need to be generalized together (ie)?
+        // i don't think it will cause invalid programs to type check but might make
+        // errors / canonicalized generics look weird
         for def in &group {
             let name_ty = self.ty_for_name(def.name());
             let generalized_val = self.generalize(name_ty);

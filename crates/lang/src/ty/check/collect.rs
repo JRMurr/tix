@@ -11,6 +11,8 @@ pub struct Collector<'db> {
     ctx: CheckCtx<'db>,
 }
 
+type Substitutions = HashMap<u32, u32>;
+
 impl<'db> Collector<'db> {
     pub fn new(ctx: CheckCtx<'db>) -> Self {
         Self {
@@ -48,10 +50,15 @@ impl<'db> Collector<'db> {
         let mut name_ty_map = HashMap::with_capacity(name_cnt);
         let mut expr_ty_map = HashMap::with_capacity(expr_cnt);
         for (name, ty) in name_tys {
-            name_ty_map.insert(name, self.canonicalize_type(ty));
+            // let free_vars = ctx
+            //     .poly_type_env
+            //     .get(&name)
+            //     .expect("Should have generalized all names by now");
+            let ty = self.canonicalize_type(ty, &HashMap::new());
+            name_ty_map.insert(name, ty);
         }
         for (expr, ty) in expr_tys {
-            expr_ty_map.insert(expr, self.canonicalize_type(ty));
+            expr_ty_map.insert(expr, self.canonicalize_type(ty, &HashMap::new()));
         }
 
         // dbg!(&self.ctx.table);
@@ -62,18 +69,18 @@ impl<'db> Collector<'db> {
         }
     }
 
-    fn canonicalize_type(&mut self, ty: TyId) -> ArcTy {
+    fn canonicalize_type(&mut self, ty: TyId, subs: &Substitutions) -> ArcTy {
         let i = self.ctx.table.find(ty);
         if let Some(ty) = self.cache.get(&i).cloned() {
             return ty;
         }
 
-        let ret = self.canonicalize_type_uncached(ty);
+        let ret = self.canonicalize_type_uncached(ty, subs);
         self.cache.insert(i, ret.clone());
         ret
     }
 
-    fn canonicalize_type_uncached(&mut self, ty_id: TyId) -> ArcTy {
+    fn canonicalize_type_uncached(&mut self, ty_id: TyId, subs: &Substitutions) -> ArcTy {
         // let ty = self.ctx.get_ty(ty_id);
 
         let ty = self.ctx.table.inlined_probe_value(ty_id).known();
@@ -99,12 +106,12 @@ impl<'db> Collector<'db> {
                 // }
             }
             Ty::List(inner_id) => {
-                let c_inner = self.canonicalize_type(inner_id);
+                let c_inner = self.canonicalize_type(inner_id, subs);
                 ArcTy::List(c_inner.into())
             }
             Ty::Lambda { param, body } => {
-                let c_param = self.canonicalize_type(param).into();
-                let c_body = self.canonicalize_type(body).into();
+                let c_param = self.canonicalize_type(param, subs).into();
+                let c_body = self.canonicalize_type(body, subs).into();
                 ArcTy::Lambda {
                     param: c_param,
                     body: c_body,
@@ -118,23 +125,29 @@ impl<'db> Collector<'db> {
                 //     dyn_ty: None,
                 //     rest: None,
                 // })
-                self.canonicalize_attrset(attr_set_ty)
+                self.canonicalize_attrset(attr_set_ty, subs)
             }
             Ty::Primitive(p) => ArcTy::Primitive(p),
         }
     }
 
-    fn canonicalize_attrset(&mut self, attr_set_ty: AttrSetTy<TyId>) -> ArcTy {
+    fn canonicalize_attrset(
+        &mut self,
+        attr_set_ty: AttrSetTy<TyId>,
+        subs: &Substitutions,
+    ) -> ArcTy {
         let mut new_fields = BTreeMap::<SmolStr, TyRef>::new();
         for (k, &v_id) in &attr_set_ty.fields {
-            let field_ty = self.canonicalize_type(v_id).into();
+            let field_ty = self.canonicalize_type(v_id, subs).into();
             new_fields.insert(k.clone(), field_ty);
         }
         let dyn_ty = attr_set_ty
             .dyn_ty
-            .map(|d_id| self.canonicalize_type(d_id).into());
+            .map(|d_id| self.canonicalize_type(d_id, subs).into());
 
-        let rest = attr_set_ty.rest.map(|r_id| self.canonicalize_type(r_id));
+        let rest = attr_set_ty
+            .rest
+            .map(|r_id| self.canonicalize_type(r_id, subs));
 
         // TODO: not sure if still needs this explicit merge
         // also need to figure out how to track "open" records like patterns
