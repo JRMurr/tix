@@ -41,11 +41,5 @@ fn simple_types() {
         "lst": [Int]
     });
 
-    // let ty = arc_ty!({
-    //     "stdenv": {
-    //         "mkDerivation": ({ "name": String } -> Int),
-    //     },
-    // });
-
     check(file, dbg!(ty));
 }

@@ -1,5 +1,4 @@
 mod check;
-mod infer;
 mod union_find;
 use derive_more::Debug;
 use std::{collections::BTreeMap, sync::Arc};
