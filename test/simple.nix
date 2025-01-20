@@ -33,5 +33,12 @@
     f2 = 2;
   };
 
+  test = (
+    /**
+      find me
+    */
+    a: a
+  );
+
   # sad = (a: b: a + b) "foo";
 }

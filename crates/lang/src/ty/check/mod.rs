@@ -19,6 +19,23 @@ use crate::{
 
 use super::{ArcTy, AttrSetTy, PrimitiveTy, Ty};
 
+#[salsa::tracked]
+pub fn check_file(db: &dyn crate::Db, file: NixFile) -> InferenceResult {
+    let module = crate::module(db, file);
+
+    dbg!(&module);
+
+    let name_res = crate::nameres::name_resolution(db, file);
+
+    let grouped_defs = crate::nameres::group_def(db, file);
+
+    let check = CheckCtx::new(&module, &name_res);
+
+    // dbg!(&grouped_defs);
+
+    check.infer_prog(grouped_defs)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Copy, Hash)]
 #[debug("TyId({_0:?})")]
 pub struct TyId(u32);
@@ -393,21 +410,4 @@ impl<'db> CheckCtx<'db> {
 
         set
     }
-}
-
-#[salsa::tracked]
-pub fn check_file(db: &dyn crate::Db, file: NixFile) -> InferenceResult {
-    let module = crate::module(db, file);
-
-    dbg!(&module);
-
-    let name_res = crate::nameres::name_resolution(db, file);
-
-    let grouped_defs = crate::nameres::group_def(db, file);
-
-    let check = CheckCtx::new(&module, &name_res);
-
-    // dbg!(&grouped_defs);
-
-    check.infer_prog(grouped_defs)
 }

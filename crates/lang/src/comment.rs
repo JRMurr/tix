@@ -1,8 +1,13 @@
-// this file is mostly taken from https://github.com/nix-community/nixdoc/blob/master/src/comment.rs
+use std::collections::HashMap;
 
-use rnix::ast::{self, AstToken};
-use rnix::{SyntaxNode, match_ast};
+use rnix::{
+    NodeOrToken, Root, WalkEvent,
+    ast::{self, AstToken},
+    match_ast,
+};
 use rowan::ast::AstNode;
+
+use crate::AstPtr;
 
 fn doc_text(comment: &rnix::ast::Comment) -> Option<&str> {
     let text = comment.syntax().text();
@@ -14,82 +19,68 @@ fn doc_text(comment: &rnix::ast::Comment) -> Option<&str> {
     }
 }
 
-/// Function retrieves a doc-comment from the [ast::Expr]
-///
-/// Returns an [Option<String>] of the first suitable doc-comment.
-/// Returns [None] in case no suitable comment was found.
-///
-/// Doc-comments can appear in two places for any expression
-///
-/// ```nix
-/// # (1) directly before the expression (anonymous)
-/// /** Doc */
-/// bar: bar;
-///
-/// # (2) when assigning a name.
-/// {
-///   /** Doc */
-///   foo = bar: bar;
-/// }
-/// ```
-///
-/// If the doc-comment is not found in place (1) the search continues at place (2)
-/// More precisely before the NODE_ATTRPATH_VALUE (ast)
-/// If no doc-comment was found in place (1) or (2) this function returns None.
-pub fn get_expr_docs(expr: &SyntaxNode) -> Option<String> {
-    if let Some(doc) = get_doc_comment(expr) {
-        // Found in place (1)
-        doc_text(&doc).map(|v| v.to_owned())
-    } else if let Some(ref parent) = expr.parent() {
-        match_ast! {
-            match parent {
-                ast::AttrpathValue(_) => {
-                    if let Some(doc_comment) = get_doc_comment(parent) {
-                        doc_text(&doc_comment).map(|v| v.to_owned())
-                    }else{
-                        None
-                    }
-                },
-                _ => {
-                    // Yet unhandled ast-nodes
-                    None
-                }
+// TODO: need a good way to handle doc comments that are just type aliases
+// they don't need to be associated to a node and can just "hang" out.
+// Parsing the doc comments could figure out if its just type aliases and handle it there?
+#[derive(Default, Debug)]
+pub struct DocComments {
+    /// For each node's pointer, store *all* doc comments that were associated with it.
+    /// Sometimes people gather multiple lines of doc comments, or just a single.
+    pub docs_for_node: HashMap<AstPtr, Vec<String>>,
 
-            }
-        }
-    } else {
-        // There is no parent;
-        // No further places where a doc-comment could be.
-        None
-    }
+    /// Comments that you couldn't attach to any particular node (e.g. file-level
+    /// doc or trailing comments).
+    pub orphan_docs: Vec<String>,
 }
 
-/// Looks backwards from the given expression
-/// Only whitespace or non-doc-comments are allowed in between an expression and the doc-comment.
-/// Any other Node or Token stops the peek.
-fn get_doc_comment(expr: &SyntaxNode) -> Option<rnix::ast::Comment> {
-    let mut prev = expr.prev_sibling_or_token();
-    loop {
-        match prev {
-            Some(rnix::NodeOrToken::Token(ref token)) => {
+/// First pass: walk all tokens in the file, and figure out which doc comments
+/// should be attached to which node.
+pub fn gather_doc_comments(root: &Root) -> DocComments {
+    let mut out = DocComments::default();
+
+    let mut pending_doc_comments: Vec<String> = Vec::new();
+    for event in root.syntax().preorder_with_tokens() {
+        match event {
+            WalkEvent::Enter(NodeOrToken::Token(ref token)) => {
                 match_ast! { match token {
-                    ast::Whitespace(_) => {
-                        prev = token.prev_sibling_or_token();
-                    },
-                    ast::Comment(it) => {
-                        if doc_text(&it).is_some() {
-                            break Some(it);
-                        }else{
-                            //Ignore non-doc comments.
-                            prev = token.prev_sibling_or_token();
-                        }
-                    },
-                    _ => {
-                        break None;
+                        ast::Comment(it) => {
+                            if let Some(text) = doc_text(&it) {
+                                pending_doc_comments.push(text.to_string());
+                            }
+                        },
+                        _ => {}
                     }
-                }}
+                }
             }
-            _ => break None,
-        };
+            WalkEvent::Enter(NodeOrToken::Node(node)) => {
+                if pending_doc_comments.is_empty() {
+                    continue;
+                }
+
+                let ptr = match_ast! {
+                    match node {
+                        ast::Expr(e) => Some(AstPtr::new(e.syntax())),
+                        ast::AttrpathValue(e) => Some(AstPtr::new(e.syntax())),
+                        _ => None,
+                    }
+                };
+
+                if let Some(ptr) = ptr {
+                    out.docs_for_node
+                        .entry(ptr)
+                        .or_default()
+                        .append(&mut pending_doc_comments);
+                }
+            }
+            WalkEvent::Leave(_) => {}
+        }
     }
+
+    // If there are doc comments left unassigned (e.g. they were trailing at the end
+    // of the file, or no node follows them), throw them into orphan docs
+    if !pending_doc_comments.is_empty() {
+        out.orphan_docs.append(&mut pending_doc_comments);
+    }
+
+    out
 }

@@ -6,7 +6,7 @@ use rnix::ast::{self, HasEntry};
 use rowan::ast::AstNode;
 use smol_str::SmolStr;
 
-use crate::{ModuleTypeDecMap, Pat, comment::get_expr_docs};
+use crate::{ModuleTypeDecMap, Pat};
 
 use super::{
     AstPtr, Attrpath, BindingValue, Bindings, Expr, ExprId, InterpolPart, Literal, Module,
@@ -179,13 +179,11 @@ impl LowerCtx {
             ast::Expr::LegacyLet(_legacy_let) => todo!(),
         };
 
-        let expr_id = self.alloc_expr(expr, ptr);
+        // if let Some(doc_str) = get_expr_docs(rnix_expr.syntax()) {
+        //     self.type_dec_map.insert_expr_dec(expr_id, doc_str);
+        // }
 
-        if let Some(doc_str) = get_expr_docs(rnix_expr.syntax()) {
-            self.type_dec_map.insert_expr_dec(expr_id, doc_str);
-        }
-
-        expr_id
+        self.alloc_expr(expr, ptr)
     }
 
     fn lower_attrpath_opt(&mut self, attrpath: Option<ast::Attrpath>) -> Attrpath {
@@ -207,7 +205,7 @@ impl LowerCtx {
     fn lower_string(&mut self, s: &rnix::ast::Str) -> ExprId {
         let ptr = AstPtr::new(s.syntax());
 
-        let expr = if let Some(lit) = get_str_literal(&s) {
+        let expr = if let Some(lit) = get_str_literal(s) {
             Expr::Literal(Literal::String(lit.into()))
         } else {
             let parts = s.normalized_parts();
