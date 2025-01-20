@@ -14,6 +14,7 @@ mod tests;
 
 use std::{collections::HashMap, ops};
 
+use comment::gather_doc_comments;
 use db::NixFile;
 pub use db::{Db, RootDatabase};
 use la_arena::{Arena, ArenaMap, Idx as Id};
@@ -27,7 +28,9 @@ pub use ty::check_file;
 pub fn module_and_source_maps(db: &dyn crate::Db, file: NixFile) -> (Module, ModuleSourceMap) {
     let root = db.parse_file(file);
 
-    lower(root)
+    let docs = gather_doc_comments(&root);
+
+    lower(root, docs)
 }
 
 #[salsa::tracked]
@@ -105,20 +108,31 @@ impl ops::Index<NameId> for Module {
 
 pub type AstPtr = rowan::ast::SyntaxNodePtr<NixLanguage>;
 
-pub type TypeDecl = String; // TODO: real type
+pub type DocComment = String; // TODO: real type
+
+pub type DocComments = Vec<DocComment>;
 
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct ModuleTypeDecMap {
-    expr_map: ArenaMap<ExprId, TypeDecl>,
+    expr_map: ArenaMap<ExprId, DocComments>,
+    name_map: ArenaMap<NameId, DocComments>,
 }
 
 impl ModuleTypeDecMap {
-    pub fn dec_for_expr(&self, expr_id: ExprId) -> Option<&TypeDecl> {
+    pub fn docs_for_expr(&self, expr_id: ExprId) -> Option<&DocComments> {
         self.expr_map.get(expr_id)
     }
 
-    pub fn insert_expr_dec(&mut self, expr_id: ExprId, ty: TypeDecl) {
-        self.expr_map.insert(expr_id, ty);
+    pub fn insert_expr(&mut self, expr_id: ExprId, comments: DocComments) {
+        self.expr_map.insert(expr_id, comments);
+    }
+
+    pub fn docs_for_name(&self, name_id: NameId) -> Option<&DocComments> {
+        self.name_map.get(name_id)
+    }
+
+    pub fn insert_name(&mut self, name_id: NameId, comments: DocComments) {
+        self.name_map.insert(name_id, comments);
     }
 }
 

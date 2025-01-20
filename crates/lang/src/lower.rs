@@ -10,24 +10,24 @@ use super::{
     ModuleSourceMap, Name, NameId, NameKind,
     ast_utils::{AttrKind, get_str_literal, name_kind_of_set, name_of_ident},
 };
-use crate::{ModuleTypeDecMap, Pat};
+use crate::{DocComments, ModuleTypeDecMap, Pat, comment::DocCommentCtx};
 
 struct LowerCtx {
-    // TODO: might want a mapping here of exprs/bindings to their doc/type comments
-    // can get later with the source map but might be slower?
     exprs: Arena<Expr>,
     names: Arena<Name>,
     source_map: ModuleSourceMap,
-    type_dec_map: ModuleTypeDecMap,
+    doc_comments: DocCommentCtx,
+    type_dec_map: ModuleTypeDecMap, // should this just be a part of the source map?
 }
 
 #[allow(dead_code)]
-pub fn lower(root: rnix::Root) -> (Module, ModuleSourceMap) {
+pub fn lower(root: rnix::Root, doc_comments: DocCommentCtx) -> (Module, ModuleSourceMap) {
     let mut ctx = LowerCtx {
         exprs: Arena::new(),
         names: Arena::new(),
         source_map: ModuleSourceMap::default(),
         type_dec_map: ModuleTypeDecMap::default(),
+        doc_comments,
     };
 
     let entry = ctx.lower_expr_opt(root.expr());
@@ -44,12 +44,24 @@ impl LowerCtx {
     fn alloc_expr(&mut self, expr: Expr, ptr: AstPtr) -> ExprId {
         let id = self.exprs.alloc(expr);
         self.source_map.insert_expr(id, ptr);
+        if let Some(docs) = self.doc_comments.get_docs(&ptr).cloned() {
+            self.type_dec_map.insert_expr(id, docs);
+        }
         id
     }
 
-    fn alloc_name(&mut self, text: SmolStr, kind: NameKind, ptr: AstPtr) -> NameId {
+    fn alloc_name(
+        &mut self,
+        text: SmolStr,
+        kind: NameKind,
+        ptr: AstPtr,
+        doc_comments: Option<DocComments>,
+    ) -> NameId {
         let id = self.names.alloc(Name { text, kind });
         self.source_map.insert_name(id, ptr);
+        if let Some(docs) = doc_comments {
+            self.type_dec_map.insert_name(id, docs);
+        }
         id
     }
 
@@ -177,10 +189,6 @@ impl LowerCtx {
             ast::Expr::LegacyLet(_legacy_let) => todo!(),
         };
 
-        // if let Some(doc_str) = get_expr_docs(rnix_expr.syntax()) {
-        //     self.type_dec_map.insert_expr_dec(expr_id, doc_str);
-        // }
-
         self.alloc_expr(expr, ptr)
     }
 
@@ -229,7 +237,7 @@ impl LowerCtx {
         let lower_name = |this: &mut Self, node: ast::Ident, kind: NameKind| -> NameId {
             let ptr = AstPtr::new(node.syntax());
             let text = name_of_ident(&node).expect("Should have name");
-            this.alloc_name(text, kind, ptr)
+            this.alloc_name(text, kind, ptr, None) // TODO: doc comments?
         };
 
         let (param, pat) = lam.param().map_or((None, None), |param| match param {
@@ -330,6 +338,8 @@ impl MergingSet {
     }
 
     fn merge_attrpath_val(&mut self, ctx: &mut LowerCtx, apv: rnix::ast::AttrpathValue) {
+        let doc_comments = ctx.doc_comments.get_docs_for_syntax(apv.syntax()).cloned();
+
         let value = BindingValueKind::Expr(apv.value());
 
         let attr_path = if let Some(apv) = apv.attrpath() {
@@ -349,7 +359,7 @@ impl MergingSet {
             todo!("Implicit attrs not support yet")
         }
 
-        self.merge_attr_value(ctx, attr, value);
+        self.merge_attr_value(ctx, attr, value, doc_comments);
     }
 
     fn merge_inherit(&mut self, ctx: &mut LowerCtx, inherit: ast::Inherit) {
@@ -387,7 +397,8 @@ impl MergingSet {
                     BindingValue::Inherit(ref_expr)
                 }
             };
-            self.merge_static_value(ctx, key, attr_ptr, value);
+            // TODO: track doc_comments here
+            self.merge_static_value(ctx, key, attr_ptr, value, None);
         }
     }
 
@@ -397,6 +408,7 @@ impl MergingSet {
         key: SmolStr,
         attr_ptr: AstPtr,
         value: BindingValue,
+        doc_comments: Option<DocComments>,
     ) {
         self.statics
             .entry(key.clone())
@@ -417,13 +429,19 @@ impl MergingSet {
                 // );
             })
             .or_insert_with(|| MergingEntry {
-                name: ctx.alloc_name(key, self.name_kind, attr_ptr),
+                name: ctx.alloc_name(key, self.name_kind, attr_ptr, doc_comments),
                 set: None,
                 value: Some((attr_ptr, value)),
             });
     }
 
-    fn merge_attr_value(&mut self, ctx: &mut LowerCtx, attr: ast::Attr, value: BindingValueKind) {
+    fn merge_attr_value(
+        &mut self,
+        ctx: &mut LowerCtx,
+        attr: ast::Attr,
+        value: BindingValueKind,
+        doc_comments: Option<DocComments>,
+    ) {
         let attr_ptr = AstPtr::new(attr.syntax());
 
         match AttrKind::of(attr) {
@@ -432,7 +450,13 @@ impl MergingSet {
                 match value {
                     BindingValueKind::Expr(e) => {
                         let e = ctx.lower_expr_opt(e);
-                        self.merge_static_value(ctx, key, attr_ptr, BindingValue::Expr(e));
+                        self.merge_static_value(
+                            ctx,
+                            key,
+                            attr_ptr,
+                            BindingValue::Expr(e),
+                            doc_comments,
+                        );
                     }
                     _ => todo!("handle other binding values"),
                 }
