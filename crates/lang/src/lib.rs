@@ -3,6 +3,7 @@
 
 // pub mod expr_table;
 mod ast_utils;
+mod comment;
 mod db;
 mod lower;
 mod nameres;
@@ -20,7 +21,7 @@ pub use ty::check_file;
 
 use std::{collections::HashMap, ops};
 
-use la_arena::{Arena, Idx as Id};
+use la_arena::{Arena, ArenaMap, Idx as Id};
 use rnix::NixLanguage;
 use smol_str::SmolStr;
 
@@ -67,6 +68,7 @@ pub struct Module {
     exprs: Arena<Expr>,
     names: Arena<Name>,
     pub entry_expr: ExprId,
+    type_dec_map: ModuleTypeDecMap,
 }
 
 impl Module {
@@ -105,12 +107,29 @@ impl ops::Index<NameId> for Module {
 
 pub type AstPtr = rowan::ast::SyntaxNodePtr<NixLanguage>;
 
+pub type TypeDecl = String; // TODO: real type
+
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
+pub struct ModuleTypeDecMap {
+    expr_map: ArenaMap<ExprId, TypeDecl>,
+}
+
+impl ModuleTypeDecMap {
+    pub fn dec_for_expr(&self, expr_id: ExprId) -> Option<&TypeDecl> {
+        self.expr_map.get(expr_id)
+    }
+
+    pub fn insert_expr_dec(&mut self, expr_id: ExprId, ty: TypeDecl) {
+        self.expr_map.insert(expr_id, ty);
+    }
+}
+
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct ModuleSourceMap {
     expr_map: HashMap<AstPtr, ExprId>,
-    expr_map_rev: HashMap<ExprId, AstPtr>,
+    expr_map_rev: ArenaMap<ExprId, AstPtr>,
     name_map: HashMap<AstPtr, NameId>,
-    name_map_rev: HashMap<NameId, AstPtr>, // TODO: nil has this a Vec<AstPtr>, will probs matter later
+    name_map_rev: ArenaMap<NameId, AstPtr>, // TODO: nil has this a Vec<AstPtr>, will probs matter later
 }
 
 impl ModuleSourceMap {
@@ -126,7 +145,7 @@ impl ModuleSourceMap {
     }
 
     pub fn node_for_expr(&self, expr_id: ExprId) -> Option<AstPtr> {
-        self.expr_map_rev.get(&expr_id).cloned()
+        self.expr_map_rev.get(expr_id).cloned()
     }
 
     pub fn name_for_node(&self, node: AstPtr) -> Option<NameId> {
@@ -135,7 +154,7 @@ impl ModuleSourceMap {
 
     pub fn nodes_for_name(&self, name_id: NameId) -> impl Iterator<Item = AstPtr> + '_ {
         self.name_map_rev
-            .get(&name_id)
+            .get(name_id)
             .into_iter()
             // .flatten()
             .cloned()

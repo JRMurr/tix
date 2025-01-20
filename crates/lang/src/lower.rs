@@ -6,7 +6,7 @@ use rnix::ast::{self, HasEntry};
 use rowan::ast::AstNode;
 use smol_str::SmolStr;
 
-use crate::Pat;
+use crate::{ModuleTypeDecMap, Pat, comment::get_expr_docs};
 
 use super::{
     AstPtr, Attrpath, BindingValue, Bindings, Expr, ExprId, InterpolPart, Literal, Module,
@@ -20,6 +20,7 @@ struct LowerCtx {
     exprs: Arena<Expr>,
     names: Arena<Name>,
     source_map: ModuleSourceMap,
+    type_dec_map: ModuleTypeDecMap,
 }
 
 #[allow(dead_code)]
@@ -28,6 +29,7 @@ pub fn lower(root: rnix::Root) -> (Module, ModuleSourceMap) {
         exprs: Arena::new(),
         names: Arena::new(),
         source_map: ModuleSourceMap::default(),
+        type_dec_map: ModuleTypeDecMap::default(),
     };
 
     let entry = ctx.lower_expr_opt(root.expr());
@@ -35,6 +37,7 @@ pub fn lower(root: rnix::Root) -> (Module, ModuleSourceMap) {
         exprs: ctx.exprs,
         names: ctx.names,
         entry_expr: entry,
+        type_dec_map: ctx.type_dec_map,
     };
     (module, ctx.source_map)
 }
@@ -63,7 +66,7 @@ impl LowerCtx {
     fn lower_expr(&mut self, rnix_expr: ast::Expr) -> ExprId {
         let ptr = AstPtr::new(rnix_expr.syntax());
 
-        let expr: Expr = match rnix_expr {
+        let expr: Expr = match &rnix_expr {
             ast::Expr::Apply(apply) => {
                 let fun = self.lower_expr_opt(apply.lambda());
                 let arg = self.lower_expr_opt(apply.argument());
@@ -124,7 +127,7 @@ impl LowerCtx {
             }
             ast::Expr::Lambda(lambda) => return self.lower_lambda(lambda, ptr),
             ast::Expr::LetIn(let_in) => {
-                let bindings = MergingSet::desugar(self, NameKind::LetIn, &let_in).finish(self);
+                let bindings = MergingSet::desugar(self, NameKind::LetIn, let_in).finish(self);
                 let body = self.lower_expr_opt(let_in.body());
                 Expr::LetIn { bindings, body }
             }
@@ -146,7 +149,7 @@ impl LowerCtx {
             ast::Expr::Paren(paren) => return self.lower_expr_opt(paren.expr()),
             ast::Expr::AttrSet(attr_set) => {
                 let bindings =
-                    MergingSet::desugar(self, name_kind_of_set(&attr_set), &attr_set).finish(self);
+                    MergingSet::desugar(self, name_kind_of_set(attr_set), attr_set).finish(self);
 
                 Expr::AttrSet {
                     is_rec: attr_set.rec_token().is_some(),
@@ -161,7 +164,7 @@ impl LowerCtx {
                 Expr::UnaryOp { op, expr }
             }
             ast::Expr::Ident(ident) => {
-                Expr::Reference(name_of_ident(&ident).expect("Should have name"))
+                Expr::Reference(name_of_ident(ident).expect("Should have name"))
             }
             ast::Expr::Assert(assert) => {
                 let cond = self.lower_expr_opt(assert.condition());
@@ -176,7 +179,13 @@ impl LowerCtx {
             ast::Expr::LegacyLet(_legacy_let) => todo!(),
         };
 
-        self.alloc_expr(expr, ptr)
+        let expr_id = self.alloc_expr(expr, ptr);
+
+        if let Some(doc_str) = get_expr_docs(rnix_expr.syntax()) {
+            self.type_dec_map.insert_expr_dec(expr_id, doc_str);
+        }
+
+        expr_id
     }
 
     fn lower_attrpath_opt(&mut self, attrpath: Option<ast::Attrpath>) -> Attrpath {
@@ -190,12 +199,12 @@ impl LowerCtx {
                     let ptr = AstPtr::new(ident.syntax());
                     self.alloc_expr(Expr::Literal(Literal::String(name)), ptr)
                 }
-                ast::Attr::Str(s) => self.lower_string(s),
+                ast::Attr::Str(s) => self.lower_string(&s),
             })
             .collect()
     }
 
-    fn lower_string(&mut self, s: rnix::ast::Str) -> ExprId {
+    fn lower_string(&mut self, s: &rnix::ast::Str) -> ExprId {
         let ptr = AstPtr::new(s.syntax());
 
         let expr = if let Some(lit) = get_str_literal(&s) {
@@ -219,7 +228,7 @@ impl LowerCtx {
         })
     }
 
-    fn lower_lambda(&mut self, lam: ast::Lambda, ptr: AstPtr) -> ExprId {
+    fn lower_lambda(&mut self, lam: &ast::Lambda, ptr: AstPtr) -> ExprId {
         // let mut param_locs = HashMap::new();
         let lower_name = |this: &mut Self, node: ast::Ident, kind: NameKind| -> NameId {
             let ptr = AstPtr::new(node.syntax());

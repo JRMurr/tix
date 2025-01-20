@@ -399,6 +399,8 @@ impl<'db> CheckCtx<'db> {
 pub fn check_file(db: &dyn crate::Db, file: NixFile) -> InferenceResult {
     let module = crate::module(db, file);
 
+    dbg!(&module);
+
     let name_res = crate::nameres::name_resolution(db, file);
 
     let grouped_defs = crate::nameres::group_def(db, file);
