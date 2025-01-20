@@ -1,7 +1,7 @@
+use std::{error::Error, path::PathBuf};
+
 use clap::Parser;
 use lang::RootDatabase;
-use std::error::Error;
-use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]

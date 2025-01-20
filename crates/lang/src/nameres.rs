@@ -4,9 +4,8 @@ use la_arena::{Arena, Idx as Id};
 use petgraph::graph::DiGraph;
 use smol_str::SmolStr;
 
-use crate::{Bindings, db::NixFile, module};
-
 use super::{BindingValue, Expr, ExprId, Module, NameId};
+use crate::{Bindings, db::NixFile, module};
 
 pub type ScopeId = Id<ScopeData>;
 

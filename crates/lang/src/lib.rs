@@ -12,18 +12,16 @@ mod ty;
 #[cfg(test)]
 mod tests;
 
-use db::NixFile;
-pub use db::{Db, RootDatabase};
-use lower::lower;
-pub use nameres::scopes;
-
-pub use ty::check_file;
-
 use std::{collections::HashMap, ops};
 
+use db::NixFile;
+pub use db::{Db, RootDatabase};
 use la_arena::{Arena, ArenaMap, Idx as Id};
+use lower::lower;
+pub use nameres::scopes;
 use rnix::NixLanguage;
 use smol_str::SmolStr;
+pub use ty::check_file;
 
 #[salsa::tracked]
 pub fn module_and_source_maps(db: &dyn crate::Db, file: NixFile) -> (Module, ModuleSourceMap) {

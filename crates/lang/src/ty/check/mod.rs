@@ -5,19 +5,19 @@ mod solve;
 #[cfg(test)]
 mod tests;
 
+use std::collections::{HashMap, HashSet};
+
 use collect::Collector;
 use derive_more::Debug;
 use ena::unify::{self, InPlaceUnificationTable, UnifyKey, UnifyValue};
-use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 
+use super::{ArcTy, AttrSetTy, PrimitiveTy, Ty};
 use crate::{
     ExprId, Module, NameId,
     db::NixFile,
     nameres::{DependentGroup, GroupedDefs, NameResolution},
 };
-
-use super::{ArcTy, AttrSetTy, PrimitiveTy, Ty};
 
 #[salsa::tracked]
 pub fn check_file(db: &dyn crate::Db, file: NixFile) -> InferenceResult {

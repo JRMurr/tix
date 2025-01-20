@@ -1,8 +1,7 @@
-use crate::{arc_ty, tests::TestDatabase, ty::ArcTy};
-
 use indoc::indoc;
 
 use super::check_file;
+use crate::{arc_ty, tests::TestDatabase, ty::ArcTy};
 
 #[track_caller]
 fn check(src: &str, expected: ArcTy) {

@@ -2,9 +2,8 @@ use std::collections::{BTreeMap, HashMap};
 
 use smol_str::SmolStr;
 
-use crate::ty::{ArcTy, AttrSetTy, Ty, TyRef};
-
 use super::{CheckCtx, InferenceResult, TyId};
+use crate::ty::{ArcTy, AttrSetTy, Ty, TyRef};
 
 pub struct Collector<'db> {
     cache: HashMap<TyId, ArcTy>,

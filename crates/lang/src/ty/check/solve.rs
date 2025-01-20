@@ -1,5 +1,6 @@
-use smol_str::SmolStr;
 use std::collections::HashSet;
+
+use smol_str::SmolStr;
 
 use super::{
     AttrSetTy, CheckCtx, Constraint, ConstraintCtx, ConstraintKind, InferenceError, Ty, TyId,

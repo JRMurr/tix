@@ -1,10 +1,10 @@
 mod check;
-use derive_more::Debug;
 use std::{collections::BTreeMap, sync::Arc};
-// use miette::Diagnostic;
-use smol_str::SmolStr;
 
 pub use check::check_file;
+use derive_more::Debug;
+// use miette::Diagnostic;
+use smol_str::SmolStr;
 
 // the mono type
 #[derive(Debug, Clone, PartialEq, Eq)]

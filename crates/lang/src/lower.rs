@@ -2,17 +2,15 @@ use std::collections::HashMap;
 
 use la_arena::Arena;
 use rnix::ast::{self, HasEntry};
-
 use rowan::ast::AstNode;
 use smol_str::SmolStr;
-
-use crate::{ModuleTypeDecMap, Pat};
 
 use super::{
     AstPtr, Attrpath, BindingValue, Bindings, Expr, ExprId, InterpolPart, Literal, Module,
     ModuleSourceMap, Name, NameId, NameKind,
     ast_utils::{AttrKind, get_str_literal, name_kind_of_set, name_of_ident},
 };
+use crate::{ModuleTypeDecMap, Pat};
 
 struct LowerCtx {
     // TODO: might want a mapping here of exprs/bindings to their doc/type comments

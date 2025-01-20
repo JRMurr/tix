@@ -2,13 +2,12 @@ use std::collections::BTreeMap;
 
 use smol_str::SmolStr;
 
+use super::{CheckCtx, Constraint, ConstraintCtx, ConstraintKind, TyId};
 use crate::{
     BindingValue, Bindings, Expr, ExprId, Literal,
     nameres::ResolveResult,
     ty::{AttrSetTy, PrimitiveTy, Ty},
 };
-
-use super::{CheckCtx, Constraint, ConstraintCtx, ConstraintKind, TyId};
 
 impl CheckCtx<'_> {
     pub(super) fn generate_constraints(
