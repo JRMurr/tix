@@ -15,12 +15,12 @@ pub fn parse_comment_text(source: &str) -> Result<Pairs<Rule>, ParseError> {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub struct HaskellTypeDecl {
+pub struct TypeDecl {
     pub identifier: SmolStr,
     pub type_expr: String,
 }
 
-pub fn collect_type_decls(pairs: Pairs<Rule>) -> Vec<HaskellTypeDecl> {
+pub fn collect_type_decls(pairs: Pairs<Rule>) -> Vec<TypeDecl> {
     let mut decls = Vec::new();
 
     for pair in pairs {
@@ -34,7 +34,7 @@ pub fn collect_type_decls(pairs: Pairs<Rule>) -> Vec<HaskellTypeDecl> {
                 let ident_rule = inner.next().unwrap(); // identifier
                 let expr_rule = inner.next().unwrap(); // type_expr
 
-                decls.push(HaskellTypeDecl {
+                decls.push(TypeDecl {
                     identifier: ident_rule.as_str().into(),
                     type_expr: expr_rule.as_str().to_string(),
                 });
@@ -83,19 +83,19 @@ mod tests {
         let decs = collect_type_decls(pairs);
 
         let expected = vec![
-            HaskellTypeDecl {
+            TypeDecl {
                 identifier: "mapMe".into(),
                 type_expr: "[a] -> (a -> b) -> [b]".to_string(),
             },
-            HaskellTypeDecl {
+            TypeDecl {
                 identifier: "compose".into(),
                 type_expr: "(b -> c) -> (a -> b) -> a -> c".to_string(),
             },
-            HaskellTypeDecl {
+            TypeDecl {
                 identifier: "const_var".into(),
                 type_expr: "int".to_string(),
             },
-            HaskellTypeDecl {
+            TypeDecl {
                 identifier: "const_lst".into(),
                 type_expr: "[ int ]".to_string(),
             },
