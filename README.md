@@ -10,3 +10,5 @@ A very simple/basic type checker for nix.
   - read over its source a lot and took some code from there to get started
   - Long term would be nice to merge into their. For now re-implementing for my own understanding and ease of messing around
 - https://github.com/nix-community/nixdoc stole some parsing logic from there
+- [nix types rfc](https://github.com/hsjobeki/nix-types/blob/main/docs/README.md#nix-types-rfc-draft)
+  - good spec for parsing doc comments

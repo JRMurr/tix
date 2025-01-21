@@ -1,0 +1,56 @@
+WHITESPACE     = _{ " " | "\t" }
+NEWLINE        = _{ "\r\n" | "\n" }
+ANY_WHITESPACE =  { WHITESPACE | NEWLINE }
+
+comment_content = {
+    SOI ~ (type_block | other_text)* ~ EOI
+}
+
+// If we see "type:", then it's either a triple-tick enclosure or un-fenced content.
+type_block = {
+    "type:" ~ (WHITESPACE | NEWLINE)* // optional spacing/newlines
+  ~ ("```" ~ block_content ~ "```" // triple-tick-fenced
+  | block_content // free-text (unfenced)
+  )
+}
+
+// Everything else that’s not a `type_block`.
+other_text = { (!"type:" ~ ANY)+ }
+
+// -------------------------------------------------------------------------
+// The unified content rule for types
+// -------------------------------------------------------------------------
+block_content = {
+    (ANY_WHITESPACE)* ~ (type_line)+ ~ (ANY_WHITESPACE)*
+}
+
+// A “type line” is `identifier :: type_expr`, e.g. `mapMe :: [a] -> (a -> b) -> [b]`.
+type_line = {
+    (ANY_WHITESPACE)* ~ identifier ~ "::" ~ type_expr ~ (NEWLINE | EOI)
+}
+
+// Identifiers: allow alphanumeric plus underscores
+identifier = @{
+    ASCII_ALPHA ~ (ASCII_ALPHANUMERIC | "_")*
+}
+
+// One segment in an arrow chain can be parenthesized, a list, or a simple/base type variable.
+// A minimal arrow-based type expression, e.g. `Int -> String`, `[a] -> (a -> b) -> [b]`.
+type_expr = {
+    arrow_segment ~ ("->" ~ arrow_segment)*
+}
+
+// One segment in an arrow chain can be parenthesized, a list, or a simple/base type variable.
+arrow_segment = { paren_type | list_type | simple_type }
+
+paren_type = {
+    "(" ~ type_expr ~ ")"
+}
+
+list_type = {
+    "[" ~ type_expr ~ "]"
+}
+
+simple_type = @{
+    identifier
+}

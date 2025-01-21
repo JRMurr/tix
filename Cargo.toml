@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/cli", "crates/lang"]
+members = ["crates/cli", "crates/comment_parser", "crates/lang"]
 resolver = "2"
 
 
