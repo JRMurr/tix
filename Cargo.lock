@@ -218,6 +218,7 @@ version = "0.1.0"
 dependencies = [
  "pest",
  "pest_derive",
+ "smol_str",
 ]
 
 [[package]]

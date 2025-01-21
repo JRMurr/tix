@@ -1,5 +1,6 @@
 use pest::{Parser, iterators::Pairs};
 use pest_derive::Parser;
+use smol_str::SmolStr;
 
 #[derive(Parser)]
 #[grammar = "comment.pest"]
@@ -15,7 +16,7 @@ pub fn parse_comment_text(source: &str) -> Result<Pairs<Rule>, ParseError> {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct HaskellTypeDecl {
-    pub identifier: String,
+    pub identifier: SmolStr,
     pub type_expr: String,
 }
 
@@ -34,7 +35,7 @@ pub fn collect_type_decls(pairs: Pairs<Rule>) -> Vec<HaskellTypeDecl> {
                 let expr_rule = inner.next().unwrap(); // type_expr
 
                 decls.push(HaskellTypeDecl {
-                    identifier: ident_rule.as_str().to_string(),
+                    identifier: ident_rule.as_str().into(),
                     type_expr: expr_rule.as_str().to_string(),
                 });
             }
@@ -71,15 +72,15 @@ mod tests {
 
         let expected = vec![
             HaskellTypeDecl {
-                identifier: "mapMe".to_string(),
+                identifier: "mapMe".into(),
                 type_expr: "[a] -> (a -> b) -> [b]".to_string(),
             },
             HaskellTypeDecl {
-                identifier: "compose".to_string(),
+                identifier: "compose".into(),
                 type_expr: "(b -> c) -> (a -> b) -> a -> c".to_string(),
             },
             HaskellTypeDecl {
-                identifier: "const_var".to_string(),
+                identifier: "const_var".into(),
                 type_expr: "int".to_string(),
             },
         ];

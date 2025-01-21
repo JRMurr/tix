@@ -6,3 +6,4 @@ resolver = "2"
 [workspace.dependencies]
 miette = { version = "7.4.0" }
 thiserror = "2.0.9"
+smol_str = "0.3.2"

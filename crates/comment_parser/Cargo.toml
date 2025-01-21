@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 pest = "2"
 pest_derive = "2"
+smol_str = { workspace = true }
