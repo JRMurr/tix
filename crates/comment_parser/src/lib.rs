@@ -39,11 +39,22 @@ pub fn collect_type_decls(pairs: Pairs<Rule>) -> Vec<HaskellTypeDecl> {
                     type_expr: expr_rule.as_str().to_string(),
                 });
             }
-            // Recurse or skip other rules as needed
-            Rule::comment_content | Rule::arrow_segment | Rule::type_expr => {
+            Rule::comment_content => {
                 decls.extend(collect_type_decls(pair.into_inner()));
             }
-            _ => {}
+            Rule::other_text
+            | Rule::EOI
+            | Rule::WHITESPACE
+            | Rule::NEWLINE
+            | Rule::ANY_WHITESPACE => {}
+            Rule::arrow_segment
+            | Rule::type_expr
+            | Rule::identifier
+            | Rule::paren_type
+            | Rule::list_type
+            | Rule::simple_type => {
+                unreachable!("Should be handle by type line")
+            }
         }
     }
 

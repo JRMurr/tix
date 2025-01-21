@@ -1,6 +1,6 @@
 WHITESPACE     = _{ " " | "\t" }
 NEWLINE        = _{ "\r\n" | "\n" }
-ANY_WHITESPACE =  { WHITESPACE | NEWLINE }
+ANY_WHITESPACE = _{ WHITESPACE | NEWLINE }
 
 comment_content = {
     SOI ~ (type_block | other_text)* ~ EOI
@@ -15,7 +15,7 @@ type_block = {
 }
 
 // Everything else that’s not a `type_block`.
-other_text = { (!"type:" ~ ANY)+ }
+other_text = _{ (!"type:" ~ ANY)+ }
 
 // -------------------------------------------------------------------------
 // The unified content rule for types
