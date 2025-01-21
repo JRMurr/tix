@@ -63,6 +63,7 @@ mod tests {
         mapMe :: [a] -> (a -> b) -> [b]
         compose :: (b -> c) -> (a -> b) -> a -> c
         const_var :: int
+        const_lst :: [ int ]
         ```
         Some more doc lines
     "#;
@@ -82,6 +83,10 @@ mod tests {
             HaskellTypeDecl {
                 identifier: "const_var".into(),
                 type_expr: "int".to_string(),
+            },
+            HaskellTypeDecl {
+                identifier: "const_lst".into(),
+                type_expr: "[ int ]".to_string(),
             },
         ];
 
