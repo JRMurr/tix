@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 
 use smol_str::SmolStr;
 
-use super::{CheckCtx, Constraint, ConstraintCtx, ConstraintKind, TyId};
+use super::{BinOverloadConstraint, CheckCtx, Constraint, ConstraintCtx, ConstraintKind, TyId};
 use crate::{
-    BinOP, BindingValue, Bindings, Expr, ExprId, Literal, NormalBinOp,
+    BinOP, BindingValue, Bindings, Expr, ExprId, Literal, NormalBinOp, OverloadBinOp,
     nameres::ResolveResult,
     ty::{AttrSetTy, PrimitiveTy, Ty},
 };
@@ -120,21 +120,33 @@ impl CheckCtx<'_> {
 
                 // https://nix.dev/manual/nix/2.23/language/operators
                 match op {
-                    // TODO: need to handle operator overloading
-                    // for now you cant concat strings and adding only works on ints...
-                    BinOP::Overload(_) => {
-                        constraints.unify_var(e, lhs_ty, rhs_ty);
+                    BinOP::Overload(op) => {
+                        let ret_ty = self.new_ty_var();
 
-                        // For now require that they are ints...
-                        // could be smarter later...
+                        // constraints.unify_var(e, lhs_ty, rhs_ty);
+
+                        // // For now require that they are ints...
+                        // // could be smarter later...
+                        // constraints.add(Constraint {
+                        //     kind: ConstraintKind::Eq(
+                        //         lhs_ty,
+                        //         Ty::Primitive(PrimitiveTy::Int).intern_ty(self),
+                        //     ),
+                        //     location: e,
+                        // });
+                        // Ty::Primitive(PrimitiveTy::Int).intern_ty(self)
+
                         constraints.add(Constraint {
-                            kind: ConstraintKind::Eq(
-                                lhs_ty,
-                                Ty::Primitive(PrimitiveTy::Int).intern_ty(self),
-                            ),
+                            kind: ConstraintKind::BinOpOverload(BinOverloadConstraint {
+                                op: *op,
+                                lhs: lhs_ty,
+                                rhs: rhs_ty,
+                                ret_val: ret_ty,
+                            }),
                             location: e,
                         });
-                        Ty::Primitive(PrimitiveTy::Int).intern_ty(self)
+
+                        ret_ty
                     }
                     BinOP::Normal(NormalBinOp::Bool(_)) => {
                         let bool_ty = Ty::Primitive(PrimitiveTy::Bool).intern_ty(self);

@@ -135,12 +135,20 @@ pub struct Constraint {
     location: ExprId,
 }
 
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Clone, Eq)]
 pub enum ConstraintKind {
     Eq(TyId, TyId),
-    BinOpOverload(OverloadBinOp, TyId, TyId),
+    BinOpOverload(BinOverloadConstraint),
     // TODO: could this be combined with the above? Its only one case so not a huge deal..
     NegationOverload(TyId),
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct BinOverloadConstraint {
+    op: OverloadBinOp,
+    lhs: TyId,
+    rhs: TyId,
+    ret_val: TyId,
 }
 
 type Substitutions = HashMap<u32, TyId>;
@@ -198,6 +206,9 @@ enum InferenceError {
 
     #[error("Can not negate non number type {0:?}")]
     InvalidNegation(Ty<TyId>),
+
+    #[error("Can not do binary operation ({1:?}) ({0:?}) ({2:?})")]
+    InvalidBinOp(OverloadBinOp, Ty<TyId>, Ty<TyId>),
 }
 
 #[derive(Debug, Clone)]

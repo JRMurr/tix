@@ -272,7 +272,7 @@ pub enum Expr {
     PathInterpolation(Box<[InterpolPart<SmolStr>]>),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OverloadBinOp {
     Add,
     Sub,
@@ -280,14 +280,20 @@ pub enum OverloadBinOp {
     Div,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl OverloadBinOp {
+    pub fn is_add(&self) -> bool {
+        matches!(self, OverloadBinOp::Add)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BoolBinOp {
     And,
     Implication,
     Or,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExprBinOp {
     Less,
     LessOrEq,
@@ -297,7 +303,7 @@ pub enum ExprBinOp {
     Equal,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NormalBinOp {
     Expr(ExprBinOp),
     Bool(BoolBinOp),
@@ -305,7 +311,7 @@ pub enum NormalBinOp {
     AttrUpdate,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinOP {
     Overload(OverloadBinOp),
     Normal(NormalBinOp),

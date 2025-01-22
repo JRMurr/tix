@@ -40,10 +40,11 @@ pub enum PrimitiveTy {
 
 impl PrimitiveTy {
     pub fn is_number(&self) -> bool {
-        match self {
-            PrimitiveTy::Float | PrimitiveTy::Int => true,
-            _ => false,
-        }
+        matches!(self, PrimitiveTy::Float | PrimitiveTy::Int)
+    }
+
+    pub fn is_float(&self) -> bool {
+        matches!(self, PrimitiveTy::Float)
     }
 }
 

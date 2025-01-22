@@ -3,10 +3,10 @@ use std::collections::HashSet;
 use smol_str::SmolStr;
 
 use super::{
-    AttrSetTy, CheckCtx, Constraint, ConstraintCtx, ConstraintKind, InferenceError, Ty, TyId,
-    TypeVariableValue,
+    AttrSetTy, BinOverloadConstraint, CheckCtx, Constraint, ConstraintCtx, ConstraintKind,
+    InferenceError, Ty, TyId, TypeVariableValue,
 };
-use crate::PrimitiveTy;
+use crate::{BinOP, OverloadBinOp, PrimitiveTy};
 
 #[derive(Debug, PartialEq, Eq)]
 enum SolveResult {
@@ -79,7 +79,9 @@ impl CheckCtx<'_> {
 
         let res: SolveResult = match &constraint.kind {
             ConstraintKind::Eq(lhs, rhs) => self.unify(*lhs, *rhs).into(),
-            ConstraintKind::BinOpOverload(_op, _lhs, _rhs) => todo!("handle bin op constraint"),
+            ConstraintKind::BinOpOverload(overload_constraint) => {
+                self.solve_bin_op(overload_constraint)
+            }
             ConstraintKind::NegationOverload(ty) => self.solve_negation(*ty),
         };
 
@@ -104,6 +106,65 @@ impl CheckCtx<'_> {
             Ty::Primitive(t) if t.is_number() => SolveResult::Solved,
             _ => SolveResult::Err(InferenceError::InvalidNegation(ty)),
         }
+    }
+
+    fn solve_bin_op(&mut self, overload_constraint: &BinOverloadConstraint) -> SolveResult {
+        let Some(lhs_val) = self
+            .table
+            .inlined_probe_value(overload_constraint.lhs)
+            .known()
+        else {
+            return SolveResult::Deferred;
+        };
+        let Some(rhs_val) = self
+            .table
+            .inlined_probe_value(overload_constraint.rhs)
+            .known()
+        else {
+            return SolveResult::Deferred;
+        };
+
+        let op = overload_constraint.op;
+        // https://nix.dev/manual/nix/2.23/language/operators
+        let ret_ty = match (&lhs_val, &rhs_val) {
+            (Ty::Primitive(l), Ty::Primitive(r)) if l.is_number() && r.is_number() => {
+                let has_float = l.is_float() || r.is_float();
+
+                if has_float {
+                    Ty::Primitive(PrimitiveTy::Float)
+                } else {
+                    lhs_val.clone()
+                }
+            }
+            (Ty::Primitive(PrimitiveTy::String), Ty::Primitive(PrimitiveTy::String))
+                if op.is_add() =>
+            {
+                Ty::Primitive(PrimitiveTy::String)
+            }
+            (Ty::Primitive(PrimitiveTy::Path), Ty::Primitive(PrimitiveTy::Path)) if op.is_add() => {
+                Ty::Primitive(PrimitiveTy::Path)
+            }
+            (Ty::Primitive(PrimitiveTy::String), Ty::Primitive(PrimitiveTy::Path))
+                if op.is_add() =>
+            {
+                Ty::Primitive(PrimitiveTy::String)
+            }
+            (Ty::Primitive(PrimitiveTy::Path), Ty::Primitive(PrimitiveTy::String))
+                if op.is_add() =>
+            {
+                Ty::Primitive(PrimitiveTy::Path)
+            }
+            _ => {
+                return SolveResult::Err(InferenceError::InvalidBinOp(
+                    overload_constraint.op,
+                    lhs_val,
+                    rhs_val,
+                ));
+            }
+        };
+
+        self.unify_var_ty(overload_constraint.ret_val, ret_ty)
+            .into()
     }
 
     fn unify_var_ty(&mut self, lhs: TyId, rhs: Ty<TyId>) -> UnifyResult {
