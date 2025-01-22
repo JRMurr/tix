@@ -137,16 +137,34 @@ impl CheckCtx<'_> {
                         Ty::Primitive(PrimitiveTy::Int).intern_ty(self)
                     }
                     BinOP::Normal(NormalBinOp::Bool(_)) => {
+                        let bool_ty = Ty::Primitive(PrimitiveTy::Bool).intern_ty(self);
                         constraints.unify_var(e, lhs_ty, rhs_ty);
+                        constraints.unify_var(e, lhs_ty, bool_ty);
 
-                        Ty::Primitive(PrimitiveTy::Bool).intern_ty(self)
+                        bool_ty
                     }
                     BinOP::Normal(NormalBinOp::Expr(_)) => {
                         constraints.unify_var(e, lhs_ty, rhs_ty);
 
                         lhs_ty
                     }
-                    o => todo!("Need to handle operator {o:?}"),
+                    BinOP::Normal(NormalBinOp::ListConcat) => {
+                        let list_elem_ty = self.new_ty_var();
+                        let list_ty = Ty::List(list_elem_ty).intern_ty(self);
+                        constraints.unify_var(e, lhs_ty, rhs_ty);
+                        constraints.unify_var(e, lhs_ty, list_ty);
+
+                        list_ty
+                    }
+                    BinOP::Normal(NormalBinOp::AttrUpdate) => {
+                        todo!(
+                            r#"
+                            BinOP::Normal(NormalBinOp::AttrUpdate)
+                            need to make sure both sides are attr sets
+                            but don't need to care about the fields
+                        "#
+                        )
+                    }
                 }
             }
             Expr::IfThenElse {
