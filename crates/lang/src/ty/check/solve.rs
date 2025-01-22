@@ -125,46 +125,56 @@ impl CheckCtx<'_> {
         };
 
         let op = overload_constraint.op;
-        // https://nix.dev/manual/nix/2.23/language/operators
-        let ret_ty = match (&lhs_val, &rhs_val) {
-            (Ty::Primitive(l), Ty::Primitive(r)) if l.is_number() && r.is_number() => {
-                let has_float = l.is_float() || r.is_float();
 
-                if has_float {
-                    Ty::Primitive(PrimitiveTy::Float)
-                } else {
-                    lhs_val.clone()
-                }
-            }
-            (Ty::Primitive(PrimitiveTy::String), Ty::Primitive(PrimitiveTy::String))
-                if op.is_add() =>
-            {
-                Ty::Primitive(PrimitiveTy::String)
-            }
-            (Ty::Primitive(PrimitiveTy::Path), Ty::Primitive(PrimitiveTy::Path)) if op.is_add() => {
-                Ty::Primitive(PrimitiveTy::Path)
-            }
-            (Ty::Primitive(PrimitiveTy::String), Ty::Primitive(PrimitiveTy::Path))
-                if op.is_add() =>
-            {
-                Ty::Primitive(PrimitiveTy::String)
-            }
-            (Ty::Primitive(PrimitiveTy::Path), Ty::Primitive(PrimitiveTy::String))
-                if op.is_add() =>
-            {
-                Ty::Primitive(PrimitiveTy::Path)
-            }
-            _ => {
-                return SolveResult::Err(InferenceError::InvalidBinOp(
-                    overload_constraint.op,
-                    lhs_val,
-                    rhs_val,
-                ));
-            }
+        let Some(ret_ty) = self.solve_bin_op_inner(op, &lhs_val, &rhs_val) else {
+            return SolveResult::Err(InferenceError::InvalidBinOp(
+                overload_constraint.op,
+                lhs_val,
+                rhs_val,
+            ));
         };
 
         self.unify_var_ty(overload_constraint.ret_val, ret_ty)
             .into()
+    }
+
+    fn solve_bin_op_inner(
+        &mut self,
+        op: OverloadBinOp,
+        lhs: &Ty<TyId>,
+        rhs: &Ty<TyId>,
+    ) -> Option<Ty<TyId>> {
+        use Ty::Primitive;
+
+        // https://nix.dev/manual/nix/2.23/language/operators
+        let (Primitive(l), Primitive(r)) = (lhs, rhs) else {
+            return None;
+        };
+
+        // if both are numbers op doesn't matter
+        if l.is_number() && r.is_number() {
+            let has_float = l.is_float() || r.is_float();
+
+            let ret_ty = if has_float {
+                Primitive(PrimitiveTy::Float)
+            } else {
+                lhs.clone()
+            };
+
+            return Some(ret_ty);
+        }
+
+        if !op.is_add() {
+            return None;
+        }
+
+        // if both are addable (at this point just strings/paths)
+        // the return type is the lhs
+        if l.is_addable() && r.is_addable() {
+            Some(Primitive(l.clone()))
+        } else {
+            None
+        }
     }
 
     fn unify_var_ty(&mut self, lhs: TyId, rhs: Ty<TyId>) -> UnifyResult {

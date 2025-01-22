@@ -46,6 +46,13 @@ impl PrimitiveTy {
     pub fn is_float(&self) -> bool {
         matches!(self, PrimitiveTy::Float)
     }
+
+    pub fn is_addable(&self) -> bool {
+        matches!(
+            self,
+            PrimitiveTy::String | PrimitiveTy::Path | PrimitiveTy::Float | PrimitiveTy::Int
+        )
+    }
 }
 
 impl From<crate::Literal> for PrimitiveTy {

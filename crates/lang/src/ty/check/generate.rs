@@ -123,19 +123,6 @@ impl CheckCtx<'_> {
                     BinOP::Overload(op) => {
                         let ret_ty = self.new_ty_var();
 
-                        // constraints.unify_var(e, lhs_ty, rhs_ty);
-
-                        // // For now require that they are ints...
-                        // // could be smarter later...
-                        // constraints.add(Constraint {
-                        //     kind: ConstraintKind::Eq(
-                        //         lhs_ty,
-                        //         Ty::Primitive(PrimitiveTy::Int).intern_ty(self),
-                        //     ),
-                        //     location: e,
-                        // });
-                        // Ty::Primitive(PrimitiveTy::Int).intern_ty(self)
-
                         constraints.add(Constraint {
                             kind: ConstraintKind::BinOpOverload(BinOverloadConstraint {
                                 op: *op,
