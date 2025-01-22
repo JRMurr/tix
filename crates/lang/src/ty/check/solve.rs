@@ -4,9 +4,9 @@ use smol_str::SmolStr;
 
 use super::{
     AttrSetTy, BinOverloadConstraint, CheckCtx, Constraint, ConstraintCtx, ConstraintKind,
-    InferenceError, Ty, TyId, TypeVariableValue,
+    InferenceError, SolveError, Ty, TyId, TypeVariableValue,
 };
-use crate::{BinOP, OverloadBinOp, PrimitiveTy};
+use crate::{OverloadBinOp, PrimitiveTy};
 
 #[derive(Debug, PartialEq, Eq)]
 enum SolveResult {
@@ -36,7 +36,7 @@ impl CheckCtx<'_> {
     pub(super) fn solve_constraints(
         &mut self,
         constraint_ctx: ConstraintCtx,
-    ) -> Result<(), InferenceError> {
+    ) -> Result<(), SolveError> {
         let mut made_progress = true;
 
         let mut constraints = constraint_ctx.constraints;
@@ -57,18 +57,19 @@ impl CheckCtx<'_> {
                         // We couldn't solve it yet, let's try again in the next loop
                         still_unsolved.push(constraint);
                     }
-                    SolveResult::Err(inference_error) => return Err(inference_error),
+                    SolveResult::Err(inference_error) => return Err(inference_error.into()),
                 }
             }
 
             constraints = still_unsolved;
         }
 
+        // TODO: if the remaining constraints are overload constraints
+        // and all TyIds left are unknown (ie would be let generalized)
+        // i need to map those constraints into the generalized type scheme and add them back during
+        // instantiation
         if !constraints.is_empty() {
-            // // We have unsolved constraints but no progress was made.
-            // // Possibly ambiguous or underdetermined -> return an error or handle specially
-            // return Err(InferenceError::AmbiguousType(...));
-            todo!()
+            return Err(SolveError::UnsolvedContraints(constraints.into()));
         }
 
         Ok(())

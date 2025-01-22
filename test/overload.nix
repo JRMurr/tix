@@ -19,6 +19,8 @@
   string_path_add = "hello" + ./overload.nix;
   path_string_add = ./overload.nix + "hello";
 
+  # a_func = a: b: a + b;
+
   # sad stuff
   # sad = -"12";
 }

@@ -4,7 +4,7 @@ use smol_str::SmolStr;
 
 use super::{BinOverloadConstraint, CheckCtx, Constraint, ConstraintCtx, ConstraintKind, TyId};
 use crate::{
-    BinOP, BindingValue, Bindings, Expr, ExprId, Literal, NormalBinOp, OverloadBinOp,
+    BinOP, BindingValue, Bindings, Expr, ExprId, Literal, NormalBinOp,
     nameres::ResolveResult,
     ty::{AttrSetTy, PrimitiveTy, Ty},
 };

@@ -211,6 +211,15 @@ enum InferenceError {
     InvalidBinOp(OverloadBinOp, Ty<TyId>, Ty<TyId>),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+enum SolveError {
+    #[error(transparent)]
+    InferenceError(#[from] InferenceError),
+
+    #[error("Unsolved constraints {0:?}")]
+    UnsolvedContraints(Box<[Constraint]>),
+}
+
 #[derive(Debug, Clone)]
 pub struct CheckCtx<'db> {
     module: &'db Module,
