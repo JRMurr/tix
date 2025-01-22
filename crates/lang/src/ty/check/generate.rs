@@ -214,8 +214,6 @@ impl CheckCtx<'_> {
             } => {
                 let set_ty = self.generate_constraints(constraints, *set);
 
-                // TODO: would be nice to have primitives like this cached
-                // is that fine to share?
                 let str_ty: Ty<TyId> = PrimitiveTy::String.into();
                 let str_ty = str_ty.intern_ty(self);
 
@@ -251,16 +249,19 @@ impl CheckCtx<'_> {
             }
             Expr::UnaryOp { op, expr } => {
                 let ty = self.generate_constraints(constraints, *expr);
-                let expected_ty = match op {
+                match op {
                     rnix::ast::UnaryOpKind::Invert => {
-                        Ty::Primitive(PrimitiveTy::Bool).intern_ty(self)
+                        let bool_ty = Ty::Primitive(PrimitiveTy::Bool).intern_ty(self);
+                        constraints.unify_var(*expr, ty, bool_ty);
                     }
                     rnix::ast::UnaryOpKind::Negate => {
-                        // TODO: could be a float...
-                        Ty::Primitive(PrimitiveTy::Int).intern_ty(self)
+                        constraints.add(Constraint {
+                            location: *expr,
+                            kind: ConstraintKind::NegationOverload(ty),
+                        });
                     }
                 };
-                constraints.unify_var(*expr, ty, expected_ty);
+
                 ty
             }
 

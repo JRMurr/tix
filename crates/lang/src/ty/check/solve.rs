@@ -6,49 +6,113 @@ use super::{
     AttrSetTy, CheckCtx, Constraint, ConstraintCtx, ConstraintKind, InferenceError, Ty, TyId,
     TypeVariableValue,
 };
+use crate::PrimitiveTy;
+
+#[derive(Debug, PartialEq, Eq)]
+enum SolveResult {
+    Solved,
+    Deferred,
+    Err(InferenceError),
+}
+
+impl From<InferenceError> for SolveResult {
+    fn from(value: InferenceError) -> Self {
+        SolveResult::Err(value)
+    }
+}
+
+type UnifyResult = Result<Ty<TyId>, InferenceError>;
+
+impl From<UnifyResult> for SolveResult {
+    fn from(value: UnifyResult) -> Self {
+        match value {
+            Ok(_) => SolveResult::Solved,
+            Err(e) => SolveResult::Err(e),
+        }
+    }
+}
 
 impl CheckCtx<'_> {
     pub(super) fn solve_constraints(
         &mut self,
-        constraints: ConstraintCtx,
+        constraint_ctx: ConstraintCtx,
     ) -> Result<(), InferenceError> {
-        // TODO: this really should loop over multiple times
-        // we might not be able to solve all constraints from the start
-        // so we need to keep looping until we do a loop without doing anything
-        for constraint in constraints.constraints {
-            self.solve_constraint(constraint)?;
+        let mut made_progress = true;
+
+        let mut constraints = constraint_ctx.constraints;
+
+        while made_progress {
+            made_progress = false;
+
+            // We'll collect the constraints that we still can't solve in this pass
+            let mut still_unsolved = Vec::new();
+
+            for constraint in constraints {
+                match self.solve_constraint(&constraint) {
+                    SolveResult::Solved => {
+                        // Good—this constraint is done, so we don't put it back in the list.
+                        made_progress = true;
+                    }
+                    SolveResult::Deferred => {
+                        // We couldn't solve it yet, let's try again in the next loop
+                        still_unsolved.push(constraint);
+                    }
+                    SolveResult::Err(inference_error) => return Err(inference_error),
+                }
+            }
+
+            constraints = still_unsolved;
+        }
+
+        if !constraints.is_empty() {
+            // // We have unsolved constraints but no progress was made.
+            // // Possibly ambiguous or underdetermined -> return an error or handle specially
+            // return Err(InferenceError::AmbiguousType(...));
+            todo!()
         }
 
         Ok(())
     }
 
-    fn solve_constraint(&mut self, constraint: Constraint) -> Result<(), InferenceError> {
+    fn solve_constraint(&mut self, constraint: &Constraint) -> SolveResult {
         let snapshot = self.table.snapshot();
 
-        let res = match constraint.kind {
-            ConstraintKind::Eq(lhs, rhs) => self.unify(lhs, rhs),
-            // ConstraintKind::Eq(lhs, TyRef::Ref(rhs)) => self.unify_var_ty(lhs, rhs),
+        let res: SolveResult = match &constraint.kind {
+            ConstraintKind::Eq(lhs, rhs) => self.unify(*lhs, *rhs).into(),
+            ConstraintKind::BinOpOverload(_op, _lhs, _rhs) => todo!("handle bin op constraint"),
+            ConstraintKind::NegationOverload(ty) => self.solve_negation(*ty),
         };
 
         match res {
-            Ok(_) => {
+            SolveResult::Solved => {
                 self.table.commit(snapshot);
-                Ok(())
             }
-            Err(e) => {
+            _ => {
                 self.table.rollback_to(snapshot);
-                Err(e)
             }
+        }
+
+        res
+    }
+
+    fn solve_negation(&mut self, ty_id: TyId) -> SolveResult {
+        let Some(ty) = self.table.inlined_probe_value(ty_id).known() else {
+            return SolveResult::Deferred;
+        };
+
+        match ty {
+            Ty::Primitive(t) if t.is_number() => SolveResult::Solved,
+            _ => SolveResult::Err(InferenceError::InvalidNegation(ty)),
         }
     }
 
-    fn unify_var_ty(&mut self, lhs: TyId, rhs: Ty<TyId>) -> Result<Ty<TyId>, InferenceError> {
+    fn unify_var_ty(&mut self, lhs: TyId, rhs: Ty<TyId>) -> UnifyResult {
         // let ret = self.unify(var, rhs.clone())?;
         let rhs_id = rhs.clone().intern_ty(self);
         self.unify(lhs, rhs_id)
     }
 
-    fn unify(&mut self, lhs: TyId, rhs: TyId) -> Result<Ty<TyId>, InferenceError> {
+    fn unify(&mut self, lhs: TyId, rhs: TyId) -> UnifyResult {
         let lhs_val = self.table.inlined_probe_value(lhs);
         let rhs_val = self.table.inlined_probe_value(rhs);
 
@@ -78,7 +142,7 @@ impl CheckCtx<'_> {
         Ok(res)
     }
 
-    fn unify_inner(&mut self, lhs: TyId, rhs: TyId) -> Result<Ty<TyId>, InferenceError> {
+    fn unify_inner(&mut self, lhs: TyId, rhs: TyId) -> UnifyResult {
         if lhs == rhs {
             return Ok(self.get_ty(lhs));
         }

@@ -14,7 +14,7 @@ use thiserror::Error;
 
 use super::{ArcTy, AttrSetTy, PrimitiveTy, Ty};
 use crate::{
-    ExprId, Module, NameId,
+    ExprId, Module, NameId, OverloadBinOp,
     db::NixFile,
     nameres::{DependentGroup, GroupedDefs, NameResolution},
 };
@@ -138,7 +138,9 @@ pub struct Constraint {
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum ConstraintKind {
     Eq(TyId, TyId),
-    // Overload()
+    BinOpOverload(OverloadBinOp, TyId, TyId),
+    // TODO: could this be combined with the above? Its only one case so not a huge deal..
+    NegationOverload(TyId),
 }
 
 type Substitutions = HashMap<u32, TyId>;
@@ -193,6 +195,9 @@ enum InferenceError {
 
     #[error("Could union attr set {0:?} and  {1:?}")]
     InvalidAttrUnion(AttrSetTy<TyId>, AttrSetTy<TyId>),
+
+    #[error("Can not negate non number type {0:?}")]
+    InvalidNegation(Ty<TyId>),
 }
 
 #[derive(Debug, Clone)]

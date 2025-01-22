@@ -38,6 +38,15 @@ pub enum PrimitiveTy {
     Uri,
 }
 
+impl PrimitiveTy {
+    pub fn is_number(&self) -> bool {
+        match self {
+            PrimitiveTy::Float | PrimitiveTy::Int => true,
+            _ => false,
+        }
+    }
+}
+
 impl From<crate::Literal> for PrimitiveTy {
     fn from(value: crate::Literal) -> Self {
         match value {
