@@ -34,10 +34,15 @@ pub struct TypeDecl {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[debug("{_0:?}")]
 pub struct KnownTyRef(Arc<KnownTy>);
 
-pub type KnownTy = Ty<KnownTyRef, SmolStr>;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TypeVarValue {
+    Generic(SmolStr),   // A generic with a given identifier
+    Reference(SmolStr), // A reference to a different Type, should be resolved during checking
+}
+
+pub type KnownTy = Ty<KnownTyRef, TypeVarValue>;
 
 impl From<KnownTy> for KnownTyRef {
     fn from(value: KnownTy) -> Self {
@@ -49,33 +54,33 @@ impl From<KnownTy> for KnownTyRef {
 #[macro_export]
 macro_rules! known_ty {
     // -- Match on known primitives -----------------------------------------
-    (Null) => {
-        $crate::KnownTy::Primitive($crate::ty::PrimitiveTy::Null)
+    (null) => {
+        $crate::KnownTy::Primitive(::lang::PrimitiveTy::Null)
     };
-    (Bool) => {
-        $crate::KnownTy::Primitive($crate::ty::PrimitiveTy::Bool)
+    (bool) => {
+        $crate::KnownTy::Primitive(::lang::PrimitiveTy::Bool)
     };
-    (Int) => {
-        $crate::KnownTy::Primitive($crate::ty::PrimitiveTy::Int)
+    (int) => {
+        $crate::KnownTy::Primitive(::lang::PrimitiveTy::Int)
     };
-    (Float) => {
-        $crate::KnownTy::Primitive($crate::ty::PrimitiveTy::Float)
+    (float) => {
+        $crate::KnownTy::Primitive(::lang::PrimitiveTy::Float)
     };
-    (String) => {
-        $crate::KnownTy::Primitive($crate::ty::PrimitiveTy::String)
+    (string) => {
+        $crate::KnownTy::Primitive(::lang::PrimitiveTy::String)
     };
-    (Path) => {
-        $crate::KnownTy::Primitive($crate::ty::PrimitiveTy::Path)
+    (path) => {
+        $crate::KnownTy::Primitive(::lang::PrimitiveTy::Path)
     };
-    (Uri) => {
-        $crate::KnownTy::Primitive($crate::ty::PrimitiveTy::Uri)
+    (uri) => {
+        $crate::KnownTy::Primitive(::lang::PrimitiveTy::Uri)
     };
     // -- TyVar syntax: TyVar(N) --------------------------------------------
     // (TyVar($n:expr)) => {
     //     $crate::KnownTy::TyVar(($n).into())
     // };
     (# $e:expr) => {
-        $crate::KnownTy::TyVar(($e).into())
+        $crate::KnownTy::TyVar($crate::TypeVarValue::Generic(($e).into()))
     };
 
     // // -- List syntax: List(T) ---------------------------------------------

@@ -41,7 +41,7 @@ type_expr = {
 }
 
 // One segment in an arrow chain can be parenthesized, a list, or a simple/base type variable.
-arrow_segment = { paren_type | list_type | simple_type }
+arrow_segment = { paren_type | list_type | type_ref }
 
 paren_type = {
     "(" ~ type_expr ~ ")"
@@ -51,6 +51,37 @@ list_type = {
     "[" ~ type_expr ~ "]"
 }
 
-simple_type = @{
-    identifier
+// a type var or reference to another type
+type_ref = {
+    primitive_ref
+  | user_type
+  | generic_ident
 }
+
+// generic params are lowercased
+generic_ident = @{
+    ASCII_ALPHA_LOWER ~ (ASCII_ALPHA_LOWER | ASCII_DIGIT | "_")*
+}
+
+// a reference to some user type alias must be uppercase
+user_type = @{
+    ASCII_ALPHA_UPPER ~ (ASCII_ALPHANUMERIC | "_")*
+}
+
+primitive_ref = {
+    string_ref
+  | int_ref
+  | bool_ref
+  | float_ref
+  | path_ref
+  | null_ref
+}
+
+// TODO: not sure if these should be case insensitive
+// typescript does these as lowercase
+string_ref = @{ "string" }
+int_ref    = @{ "int" }
+bool_ref   = @{ "bool" }
+float_ref  = @{ "float" }
+path_ref   = @{ "path" }
+null_ref   = @{ "null" }

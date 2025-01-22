@@ -1,6 +1,6 @@
 use pest::iterators::Pairs;
 
-use crate::{KnownTy, Rule, TypeDecl};
+use crate::{KnownTy, Rule, TypeDecl, TypeVarValue};
 
 pub fn collect_type_decls(pairs: Pairs<Rule>) -> Vec<TypeDecl> {
     let mut decls = Vec::new();
@@ -29,13 +29,8 @@ pub fn collect_type_decls(pairs: Pairs<Rule>) -> Vec<TypeDecl> {
             | Rule::WHITESPACE
             | Rule::NEWLINE
             | Rule::ANY_WHITESPACE => {}
-            Rule::arrow_segment
-            | Rule::type_expr
-            | Rule::identifier
-            | Rule::paren_type
-            | Rule::list_type
-            | Rule::simple_type => {
-                unreachable!("Should be handle by type line")
+            _ => {
+                unreachable!("Should be handle by type line: {:?}", pair.as_rule())
             }
         }
     }
@@ -47,18 +42,24 @@ pub fn collect_type_expr(mut pairs: Pairs<Rule>) -> Option<KnownTy> {
     let curr = pairs.next()?;
 
     let curr = match curr.as_rule() {
-        // wrapper rules (show this be shallow?)
-        Rule::type_expr | Rule::arrow_segment | Rule::paren_type => {
-            collect_type_expr(curr.into_inner()).unwrap()
-        }
+        Rule::type_expr
+        | Rule::arrow_segment
+        | Rule::paren_type
+        | Rule::type_ref
+        | Rule::primitive_ref => collect_type_expr(curr.into_inner()).unwrap(),
         Rule::list_type => KnownTy::List(collect_type_expr(curr.into_inner()).unwrap().into()),
-        // TODO: parse the string to get known types
-        // will the convention be known types are uppercase or how to distinguish type vars from real types?
-        Rule::simple_type => KnownTy::TyVar(curr.as_str().into()),
+        Rule::string_ref => KnownTy::Primitive(lang::PrimitiveTy::String),
+        Rule::int_ref => KnownTy::Primitive(lang::PrimitiveTy::Int),
+        Rule::bool_ref => KnownTy::Primitive(lang::PrimitiveTy::Bool),
+        Rule::float_ref => KnownTy::Primitive(lang::PrimitiveTy::Float),
+        Rule::path_ref => KnownTy::Primitive(lang::PrimitiveTy::Path),
+        Rule::null_ref => KnownTy::Primitive(lang::PrimitiveTy::Null),
+        Rule::generic_ident => KnownTy::TyVar(TypeVarValue::Generic(curr.as_str().into())),
+        Rule::user_type => KnownTy::TyVar(TypeVarValue::Reference(curr.as_str().into())),
         Rule::other_text | Rule::EOI | Rule::WHITESPACE | Rule::NEWLINE | Rule::ANY_WHITESPACE => {
             unreachable!("should not be seen whitespace...")
         }
-        _ => unreachable!("should not be seen"),
+        _ => unreachable!("collect_type_expr should not be seen: {:?}", curr.as_rule()),
     };
 
     // if theres more than this expression is the argument to a lambda
@@ -99,25 +100,25 @@ mod tests {
                 identifier: "mapMe".into(),
                 type_expr: known_ty! {
                     [(# "a")] -> ((# "a") -> (# "b")) -> [(# "b")]
-                }, //"[a] -> (a -> b) -> [b]".to_string(),
+                },
             },
             TypeDecl {
                 identifier: "compose".into(),
                 type_expr: known_ty! {
                     ((# "b") -> (# "c")) -> ((# "a") -> (# "b")) -> (# "a") -> (# "c")
-                }, //"(b -> c) -> (a -> b) -> a -> c".to_string(),
+                },
             },
             TypeDecl {
                 identifier: "const_var".into(),
                 type_expr: known_ty! {
-                    (# "int") // todo: real int type not ty var
-                }, //"int".to_string(),
+                    int
+                },
             },
             TypeDecl {
                 identifier: "const_lst".into(),
                 type_expr: known_ty! {
-                    [(# "int")] // todo: real int type not ty var
-                }, // "[ int ]".to_string(),
+                    [int]
+                },
             },
         ];
 
