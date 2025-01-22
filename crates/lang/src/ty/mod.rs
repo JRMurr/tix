@@ -8,12 +8,12 @@ use smol_str::SmolStr;
 
 // the mono type
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Ty<RefType> {
+pub enum Ty<RefType, VarType = u32> {
     // TODO: should specify whats a unification var vs type var
     /// A type quantifier (ie the `a` in `a -> a`)
     #[allow(clippy::enum_variant_names)]
     #[debug("TyVar({_0})")]
-    TyVar(u32), // TODO: should make this u32
+    TyVar(VarType),
 
     // TODO: could we track literals in the type system like typescript does?
     #[debug("{_0:?}")]

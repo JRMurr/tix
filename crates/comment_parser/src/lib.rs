@@ -1,3 +1,10 @@
+mod collect;
+
+use std::sync::Arc;
+
+use collect::collect_type_decls;
+use derive_more::Debug;
+use lang::Ty;
 use pest::{Parser, iterators::Pairs};
 use pest_derive::Parser;
 use smol_str::SmolStr;
@@ -14,93 +21,95 @@ pub fn parse_comment_text(source: &str) -> Result<Pairs<Rule>, ParseError> {
     Ok(CommentParser::parse(Rule::comment_content, source)?)
 }
 
+pub fn parse_and_collect(source: &str) -> Result<Vec<TypeDecl>, ParseError> {
+    let pairs = parse_comment_text(source)?;
+
+    Ok(collect_type_decls(pairs))
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct TypeDecl {
     pub identifier: SmolStr,
-    pub type_expr: String,
+    pub type_expr: KnownTy,
 }
 
-pub fn collect_type_decls(pairs: Pairs<Rule>) -> Vec<TypeDecl> {
-    let mut decls = Vec::new();
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[debug("{_0:?}")]
+pub struct KnownTyRef(Arc<KnownTy>);
 
-    for pair in pairs {
-        match pair.as_rule() {
-            Rule::type_block | Rule::block_content => {
-                // Descend into children to find type_line
-                decls.extend(collect_type_decls(pair.into_inner()));
-            }
-            Rule::type_line => {
-                let mut inner = pair.into_inner();
-                let ident_rule = inner.next().unwrap(); // identifier
-                let expr_rule = inner.next().unwrap(); // type_expr
+pub type KnownTy = Ty<KnownTyRef, SmolStr>;
 
-                decls.push(TypeDecl {
-                    identifier: ident_rule.as_str().into(),
-                    type_expr: expr_rule.as_str().to_string(),
-                });
-            }
-            Rule::comment_content => {
-                decls.extend(collect_type_decls(pair.into_inner()));
-            }
-            Rule::other_text
-            | Rule::EOI
-            | Rule::WHITESPACE
-            | Rule::NEWLINE
-            | Rule::ANY_WHITESPACE => {}
-            Rule::arrow_segment
-            | Rule::type_expr
-            | Rule::identifier
-            | Rule::paren_type
-            | Rule::list_type
-            | Rule::simple_type => {
-                unreachable!("Should be handle by type line")
-            }
+impl From<KnownTy> for KnownTyRef {
+    fn from(value: KnownTy) -> Self {
+        KnownTyRef(Arc::new(value))
+    }
+}
+
+// TODO: mostly copy pasted from the lang crate. Would be nice to generalize this macro to work for either type
+#[macro_export]
+macro_rules! known_ty {
+    // -- Match on known primitives -----------------------------------------
+    (Null) => {
+        $crate::KnownTy::Primitive($crate::ty::PrimitiveTy::Null)
+    };
+    (Bool) => {
+        $crate::KnownTy::Primitive($crate::ty::PrimitiveTy::Bool)
+    };
+    (Int) => {
+        $crate::KnownTy::Primitive($crate::ty::PrimitiveTy::Int)
+    };
+    (Float) => {
+        $crate::KnownTy::Primitive($crate::ty::PrimitiveTy::Float)
+    };
+    (String) => {
+        $crate::KnownTy::Primitive($crate::ty::PrimitiveTy::String)
+    };
+    (Path) => {
+        $crate::KnownTy::Primitive($crate::ty::PrimitiveTy::Path)
+    };
+    (Uri) => {
+        $crate::KnownTy::Primitive($crate::ty::PrimitiveTy::Uri)
+    };
+    // -- TyVar syntax: TyVar(N) --------------------------------------------
+    // (TyVar($n:expr)) => {
+    //     $crate::KnownTy::TyVar(($n).into())
+    // };
+    (# $e:expr) => {
+        $crate::KnownTy::TyVar(($e).into())
+    };
+
+    // // -- List syntax: List(T) ---------------------------------------------
+    // (List($elem:tt)) => {
+    //     $crate::KnownTy::List($crate::ty::TyRef::from($crate::arc_ty!($elem)))
+    // };
+    (($($inner:tt)*)) => { $crate::known_ty!($($inner)*) };
+    ([$($inner:tt)*]) => { $crate::KnownTy::List($crate::KnownTyRef::from($crate::known_ty!($($inner)*)))};
+
+    ({ $($key:literal : $ty:tt),* $(,)? }) => {{
+        $crate::KnownTy::AttrSet($crate::ty::AttrSetTy::<$crate::ty::TyRef>::from_internal(
+            [
+                $(($key, $crate::known_ty!($ty)),)*
+            ],
+            None,
+        ))
+    }};
+
+    // ({ $($key:literal : $ty:tt),* $(,)? }) => {{
+    //     $crate::ty::Ty::Attrset($crate::ty::Attrset::from_internal(
+    //         [
+    //             $(($key, ty!($ty), $crate::ty::AttrSource::Unknown),)*
+    //         ],
+    //         None,
+    //     ))
+    // }};
+
+    ($arg:tt -> $($ret:tt)*) => {
+        $crate::KnownTy::Lambda {
+            param: $crate::KnownTyRef::from($crate::known_ty!($arg)),
+            body: $crate::KnownTyRef::from($crate::known_ty!($($ret)*)),
         }
-    }
+    };
 
-    decls
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
 
-    #[test]
-    fn it_works() {
-        let example_comment = r#"
-        This is some text
-        type:
-        ```
-        mapMe :: [a] -> (a -> b) -> [b]
-        compose :: (b -> c) -> (a -> b) -> a -> c
-        const_var :: int
-        const_lst :: [ int ]
-        ```
-        Some more doc lines
-    "#;
-        let pairs = parse_comment_text(example_comment).expect("No parse error");
-
-        let decs = collect_type_decls(pairs);
-
-        let expected = vec![
-            TypeDecl {
-                identifier: "mapMe".into(),
-                type_expr: "[a] -> (a -> b) -> [b]".to_string(),
-            },
-            TypeDecl {
-                identifier: "compose".into(),
-                type_expr: "(b -> c) -> (a -> b) -> a -> c".to_string(),
-            },
-            TypeDecl {
-                identifier: "const_var".into(),
-                type_expr: "int".to_string(),
-            },
-            TypeDecl {
-                identifier: "const_lst".into(),
-                type_expr: "[ int ]".to_string(),
-            },
-        ];
-
-        assert_eq!(decs, expected)
-    }
 }

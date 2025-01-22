@@ -14,15 +14,15 @@ rowan = "0.15"
 smol_str = { workspace = true }
 thiserror = { workspace = true }
 miette = { workspace = true }
+la-arena = { workspace = true }
+derive_more = { workspace = true, features = ["debug"] }
 
 
 salsa = { git = "https://github.com/salsa-rs/salsa", rev = "88a1d7774d78f048fbd77d40abca9ebd729fd1f0" }
 dashmap = "6.1.0"
 petgraph = "0.7.0"
-la-arena = "0.3.1"
 ena = "0.14.3"
 itertools = "0.14.0"
-derive_more = { version = "1.0.0", features = ["debug"] }
 indoc = "2.0.5"
 
 [lib]

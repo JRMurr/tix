@@ -7,3 +7,6 @@ edition = "2024"
 pest = "2"
 pest_derive = "2"
 smol_str = { workspace = true }
+lang = { path = "../lang" }
+derive_more = { workspace = true, features = ["debug"] }
+# la-arena = { workspace = true }

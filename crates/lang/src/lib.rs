@@ -22,7 +22,7 @@ use lower::lower;
 pub use nameres::scopes;
 use rnix::NixLanguage;
 use smol_str::SmolStr;
-pub use ty::check_file;
+pub use ty::*;
 
 #[salsa::tracked]
 pub fn module_and_source_maps(db: &dyn crate::Db, file: NixFile) -> (Module, ModuleSourceMap) {
