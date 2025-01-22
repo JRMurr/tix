@@ -138,6 +138,7 @@ pub struct Constraint {
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum ConstraintKind {
     Eq(TyId, TyId),
+    // Overload()
 }
 
 type Substitutions = HashMap<u32, TyId>;

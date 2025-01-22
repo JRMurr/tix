@@ -150,7 +150,7 @@ impl LowerCtx {
                 let lhs = self.lower_expr_opt(bin_op.lhs());
 
                 // TODO: handle this better, maybe keep the option in the expr type?
-                let op = bin_op.operator().expect("Should have operator");
+                let op = bin_op.operator().expect("Should have operator").into();
 
                 let rhs = self.lower_expr_opt(bin_op.rhs());
 

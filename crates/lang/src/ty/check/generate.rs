@@ -4,7 +4,7 @@ use smol_str::SmolStr;
 
 use super::{CheckCtx, Constraint, ConstraintCtx, ConstraintKind, TyId};
 use crate::{
-    BindingValue, Bindings, Expr, ExprId, Literal,
+    BinOP, BindingValue, Bindings, Expr, ExprId, Literal, NormalBinOp,
     nameres::ResolveResult,
     ty::{AttrSetTy, PrimitiveTy, Ty},
 };
@@ -122,7 +122,7 @@ impl CheckCtx<'_> {
                 match op {
                     // TODO: need to handle operator overloading
                     // for now you cant concat strings and adding only works on ints...
-                    rnix::ast::BinOpKind::Add | rnix::ast::BinOpKind::Sub => {
+                    BinOP::Overload(_) => {
                         constraints.unify_var(e, lhs_ty, rhs_ty);
 
                         // For now require that they are ints...
@@ -136,10 +136,15 @@ impl CheckCtx<'_> {
                         });
                         Ty::Primitive(PrimitiveTy::Int).intern_ty(self)
                     }
-                    rnix::ast::BinOpKind::Equal => {
+                    BinOP::Normal(NormalBinOp::Bool(_)) => {
                         constraints.unify_var(e, lhs_ty, rhs_ty);
 
                         Ty::Primitive(PrimitiveTy::Bool).intern_ty(self)
+                    }
+                    BinOP::Normal(NormalBinOp::Expr(_)) => {
+                        constraints.unify_var(e, lhs_ty, rhs_ty);
+
+                        lhs_ty
                     }
                     o => todo!("Need to handle operator {o:?}"),
                 }

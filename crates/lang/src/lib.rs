@@ -17,6 +17,7 @@ use std::{collections::HashMap, ops};
 use comment::gather_doc_comments;
 use db::NixFile;
 pub use db::{Db, RootDatabase};
+// use derive_more::Debug;
 use la_arena::{Arena, ArenaMap, Idx as Id};
 use lower::lower;
 pub use nameres::scopes;
@@ -239,7 +240,7 @@ pub enum Expr {
     BinOp {
         lhs: ExprId,
         rhs: ExprId,
-        op: rnix::ast::BinOpKind,
+        op: BinOP,
     },
     AttrSet {
         is_rec: bool,
@@ -269,6 +270,72 @@ pub enum Expr {
     },
     StringInterpolation(Box<[InterpolPart<SmolStr>]>),
     PathInterpolation(Box<[InterpolPart<SmolStr>]>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OverloadBinOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BoolBinOp {
+    And,
+    Implication,
+    Or,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExprBinOp {
+    Less,
+    LessOrEq,
+    More,
+    MoreOrEq,
+    NotEqual,
+    Equal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NormalBinOp {
+    Expr(ExprBinOp),
+    Bool(BoolBinOp),
+    ListConcat,
+    AttrUpdate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BinOP {
+    Overload(OverloadBinOp),
+    Normal(NormalBinOp),
+}
+
+impl From<rnix::ast::BinOpKind> for BinOP {
+    fn from(value: rnix::ast::BinOpKind) -> Self {
+        match value {
+            rnix::ast::BinOpKind::Concat => BinOP::Normal(NormalBinOp::ListConcat),
+            rnix::ast::BinOpKind::Update => BinOP::Normal(NormalBinOp::AttrUpdate),
+
+            rnix::ast::BinOpKind::Add => BinOP::Overload(OverloadBinOp::Add),
+            rnix::ast::BinOpKind::Sub => BinOP::Overload(OverloadBinOp::Sub),
+            rnix::ast::BinOpKind::Mul => BinOP::Overload(OverloadBinOp::Mul),
+            rnix::ast::BinOpKind::Div => BinOP::Overload(OverloadBinOp::Div),
+
+            rnix::ast::BinOpKind::And => BinOP::Normal(NormalBinOp::Bool(BoolBinOp::And)),
+            rnix::ast::BinOpKind::Or => BinOP::Normal(NormalBinOp::Bool(BoolBinOp::Or)),
+            rnix::ast::BinOpKind::Implication => {
+                BinOP::Normal(NormalBinOp::Bool(BoolBinOp::Implication))
+            }
+
+            rnix::ast::BinOpKind::Equal => BinOP::Normal(NormalBinOp::Expr(ExprBinOp::Equal)),
+            rnix::ast::BinOpKind::Less => BinOP::Normal(NormalBinOp::Expr(ExprBinOp::Less)),
+            rnix::ast::BinOpKind::LessOrEq => BinOP::Normal(NormalBinOp::Expr(ExprBinOp::LessOrEq)),
+            rnix::ast::BinOpKind::More => BinOP::Normal(NormalBinOp::Expr(ExprBinOp::More)),
+            rnix::ast::BinOpKind::MoreOrEq => BinOP::Normal(NormalBinOp::Expr(ExprBinOp::MoreOrEq)),
+            rnix::ast::BinOpKind::NotEqual => BinOP::Normal(NormalBinOp::Expr(ExprBinOp::NotEqual)),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
