@@ -87,7 +87,7 @@ mod tests {
         mapMe :: [a] -> (a -> b) -> [b]
         compose :: (b -> c) -> (a -> b) -> a -> c
         const_var :: int
-        const_lst :: [ int ]
+        const_lst :: [ string ]
         ```
         Some more doc lines
     "#;
@@ -117,7 +117,7 @@ mod tests {
             TypeDecl {
                 identifier: "const_lst".into(),
                 type_expr: known_ty! {
-                    [int]
+                    [string]
                 },
             },
         ];

@@ -77,8 +77,10 @@ primitive_ref = {
   | null_ref
 }
 
-// TODO: not sure if these should be case insensitive
-// typescript does these as lowercase
+// TODO: not sure if these should be uppercase
+// typescript does these as lowercase but since we have implicit generics as lowercase
+// maybe making them uppercase is fine?
+// the only reservation I have now is that nixpkgs lib does these are lowercase
 string_ref = @{ "string" }
 int_ref    = @{ "int" }
 bool_ref   = @{ "bool" }
