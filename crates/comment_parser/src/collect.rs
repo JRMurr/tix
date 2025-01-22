@@ -52,6 +52,8 @@ pub fn collect_type_expr(mut pairs: Pairs<Rule>) -> Option<KnownTy> {
             collect_type_expr(curr.into_inner()).unwrap()
         }
         Rule::list_type => KnownTy::List(collect_type_expr(curr.into_inner()).unwrap().into()),
+        // TODO: parse the string to get known types
+        // will the convention be known types are uppercase or how to distinguish type vars from real types?
         Rule::simple_type => KnownTy::TyVar(curr.as_str().into()),
         Rule::other_text | Rule::EOI | Rule::WHITESPACE | Rule::NEWLINE | Rule::ANY_WHITESPACE => {
             unreachable!("should not be seen whitespace...")
