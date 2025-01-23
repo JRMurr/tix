@@ -4,7 +4,7 @@ use smol_str::SmolStr;
 
 use super::{
     AttrSetTy, BinOverloadConstraint, CheckCtx, Constraint, ConstraintCtx, ConstraintKind,
-    InferenceError, SolveError, Ty, TyId, TypeVariableValue,
+    InferenceError, OverloadConstraintKind, SolveError, Ty, TyId, TypeVariableValue,
 };
 use crate::{OverloadBinOp, PrimitiveTy};
 
@@ -69,7 +69,7 @@ impl CheckCtx<'_> {
         // i need to map those constraints into the generalized type scheme and add them back during
         // instantiation
         if !constraints.is_empty() {
-            return Err(SolveError::UnsolvedContraints(constraints.into()));
+            return Err(SolveError::UnsolvedConstraints(constraints.into()));
         }
 
         Ok(())
@@ -80,10 +80,12 @@ impl CheckCtx<'_> {
 
         let res: SolveResult = match &constraint.kind {
             ConstraintKind::Eq(lhs, rhs) => self.unify(*lhs, *rhs).into(),
-            ConstraintKind::BinOpOverload(overload_constraint) => {
+            ConstraintKind::Overload(OverloadConstraintKind::BinOp(overload_constraint)) => {
                 self.solve_bin_op(overload_constraint)
             }
-            ConstraintKind::NegationOverload(ty) => self.solve_negation(*ty),
+            ConstraintKind::Overload(OverloadConstraintKind::Negation(ty)) => {
+                self.solve_negation(*ty)
+            }
         };
 
         match res {
@@ -172,7 +174,7 @@ impl CheckCtx<'_> {
         // if both are addable (at this point just strings/paths)
         // the return type is the lhs
         if l.is_addable() && r.is_addable() {
-            Some(Primitive(l.clone()))
+            Some(lhs.clone())
         } else {
             None
         }

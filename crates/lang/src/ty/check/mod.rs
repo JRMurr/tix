@@ -138,9 +138,31 @@ pub struct Constraint {
 #[derive(Debug, PartialEq, Clone, Eq)]
 pub enum ConstraintKind {
     Eq(TyId, TyId),
-    BinOpOverload(BinOverloadConstraint),
-    // TODO: could this be combined with the above? Its only one case so not a huge deal..
-    NegationOverload(TyId),
+    Overload(OverloadConstraintKind),
+}
+
+#[derive(Debug, PartialEq, Clone, Eq)]
+pub enum OverloadConstraintKind {
+    BinOp(BinOverloadConstraint),
+    Negation(TyId),
+}
+
+impl From<OverloadConstraintKind> for ConstraintKind {
+    fn from(value: OverloadConstraintKind) -> Self {
+        ConstraintKind::Overload(value)
+    }
+}
+
+impl From<BinOverloadConstraint> for OverloadConstraintKind {
+    fn from(value: BinOverloadConstraint) -> Self {
+        OverloadConstraintKind::BinOp(value)
+    }
+}
+
+impl From<BinOverloadConstraint> for ConstraintKind {
+    fn from(value: BinOverloadConstraint) -> Self {
+        ConstraintKind::Overload(OverloadConstraintKind::BinOp(value))
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -217,7 +239,7 @@ enum SolveError {
     InferenceError(#[from] InferenceError),
 
     #[error("Unsolved constraints {0:?}")]
-    UnsolvedContraints(Box<[Constraint]>),
+    UnsolvedConstraints(Box<[Constraint]>),
 }
 
 #[derive(Debug, Clone)]

@@ -2,7 +2,10 @@ use std::collections::BTreeMap;
 
 use smol_str::SmolStr;
 
-use super::{BinOverloadConstraint, CheckCtx, Constraint, ConstraintCtx, ConstraintKind, TyId};
+use super::{
+    BinOverloadConstraint, CheckCtx, Constraint, ConstraintCtx, ConstraintKind,
+    OverloadConstraintKind, TyId,
+};
 use crate::{
     BinOP, BindingValue, Bindings, Expr, ExprId, Literal, NormalBinOp,
     nameres::ResolveResult,
@@ -124,12 +127,13 @@ impl CheckCtx<'_> {
                         let ret_ty = self.new_ty_var();
 
                         constraints.add(Constraint {
-                            kind: ConstraintKind::BinOpOverload(BinOverloadConstraint {
+                            kind: BinOverloadConstraint {
                                 op: *op,
                                 lhs: lhs_ty,
                                 rhs: rhs_ty,
                                 ret_val: ret_ty,
-                            }),
+                            }
+                            .into(),
                             location: e,
                         });
 
@@ -256,7 +260,7 @@ impl CheckCtx<'_> {
                     rnix::ast::UnaryOpKind::Negate => {
                         constraints.add(Constraint {
                             location: *expr,
-                            kind: ConstraintKind::NegationOverload(ty),
+                            kind: OverloadConstraintKind::Negation(ty).into(),
                         });
                     }
                 };
