@@ -1,14 +1,30 @@
 use super::TyId;
 use crate::{ExprId, OverloadBinOp};
 
+mod sealed {
+    pub trait Sealed {}
+    impl Sealed for super::RootConstraintKind {}
+    impl Sealed for super::OverloadConstraintKind {}
+}
+
+pub trait IsConstraintKind: sealed::Sealed {}
+
+// Re-export the sealed implementations.
+impl IsConstraintKind for RootConstraintKind {}
+impl IsConstraintKind for OverloadConstraintKind {}
+
 #[derive(Debug, PartialEq, Eq, Clone)]
-pub struct Constraint {
-    pub(crate) kind: ConstraintKind,
+pub struct Constraint<Kind: IsConstraintKind + Clone> {
+    pub(crate) kind: Kind,
     pub(crate) location: ExprId,
 }
 
+pub type RootConstraint = Constraint<RootConstraintKind>;
+
+pub type OverloadConstraint = Constraint<OverloadConstraintKind>;
+
 #[derive(Debug, PartialEq, Clone, Eq)]
-pub enum ConstraintKind {
+pub enum RootConstraintKind {
     Eq(TyId, TyId),
     Overload(OverloadConstraintKind),
 }
@@ -19,9 +35,9 @@ pub enum OverloadConstraintKind {
     Negation(TyId),
 }
 
-impl From<OverloadConstraintKind> for ConstraintKind {
+impl From<OverloadConstraintKind> for RootConstraintKind {
     fn from(value: OverloadConstraintKind) -> Self {
-        ConstraintKind::Overload(value)
+        RootConstraintKind::Overload(value)
     }
 }
 
@@ -31,9 +47,9 @@ impl From<BinOverloadConstraint> for OverloadConstraintKind {
     }
 }
 
-impl From<BinOverloadConstraint> for ConstraintKind {
+impl From<BinOverloadConstraint> for RootConstraintKind {
     fn from(value: BinOverloadConstraint) -> Self {
-        ConstraintKind::Overload(OverloadConstraintKind::BinOp(value))
+        RootConstraintKind::Overload(OverloadConstraintKind::BinOp(value))
     }
 }
 
@@ -47,7 +63,7 @@ pub struct BinOverloadConstraint {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConstraintCtx {
-    pub(crate) constraints: Vec<Constraint>,
+    pub(crate) constraints: Vec<RootConstraint>,
 }
 
 impl ConstraintCtx {
@@ -57,14 +73,14 @@ impl ConstraintCtx {
         }
     }
 
-    pub fn add(&mut self, c: Constraint) {
+    pub fn add(&mut self, c: RootConstraint) {
         self.constraints.push(c);
     }
 
     pub fn unify_var(&mut self, e: ExprId, lhs: TyId, rhs: TyId) {
-        self.constraints.push(Constraint {
+        self.constraints.push(RootConstraint {
             location: e,
-            kind: ConstraintKind::Eq(lhs, rhs),
+            kind: RootConstraintKind::Eq(lhs, rhs),
         });
     }
 }

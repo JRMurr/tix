@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use smol_str::SmolStr;
 
 use super::{
-    BinOverloadConstraint, CheckCtx, Constraint, ConstraintCtx, ConstraintKind,
-    OverloadConstraintKind, TyId,
+    BinOverloadConstraint, CheckCtx, Constraint, ConstraintCtx, OverloadConstraintKind,
+    RootConstraintKind, TyId,
 };
 use crate::{
     BinOP, BindingValue, Bindings, Expr, ExprId, Literal, NormalBinOp,
@@ -20,7 +20,7 @@ impl CheckCtx<'_> {
     ) -> TyId {
         let ty = self.generate_constraints_inner(constraints, e);
         constraints.add(Constraint {
-            kind: ConstraintKind::Eq(self.ty_for_expr(e), ty),
+            kind: RootConstraintKind::Eq(self.ty_for_expr(e), ty),
             location: e,
         });
         ty
@@ -60,7 +60,7 @@ impl CheckCtx<'_> {
                 let ret_ty = self.new_ty_var();
 
                 constraints.add(Constraint {
-                    kind: ConstraintKind::Eq(
+                    kind: RootConstraintKind::Eq(
                         fun_ty,
                         Ty::Lambda {
                             param: arg_ty,
@@ -178,7 +178,7 @@ impl CheckCtx<'_> {
                 let cond_ty = self.generate_constraints(constraints, *cond);
 
                 constraints.add(Constraint {
-                    kind: ConstraintKind::Eq(
+                    kind: RootConstraintKind::Eq(
                         cond_ty,
                         Ty::Primitive(PrimitiveTy::Bool).intern_ty(self),
                     ),
@@ -189,7 +189,7 @@ impl CheckCtx<'_> {
                 let else_ty = self.generate_constraints(constraints, *else_body);
 
                 constraints.add(Constraint {
-                    kind: ConstraintKind::Eq(then_ty, else_ty),
+                    kind: RootConstraintKind::Eq(then_ty, else_ty),
                     location: e,
                 });
 

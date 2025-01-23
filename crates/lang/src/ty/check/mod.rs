@@ -173,7 +173,7 @@ enum SolveError {
     InferenceError(#[from] InferenceError),
 
     #[error("Unsolved constraints {0:?}")]
-    UnsolvedConstraints(Box<[Constraint]>),
+    UnsolvedConstraints(Box<[RootConstraint]>),
 }
 
 #[derive(Debug, Clone)]
@@ -229,7 +229,7 @@ impl<'db> CheckCtx<'db> {
         for def in &group {
             let ty = self.generate_constraints(&mut constraints, def.expr());
             constraints.add(Constraint {
-                kind: ConstraintKind::Eq(self.ty_for_name(def.name()), ty),
+                kind: RootConstraintKind::Eq(self.ty_for_name(def.name()), ty),
                 location: def.expr(),
             });
         }

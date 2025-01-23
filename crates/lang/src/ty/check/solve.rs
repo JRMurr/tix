@@ -3,8 +3,9 @@ use std::collections::HashSet;
 use smol_str::SmolStr;
 
 use super::{
-    AttrSetTy, BinOverloadConstraint, CheckCtx, Constraint, ConstraintCtx, ConstraintKind,
-    InferenceError, OverloadConstraintKind, SolveError, Ty, TyId, TypeVariableValue,
+    AttrSetTy, BinOverloadConstraint, CheckCtx, ConstraintCtx, InferenceError,
+    OverloadConstraintKind, RootConstraint, RootConstraintKind, SolveError, Ty, TyId,
+    TypeVariableValue,
 };
 use crate::{OverloadBinOp, PrimitiveTy};
 
@@ -75,15 +76,15 @@ impl CheckCtx<'_> {
         Ok(())
     }
 
-    fn solve_constraint(&mut self, constraint: &Constraint) -> SolveResult {
+    fn solve_constraint(&mut self, constraint: &RootConstraint) -> SolveResult {
         let snapshot = self.table.snapshot();
 
         let res: SolveResult = match &constraint.kind {
-            ConstraintKind::Eq(lhs, rhs) => self.unify(*lhs, *rhs).into(),
-            ConstraintKind::Overload(OverloadConstraintKind::BinOp(overload_constraint)) => {
+            RootConstraintKind::Eq(lhs, rhs) => self.unify(*lhs, *rhs).into(),
+            RootConstraintKind::Overload(OverloadConstraintKind::BinOp(overload_constraint)) => {
                 self.solve_bin_op(overload_constraint)
             }
-            ConstraintKind::Overload(OverloadConstraintKind::Negation(ty)) => {
+            RootConstraintKind::Overload(OverloadConstraintKind::Negation(ty)) => {
                 self.solve_negation(*ty)
             }
         };
