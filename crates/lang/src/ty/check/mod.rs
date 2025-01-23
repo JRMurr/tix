@@ -1,4 +1,5 @@
 mod collect;
+mod constraints;
 mod generate;
 mod solve;
 
@@ -8,6 +9,7 @@ mod tests;
 use std::collections::{HashMap, HashSet};
 
 use collect::Collector;
+pub(crate) use constraints::*;
 use derive_more::Debug;
 use ena::unify::{self, InPlaceUnificationTable, UnifyKey, UnifyValue};
 use thiserror::Error;
@@ -129,75 +131,7 @@ impl Ty<TyId> {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone)]
-pub struct Constraint {
-    kind: ConstraintKind,
-    location: ExprId,
-}
-
-#[derive(Debug, PartialEq, Clone, Eq)]
-pub enum ConstraintKind {
-    Eq(TyId, TyId),
-    Overload(OverloadConstraintKind),
-}
-
-#[derive(Debug, PartialEq, Clone, Eq)]
-pub enum OverloadConstraintKind {
-    BinOp(BinOverloadConstraint),
-    Negation(TyId),
-}
-
-impl From<OverloadConstraintKind> for ConstraintKind {
-    fn from(value: OverloadConstraintKind) -> Self {
-        ConstraintKind::Overload(value)
-    }
-}
-
-impl From<BinOverloadConstraint> for OverloadConstraintKind {
-    fn from(value: BinOverloadConstraint) -> Self {
-        OverloadConstraintKind::BinOp(value)
-    }
-}
-
-impl From<BinOverloadConstraint> for ConstraintKind {
-    fn from(value: BinOverloadConstraint) -> Self {
-        ConstraintKind::Overload(OverloadConstraintKind::BinOp(value))
-    }
-}
-
-#[derive(Debug, PartialEq, Eq, Clone)]
-pub struct BinOverloadConstraint {
-    op: OverloadBinOp,
-    lhs: TyId,
-    rhs: TyId,
-    ret_val: TyId,
-}
-
 type Substitutions = HashMap<u32, TyId>;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ConstraintCtx {
-    constraints: Vec<Constraint>,
-}
-
-impl ConstraintCtx {
-    pub fn new() -> Self {
-        Self {
-            constraints: Vec::new(),
-        }
-    }
-
-    pub fn add(&mut self, c: Constraint) {
-        self.constraints.push(c);
-    }
-
-    pub fn unify_var(&mut self, e: ExprId, lhs: TyId, rhs: TyId) {
-        self.constraints.push(Constraint {
-            location: e,
-            kind: ConstraintKind::Eq(lhs, rhs),
-        });
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InferenceResult {
