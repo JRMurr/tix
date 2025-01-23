@@ -293,8 +293,6 @@ impl CheckCtx<'_> {
         }
     }
 
-    // TODO: this seems to be returing the right type but its not getting mapped correctly in the
-    // final result...
     fn unify_attr(
         &mut self,
         mut lhs: AttrSetTy<TyId>,

@@ -3,6 +3,7 @@
     "dashmap",
     "froms",
     "indoc",
+    "nameres",
     "petgraph",
     "preorder",
     "rnix",

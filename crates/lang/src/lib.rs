@@ -142,7 +142,7 @@ pub struct ModuleSourceMap {
     expr_map: HashMap<AstPtr, ExprId>,
     expr_map_rev: ArenaMap<ExprId, AstPtr>,
     name_map: HashMap<AstPtr, NameId>,
-    name_map_rev: ArenaMap<NameId, AstPtr>, // TODO: nil has this a Vec<AstPtr>, will probs matter later
+    name_map_rev: ArenaMap<NameId, AstPtr>, // TODO: nil has this a Vec<AstPtr>, will probably matter later
 }
 
 impl ModuleSourceMap {
