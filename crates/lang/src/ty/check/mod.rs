@@ -123,6 +123,7 @@ impl TypeVariableValue {
 pub struct TySchema {
     pub vars: HashSet<u32>, // Each usize corresponds to a Ty::TyVar(x)
     pub ty: TyId,
+    pub constraints: Box<[OverloadConstraint]>,
 }
 
 impl Ty<TyId> {
@@ -359,6 +360,7 @@ impl<'db> CheckCtx<'db> {
         TySchema {
             vars: free_vars,
             ty,
+            constraints: Box::default(), // TODO
         }
     }
 
