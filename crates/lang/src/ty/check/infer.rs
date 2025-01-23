@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
 use super::{
-    CheckCtx, Constraint, ConstraintCtx, InferenceResult, RootConstraintKind, TyId, TySchema,
-    collect::Collector,
+    CheckCtx, Constraint, ConstraintCtx, InferenceError, InferenceResult, OverloadConstraint,
+    RootConstraintKind, SolveError, TyId, TySchema, collect::Collector,
 };
 use crate::{
     AttrSetTy, Ty,
@@ -11,32 +11,45 @@ use crate::{
 
 type Substitutions = HashMap<u32, TyId>;
 
+fn get_deferred(result: Result<(), SolveError>) -> Result<Vec<OverloadConstraint>, InferenceError> {
+    match result {
+        Ok(_) => Ok(Vec::new()),
+        Err(e) => match e.deferrable() {
+            Some(constraints) => Ok(constraints),
+            None => Err(e.inference_error().unwrap()),
+        },
+    }
+}
+
 impl CheckCtx<'_> {
-    pub fn infer_prog(mut self, groups: GroupedDefs) -> InferenceResult {
+    pub fn infer_prog(mut self, groups: GroupedDefs) -> Result<InferenceResult, InferenceError> {
         let len = self.module.names().len() + self.module.exprs().len();
         for _ in 0..len {
             self.new_ty_var();
         }
 
         for group in groups {
-            self.infer_scc_group(group);
+            self.infer_scc_group(group)?;
         }
 
-        self.infer_root();
+        self.infer_root()?;
 
         let mut collector = Collector::new(self);
 
-        collector.finalize_inference()
+        Ok(collector.finalize_inference())
     }
 
-    fn infer_root(&mut self) {
+    fn infer_root(&mut self) -> Result<(), InferenceError> {
         let mut constraints = ConstraintCtx::new();
         self.generate_constraints(&mut constraints, self.module.entry_expr);
-        self.solve_constraints(constraints)
-            .expect("TODO: solve error aka type error");
+
+        // TODO: i think its fine to not do anything with the defers here?
+        let _ = get_deferred(self.solve_constraints(constraints))?;
+
+        Ok(())
     }
 
-    fn infer_scc_group(&mut self, group: DependentGroup) {
+    fn infer_scc_group(&mut self, group: DependentGroup) -> Result<(), InferenceError> {
         let mut constraints = ConstraintCtx::new();
 
         for def in &group {
@@ -47,8 +60,9 @@ impl CheckCtx<'_> {
             });
         }
 
-        self.solve_constraints(constraints)
-            .expect("TODO: solve error aka type error");
+        let res = self.solve_constraints(constraints);
+
+        let deferred_constraints = get_deferred(res)?;
 
         // TODO: could there be cases where mutually dependent TypeDefs
         // need to be generalized together (ie)?
@@ -59,6 +73,8 @@ impl CheckCtx<'_> {
             let generalized_val = self.generalize(name_ty);
             self.poly_type_env.insert(def.name(), generalized_val);
         }
+
+        Ok(())
     }
 
     pub fn instantiate(&mut self, scheme: &TySchema) -> TyId {

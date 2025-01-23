@@ -21,18 +21,24 @@ pub struct Constraint<Kind: IsConstraintKind + Clone> {
 
 pub type RootConstraint = Constraint<RootConstraintKind>;
 
+impl RootConstraint {
+    pub fn overload(&self) -> Option<OverloadConstraint> {
+        match &self.kind {
+            RootConstraintKind::Overload(o) => Some(OverloadConstraint {
+                kind: o.clone(),
+                location: self.location,
+            }),
+            _ => None,
+        }
+    }
+}
+
 pub type OverloadConstraint = Constraint<OverloadConstraintKind>;
 
 #[derive(Debug, PartialEq, Clone, Eq)]
 pub enum RootConstraintKind {
     Eq(TyId, TyId),
     Overload(OverloadConstraintKind),
-}
-
-impl RootConstraintKind {
-    pub fn is_overload(&self) -> bool {
-        matches!(self, RootConstraintKind::Overload(_))
-    }
 }
 
 #[derive(Debug, PartialEq, Clone, Eq)]

@@ -17,7 +17,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let file = db.read_file(args.file_path)?;
 
-    dbg!(lang::check_file(&db, file));
+    dbg!(lang::check_file(&db, file)?);
 
     // let (module, _source_map) = lang::module_and_source_maps(&db, file);
 

@@ -18,7 +18,7 @@ use super::{ArcTy, AttrSetTy, PrimitiveTy, Ty};
 use crate::{ExprId, Module, NameId, OverloadBinOp, db::NixFile, nameres::NameResolution};
 
 #[salsa::tracked]
-pub fn check_file(db: &dyn crate::Db, file: NixFile) -> InferenceResult {
+pub fn check_file(db: &dyn crate::Db, file: NixFile) -> Result<InferenceResult, InferenceError> {
     let module = crate::module(db, file);
 
     let name_res = crate::nameres::name_resolution(db, file);
@@ -145,7 +145,7 @@ impl InferenceResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
-enum InferenceError {
+pub enum InferenceError {
     #[error("Could not union {0:?} and {1:?}")]
     InvalidUnion(Ty<TyId>, Ty<TyId>),
 
@@ -163,12 +163,40 @@ enum InferenceError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
-enum SolveError {
+pub enum SolveError {
     #[error(transparent)]
     InferenceError(#[from] InferenceError),
 
     #[error("Unsolved constraints {0:?}")]
     UnsolvedConstraints(Box<[RootConstraint]>),
+}
+
+impl SolveError {
+    /// If the Solve error is only unsolved Overload constraints
+    /// it could be solved later by tracking them on the appropriate [TySchema]
+    pub fn deferrable(&self) -> Option<Vec<OverloadConstraint>> {
+        let SolveError::UnsolvedConstraints(constraints) = self else {
+            return None;
+        };
+
+        let num_constrains = constraints.len();
+
+        let overload_constraints: Vec<_> =
+            constraints.iter().filter_map(|c| c.overload()).collect();
+
+        if num_constrains == overload_constraints.len() {
+            Some(overload_constraints)
+        } else {
+            None
+        }
+    }
+
+    pub fn inference_error(self) -> Option<InferenceError> {
+        match self {
+            SolveError::InferenceError(inference_error) => Some(inference_error),
+            SolveError::UnsolvedConstraints(_) => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

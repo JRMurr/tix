@@ -7,7 +7,7 @@ use crate::{arc_ty, tests::TestDatabase, ty::ArcTy};
 fn check(src: &str, expected: ArcTy) {
     let (db, file) = TestDatabase::single_file(src).unwrap();
     let module = crate::module(&db, file);
-    let inference = check_file(&db, file);
+    let inference = check_file(&db, file).expect("No inference error");
 
     let root_ty = inference
         .expr_ty_map
