@@ -43,3 +43,14 @@ fn simple_types() {
 
     check(file, dbg!(ty));
 }
+
+#[test]
+fn equality() {
+    let file = indoc! {"
+        1 == 0
+    "};
+
+    let ty = arc_ty! { Bool };
+
+    check(file, dbg!(ty));
+}

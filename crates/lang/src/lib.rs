@@ -293,6 +293,7 @@ pub enum BoolBinOp {
     Or,
 }
 
+/// Bin ops like equality or less than that operate on expressions but return a bool
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExprBinOp {
     Less,

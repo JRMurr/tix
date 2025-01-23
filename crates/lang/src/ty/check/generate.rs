@@ -149,7 +149,7 @@ impl CheckCtx<'_> {
                     BinOP::Normal(NormalBinOp::Expr(_)) => {
                         constraints.unify_var(e, lhs_ty, rhs_ty);
 
-                        lhs_ty
+                        Ty::Primitive(PrimitiveTy::Bool).intern_ty(self)
                     }
                     BinOP::Normal(NormalBinOp::ListConcat) => {
                         let list_elem_ty = self.new_ty_var();
