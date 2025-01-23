@@ -1,17 +1,20 @@
 use std::collections::{HashMap, HashSet};
 
 use super::{
-    CheckCtx, Constraint, ConstraintCtx, InferenceError, InferenceResult, OverloadConstraint,
-    RootConstraintKind, SolveError, TyId, TySchema, collect::Collector,
+    CheckCtx, Constraint, ConstraintCtx, FreeVars, InferenceError, InferenceResult,
+    OverloadConstraint, OverloadConstraintKind, RootConstraintKind, SolveError, TyId, TySchema,
+    collect::Collector,
 };
 use crate::{
     AttrSetTy, Ty,
     nameres::{DependentGroup, GroupedDefs},
 };
 
-type Substitutions = HashMap<u32, TyId>;
+type Substitutions = HashMap<TyId, TyId>;
 
-fn get_deferred(result: Result<(), SolveError>) -> Result<Vec<OverloadConstraint>, InferenceError> {
+type DeferredConstraints = Vec<OverloadConstraint>;
+
+fn get_deferred(result: Result<(), SolveError>) -> Result<DeferredConstraints, InferenceError> {
     match result {
         Ok(_) => Ok(Vec::new()),
         Err(e) => match e.deferrable() {
@@ -60,9 +63,7 @@ impl CheckCtx<'_> {
             });
         }
 
-        let res = self.solve_constraints(constraints);
-
-        let deferred_constraints = get_deferred(res)?;
+        let deferred_constraints = get_deferred(self.solve_constraints(constraints))?;
 
         // TODO: could there be cases where mutually dependent TypeDefs
         // need to be generalized together (ie)?
@@ -70,9 +71,10 @@ impl CheckCtx<'_> {
         // errors / canonicalized generics look weird
         for def in &group {
             let name_ty = self.ty_for_name(def.name());
-            let generalized_val = self.generalize(name_ty);
+            let generalized_val = self.generalize(name_ty, &deferred_constraints);
             self.poly_type_env.insert(def.name(), generalized_val);
         }
+        // TODO: should we assert that all deferred_constraints went somewhere?
 
         Ok(())
     }
@@ -91,7 +93,7 @@ impl CheckCtx<'_> {
 
         let new_ty = match ty {
             Ty::TyVar(x) => {
-                if let Some(&replacement) = substitutions.get(&x) {
+                if let Some(&replacement) = substitutions.get(&ty_id) {
                     return replacement;
                 }
                 // this should have been unified by now...
@@ -135,23 +137,35 @@ impl CheckCtx<'_> {
         new_ty.intern_ty(self)
     }
 
-    fn generalize(&mut self, ty: TyId) -> TySchema {
+    fn generalize(&mut self, ty: TyId, deferred: &DeferredConstraints) -> TySchema {
         let free_vars = self.free_type_vars(ty);
+
+        let constraints = deferred
+            .iter()
+            .filter(|c| match &c.kind {
+                OverloadConstraintKind::BinOp(bin_overload_constraint) => {
+                    bin_overload_constraint.has_free_var(&free_vars)
+                }
+                OverloadConstraintKind::Negation(ty_id) => free_vars.contains(ty_id),
+            })
+            .cloned()
+            .collect();
+
         TySchema {
             vars: free_vars,
             ty,
-            constraints: Box::default(), // TODO
+            constraints,
         }
     }
 
-    fn free_type_vars(&mut self, ty_id: TyId) -> HashSet<u32> {
+    fn free_type_vars(&mut self, ty_id: TyId) -> FreeVars {
         let mut set = HashSet::new();
 
         let ty = self.get_ty(ty_id);
 
         match ty {
-            Ty::TyVar(x) => {
-                set.insert(x);
+            Ty::TyVar(_) => {
+                set.insert(ty_id);
             }
             Ty::List(inner) => set.extend(&self.free_type_vars(inner)),
             Ty::Lambda { param, body } => {

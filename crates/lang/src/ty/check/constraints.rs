@@ -1,4 +1,4 @@
-use super::TyId;
+use super::{FreeVars, TyId};
 use crate::{ExprId, OverloadBinOp};
 
 mod sealed {
@@ -71,6 +71,14 @@ pub struct BinOverloadConstraint {
     pub(crate) lhs: TyId,
     pub(crate) rhs: TyId,
     pub(crate) ret_val: TyId,
+}
+
+impl BinOverloadConstraint {
+    // check if either the lhs or rhs is in the free vars
+    // TODO: don't think we need to check the ret since it only would be set if the lhs and rhs are known
+    pub fn has_free_var(&self, free: &FreeVars) -> bool {
+        free.contains(&self.lhs) || free.contains(&self.rhs)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

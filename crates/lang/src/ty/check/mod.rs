@@ -114,10 +114,12 @@ impl TypeVariableValue {
     }
 }
 
+pub type FreeVars = HashSet<TyId>;
+
 // the poly type
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TySchema {
-    pub vars: HashSet<u32>, // Each usize corresponds to a Ty::TyVar(x)
+    pub vars: FreeVars,
     pub ty: TyId,
     pub constraints: Box<[OverloadConstraint]>,
 }
