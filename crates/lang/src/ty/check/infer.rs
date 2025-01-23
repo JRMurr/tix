@@ -218,6 +218,10 @@ impl CheckCtx<'_> {
                 if let Some(dyn_ty) = attr_set_ty.dyn_ty {
                     set.extend(&self.free_type_vars(dyn_ty));
                 }
+
+                if let Some(rest_ty) = attr_set_ty.rest {
+                    set.extend(&self.free_type_vars(rest_ty));
+                }
             }
             Ty::Primitive(_) => {}
         }

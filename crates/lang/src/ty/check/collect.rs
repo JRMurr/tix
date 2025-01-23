@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use smol_str::SmolStr;
 
@@ -11,6 +11,89 @@ pub struct Collector<'db> {
 }
 
 type Substitutions = HashMap<u32, u32>;
+
+impl ArcTy {
+    /// Normalize all the ty vars to start from 0 instead
+    /// of the "random" nums it has from solving
+    pub fn normalize_vars(&self) -> ArcTy {
+        let free_vars = self.free_type_vars();
+
+        self.normalize_inner(&free_vars)
+    }
+
+    fn normalize_inner(&self, free: &Vec<u32>) -> ArcTy {
+        match self {
+            Ty::TyVar(x) => {
+                let new_idx = free.iter().position(|new| new == x).unwrap();
+                ArcTy::TyVar(new_idx.try_into().unwrap())
+            }
+            Ty::List(inner) => ArcTy::List(inner.0.normalize_inner(free).into()),
+            Ty::Lambda { param, body } => ArcTy::Lambda {
+                param: param.0.normalize_inner(free).into(),
+                body: body.0.normalize_inner(free).into(),
+            },
+            Ty::AttrSet(attr_set_ty) => {
+                let fields = attr_set_ty
+                    .fields
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.0.normalize_inner(free).into()))
+                    .collect();
+
+                let dyn_ty = attr_set_ty
+                    .dyn_ty
+                    .clone()
+                    .map(|dyn_ty| dyn_ty.0.normalize_inner(free).into());
+
+                let rest = attr_set_ty
+                    .rest
+                    .clone()
+                    .map(|rest| rest.0.normalize_inner(free).into());
+
+                ArcTy::AttrSet(AttrSetTy {
+                    fields,
+                    dyn_ty,
+                    rest,
+                })
+            }
+            Ty::Primitive(_) => self.clone(),
+        }
+    }
+
+    // TODO: very similar to [CheckCtx::free_type_vars]
+    // maybe there could be a generic "walk" func that could work for arena tys and arc tys?
+    // or maybe i just stop having arc tys...
+    // the only diff here is order sorta matters (first seen TyVar should be 'a')
+    // but not end of the world if not
+    fn free_type_vars(&self) -> Vec<u32> {
+        let mut set = Vec::new();
+        match self {
+            Ty::TyVar(x) => {
+                set.push(*x);
+            }
+            Ty::List(inner) => set.extend(&inner.0.free_type_vars()),
+            Ty::Lambda { param, body } => {
+                set.extend(&param.0.free_type_vars());
+                set.extend(&body.0.free_type_vars());
+            }
+            Ty::AttrSet(attr_set_ty) => {
+                attr_set_ty.fields.values().for_each(|v| {
+                    set.extend(&v.0.free_type_vars());
+                });
+
+                if let Some(dyn_ty) = &attr_set_ty.dyn_ty {
+                    set.extend(&dyn_ty.0.free_type_vars());
+                }
+
+                if let Some(rest_ty) = &attr_set_ty.rest {
+                    set.extend(&rest_ty.0.free_type_vars());
+                }
+            }
+            Ty::Primitive(_) => {}
+        }
+
+        set
+    }
+}
 
 impl<'db> Collector<'db> {
     pub fn new(ctx: CheckCtx<'db>) -> Self {
@@ -54,7 +137,7 @@ impl<'db> Collector<'db> {
             //     .get(&name)
             //     .expect("Should have generalized all names by now");
             let ty = self.canonicalize_type(ty, &HashMap::new());
-            name_ty_map.insert(name, ty);
+            name_ty_map.insert(name, ty.normalize_vars());
         }
         for (expr, ty) in expr_tys {
             expr_ty_map.insert(expr, self.canonicalize_type(ty, &HashMap::new()));
