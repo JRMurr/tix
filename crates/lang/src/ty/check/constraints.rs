@@ -29,6 +29,12 @@ pub enum RootConstraintKind {
     Overload(OverloadConstraintKind),
 }
 
+impl RootConstraintKind {
+    pub fn is_overload(&self) -> bool {
+        matches!(self, RootConstraintKind::Overload(_))
+    }
+}
+
 #[derive(Debug, PartialEq, Clone, Eq)]
 pub enum OverloadConstraintKind {
     BinOp(BinOverloadConstraint),
