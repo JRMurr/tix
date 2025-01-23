@@ -45,7 +45,7 @@ impl CheckCtx<'_> {
                     }
                 }
                 Some(res) => match res {
-                    &ResolveResult::Definition(name) => self.ty_for_name(name),
+                    &ResolveResult::Definition(name) => self.ty_for_name(name, constraints),
                     ResolveResult::WithExprs(_) => {
                         todo!("handle with exprs in reference gen")
                     }
@@ -77,7 +77,7 @@ impl CheckCtx<'_> {
                 let param_ty = self.new_ty_var();
 
                 if let Some(name) = *param {
-                    let name_ty = self.ty_for_name(name);
+                    let name_ty = self.ty_for_name(name, constraints);
                     constraints.unify_var(e, param_ty, name_ty);
                 }
 
@@ -88,7 +88,7 @@ impl CheckCtx<'_> {
                         let default_ty =
                             default_expr.map(|e| self.generate_constraints(constraints, e));
                         let Some(name) = name else { continue };
-                        let name_ty = self.ty_for_name(name);
+                        let name_ty = self.ty_for_name(name, constraints);
                         if let Some(default_ty) = default_ty {
                             constraints.unify_var(e, name_ty, default_ty);
                         }
@@ -332,12 +332,12 @@ impl CheckCtx<'_> {
             // so we can skip generating constraints
             if let Some(ty_schema) = self.poly_type_env.get(&name).cloned() {
                 // println!("got poly {ty_schema:?} for name {name:?}");
-                let value_ty = self.instantiate(&ty_schema);
+                let value_ty = self.instantiate(&ty_schema, constraints);
                 fields.insert(name_text, value_ty);
                 continue;
             }
 
-            let name_ty = self.ty_for_name(name);
+            let name_ty = self.ty_for_name(name, constraints);
             let value_ty = match value {
                 BindingValue::Inherit(e) | BindingValue::Expr(e) => {
                     self.generate_constraints(constraints, e)

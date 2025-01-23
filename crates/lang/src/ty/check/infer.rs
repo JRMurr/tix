@@ -1,9 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
 use super::{
-    CheckCtx, Constraint, ConstraintCtx, FreeVars, InferenceError, InferenceResult,
-    OverloadConstraint, OverloadConstraintKind, RootConstraintKind, SolveError, TyId, TySchema,
-    collect::Collector,
+    BinOverloadConstraint, CheckCtx, Constraint, ConstraintCtx, FreeVars, InferenceError,
+    InferenceResult, OverloadConstraint, OverloadConstraintKind, RootConstraintKind, SolveError,
+    TyId, TySchema, collect::Collector,
 };
 use crate::{
     AttrSetTy, Ty,
@@ -58,7 +58,7 @@ impl CheckCtx<'_> {
         for def in &group {
             let ty = self.generate_constraints(&mut constraints, def.expr());
             constraints.add(Constraint {
-                kind: RootConstraintKind::Eq(self.ty_for_name(def.name()), ty),
+                kind: RootConstraintKind::Eq(self.ty_for_name_no_instantiate(def.name()), ty),
                 location: def.expr(),
             });
         }
@@ -70,7 +70,7 @@ impl CheckCtx<'_> {
         // i don't think it will cause invalid programs to type check but might make
         // errors / canonicalized generics look weird
         for def in &group {
-            let name_ty = self.ty_for_name(def.name());
+            let name_ty = self.ty_for_name_no_instantiate(def.name());
             let generalized_val = self.generalize(name_ty, &deferred_constraints);
             self.poly_type_env.insert(def.name(), generalized_val);
         }
@@ -79,13 +79,51 @@ impl CheckCtx<'_> {
         Ok(())
     }
 
-    pub fn instantiate(&mut self, scheme: &TySchema) -> TyId {
+    pub fn instantiate(&mut self, scheme: &TySchema, constraints: &mut ConstraintCtx) -> TyId {
         let mut substitutions = HashMap::new();
         for &var in &scheme.vars {
             substitutions.insert(var, self.new_ty_var());
         }
 
+        for constraint in &scheme.constraints {
+            self.instantiate_constraint(constraint, &substitutions, constraints);
+        }
+
         self.instantiate_ty(scheme.ty, &substitutions)
+    }
+
+    pub fn instantiate_constraint(
+        &mut self,
+        overload_constraint: &OverloadConstraint,
+        substitutions: &Substitutions,
+        constraints: &mut ConstraintCtx,
+    ) {
+        let get_sub = |ty_id| {
+            if let Some(&replacement) = substitutions.get(&ty_id) {
+                return replacement;
+            }
+            panic!("No substitution found for {ty_id:?}")
+        };
+
+        let location = overload_constraint.location;
+        match &overload_constraint.kind {
+            OverloadConstraintKind::BinOp(bin_op) => {
+                constraints.add(Constraint {
+                    kind: BinOverloadConstraint {
+                        op: bin_op.op,
+                        lhs: get_sub(bin_op.lhs),
+                        rhs: get_sub(bin_op.rhs),
+                        ret_val: get_sub(bin_op.ret_val),
+                    }
+                    .into(),
+                    location,
+                });
+            }
+            OverloadConstraintKind::Negation(ty_id) => constraints.add(Constraint {
+                location,
+                kind: OverloadConstraintKind::Negation(get_sub(*ty_id)).into(),
+            }),
+        }
     }
 
     fn instantiate_ty(&mut self, ty_id: TyId, substitutions: &Substitutions) -> TyId {

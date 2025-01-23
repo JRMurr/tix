@@ -248,15 +248,23 @@ impl<'db> CheckCtx<'db> {
         self.alloc_ty(None)
     }
 
-    fn ty_for_name(&mut self, name: NameId) -> TyId {
+    fn ty_for_name(&mut self, name: NameId, constraints: &mut ConstraintCtx) -> TyId {
         let ty_schema = self.poly_type_env.get(&name).cloned();
 
         if let Some(ty_schema) = ty_schema {
-            return self.instantiate(&ty_schema);
+            return self.instantiate(&ty_schema, constraints);
         }
 
         // NOTE: this should only happen during the inference of the value for the name
         // after inferring we should add the name to the poly type env
+        u32::from(name.into_raw()).into()
+    }
+
+    fn ty_for_name_no_instantiate(&mut self, name: NameId) -> TyId {
+        // TODO: not sure if this will always hold but good to check the assumption
+        // the only case it would be nice to ignore would be during canonicalizing
+        debug_assert!(!self.poly_type_env.contains_key(&name));
+
         u32::from(name.into_raw()).into()
     }
 
