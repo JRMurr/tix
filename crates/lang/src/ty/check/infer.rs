@@ -3,14 +3,12 @@ use std::collections::{HashMap, HashSet};
 use super::{
     AttrMergeConstraint, BinOverloadConstraint, CheckCtx, Constraint, ConstraintCtx,
     DeferrableConstraint, DeferrableConstraintKind, FreeVars, InferenceError, InferenceResult,
-    RootConstraintKind, SolveError, TyId, TySchema, collect::Collector,
+    RootConstraintKind, SolveError, Substitutions, TyId, TySchema, collect::Collector,
 };
 use crate::{
     AttrSetTy, Ty,
     nameres::{DependentGroup, GroupedDefs},
 };
-
-type Substitutions = HashMap<TyId, TyId>;
 
 type DeferredConstraints = Vec<DeferrableConstraint>;
 
@@ -31,7 +29,7 @@ impl CheckCtx<'_> {
             self.new_ty_var();
         }
 
-        for group in groups {
+        for group in dbg!(groups) {
             self.infer_scc_group(group)?;
         }
 
@@ -43,6 +41,7 @@ impl CheckCtx<'_> {
     }
 
     fn infer_root(&mut self) -> Result<(), InferenceError> {
+        println!("INFER ROOT");
         let mut constraints = ConstraintCtx::new();
         self.generate_constraints(&mut constraints, self.module.entry_expr);
 
@@ -79,7 +78,11 @@ impl CheckCtx<'_> {
         Ok(())
     }
 
-    pub fn instantiate(&mut self, scheme: &TySchema, constraints: &mut ConstraintCtx) -> TyId {
+    pub fn instantiate(
+        &mut self,
+        scheme: &TySchema,
+        constraints: &mut ConstraintCtx,
+    ) -> (TyId, Substitutions) {
         let mut substitutions = HashMap::new();
         for &var in &scheme.vars {
             substitutions.insert(var, self.new_ty_var());
@@ -91,7 +94,9 @@ impl CheckCtx<'_> {
 
         // dbg!(scheme);
 
-        self.instantiate_ty(scheme.ty, &substitutions)
+        let ty = self.instantiate_ty(scheme.ty, &substitutions);
+
+        (ty, substitutions)
     }
 
     pub fn instantiate_constraint(

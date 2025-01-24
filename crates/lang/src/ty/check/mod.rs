@@ -204,6 +204,33 @@ impl SolveError {
     }
 }
 
+pub type Substitutions = HashMap<TyId, TyId>;
+
+#[derive(Debug, Clone, Default)]
+pub struct SubstitutionScopes {
+    scopes: Vec<Substitutions>,
+}
+
+impl SubstitutionScopes {
+    pub fn push(&mut self, scope: Substitutions) {
+        self.scopes.push(scope);
+    }
+
+    pub fn pop(&mut self) -> Option<Substitutions> {
+        self.scopes.pop()
+    }
+
+    pub fn get_sub(&self, key: &TyId) -> Option<TyId> {
+        for scope in self.scopes.iter().rev() {
+            if let Some(sub) = dbg!(scope).get(key) {
+                return Some(*sub);
+            }
+        }
+
+        None
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CheckCtx<'db> {
     module: &'db Module,
@@ -214,6 +241,8 @@ pub struct CheckCtx<'db> {
     poly_type_env: HashMap<NameId, TySchema>,
 
     prim_cache: HashMap<PrimitiveTy, TyId>,
+
+    sub_scopes: SubstitutionScopes,
 }
 
 impl<'db> CheckCtx<'db> {
@@ -224,6 +253,7 @@ impl<'db> CheckCtx<'db> {
             table: InPlaceUnificationTable::new(),
             poly_type_env: HashMap::new(),
             prim_cache: HashMap::new(),
+            sub_scopes: SubstitutionScopes::default(),
         }
     }
 
@@ -251,8 +281,14 @@ impl<'db> CheckCtx<'db> {
         self.alloc_ty(None)
     }
 
-    fn ty_for_name(&mut self, name: NameId, constraints: &mut ConstraintCtx) -> TyId {
+    fn ty_for_name(
+        &mut self,
+        name: NameId,
+        constraints: &mut ConstraintCtx,
+    ) -> (TyId, Substitutions) {
         let ty_schema = self.poly_type_env.get(&name).cloned();
+
+        dbg!(name);
 
         if let Some(ty_schema) = ty_schema {
             return self.instantiate(&ty_schema, constraints);
@@ -260,7 +296,19 @@ impl<'db> CheckCtx<'db> {
 
         // NOTE: this should only happen during the inference of the value for the name
         // after inferring we should add the name to the poly type env
-        u32::from(name.into_raw()).into()
+        let ty: TyId = u32::from(name.into_raw()).into();
+
+        (
+            dbg!(self.sub_scopes.get_sub(&ty)).unwrap_or(ty),
+            HashMap::new(),
+        )
+    }
+
+    fn ty_for_name_no_subs(&mut self, name: NameId, constraints: &mut ConstraintCtx) -> TyId {
+        let (ty, subs) = self.ty_for_name(name, constraints);
+        // TODO: this will probably be sad but good for sanity for now
+        debug_assert!(subs.is_empty());
+        ty
     }
 
     fn ty_for_name_no_instantiate(&mut self, name: NameId) -> TyId {

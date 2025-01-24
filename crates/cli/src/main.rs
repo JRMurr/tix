@@ -21,7 +21,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let inference = dbg!(lang::check_file(&db, file)?);
 
-    // dbg!(module);
+    dbg!(&module);
 
     let root_ty = inference
         .expr_ty_map

@@ -4,7 +4,7 @@ use smol_str::SmolStr;
 
 use super::{
     AttrMergeConstraint, BinOverloadConstraint, CheckCtx, Constraint, ConstraintCtx,
-    DeferrableConstraintKind, RootConstraintKind, TyId,
+    DeferrableConstraintKind, RootConstraintKind, Substitutions, TyId,
 };
 use crate::{
     BinOP, BindingValue, Bindings, Expr, ExprId, Literal, NormalBinOp,
@@ -49,7 +49,11 @@ impl CheckCtx<'_> {
                 // we still get back the non generalized name
                 // so I need a good way to handle that...
                 Some(res) => match res {
-                    &ResolveResult::Definition(name) => self.ty_for_name(name, constraints),
+                    &ResolveResult::Definition(name) => {
+                        println!("LOOKIN UP {var_name}");
+                        // TODO: Rethink the sub look up....
+                        self.ty_for_name(name, constraints).0
+                    }
                     ResolveResult::WithExprs(_) => {
                         todo!("handle with exprs in reference gen")
                     }
@@ -59,6 +63,7 @@ impl CheckCtx<'_> {
                 },
             },
             Expr::Apply { fun, arg } => {
+                println!("IN APPLY");
                 let fun_ty = self.generate_constraints(constraints, *fun);
                 let arg_ty = self.generate_constraints(constraints, *arg);
                 let ret_ty = self.new_ty_var();
@@ -78,10 +83,11 @@ impl CheckCtx<'_> {
                 ret_ty
             }
             Expr::Lambda { param, pat, body } => {
+                println!("IN LAMBDA");
                 let param_ty = self.new_ty_var();
 
                 if let Some(name) = *param {
-                    let name_ty = self.ty_for_name(name, constraints);
+                    let name_ty = self.ty_for_name_no_subs(name, constraints);
                     constraints.unify_var(e, param_ty, name_ty);
                 }
 
@@ -92,7 +98,7 @@ impl CheckCtx<'_> {
                         let default_ty =
                             default_expr.map(|e| self.generate_constraints(constraints, e));
                         let Some(name) = name else { continue };
-                        let name_ty = self.ty_for_name(name, constraints);
+                        let name_ty = self.ty_for_name_no_subs(name, constraints);
                         if let Some(default_ty) = default_ty {
                             constraints.unify_var(e, name_ty, default_ty);
                         }
@@ -206,17 +212,23 @@ impl CheckCtx<'_> {
                 then_ty
             }
             Expr::LetIn { bindings, body } => {
+                println!("IN LET IN");
                 // TODO: we might be doing instantiates twice here
                 // once in the gen bind call then in the body
                 // maybe in the gen we can fully skip already "evaluated" names?
-                self.generate_bind_constraints(constraints, bindings, e);
-                self.generate_constraints(constraints, *body)
+                let (_, subs) = self.generate_bind_constraints(constraints, bindings, e);
+                self.sub_scopes.push(subs);
+                println!("PUSHING SCOPE");
+                let res = self.generate_constraints(constraints, *body);
+                self.sub_scopes.pop();
+                res
             }
             Expr::AttrSet {
                 is_rec: _,
                 bindings,
             } => {
-                let attr_ty = self.generate_bind_constraints(constraints, bindings, e);
+                // TODO: need to handle subs somehow in recusrive attrsets....
+                let (attr_ty, _subs) = self.generate_bind_constraints(constraints, bindings, e);
 
                 Ty::AttrSet(attr_ty).intern_ty(self)
             }
@@ -327,7 +339,7 @@ impl CheckCtx<'_> {
         constraints: &mut ConstraintCtx,
         bindings: &Bindings,
         e: ExprId,
-    ) -> AttrSetTy<TyId> {
+    ) -> (AttrSetTy<TyId>, Substitutions) {
         // let inherit_from_tys = bindings
         //     .inherit_froms
         //     .iter()
@@ -335,19 +347,23 @@ impl CheckCtx<'_> {
         //     .collect::<Vec<_>>();
 
         let mut fields = BTreeMap::new();
+        let mut subs = Substitutions::new();
         for &(name, value) in bindings.statics.iter() {
             let name_text = self.module[name].text.clone();
             // if we already have this name in poly_type_env
             // we checked before on a previous SCC group
             // so we can skip generating constraints
-            if let Some(ty_schema) = self.poly_type_env.get(&name).cloned() {
-                // println!("got poly {ty_schema:?} for name {name:?}");
-                let value_ty = self.instantiate(&ty_schema, constraints);
-                fields.insert(name_text, value_ty);
-                continue;
-            }
+            // if let Some(ty_schema) = self.poly_type_env.get(&name).cloned() {
+            //     // println!("got poly {ty_schema:?} for name {name:?}");
+            //     let (value_ty, inner_sub) = self.instantiate(&ty_schema, constraints);
+            //     fields.insert(name_text, value_ty);
+            //     subs.extend(inner_sub);
+            //     continue;
+            // }
 
-            let name_ty = self.ty_for_name(name, constraints);
+            let (name_ty, inner_sub) = self.ty_for_name(name, constraints);
+            // subs.extend(inner_sub);
+            self.sub_scopes.push(inner_sub);
             let value_ty = match value {
                 BindingValue::Inherit(e) | BindingValue::Expr(e) => {
                     self.generate_constraints(constraints, e)
@@ -357,6 +373,7 @@ impl CheckCtx<'_> {
                     // self.infer_set_field(inherit_from_tys[i], Some(name_text.clone()))
                 }
             };
+            self.sub_scopes.pop();
             // TODO: need a good expression look up here
             constraints.unify_var(e, name_ty, value_ty);
             // let generalized_val = self.generalize(value_ty);
@@ -380,10 +397,12 @@ impl CheckCtx<'_> {
             // dyn_ty
         });
 
-        AttrSetTy {
+        let ty = AttrSetTy {
             fields,
             dyn_ty,
             rest: None,
-        }
+        };
+
+        (ty, subs)
     }
 }
