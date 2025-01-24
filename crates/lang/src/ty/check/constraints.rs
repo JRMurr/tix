@@ -45,6 +45,7 @@ pub enum RootConstraintKind {
 pub enum DeferrableConstraintKind {
     BinOp(BinOverloadConstraint),
     Negation(TyId),
+    AttrMerge(AttrMergeConstraint),
 }
 
 impl From<DeferrableConstraintKind> for RootConstraintKind {
@@ -74,6 +75,33 @@ pub struct BinOverloadConstraint {
 }
 
 impl BinOverloadConstraint {
+    // check if either the lhs or rhs is in the free vars
+    // TODO: don't think we need to check the ret since it only would be set if the lhs and rhs are known
+    pub fn has_free_var(&self, free: &FreeVars) -> bool {
+        free.contains(&self.lhs) || free.contains(&self.rhs)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct AttrMergeConstraint {
+    pub(crate) lhs: TyId,
+    pub(crate) rhs: TyId,
+    pub(crate) ret_val: TyId,
+}
+
+impl From<AttrMergeConstraint> for DeferrableConstraintKind {
+    fn from(value: AttrMergeConstraint) -> Self {
+        DeferrableConstraintKind::AttrMerge(value)
+    }
+}
+
+impl From<AttrMergeConstraint> for RootConstraintKind {
+    fn from(value: AttrMergeConstraint) -> Self {
+        RootConstraintKind::Deferrable(DeferrableConstraintKind::AttrMerge(value))
+    }
+}
+
+impl AttrMergeConstraint {
     // check if either the lhs or rhs is in the free vars
     // TODO: don't think we need to check the ret since it only would be set if the lhs and rhs are known
     pub fn has_free_var(&self, free: &FreeVars) -> bool {

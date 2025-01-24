@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use smol_str::SmolStr;
 
 use super::{
-    BinOverloadConstraint, CheckCtx, Constraint, ConstraintCtx, DeferrableConstraintKind,
-    RootConstraintKind, TyId,
+    AttrMergeConstraint, BinOverloadConstraint, CheckCtx, Constraint, ConstraintCtx,
+    DeferrableConstraintKind, RootConstraintKind, TyId,
 };
 use crate::{
     BinOP, BindingValue, Bindings, Expr, ExprId, Literal, NormalBinOp,
@@ -160,13 +160,19 @@ impl CheckCtx<'_> {
                         list_ty
                     }
                     BinOP::Normal(NormalBinOp::AttrUpdate) => {
-                        todo!(
-                            r#"
-                            BinOP::Normal(NormalBinOp::AttrUpdate)
-                            need to make sure both sides are attr sets
-                            but don't need to care about the fields
-                        "#
-                        )
+                        let ret_ty = self.new_ty_var();
+
+                        constraints.add(Constraint {
+                            kind: AttrMergeConstraint {
+                                lhs: lhs_ty,
+                                rhs: rhs_ty,
+                                ret_val: ret_ty,
+                            }
+                            .into(),
+                            location: e,
+                        });
+
+                        ret_ty
                     }
                 }
             }

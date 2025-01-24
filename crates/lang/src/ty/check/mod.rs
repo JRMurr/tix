@@ -162,6 +162,9 @@ pub enum InferenceError {
 
     #[error("Can not do binary operation ({1:?}) ({0:?}) ({2:?})")]
     InvalidBinOp(OverloadBinOp, Ty<TyId>, Ty<TyId>),
+
+    #[error("Can not do attrset merge on ({0:?}) ({1:?})")]
+    InvalidAttrMerge(Ty<TyId>, Ty<TyId>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]

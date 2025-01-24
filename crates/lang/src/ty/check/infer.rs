@@ -1,9 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
 use super::{
-    BinOverloadConstraint, CheckCtx, Constraint, ConstraintCtx, DeferrableConstraint,
-    DeferrableConstraintKind, FreeVars, InferenceError, InferenceResult, RootConstraintKind,
-    SolveError, TyId, TySchema, collect::Collector,
+    AttrMergeConstraint, BinOverloadConstraint, CheckCtx, Constraint, ConstraintCtx,
+    DeferrableConstraint, DeferrableConstraintKind, FreeVars, InferenceError, InferenceResult,
+    RootConstraintKind, SolveError, TyId, TySchema, collect::Collector,
 };
 use crate::{
     AttrSetTy, Ty,
@@ -123,6 +123,17 @@ impl CheckCtx<'_> {
                 location,
                 kind: DeferrableConstraintKind::Negation(get_sub(*ty_id)).into(),
             }),
+            DeferrableConstraintKind::AttrMerge(attr_merge_constraint) => {
+                constraints.add(Constraint {
+                    kind: AttrMergeConstraint {
+                        lhs: get_sub(attr_merge_constraint.lhs),
+                        rhs: get_sub(attr_merge_constraint.rhs),
+                        ret_val: get_sub(attr_merge_constraint.ret_val),
+                    }
+                    .into(),
+                    location,
+                })
+            }
         }
     }
 
@@ -185,6 +196,9 @@ impl CheckCtx<'_> {
                     bin_overload_constraint.has_free_var(&free_vars)
                 }
                 DeferrableConstraintKind::Negation(ty_id) => free_vars.contains(ty_id),
+                DeferrableConstraintKind::AttrMerge(attr_merge_constraint) => {
+                    attr_merge_constraint.has_free_var(&free_vars)
+                }
             })
             .cloned()
             .collect();

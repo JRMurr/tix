@@ -3,9 +3,9 @@ use std::collections::HashSet;
 use smol_str::SmolStr;
 
 use super::{
-    AttrSetTy, BinOverloadConstraint, CheckCtx, ConstraintCtx, InferenceError,
-    DeferrableConstraintKind, RootConstraint, RootConstraintKind, SolveError, Ty, TyId,
-    TypeVariableValue,
+    AttrMergeConstraint, AttrSetTy, BinOverloadConstraint, CheckCtx, ConstraintCtx,
+    DeferrableConstraintKind, InferenceError, RootConstraint, RootConstraintKind, SolveError, Ty,
+    TyId, TypeVariableValue,
 };
 use crate::{OverloadBinOp, PrimitiveTy};
 
@@ -81,12 +81,15 @@ impl CheckCtx<'_> {
 
         let res: SolveResult = match &constraint.kind {
             RootConstraintKind::Eq(lhs, rhs) => self.unify(*lhs, *rhs).into(),
-            RootConstraintKind::Deferrable(DeferrableConstraintKind::BinOp(overload_constraint)) => {
-                self.solve_bin_op(overload_constraint)
-            }
-            RootConstraintKind::Deferrable(DeferrableConstraintKind::Negation(ty)) => {
-                self.solve_negation(*ty)
-            }
+            RootConstraintKind::Deferrable(defer_constraint) => match defer_constraint {
+                DeferrableConstraintKind::BinOp(overload_constraint) => {
+                    self.solve_bin_op(overload_constraint)
+                }
+                DeferrableConstraintKind::Negation(ty) => self.solve_negation(*ty),
+                DeferrableConstraintKind::AttrMerge(attr_merge_constraint) => {
+                    self.solve_attr_merge(attr_merge_constraint)
+                }
+            },
         };
 
         match res {
@@ -112,18 +115,16 @@ impl CheckCtx<'_> {
         }
     }
 
+    fn get_known_pair(&mut self, lhs: TyId, rhs: TyId) -> Option<(Ty<TyId>, Ty<TyId>)> {
+        let lhs_val = self.table.inlined_probe_value(lhs).known()?;
+        let rhs_val = self.table.inlined_probe_value(rhs).known()?;
+
+        Some((lhs_val, rhs_val))
+    }
+
     fn solve_bin_op(&mut self, overload_constraint: &BinOverloadConstraint) -> SolveResult {
-        let Some(lhs_val) = self
-            .table
-            .inlined_probe_value(overload_constraint.lhs)
-            .known()
-        else {
-            return SolveResult::Deferred;
-        };
-        let Some(rhs_val) = self
-            .table
-            .inlined_probe_value(overload_constraint.rhs)
-            .known()
+        let Some((lhs_val, rhs_val)) =
+            self.get_known_pair(overload_constraint.lhs, overload_constraint.rhs)
         else {
             return SolveResult::Deferred;
         };
@@ -179,6 +180,30 @@ impl CheckCtx<'_> {
         } else {
             None
         }
+    }
+
+    fn solve_attr_merge(&mut self, attr_merge: &AttrMergeConstraint) -> SolveResult {
+        let Some(pair) = self.get_known_pair(attr_merge.lhs, attr_merge.rhs) else {
+            return SolveResult::Deferred;
+        };
+
+        if !matches!(pair, (Ty::AttrSet(_), Ty::AttrSet(_))) {
+            return SolveResult::Err(InferenceError::InvalidAttrMerge(pair.0, pair.1));
+        }
+
+        let lhs = self.flatten_attr(attr_merge.lhs);
+        let rhs = self.flatten_attr(attr_merge.rhs);
+
+        if lhs.rest.is_some() || rhs.rest.is_some() {
+            // TODO: this will probably cause some weirdness
+            // I think i leave rest set when it should not during gen
+            return SolveResult::Deferred;
+        }
+
+        let ret_ty = lhs.merge(rhs);
+
+        self.unify_var_ty(attr_merge.ret_val, Ty::AttrSet(ret_ty))
+            .into()
     }
 
     fn unify_var_ty(&mut self, lhs: TyId, rhs: Ty<TyId>) -> UnifyResult {
