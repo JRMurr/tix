@@ -4,14 +4,14 @@ use crate::{ExprId, OverloadBinOp};
 mod sealed {
     pub trait Sealed {}
     impl Sealed for super::RootConstraintKind {}
-    impl Sealed for super::OverloadConstraintKind {}
+    impl Sealed for super::DeferrableConstraintKind {}
 }
 
 pub trait IsConstraintKind: sealed::Sealed {}
 
 // Re-export the sealed implementations.
 impl IsConstraintKind for RootConstraintKind {}
-impl IsConstraintKind for OverloadConstraintKind {}
+impl IsConstraintKind for DeferrableConstraintKind {}
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Constraint<Kind: IsConstraintKind + Clone> {
@@ -22,9 +22,9 @@ pub struct Constraint<Kind: IsConstraintKind + Clone> {
 pub type RootConstraint = Constraint<RootConstraintKind>;
 
 impl RootConstraint {
-    pub fn overload(&self) -> Option<OverloadConstraint> {
+    pub fn overload(&self) -> Option<DeferrableConstraint> {
         match &self.kind {
-            RootConstraintKind::Overload(o) => Some(OverloadConstraint {
+            RootConstraintKind::Deferrable(o) => Some(DeferrableConstraint {
                 kind: o.clone(),
                 location: self.location,
             }),
@@ -33,35 +33,35 @@ impl RootConstraint {
     }
 }
 
-pub type OverloadConstraint = Constraint<OverloadConstraintKind>;
+pub type DeferrableConstraint = Constraint<DeferrableConstraintKind>;
 
 #[derive(Debug, PartialEq, Clone, Eq)]
 pub enum RootConstraintKind {
     Eq(TyId, TyId),
-    Overload(OverloadConstraintKind),
+    Deferrable(DeferrableConstraintKind),
 }
 
 #[derive(Debug, PartialEq, Clone, Eq)]
-pub enum OverloadConstraintKind {
+pub enum DeferrableConstraintKind {
     BinOp(BinOverloadConstraint),
     Negation(TyId),
 }
 
-impl From<OverloadConstraintKind> for RootConstraintKind {
-    fn from(value: OverloadConstraintKind) -> Self {
-        RootConstraintKind::Overload(value)
+impl From<DeferrableConstraintKind> for RootConstraintKind {
+    fn from(value: DeferrableConstraintKind) -> Self {
+        RootConstraintKind::Deferrable(value)
     }
 }
 
-impl From<BinOverloadConstraint> for OverloadConstraintKind {
+impl From<BinOverloadConstraint> for DeferrableConstraintKind {
     fn from(value: BinOverloadConstraint) -> Self {
-        OverloadConstraintKind::BinOp(value)
+        DeferrableConstraintKind::BinOp(value)
     }
 }
 
 impl From<BinOverloadConstraint> for RootConstraintKind {
     fn from(value: BinOverloadConstraint) -> Self {
-        RootConstraintKind::Overload(OverloadConstraintKind::BinOp(value))
+        RootConstraintKind::Deferrable(DeferrableConstraintKind::BinOp(value))
     }
 }
 

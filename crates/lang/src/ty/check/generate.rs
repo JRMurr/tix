@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use smol_str::SmolStr;
 
 use super::{
-    BinOverloadConstraint, CheckCtx, Constraint, ConstraintCtx, OverloadConstraintKind,
+    BinOverloadConstraint, CheckCtx, Constraint, ConstraintCtx, DeferrableConstraintKind,
     RootConstraintKind, TyId,
 };
 use crate::{
@@ -260,7 +260,7 @@ impl CheckCtx<'_> {
                     rnix::ast::UnaryOpKind::Negate => {
                         constraints.add(Constraint {
                             location: *expr,
-                            kind: OverloadConstraintKind::Negation(ty).into(),
+                            kind: DeferrableConstraintKind::Negation(ty).into(),
                         });
                     }
                 };

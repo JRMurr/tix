@@ -121,7 +121,7 @@ pub type FreeVars = HashSet<TyId>;
 pub struct TySchema {
     pub vars: FreeVars,
     pub ty: TyId,
-    pub constraints: Box<[OverloadConstraint]>,
+    pub constraints: Box<[DeferrableConstraint]>,
 }
 
 impl Ty<TyId> {
@@ -176,7 +176,7 @@ pub enum SolveError {
 impl SolveError {
     /// If the Solve error is only unsolved Overload constraints
     /// it could be solved later by tracking them on the appropriate [TySchema]
-    pub fn deferrable(&self) -> Option<Vec<OverloadConstraint>> {
+    pub fn deferrable(&self) -> Option<Vec<DeferrableConstraint>> {
         let SolveError::UnsolvedConstraints(constraints) = self else {
             return None;
         };

@@ -1,9 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
 use super::{
-    BinOverloadConstraint, CheckCtx, Constraint, ConstraintCtx, FreeVars, InferenceError,
-    InferenceResult, OverloadConstraint, OverloadConstraintKind, RootConstraintKind, SolveError,
-    TyId, TySchema, collect::Collector,
+    BinOverloadConstraint, CheckCtx, Constraint, ConstraintCtx, DeferrableConstraint,
+    DeferrableConstraintKind, FreeVars, InferenceError, InferenceResult, RootConstraintKind,
+    SolveError, TyId, TySchema, collect::Collector,
 };
 use crate::{
     AttrSetTy, Ty,
@@ -12,7 +12,7 @@ use crate::{
 
 type Substitutions = HashMap<TyId, TyId>;
 
-type DeferredConstraints = Vec<OverloadConstraint>;
+type DeferredConstraints = Vec<DeferrableConstraint>;
 
 fn get_deferred(result: Result<(), SolveError>) -> Result<DeferredConstraints, InferenceError> {
     match result {
@@ -94,7 +94,7 @@ impl CheckCtx<'_> {
 
     pub fn instantiate_constraint(
         &mut self,
-        overload_constraint: &OverloadConstraint,
+        overload_constraint: &DeferrableConstraint,
         substitutions: &Substitutions,
         constraints: &mut ConstraintCtx,
     ) {
@@ -107,7 +107,7 @@ impl CheckCtx<'_> {
 
         let location = overload_constraint.location;
         match &overload_constraint.kind {
-            OverloadConstraintKind::BinOp(bin_op) => {
+            DeferrableConstraintKind::BinOp(bin_op) => {
                 constraints.add(Constraint {
                     kind: BinOverloadConstraint {
                         op: bin_op.op,
@@ -119,9 +119,9 @@ impl CheckCtx<'_> {
                     location,
                 });
             }
-            OverloadConstraintKind::Negation(ty_id) => constraints.add(Constraint {
+            DeferrableConstraintKind::Negation(ty_id) => constraints.add(Constraint {
                 location,
-                kind: OverloadConstraintKind::Negation(get_sub(*ty_id)).into(),
+                kind: DeferrableConstraintKind::Negation(get_sub(*ty_id)).into(),
             }),
         }
     }
@@ -181,10 +181,10 @@ impl CheckCtx<'_> {
         let constraints = deferred
             .iter()
             .filter(|c| match &c.kind {
-                OverloadConstraintKind::BinOp(bin_overload_constraint) => {
+                DeferrableConstraintKind::BinOp(bin_overload_constraint) => {
                     bin_overload_constraint.has_free_var(&free_vars)
                 }
-                OverloadConstraintKind::Negation(ty_id) => free_vars.contains(ty_id),
+                DeferrableConstraintKind::Negation(ty_id) => free_vars.contains(ty_id),
             })
             .cloned()
             .collect();

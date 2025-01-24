@@ -4,7 +4,7 @@ use smol_str::SmolStr;
 
 use super::{
     AttrSetTy, BinOverloadConstraint, CheckCtx, ConstraintCtx, InferenceError,
-    OverloadConstraintKind, RootConstraint, RootConstraintKind, SolveError, Ty, TyId,
+    DeferrableConstraintKind, RootConstraint, RootConstraintKind, SolveError, Ty, TyId,
     TypeVariableValue,
 };
 use crate::{OverloadBinOp, PrimitiveTy};
@@ -81,10 +81,10 @@ impl CheckCtx<'_> {
 
         let res: SolveResult = match &constraint.kind {
             RootConstraintKind::Eq(lhs, rhs) => self.unify(*lhs, *rhs).into(),
-            RootConstraintKind::Overload(OverloadConstraintKind::BinOp(overload_constraint)) => {
+            RootConstraintKind::Deferrable(DeferrableConstraintKind::BinOp(overload_constraint)) => {
                 self.solve_bin_op(overload_constraint)
             }
-            RootConstraintKind::Overload(OverloadConstraintKind::Negation(ty)) => {
+            RootConstraintKind::Deferrable(DeferrableConstraintKind::Negation(ty)) => {
                 self.solve_negation(*ty)
             }
         };
