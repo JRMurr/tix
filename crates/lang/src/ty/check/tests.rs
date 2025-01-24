@@ -54,3 +54,24 @@ fn equality() {
 
     check(file, dbg!(ty));
 }
+
+#[test]
+fn basic_merge() {
+    let file = indoc! {"
+        {
+            a = 1;
+            b = 2;
+        }
+        // {
+            a = \"hi\";
+            c = ./merge.nix;
+        }
+    "};
+    let ty = arc_ty!({
+        "a": (String),
+        "b": (Int),
+        "c": (Path)
+    });
+
+    check(file, dbg!(ty));
+}
