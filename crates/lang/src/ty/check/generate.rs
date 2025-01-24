@@ -44,6 +44,10 @@ impl CheckCtx<'_> {
                         _ => self.new_ty_var(),
                     }
                 }
+                // TODO: this is not handling generalized stuff correctly
+                // when we call this in the instantiated type constraint gen
+                // we still get back the non generalized name
+                // so I need a good way to handle that...
                 Some(res) => match res {
                     &ResolveResult::Definition(name) => self.ty_for_name(name, constraints),
                     ResolveResult::WithExprs(_) => {

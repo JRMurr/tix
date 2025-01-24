@@ -1,5 +1,31 @@
+# let
+#   foo = { }@arg: arg.bar;
+# in
+# # foo { bar = 1; } # type errors
+# foo { } # does not type error
+
+# let
+#   add = a: b: a + b;
+#   res = add 1 2;
+# in
+# res
+# # {
+# #   int = add 1 2;
+# #   float = add 3.14 2;
+# #   str = add "hi" ./test.nix;
+# # }
+
+# let
+#   res = (a: b: a + b) 1 2;
+# in
+# res
+
+# let
+#   add = (a: b: a + b);
+# in
+# add 1 2
+
 let
-  foo = { }@arg: arg.bar;
+  id = (a: a);
 in
-# foo { bar = 1; } # type errors
-foo { } # does not type error
+id 1

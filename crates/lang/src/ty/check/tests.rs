@@ -75,3 +75,45 @@ fn basic_merge() {
 
     check(file, dbg!(ty));
 }
+
+#[test]
+fn simple_func() {
+    let file = indoc! {"
+        (a: b: a + b) 1 2;
+    "};
+    let ty = arc_ty!(Int);
+
+    check(file, dbg!(ty));
+}
+
+#[test]
+fn simple_let_gen() {
+    let file = indoc! {"
+        let id = (a: a); in
+        id 1
+    "};
+    let ty = arc_ty!(Int);
+
+    check(file, dbg!(ty));
+}
+
+#[test]
+fn simple_let_gen_overload() {
+    let file = indoc! {"
+        let 
+            add = a: b: a + b;
+        in
+        {
+            int = add 1 2;
+            float = add 3.14 2;
+            str = add \"hi\" ./test.nix;
+        }
+    "};
+    let ty = arc_ty!({
+        "int": (Int),
+        "float": (Float),
+        "str": (String)
+    });
+
+    check(file, dbg!(ty));
+}

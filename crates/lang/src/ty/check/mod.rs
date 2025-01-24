@@ -132,8 +132,8 @@ impl Ty<TyId> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InferenceResult {
-    name_ty_map: HashMap<NameId, ArcTy>,
-    expr_ty_map: HashMap<ExprId, ArcTy>,
+    pub name_ty_map: HashMap<NameId, ArcTy>,
+    pub expr_ty_map: HashMap<ExprId, ArcTy>,
 }
 
 impl InferenceResult {

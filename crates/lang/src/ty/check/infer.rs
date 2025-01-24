@@ -89,6 +89,8 @@ impl CheckCtx<'_> {
             self.instantiate_constraint(constraint, &substitutions, constraints);
         }
 
+        // dbg!(scheme);
+
         self.instantiate_ty(scheme.ty, &substitutions)
     }
 

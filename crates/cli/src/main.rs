@@ -17,11 +17,18 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let file = db.read_file(args.file_path)?;
 
-    dbg!(lang::check_file(&db, file)?);
+    let (module, _source_map) = lang::module_and_source_maps(&db, file);
 
-    // let (module, _source_map) = lang::module_and_source_maps(&db, file);
+    let inference = dbg!(lang::check_file(&db, file)?);
 
     // dbg!(module);
+
+    let root_ty = inference
+        .expr_ty_map
+        .get(&module.entry_expr)
+        .expect("No type for root module entry");
+
+    dbg!(root_ty);
 
     Ok(())
 }
