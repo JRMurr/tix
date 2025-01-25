@@ -140,6 +140,8 @@ impl CheckCtx<'_> {
     }
 
     fn instantiate_ty(&mut self, ty_id: TyId, substitutions: &Substitutions) -> TyId {
+        let ty_id = self.table.find(ty_id);
+
         let ty = self.get_ty(ty_id);
 
         let new_ty = match ty {
@@ -214,6 +216,8 @@ impl CheckCtx<'_> {
 
     fn free_type_vars(&mut self, ty_id: TyId) -> FreeVars {
         let mut set = HashSet::new();
+
+        let ty_id = self.table.find(ty_id);
 
         let ty = self.get_ty(ty_id);
 
