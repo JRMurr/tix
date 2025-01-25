@@ -9,3 +9,4 @@ thiserror = "2.0.9"
 smol_str = "0.3.2"
 la-arena = "0.3.1"
 derive_more = { version = "1.0.0" }
+log = "0.4.25"

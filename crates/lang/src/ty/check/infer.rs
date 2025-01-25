@@ -85,11 +85,12 @@ impl CheckCtx<'_> {
             substitutions.insert(var, self.new_ty_var());
         }
 
+        dbg!(&self.table);
+        dbg!(&scheme);
+
         for constraint in &scheme.constraints {
             self.instantiate_constraint(constraint, &substitutions, constraints);
         }
-
-        // dbg!(scheme);
 
         self.instantiate_ty(scheme.ty, &substitutions)
     }
@@ -100,11 +101,17 @@ impl CheckCtx<'_> {
         substitutions: &Substitutions,
         constraints: &mut ConstraintCtx,
     ) {
-        let get_sub = |ty_id| {
-            if let Some(&replacement) = substitutions.get(&ty_id) {
-                return replacement;
+        let mut get_sub = |ty_id| {
+            let ty_id = self.table.find(ty_id);
+            let ty = self.get_ty(ty_id);
+            if matches!(ty, Ty::TyVar(_)) {
+                if let Some(&replacement) = substitutions.get(&ty_id) {
+                    return replacement;
+                }
+                panic!("No substitution found for {ty_id:?}")
             }
-            panic!("No substitution found for {ty_id:?}")
+
+            ty_id
         };
 
         let location = overload_constraint.location;
@@ -140,6 +147,8 @@ impl CheckCtx<'_> {
     }
 
     fn instantiate_ty(&mut self, ty_id: TyId, substitutions: &Substitutions) -> TyId {
+        // TODO: table.find is not inlined which could cause slowness
+        // doesnt seem to have the inlined value exposed...
         let ty_id = self.table.find(ty_id);
 
         let ty = self.get_ty(ty_id);
@@ -193,16 +202,21 @@ impl CheckCtx<'_> {
     fn generalize(&mut self, ty: TyId, deferred: &DeferredConstraints) -> TySchema {
         let free_vars = self.free_type_vars(ty);
 
+        // let to_root = |ty_id| {}
+
         let constraints = deferred
             .iter()
-            .filter(|c| match &c.kind {
-                DeferrableConstraintKind::BinOp(bin_overload_constraint) => {
-                    bin_overload_constraint.has_free_var(&free_vars)
+            .filter(|c| {
+                let all_vars = c.kind.get_vars();
+                let root_vars = all_vars.iter().map(|ty_id| self.table.find(*ty_id));
+
+                for root_var in root_vars {
+                    if free_vars.contains(&root_var) {
+                        return true;
+                    }
                 }
-                DeferrableConstraintKind::Negation(ty_id) => free_vars.contains(ty_id),
-                DeferrableConstraintKind::AttrMerge(attr_merge_constraint) => {
-                    attr_merge_constraint.has_free_var(&free_vars)
-                }
+
+                false
             })
             .cloned()
             .collect();

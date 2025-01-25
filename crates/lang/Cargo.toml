@@ -16,7 +16,7 @@ thiserror = { workspace = true }
 miette = { workspace = true }
 la-arena = { workspace = true }
 derive_more = { workspace = true, features = ["debug"] }
-
+log = { workspace = true }
 
 salsa = { git = "https://github.com/salsa-rs/salsa", rev = "88a1d7774d78f048fbd77d40abca9ebd729fd1f0" }
 dashmap = "6.1.0"

@@ -164,16 +164,16 @@ impl<'db> Collector<'db> {
 
     fn canonicalize_type_uncached(&mut self, ty_id: TyId, subs: &Substitutions) -> ArcTy {
         // let ty = self.ctx.get_ty(ty_id);
+        let ty_id = self.ctx.table.find(ty_id);
+        let ty = self.ctx.get_ty(ty_id);
 
-        let ty = self.ctx.table.inlined_probe_value(ty_id).known();
-
-        let ty = if let Some(t) = ty {
-            t
-        } else {
-            let root = self.ctx.table.find(ty_id);
-            // eprintln!("{ty_id:?} is unknown\troot: {root:?}");
-            Ty::TyVar(root.0)
-        };
+        // let ty = if let Some(t) = ty {
+        //     t
+        // } else {
+        //     let root = self.ctx.table.find(ty_id);
+        //     // eprintln!("{ty_id:?} is unknown\troot: {root:?}");
+        //     Ty::TyVar(root.0)
+        // };
 
         match ty {
             Ty::TyVar(x) => {

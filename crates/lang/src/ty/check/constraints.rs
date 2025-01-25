@@ -1,4 +1,4 @@
-use super::{FreeVars, TyId};
+use super::TyId;
 use crate::{ExprId, OverloadBinOp};
 
 mod sealed {
@@ -48,6 +48,20 @@ pub enum DeferrableConstraintKind {
     AttrMerge(AttrMergeConstraint),
 }
 
+impl DeferrableConstraintKind {
+    pub fn get_vars(&self) -> Vec<TyId> {
+        match self {
+            DeferrableConstraintKind::BinOp(bin_op) => {
+                [bin_op.lhs, bin_op.rhs, bin_op.ret_val].into()
+            }
+            DeferrableConstraintKind::Negation(ty_id) => [*ty_id].into(),
+            DeferrableConstraintKind::AttrMerge(attr_merge) => {
+                [attr_merge.lhs, attr_merge.rhs, attr_merge.ret_val].into()
+            }
+        }
+    }
+}
+
 impl From<DeferrableConstraintKind> for RootConstraintKind {
     fn from(value: DeferrableConstraintKind) -> Self {
         RootConstraintKind::Deferrable(value)
@@ -74,14 +88,6 @@ pub struct BinOverloadConstraint {
     pub(crate) ret_val: TyId,
 }
 
-impl BinOverloadConstraint {
-    // check if either the lhs or rhs is in the free vars
-    // TODO: don't think we need to check the ret since it only would be set if the lhs and rhs are known
-    pub fn has_free_var(&self, free: &FreeVars) -> bool {
-        free.contains(&self.lhs) || free.contains(&self.rhs)
-    }
-}
-
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct AttrMergeConstraint {
     pub(crate) lhs: TyId,
@@ -98,14 +104,6 @@ impl From<AttrMergeConstraint> for DeferrableConstraintKind {
 impl From<AttrMergeConstraint> for RootConstraintKind {
     fn from(value: AttrMergeConstraint) -> Self {
         RootConstraintKind::Deferrable(DeferrableConstraintKind::AttrMerge(value))
-    }
-}
-
-impl AttrMergeConstraint {
-    // check if either the lhs or rhs is in the free vars
-    // TODO: don't think we need to check the ret since it only would be set if the lhs and rhs are known
-    pub fn has_free_var(&self, free: &FreeVars) -> bool {
-        free.contains(&self.lhs) || free.contains(&self.rhs)
     }
 }
 
