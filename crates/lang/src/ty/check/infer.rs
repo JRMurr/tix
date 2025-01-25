@@ -33,6 +33,8 @@ impl CheckCtx<'_> {
             self.infer_scc_group(group)?;
         }
 
+        dbg!(&self.table);
+
         self.infer_root()?;
 
         let mut collector = Collector::new(self);
@@ -145,6 +147,9 @@ impl CheckCtx<'_> {
     }
 
     fn instantiate_ty(&mut self, ty_id: TyId, substitutions: &Substitutions) -> TyId {
+        // get the root key before replacing
+        let ty_id = self.table.find(ty_id);
+
         let ty = self.get_ty(ty_id);
 
         let new_ty = match ty {
@@ -219,6 +224,9 @@ impl CheckCtx<'_> {
 
     fn free_type_vars(&mut self, ty_id: TyId) -> FreeVars {
         let mut set = HashSet::new();
+
+        // get the root key before getting free vars
+        let ty_id = self.table.find(ty_id);
 
         let ty = self.get_ty(ty_id);
 

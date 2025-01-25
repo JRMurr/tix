@@ -353,13 +353,13 @@ impl CheckCtx<'_> {
             // if we already have this name in poly_type_env
             // we checked before on a previous SCC group
             // so we can skip generating constraints
-            // if let Some(ty_schema) = self.poly_type_env.get(&name).cloned() {
-            //     // println!("got poly {ty_schema:?} for name {name:?}");
-            //     let (value_ty, inner_sub) = self.instantiate(&ty_schema, constraints);
-            //     fields.insert(name_text, value_ty);
-            //     subs.extend(inner_sub);
-            //     continue;
-            // }
+            if let Some(ty_schema) = self.poly_type_env.get(&name).cloned() {
+                // println!("got poly {ty_schema:?} for name {name:?}");
+                let (value_ty, inner_sub) = self.instantiate(&ty_schema, constraints);
+                fields.insert(name_text, value_ty);
+                subs.extend(inner_sub);
+                continue;
+            }
 
             let (name_ty, inner_sub) = self.ty_for_name(name, constraints);
             // subs.extend(inner_sub);

@@ -288,7 +288,7 @@ impl<'db> CheckCtx<'db> {
     ) -> (TyId, Substitutions) {
         let ty_schema = self.poly_type_env.get(&name).cloned();
 
-        dbg!(name);
+        dbg!(name, &ty_schema);
 
         if let Some(ty_schema) = ty_schema {
             return self.instantiate(&ty_schema, constraints);
