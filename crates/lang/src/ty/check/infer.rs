@@ -29,11 +29,11 @@ impl CheckCtx<'_> {
             self.new_ty_var();
         }
 
-        for group in dbg!(groups) {
+        for group in groups {
             self.infer_scc_group(group)?;
         }
 
-        dbg!(&self.table);
+        // dbg!(&self.table);
 
         self.infer_root()?;
 

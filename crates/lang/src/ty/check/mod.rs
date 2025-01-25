@@ -288,7 +288,7 @@ impl<'db> CheckCtx<'db> {
     ) -> (TyId, Substitutions) {
         let ty_schema = self.poly_type_env.get(&name).cloned();
 
-        dbg!(name, &ty_schema);
+        // dbg!(name, &ty_schema);
 
         if let Some(ty_schema) = ty_schema {
             return self.instantiate(&ty_schema, constraints);
@@ -298,8 +298,10 @@ impl<'db> CheckCtx<'db> {
         // after inferring we should add the name to the poly type env
         let ty: TyId = u32::from(name.into_raw()).into();
 
+        let root_key = self.table.find(ty);
+
         (
-            dbg!(self.sub_scopes.get_sub(&ty)).unwrap_or(ty),
+            self.sub_scopes.get_sub(&root_key).unwrap_or(root_key),
             HashMap::new(),
         )
     }
