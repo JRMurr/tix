@@ -17,9 +17,20 @@ fn check(src: &str, expected: ArcTy) {
     assert_eq!(root_ty, &expected)
 }
 
-#[test]
-fn simple_types() {
-    let file = indoc! {"{
+macro_rules! test_case {
+    ($name:ident, $file:tt, $ty:tt) => {
+        #[test]
+        fn $name() {
+            let file = indoc! { $file };
+            let ty = arc_ty!($ty);
+            check(file, ty);
+        }
+    };
+}
+
+test_case!(
+    simple_types,
+    "{
         num = 1;
         str = \"foo\";
         bool = true;
@@ -29,35 +40,21 @@ fn simple_types() {
         # add = a: b: a + b;
         lst = [(1) (2)];
     }
-    "};
+    ", 
+    {
+    "num": (Int),
+    "str": (String),
+    "bool": (Bool),
+    "null": (Null),
+    "float": (Float),
+    // "add": (Int -> Int -> Int),
+    "lst": [Int]
+    }
+);
 
-    let ty = arc_ty!({
-        "num": (Int),
-        "str": (String),
-        "bool": (Bool),
-        "null": (Null),
-        "float": (Float),
-        // "add": (Int -> Int -> Int),
-        "lst": [Int]
-    });
+test_case!(equality, "1 == 0", Bool);
 
-    check(file, dbg!(ty));
-}
-
-#[test]
-fn equality() {
-    let file = indoc! {"
-        1 == 0
-    "};
-
-    let ty = arc_ty! { Bool };
-
-    check(file, dbg!(ty));
-}
-
-#[test]
-fn basic_merge() {
-    let file = indoc! {"
+test_case!(basic_merge, "
         {
             a = 1;
             b = 2;
@@ -66,41 +63,33 @@ fn basic_merge() {
             a = \"hi\";
             c = ./merge.nix;
         }
-    "};
-    let ty = arc_ty!({
-        "a": (String),
-        "b": (Int),
-        "c": (Path)
-    });
+    ", {
+    "a": (String),
+    "b": (Int),
+    "c": (Path)
+});
 
-    check(file, dbg!(ty));
-}
+test_case!(
+    simple_func,
+    "
+    (a: b: a + b) 1 2
+    ",
+    Int
+);
 
-#[test]
-fn simple_func() {
-    let file = indoc! {"
-        (a: b: a + b) 1 2;
-    "};
-    let ty = arc_ty!(Int);
-
-    check(file, dbg!(ty));
-}
-
-#[test]
-fn simple_let_gen() {
-    let file = indoc! {"
-        let id = (a: a); in
+test_case!(
+    simple_let_gen,
+    "
+    let id = (a: a); in
         id 1
-    "};
-    let ty = arc_ty!(Int);
+    ",
+    Int
+);
 
-    check(file, dbg!(ty));
-}
-
-#[test]
-fn simple_let_gen_overload() {
-    let file = indoc! {"
-        let 
+test_case!(
+    simple_let_gen_overload,
+    "
+    let 
             add = a: b: a + b;
         in
         {
@@ -108,12 +97,10 @@ fn simple_let_gen_overload() {
             float = add 3.14 2;
             str = add \"hi\" ./test.nix;
         }
-    "};
-    let ty = arc_ty!({
+    ",
+    {
         "int": (Int),
         "float": (Float),
         "str": (String)
-    });
-
-    check(file, dbg!(ty));
-}
+    }
+);
