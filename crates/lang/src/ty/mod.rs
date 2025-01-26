@@ -225,6 +225,9 @@ macro_rules! arc_ty {
         $crate::ty::Ty::<$crate::ty::TyRef>::Primitive($crate::ty::PrimitiveTy::Uri)
     };
     // -- TyVar syntax: TyVar(N) --------------------------------------------
+    (# $n:expr) => {
+        $crate::ty::Ty::<$crate::ty::TyRef>::TyVar($n)
+    };
     (TyVar($n:expr)) => {
         $crate::ty::Ty::<$crate::ty::TyRef>::TyVar($n)
     };
@@ -255,7 +258,7 @@ macro_rules! arc_ty {
     // }};
 
     ($arg:tt -> $($ret:tt)*) => {
-        $crate::ty::Ty::<$crate::ty::TyRef>::Lambda {
+        $crate::ty::Ty::Lambda::<$crate::ty::TyRef> {
             param: $crate::ty::TyRef::from($crate::arc_ty!($arg)),
             body: $crate::ty::TyRef::from($crate::arc_ty!($($ret)*)),
         }

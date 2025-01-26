@@ -140,7 +140,13 @@ impl<'db> Collector<'db> {
             name_ty_map.insert(name, ty.normalize_vars());
         }
         for (expr, ty) in expr_tys {
-            expr_ty_map.insert(expr, self.canonicalize_type(ty, &HashMap::new()));
+            let mut ty = self.canonicalize_type(ty, &HashMap::new());
+
+            if expr == self.ctx.module.entry_expr {
+                ty = ty.normalize_vars();
+            }
+
+            expr_ty_map.insert(expr, ty);
         }
 
         // dbg!(&self.ctx.table);

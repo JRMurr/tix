@@ -37,24 +37,25 @@ test_case!(
         null = null;
         float = 3.14;
         # TODO: overloading needs to handle the case when one of the know types is a type var
-        # add = a: b: a + b;
+        add = a: b: a + b;
         lst = [(1) (2)];
     }
-    ", 
+    ",
     {
     "num": (Int),
     "str": (String),
     "bool": (Bool),
     "null": (Null),
     "float": (Float),
-    // "add": (Int -> Int -> Int),
+    "add": ((# 0) -> (# 1) -> (# 2)),
     "lst": [Int]
     }
 );
 
 test_case!(equality, "1 == 0", Bool);
 
-test_case!(basic_merge, "
+test_case!(basic_merge,
+    "
         {
             a = 1;
             b = 2;
@@ -80,7 +81,9 @@ test_case!(
 test_case!(
     simple_let_gen,
     "
-    let id = (a: a); in
+    let
+        id = (a: a);
+    in
         id 1
     ",
     Int
@@ -90,8 +93,8 @@ test_case!(
     simple_let_gen_overload,
     "
     let 
-            add = a: b: a + b;
-        in
+        add = a: b: a + b;
+    in
         {
             int = add 1 2;
             float = add 3.14 2;
