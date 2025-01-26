@@ -365,7 +365,7 @@ impl CheckCtx<'_> {
                 // return self.unify_attr(lhs_missing, rhs);
                 // lhs_missing.rest = Some(rest);
 
-                rhs_missing.rest = lhs.rest; // TODO: should this error if lhs has no rest?
+                rhs_missing.rest = lhs.rest;
 
                 self.unify_var_ty(rest, Ty::AttrSet(rhs_missing))?;
 
@@ -381,7 +381,7 @@ impl CheckCtx<'_> {
         } else if rhs_keys.is_subset(&lhs_keys) {
             // rhs is missing keys the lhs has
             if let Some(rest) = rhs.rest {
-                lhs_missing.rest = rhs.rest; // TODO: should this error if rhs has no rest?
+                lhs_missing.rest = rhs.rest;
                 self.unify_var_ty(rest, Ty::AttrSet(lhs_missing))?;
 
                 // let new_rest = self
