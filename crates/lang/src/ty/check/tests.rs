@@ -212,3 +212,23 @@ test_case!(
     ",
     Int
 );
+
+test_case!(
+    inherit_from,
+    "
+    let
+        simple = {
+            foo = 100;
+            bar = ''123'';
+        };
+    in {
+        inherit (simple) foo bar;
+        a = ''test123'';
+    }
+    ",
+    {
+        "foo": Int,
+        "bar": String,
+        "a": String
+    }
+);

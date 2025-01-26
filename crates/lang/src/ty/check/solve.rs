@@ -336,7 +336,7 @@ impl CheckCtx<'_> {
             self.unify(*lhs_val, *rhs_val)?;
         }
 
-        // dbg!(&lhs_keys, &rhs_keys, &shared_keys, &all_keys);
+        dbg!(&lhs_keys, &rhs_keys, &shared_keys, &all_keys);
 
         let get_missing = |attr: &AttrSetTy<TyId>, key_set: &HashSet<&SmolStr>| {
             let missing_keys = all_keys.difference(key_set).cloned().cloned();
@@ -360,7 +360,7 @@ impl CheckCtx<'_> {
             return Ok(lhs);
         } else if lhs_keys.is_subset(&rhs_keys) {
             // lhs is missing keys the rhs has
-            if let Some(rest) = rhs.rest {
+            if let Some(rest) = lhs.rest {
                 // let rhs = self.flatten_attr(rest);
                 // return self.unify_attr(lhs_missing, rhs);
                 // lhs_missing.rest = Some(rest);
@@ -380,9 +380,8 @@ impl CheckCtx<'_> {
             return Err(InferenceError::UnifyEmptyRest(lhs_missing));
         } else if rhs_keys.is_subset(&lhs_keys) {
             // rhs is missing keys the lhs has
-            if let Some(rest) = lhs.rest {
+            if let Some(rest) = rhs.rest {
                 lhs_missing.rest = rhs.rest; // TODO: should this error if rhs has no rest?
-
                 self.unify_var_ty(rest, Ty::AttrSet(lhs_missing))?;
 
                 // let new_rest = self

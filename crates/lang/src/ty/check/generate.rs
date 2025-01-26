@@ -328,11 +328,11 @@ impl CheckCtx<'_> {
         bindings: &Bindings,
         e: ExprId,
     ) -> AttrSetTy<TyId> {
-        // let inherit_from_tys = bindings
-        //     .inherit_froms
-        //     .iter()
-        //     .map(|&from_expr| self.generate_constraints(constraints, from_expr))
-        //     .collect::<Vec<_>>();
+        let inherit_from_tys = bindings
+            .inherit_froms
+            .iter()
+            .map(|&from_expr| self.generate_constraints(constraints, from_expr))
+            .collect::<Vec<_>>();
 
         let mut fields = BTreeMap::new();
         for &(name, value) in bindings.statics.iter() {
@@ -353,8 +353,16 @@ impl CheckCtx<'_> {
                     self.generate_constraints(constraints, e)
                 }
                 BindingValue::InheritFrom(i) => {
-                    todo!("handle inherit from {i}")
-                    // self.infer_set_field(inherit_from_tys[i], Some(name_text.clone()))
+                    // TODO: some duplication with select, might be worth to extract
+                    let attr_set_ty = inherit_from_tys[i];
+                    let (attr_with_field, value_ty) = self.attr_with_field(name_text.clone());
+                    constraints.unify_var(
+                        e,
+                        attr_set_ty,
+                        Ty::AttrSet(attr_with_field).intern_ty(self),
+                    );
+
+                    value_ty
                 }
             };
             // TODO: need a good expression look up here
