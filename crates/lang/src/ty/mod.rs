@@ -248,6 +248,15 @@ macro_rules! arc_ty {
         ))
     }};
 
+    ({ $($key:literal : $ty:tt),* $(,)?;  $rest:tt }) => {{
+        $crate::ty::Ty::<$crate::ty::TyRef>::AttrSet($crate::ty::AttrSetTy::<$crate::ty::TyRef>::from_internal(
+            [
+                $(($key, $crate::arc_ty!($ty)),)*
+            ],
+            Some($crate::arc_ty!($rest).into()),
+        ))
+    }};
+
     // ({ $($key:literal : $ty:tt),* $(,)? }) => {{
     //     $crate::ty::Ty::Attrset($crate::ty::Attrset::from_internal(
     //         [
