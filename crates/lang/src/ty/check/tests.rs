@@ -193,3 +193,22 @@ test_case!(
         (# 0) // since this is an arg param there can be more fields
     }) -> Bool)
 );
+
+test_case!(
+    rec_fun,
+    "
+    let
+        fib =
+            n:
+            if n == 0 then
+            0
+            else if n == 1 then
+            1
+            else
+            fib (n - 1) + fib (n - 2);
+
+    in
+        fib 3
+    ",
+    Int
+);
