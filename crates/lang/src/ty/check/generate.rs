@@ -44,10 +44,6 @@ impl CheckCtx<'_> {
                         _ => self.new_ty_var(),
                     }
                 }
-                // TODO: this is not handling generalized stuff correctly
-                // when we call this in the instantiated type constraint gen
-                // we still get back the non generalized name
-                // so I need a good way to handle that...
                 Some(res) => match res {
                     &ResolveResult::Definition(name) => self.ty_for_name(name, constraints),
                     ResolveResult::WithExprs(_) => {
@@ -328,7 +324,7 @@ impl CheckCtx<'_> {
         bindings: &Bindings,
         e: ExprId,
     ) -> AttrSetTy<TyId> {
-        let inherit_from_tys = bindings
+        let _inherit_from_tys = bindings
             .inherit_froms
             .iter()
             .map(|&from_expr| self.generate_constraints(constraints, from_expr))
@@ -349,21 +345,21 @@ impl CheckCtx<'_> {
 
             let name_ty = self.ty_for_name(name, constraints);
             let value_ty = match value {
-                BindingValue::Inherit(e) | BindingValue::Expr(e) => {
+                BindingValue::Inherit(e) | BindingValue::Expr(e) | BindingValue::InheritFrom(e) => {
                     self.generate_constraints(constraints, e)
-                }
-                BindingValue::InheritFrom(i) => {
-                    // TODO: some duplication with select, might be worth to extract
-                    let attr_set_ty = inherit_from_tys[i];
-                    let (attr_with_field, value_ty) = self.attr_with_field(name_text.clone());
-                    constraints.unify_var(
-                        e,
-                        attr_set_ty,
-                        Ty::AttrSet(attr_with_field).intern_ty(self),
-                    );
+                } // BindingValue::InheritFrom(expr) => {
+                  //     // TODO: some duplication with select, might be worth to extract
+                  //     let attr_set_ty = inherit_from_tys[i];
+                  //     dbg!(self.get_ty(attr_set_ty));
+                  //     let (attr_with_field, value_ty) = self.attr_with_field(name_text.clone());
+                  //     constraints.unify_var(
+                  //         e,
+                  //         attr_set_ty,
+                  //         Ty::AttrSet(attr_with_field).intern_ty(self),
+                  //     );
 
-                    value_ty
-                }
+                  //     value_ty
+                  // }
             };
             // TODO: need a good expression look up here
             constraints.unify_var(e, name_ty, value_ty);

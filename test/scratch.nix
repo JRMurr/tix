@@ -25,7 +25,14 @@
 # in
 # add 1 2
 
+# let
+#   id = (a: a);
+# in
+# id 1
+
 let
-  id = (a: a);
+  simple = {
+    foo = 100;
+  };
 in
-id 1
+simple.foo

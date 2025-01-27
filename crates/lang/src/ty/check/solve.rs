@@ -334,6 +334,7 @@ impl CheckCtx<'_> {
         }
 
         // dbg!(&lhs_keys, &rhs_keys, &shared_keys, &all_keys);
+        // dbg!(&self.table);
 
         let get_missing = |attr: &AttrSetTy<TyId>, key_set: &HashSet<&SmolStr>| {
             let missing_keys = all_keys.difference(key_set).cloned().cloned();

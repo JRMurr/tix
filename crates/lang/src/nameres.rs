@@ -359,10 +359,15 @@ impl NameDependencies {
         bindings: &Bindings,
         // expr: ExprId,
     ) {
-        // TODO: skipping dynamics here
-        for (name, expr) in bindings.name_values() {
-            self.name_to_expr.insert(name, expr);
-            self.traverse_expr(module, name_res, expr, Some(name));
+        for (name, bv) in &bindings.statics {
+            let expr = match bv {
+                BindingValue::Expr(id) => *id,
+                BindingValue::Inherit(id) => *id,
+                BindingValue::InheritFrom(id) => *id,
+            };
+
+            self.name_to_expr.insert(*name, expr);
+            self.traverse_expr(module, name_res, expr, Some(*name));
         }
         for (_name_expr, _value_expr) in bindings.dynamics.iter() {
             todo!()

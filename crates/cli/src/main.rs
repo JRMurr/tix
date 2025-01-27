@@ -19,9 +19,9 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let (module, _source_map) = lang::module_and_source_maps(&db, file);
 
-    let inference = dbg!(lang::check_file(&db, file)?);
+    dbg!(&module);
 
-    // dbg!(module);
+    let inference = dbg!(lang::check_file(&db, file)?);
 
     let root_ty = inference
         .expr_ty_map

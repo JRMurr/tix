@@ -365,9 +365,9 @@ impl MergingSet {
     fn merge_inherit(&mut self, ctx: &mut LowerCtx, inherit: ast::Inherit) {
         let from_expr = inherit.from().map(|e| {
             let expr = ctx.lower_expr_opt(e.expr());
-            let idx = self.inherit_froms.len();
+            // let idx = self.inherit_froms.len();
             self.inherit_froms.push(expr);
-            idx
+            expr
         });
 
         if inherit.attrs().next().is_none() {
@@ -391,7 +391,22 @@ impl MergingSet {
             };
 
             let value = match from_expr {
-                Some(i) => BindingValue::InheritFrom(i),
+                Some(set_expr) => {
+                    // let inherit
+                    let attrpath =
+                        [ctx.alloc_expr(Expr::Literal(Literal::String(key.clone())), attr_ptr)]
+                            .into();
+                    let select_expr = ctx.alloc_expr(
+                        Expr::Select {
+                            set: set_expr,
+                            attrpath,
+                            default_expr: None,
+                        },
+                        attr_ptr,
+                    );
+
+                    BindingValue::InheritFrom(select_expr)
+                }
                 None => {
                     let ref_expr = ctx.alloc_expr(Expr::Reference(key.clone()), attr_ptr);
                     BindingValue::Inherit(ref_expr)

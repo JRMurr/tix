@@ -31,7 +31,7 @@ impl CheckCtx<'_> {
             self.new_ty_var();
         }
 
-        for group in groups {
+        for group in dbg!(groups) {
             self.infer_scc_group(group)?;
         }
 
@@ -63,6 +63,7 @@ impl CheckCtx<'_> {
             });
         }
 
+        // dbg!(&self.table);
         let deferred_constraints = get_deferred(self.solve_constraints(constraints))?;
 
         // TODO: could there be cases where mutually dependent TypeDefs
