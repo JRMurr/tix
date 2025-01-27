@@ -86,9 +86,10 @@ impl CheckCtx<'_> {
             substitutions.insert(var, self.new_ty_var());
         }
 
-        // dbg!(&self.table);
-        // dbg!(&scheme);
+        dbg!(&self.table);
+        dbg!(&scheme);
 
+        // TODO: might want to make constraints snapshotable
         for constraint in &scheme.constraints {
             self.instantiate_constraint(constraint, &substitutions, constraints);
         }
@@ -201,31 +202,39 @@ impl CheckCtx<'_> {
     }
 
     fn generalize(&mut self, ty: TyId, deferred: &DeferredConstraints) -> TySchema {
-        let free_vars = self.free_type_vars(ty);
+        let mut free_vars = self.free_type_vars(ty);
 
         // let to_root = |ty_id| {}
 
-        let constraints = deferred
-            .iter()
-            .filter(|c| {
-                let all_vars = c.kind.get_vars();
-                let root_vars = all_vars.iter().map(|ty_id| self.table.find(*ty_id));
+        let mut constraints = Vec::new();
 
-                for root_var in root_vars {
-                    if free_vars.contains(&root_var) {
-                        return true;
-                    }
-                }
+        // TODO: this will always track the deferred constraints if they have any free vars in there
+        // which should basically always be true since they are deferred
+        // in most cases this is probably fine but might lead to some
+        // dupe constraints when things are mutually dependent
 
-                false
-            })
-            .cloned()
-            .collect();
+        for constraint in deferred {
+            let all_vars = constraint.kind.get_vars();
+            let maybe_free_vars = all_vars
+                .iter()
+                .map(|ty_id| self.free_type_vars(*ty_id))
+                // TODO: this is probably doing more work than it should
+                // could manually create a new hash set
+                .reduce(|acc, x| {
+                    let res: HashSet<TyId> = acc.union(&x).cloned().collect();
+                    res
+                })
+                .unwrap_or_default();
+            if !maybe_free_vars.is_empty() {
+                free_vars = free_vars.union(&maybe_free_vars).cloned().collect();
+                constraints.push(constraint.clone());
+            }
+        }
 
         TySchema {
             vars: free_vars,
             ty,
-            constraints,
+            constraints: constraints.into(),
         }
     }
 
