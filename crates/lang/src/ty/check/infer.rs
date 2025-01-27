@@ -85,8 +85,8 @@ impl CheckCtx<'_> {
             substitutions.insert(var, self.new_ty_var());
         }
 
-        dbg!(&self.table);
-        dbg!(&scheme);
+        // dbg!(&self.table);
+        // dbg!(&scheme);
 
         for constraint in &scheme.constraints {
             self.instantiate_constraint(constraint, &substitutions, constraints);

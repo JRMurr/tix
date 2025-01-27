@@ -232,3 +232,16 @@ test_case!(
         "a": String
     }
 );
+
+test_case!(
+    select,
+    "
+    let
+        simple = {
+            foo = 100;
+        };
+    in
+        simple.foo
+    ",
+    Int
+);

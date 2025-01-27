@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use smol_str::SmolStr;
 
@@ -45,17 +45,14 @@ impl CheckCtx<'_> {
         while made_progress {
             made_progress = false;
 
-            // We'll collect the constraints that we still can't solve in this pass
             let mut still_unsolved = Vec::new();
 
             for constraint in constraints {
                 match self.solve_constraint(&constraint) {
                     SolveResult::Solved => {
-                        // Good—this constraint is done, so we don't put it back in the list.
                         made_progress = true;
                     }
                     SolveResult::Deferred => {
-                        // We couldn't solve it yet, let's try again in the next loop
                         still_unsolved.push(constraint);
                     }
                     SolveResult::Err(inference_error) => return Err(inference_error.into()),
@@ -336,7 +333,7 @@ impl CheckCtx<'_> {
             self.unify(*lhs_val, *rhs_val)?;
         }
 
-        dbg!(&lhs_keys, &rhs_keys, &shared_keys, &all_keys);
+        // dbg!(&lhs_keys, &rhs_keys, &shared_keys, &all_keys);
 
         let get_missing = |attr: &AttrSetTy<TyId>, key_set: &HashSet<&SmolStr>| {
             let missing_keys = all_keys.difference(key_set).cloned().cloned();
@@ -354,7 +351,18 @@ impl CheckCtx<'_> {
                 }
                 // both have no rest => done
                 (None, None) => None,
-                _ => return Err(InferenceError::InvalidAttrUnion(lhs, rhs)),
+                (Some(possible_empty_rest), None) | (None, Some(possible_empty_rest)) => {
+                    // if the only rest can unify with an empty attrset then this is fine
+                    // TODO: this works but will make errors confusing....
+                    let empty_attr = Ty::AttrSet(AttrSetTy {
+                        fields: BTreeMap::new(),
+                        dyn_ty: None,
+                        rest: None,
+                    });
+                    self.unify_var_ty(possible_empty_rest, empty_attr)?;
+
+                    None
+                } // InferenceError::InvalidAttrUnion(lhs, rhs)
             };
             lhs.rest = rest;
             return Ok(lhs);
