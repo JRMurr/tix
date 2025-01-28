@@ -25,5 +25,9 @@ ena = "0.14.3"
 itertools = "0.14.0"
 indoc = "2.0.5"
 
+
+[dev-dependencies]
+proptest = { workspace = true }
+
 [lib]
 path = "src/lib.rs"

@@ -7,6 +7,9 @@ mod solve;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod pbt;
+
 use std::collections::{HashMap, HashSet};
 
 pub(crate) use constraints::*;

@@ -102,6 +102,14 @@ impl<RefType> AttrSetTy<RefType> {
         }
     }
 
+    pub fn from_fields(fields: BTreeMap<SmolStr, RefType>) -> Self {
+        Self {
+            fields,
+            dyn_ty: None,
+            rest: None,
+        }
+    }
+
     pub fn from_rest(rest: RefType) -> Self {
         Self {
             fields: Default::default(),

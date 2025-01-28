@@ -10,3 +10,11 @@ smol_str = "0.3.2"
 la-arena = "0.3.1"
 derive_more = { version = "1.0.0" }
 log = "0.4.25"
+proptest = "1.6.0"
+
+
+[profile.test.package.proptest]
+opt-level = 3
+
+[profile.test.package.rand_chacha]
+opt-level = 3

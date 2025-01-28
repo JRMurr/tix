@@ -1,11 +1,13 @@
 {
   "cSpell.words": [
+    "chacha",
     "dashmap",
     "froms",
     "indoc",
     "nameres",
     "petgraph",
     "preorder",
+    "proptest",
     "rnix",
     "smol",
     "snapshotable"
