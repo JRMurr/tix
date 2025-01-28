@@ -4,7 +4,7 @@ use super::check_file;
 use crate::{arc_ty, tests::TestDatabase, ty::ArcTy};
 
 #[track_caller]
-fn check(src: &str, expected: ArcTy) {
+pub fn expect_ty_inference(src: &str, expected: ArcTy) {
     let (db, file) = TestDatabase::single_file(src).unwrap();
     let module = crate::module(&db, file);
     let inference = check_file(&db, file).expect("No inference error");
@@ -23,7 +23,7 @@ macro_rules! test_case {
         fn $name() {
             let file = indoc! { $file };
             let ty = arc_ty!($ty);
-            check(file, ty);
+            expect_ty_inference(file, ty);
         }
     };
 }

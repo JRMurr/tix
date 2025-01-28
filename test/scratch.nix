@@ -30,9 +30,17 @@
 # in
 # id 1
 
-let
-  simple = {
-    foo = 100;
-  };
-in
-simple.foo
+# let
+#   simple = {
+#     foo = 100;
+#   };
+# in
+# simple.foo
+
+(
+  param:
+  let
+    tmp = ("test");
+  in
+  if param == 1 then tmp else tmp
+)

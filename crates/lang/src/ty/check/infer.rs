@@ -31,7 +31,7 @@ impl CheckCtx<'_> {
             self.new_ty_var();
         }
 
-        for group in dbg!(groups) {
+        for group in groups {
             self.infer_scc_group(group)?;
         }
 
@@ -86,8 +86,8 @@ impl CheckCtx<'_> {
             substitutions.insert(var, self.new_ty_var());
         }
 
-        dbg!(&self.table);
-        dbg!(&scheme);
+        // dbg!(&self.table);
+        // dbg!(&scheme);
 
         // TODO: might want to make constraints snapshotable
         for constraint in &scheme.constraints {
