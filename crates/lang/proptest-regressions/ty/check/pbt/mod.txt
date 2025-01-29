@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 0b0f13cdc6e8c092d95c537215b674290c20469bddcac294c78d64972665a5b5 # shrinks to (ty, file) = (List(Bool), "(let in = [(false)]; in in)")
+cc f90f7e7c7deadfa83c710664bcb3f238d799a16343c456b20a0ed804704d6df5 # shrinks to (ty, text) = (AttrSetTy { fields: {"_pbt_a": List(AttrSetTy { fields: {"_pbt__": Null}, dyn_ty: None, rest: None })}, dyn_ty: None, rest: None }, "({_pbt_a=([(({_pbt__=(null); _pbt__=(null);}))]);})")
