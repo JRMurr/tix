@@ -10,6 +10,7 @@
     "proptest",
     "rnix",
     "smol",
-    "snapshotable"
+    "snapshotable",
+    "strat"
   ]
 }

@@ -1,7 +1,4 @@
-use proptest::prelude::{
-    any, prop, prop_assert_eq, prop_compose, prop_oneof, proptest, Arbitrary, BoxedStrategy, Just,
-    ProptestConfig, Strategy,
-};
+use proptest::prelude::{prop_oneof, Arbitrary, BoxedStrategy, Just, Strategy};
 
 use crate::{ArcTy, BoolBinOp, ExprBinOp, OverloadBinOp, PrimitiveTy};
 
@@ -20,7 +17,7 @@ impl Default for RecursiveParams {
         Self {
             depth: 4,                // levels deep
             desired_size: 64,        // total nodes
-            expected_branch_size: 5, // items per collection
+            expected_branch_size: 3, // items per collection
         }
     }
 }

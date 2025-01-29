@@ -18,7 +18,7 @@ use ena::unify::{self, InPlaceUnificationTable, UnifyKey, UnifyValue};
 use thiserror::Error;
 
 use super::{ArcTy, AttrSetTy, PrimitiveTy, Ty};
-use crate::{ExprId, Module, NameId, OverloadBinOp, db::NixFile, nameres::NameResolution};
+use crate::{db::NixFile, nameres::NameResolution, ExprId, Module, NameId, OverloadBinOp};
 
 #[salsa::tracked]
 pub fn check_file(db: &dyn crate::Db, file: NixFile) -> Result<InferenceResult, InferenceError> {
@@ -241,7 +241,7 @@ impl<'db> CheckCtx<'db> {
                     *t
                 } else {
                     let id = self.table.new_key(TypeVariableValue::Known(ty.clone()));
-                    self.prim_cache.insert(prim.clone(), id);
+                    self.prim_cache.insert(*prim, id);
                     id
                 }
             }

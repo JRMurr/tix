@@ -27,7 +27,7 @@ pub enum Ty<RefType, VarType = u32> {
     AttrSet(AttrSetTy<RefType>),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PrimitiveTy {
     Null,
     Bool,
