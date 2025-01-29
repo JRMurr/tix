@@ -18,11 +18,13 @@ use comment::gather_doc_comments;
 use db::NixFile;
 pub use db::{Db, RootDatabase};
 // use derive_more::Debug;
+use derive_more::From;
 use la_arena::{Arena, ArenaMap, Idx as Id};
 use lower::lower;
 pub use nameres::scopes;
 use rnix::NixLanguage;
 use smol_str::SmolStr;
+
 pub use ty::*;
 
 #[salsa::tracked]
@@ -280,6 +282,20 @@ pub enum OverloadBinOp {
     Div,
 }
 
+// used mostly in pbt for file generation
+impl From<OverloadBinOp> for String {
+    fn from(value: OverloadBinOp) -> Self {
+        let v = match value {
+            OverloadBinOp::Add => "+",
+            OverloadBinOp::Sub => "-",
+            OverloadBinOp::Mul => "*",
+            OverloadBinOp::Div => "/",
+        };
+
+        v.to_string()
+    }
+}
+
 impl OverloadBinOp {
     pub fn is_add(&self) -> bool {
         matches!(self, OverloadBinOp::Add)
@@ -293,6 +309,17 @@ pub enum BoolBinOp {
     Or,
 }
 
+// used mostly in pbt for file generation
+impl From<BoolBinOp> for String {
+    fn from(value: BoolBinOp) -> Self {
+        match value {
+            BoolBinOp::And => "&&".to_string(),
+            BoolBinOp::Implication => "->".to_string(),
+            BoolBinOp::Or => "||".to_string(),
+        }
+    }
+}
+
 /// Bin ops like equality or less than that operate on expressions but return a bool
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExprBinOp {
@@ -304,7 +331,8 @@ pub enum ExprBinOp {
     Equal,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, From, Clone, Copy, PartialEq, Eq)]
+#[from(forward)]
 pub enum NormalBinOp {
     Expr(ExprBinOp),
     Bool(BoolBinOp),
@@ -312,9 +340,10 @@ pub enum NormalBinOp {
     AttrUpdate,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, From, Clone, Copy, PartialEq, Eq)]
 pub enum BinOP {
     Overload(OverloadBinOp),
+    #[from(NormalBinOp, ExprBinOp, BoolBinOp)]
     Normal(NormalBinOp),
 }
 

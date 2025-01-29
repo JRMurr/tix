@@ -7,9 +7,9 @@ use super::{
     DeferrableConstraintKind, RootConstraintKind, TyId,
 };
 use crate::{
-    BinOP, BindingValue, Bindings, Expr, ExprId, Literal, NormalBinOp,
     nameres::ResolveResult,
     ty::{AttrSetTy, PrimitiveTy, Ty},
+    BinOP, BindingValue, Bindings, Expr, ExprId, Literal, NormalBinOp,
 };
 
 impl CheckCtx<'_> {
@@ -147,6 +147,8 @@ impl CheckCtx<'_> {
                         bool_ty
                     }
                     BinOP::Normal(NormalBinOp::Expr(_)) => {
+                        // TODO: should reject function types here if its not an equality check
+                        // right now ill allow it but nix will throw an error...
                         constraints.unify_var(e, lhs_ty, rhs_ty);
 
                         Ty::Primitive(PrimitiveTy::Bool).intern_ty(self)

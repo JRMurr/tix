@@ -1,22 +1,20 @@
 use std::collections::HashSet;
 
-use proptest::prelude::*;
+mod arbitrary;
+
+use arbitrary::RecursiveParams;
+
+use proptest::prelude::{
+    any, prop, prop_assert_eq, prop_compose, prop_oneof, proptest, BoxedStrategy, Just,
+    ProptestConfig, Strategy,
+};
+// use proptest::prelude::*;
 use smol_str::SmolStr;
 
-use crate::{ty::check::tests::get_inferred_root, ArcTy, AttrSetTy, PrimitiveTy, Ty, TyRef};
-
-fn arb_prim() -> impl Strategy<Value = PrimitiveTy> {
-    prop_oneof![
-        Just(PrimitiveTy::Null),
-        Just(PrimitiveTy::Bool),
-        Just(PrimitiveTy::Int),
-        Just(PrimitiveTy::Float),
-        Just(PrimitiveTy::String),
-        // Just(PrimitiveTy::Path),
-        // no uri
-    ]
-    .boxed()
-}
+use crate::{
+    ty::check::tests::get_inferred_root, ArcTy, AttrSetTy, BoolBinOp, OverloadBinOp, PrimitiveTy,
+    Ty, TyRef,
+};
 
 prop_compose! {
     // put a 10 char limit on idents, should be enough....
@@ -25,26 +23,8 @@ prop_compose! {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct RecursiveParams {
-    depth: u32,
-    desired_size: u32,
-    expected_branch_size: u32,
-}
-
-impl Default for RecursiveParams {
-    fn default() -> Self {
-        // TODO: picked basically at random...
-        Self {
-            depth: 4,                // levels deep
-            desired_size: 64,        // total nodes
-            expected_branch_size: 5, // items per collection
-        }
-    }
-}
-
 fn arb_arc_ty(args: RecursiveParams) -> impl Strategy<Value = ArcTy> {
-    let leaf = arb_prim().prop_map(ArcTy::Primitive);
+    let leaf = any::<PrimitiveTy>().prop_map(ArcTy::Primitive);
 
     leaf.prop_recursive(
         args.depth,
@@ -64,30 +44,35 @@ fn arb_arc_ty(args: RecursiveParams) -> impl Strategy<Value = ArcTy> {
     )
 }
 
-impl Arbitrary for ArcTy {
-    type Parameters = RecursiveParams;
-    type Strategy = BoxedStrategy<ArcTy>;
-
-    fn arbitrary_with(args: Self::Parameters) -> Self::Strategy {
-        arb_arc_ty(args).boxed()
-    }
-}
-
 // TODO: would be nice to make a wrapper type around String to mark at the type level its a nix string
 // would make it slightly nicer type safety
 
 type NixFileStr = String;
 
 fn arb_bool_str() -> impl Strategy<Value = NixFileStr> {
-    // let leaf = any::<bool>().prop_map(|b| b.to_string());
+    let leaf = any::<bool>().prop_map(|b| b.to_string());
 
-    prop_oneof![any::<bool>().prop_map(|b| b.to_string()),]
+    leaf.prop_recursive(3, 5, 2, |inner| {
+        (
+            inner.clone(),
+            inner.clone(),
+            any::<BoolBinOp>().prop_map_into::<String>(),
+        )
+            .prop_map(|(l, r, op)| format!("({l}) {op} ({r})"))
+    })
 }
 
 fn arb_int_str() -> impl Strategy<Value = NixFileStr> {
-    // let leaf = any::<i32>().prop_map(|i| i.to_string());
+    let leaf = any::<i32>().prop_map(|i| i.to_string());
 
-    prop_oneof![any::<i32>().prop_map(|i| i.to_string())]
+    leaf.prop_recursive(3, 5, 2, |inner| {
+        (
+            inner.clone(),
+            inner.clone(),
+            any::<OverloadBinOp>().prop_map_into::<String>(),
+        )
+            .prop_map(|(l, r, op)| format!("({l}) {op} ({r})"))
+    })
 }
 
 prop_compose! {
@@ -96,9 +81,25 @@ prop_compose! {
     }
 }
 
-
 fn arb_float_str() -> impl Strategy<Value = NixFileStr> {
-    prop_oneof![arb_simple_float().prop_map(|f| format!("{f:.4}"))]
+    let leaf = arb_simple_float().prop_map(|f| format!("{f:.4}"));
+
+    leaf.prop_recursive(3, 5, 2, |inner| {
+        let float_or_int = prop_oneof![inner.clone(), arb_int_str()];
+
+        // make it so we can always have at least one float in the opp
+        // but could be on either side
+        let args = (inner, float_or_int)
+            .prop_flat_map(|(float, f_or_int)| Just([float, f_or_int]))
+            .prop_shuffle();
+
+        (args, any::<OverloadBinOp>().prop_map_into::<String>()).prop_map(|(args, op)| {
+            let l = &args[0];
+            let r = &args[1];
+
+            format!("({l}) {op} ({r})")
+        })
+    })
 }
 
 fn arb_str_value() -> impl Strategy<Value = NixFileStr> {
@@ -113,7 +114,7 @@ fn wrap_in_let(str_gen: impl Strategy<Value = NixFileStr>) -> impl Strategy<Valu
 fn wrap_in_attr(str_gen: impl Strategy<Value = NixFileStr>) -> impl Strategy<Value = NixFileStr> {
     let key_val_gen = (
         arb_smol_str_ident(),
-        arb_prim().prop_flat_map(prim_ty_to_string),
+        any::<PrimitiveTy>().prop_flat_map(prim_ty_to_string),
         // TODO: this might get into recursion hell....
         // ArcTy::arbitrary_with(RecursiveParams {
         //     depth: 2,
