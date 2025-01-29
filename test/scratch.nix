@@ -37,10 +37,18 @@
 # in
 # simple.foo
 
+# (
+#   param:
+#   let
+#     tmp = ("test");
+#   in
+#   if param == 1 then tmp else tmp
+# )
+
 (
   param:
   let
-    tmp = ("test");
+    tmp = (({ _pbt_a = ((un_used_param: null)); }));
   in
-  if param == 1 then tmp else tmp
+  if param == (un_used_param: null) then tmp else tmp
 )

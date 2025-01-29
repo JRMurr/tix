@@ -16,6 +16,8 @@ use crate::{
     Ty, TyRef,
 };
 
+use super::collect::Substitutions;
+
 prop_compose! {
     // put a 10 char limit on identifiers, should be enough....
     fn arb_smol_str_ident()(string in "_pbt_([a-z]|[A-Z]|[0-9]|_){1,10}") -> SmolStr {
@@ -226,6 +228,68 @@ fn text_from_ty(ty: &ArcTy) -> impl Strategy<Value = NixTextStr> {
     // non_type_modifying_transform(inner).boxed()
 }
 
+impl AttrSetTy<TyRef> {
+    /// Each child of the attrset for now will be unique
+    /// so we need to make sure each child has its own unique ty vars
+    fn spread_free_vars(&self, num_free_vars: &mut usize) -> Self {
+        // let mut num_free_vars = 0;
+
+        let fields = self
+            .fields
+            .iter()
+            .map(|(k, v)| {
+                let free_vars = v.0.free_type_vars();
+
+                let subs: Substitutions = free_vars
+                    .iter()
+                    .enumerate()
+                    .map(|(i, var)| (*var, (*num_free_vars + i + 1) as u32))
+                    .collect();
+
+                *num_free_vars += free_vars.len();
+
+                let ty = v.0.normalize_inner(&subs).into();
+
+                (k.clone(), ty)
+            })
+            .collect();
+
+        // let dyn_ty = self
+        //     .dyn_ty
+        //     .clone()
+        //     .map(|dyn_ty| dyn_ty.0.normalize_inner(free).into());
+
+        // let rest = self
+        //     .rest
+        //     .clone()
+        //     .map(|rest| rest.0.normalize_inner(free).into());
+
+        Self {
+            fields,
+            dyn_ty: None, // TODO:
+            rest: None,   // TODO:
+        }
+    }
+}
+
+impl ArcTy {
+    // TODO: make spread_free_vars for all variants
+    fn offset_free_vars(&self, num_free_vars: &mut usize) -> Self {
+        let free_vars = self.free_type_vars();
+
+        // TODO: extract this
+        let subs: Substitutions = free_vars
+            .iter()
+            .enumerate()
+            .map(|(i, var)| (*var, (*num_free_vars + i + 1) as u32))
+            .collect();
+
+        *num_free_vars += free_vars.len();
+
+        self.normalize_inner(&subs)
+    }
+}
+
 fn attr_strat(
     inner: impl Strategy<Value = (TyRef, NixTextStr)>,
 ) -> impl Strategy<Value = (ArcTy, NixTextStr)> {
@@ -255,7 +319,7 @@ fn attr_strat(
 
             let fields = format!("({{{}}})", fields.join(" "));
 
-            Some((ret_ty, fields))
+            Some((ret_ty.spread_free_vars(&mut 0), fields))
         },
     );
 
@@ -263,12 +327,66 @@ fn attr_strat(
         children
             .into_iter()
             .reduce(|(acc_ty, acc_text), (ty, text)| {
-                (acc_ty.merge(ty.clone()), format!("{acc_text} // {text}"))
+                // let free_vars_ty = ty.free_type_vars();
+                // let free_vars_len = acc_ty.free_type_vars().len();
+
+                // let free_vars_ty: Substitutions = free_vars_ty
+                //     .iter()
+                //     .enumerate()
+                //     .map(|(i, var)| (*var, (free_vars_len + i) as u32))
+                //     .collect();
+
+                // let ty = ty.normalize_inner(&free_vars_ty);
+
+                (
+                    acc_ty.merge(ty).spread_free_vars(&mut 0),
+                    format!("{acc_text} // {text}"),
+                )
             })
             .expect("should have at least one elem in the children list for attr merging")
     });
 
     merged_attrs.prop_map(|(ty, text)| (ArcTy::AttrSet(ty), text))
+}
+
+fn func_strat<S: Strategy<Value = (TyRef, NixTextStr)> + Clone>(
+    inner: S,
+) -> impl Strategy<Value = (ArcTy, NixTextStr)> {
+    // format!("(param: let tmp = ({body}); in if param == {param} then tmp else tmp)")
+    let fully_known = (inner.clone(), inner.clone()).prop_map(
+        |((param_ty, param_text), (body_ty, body_text))| {
+            let mut num_free_vars = 0;
+
+            let param_ty = param_ty.0.offset_free_vars(&mut num_free_vars).into();
+            let body_ty = body_ty.0.offset_free_vars(&mut num_free_vars).into();
+
+            let ty = ArcTy::Lambda {
+                param: param_ty,
+                body: body_ty,
+            };
+            let text = format!(
+                "(param: let tmp = ({body_text}); in if param == {param_text} then tmp else tmp)"
+            );
+
+            (ty, text)
+        },
+    );
+
+    let generic = inner.clone().prop_map(|(body_ty, body_text)| {
+        let num_free_vars = body_ty.0.free_type_vars().len();
+
+        let param_ty = ArcTy::TyVar((num_free_vars + 1) as u32);
+
+        let ty = ArcTy::Lambda {
+            param: param_ty.into(),
+            body: body_ty,
+        };
+        let text = format!("(un_used_param: {body_text})");
+
+        (ty, text)
+    });
+
+    prop_oneof![fully_known, generic]
 }
 
 fn arb_nix_text(args: RecursiveParams) -> impl Strategy<Value = (ArcTy, NixTextStr)> {
@@ -280,6 +398,9 @@ fn arb_nix_text(args: RecursiveParams) -> impl Strategy<Value = (ArcTy, NixTextS
         args.desired_size,
         args.expected_branch_size,
         |inner| {
+            // TODO: make sure all places where inner is called multiple times
+            // does a free var spread
+            // TODO: make it automatic?
             let wrapped = inner
                 .clone()
                 .prop_flat_map(|(ty, text)| (Just(ty), non_type_modifying_transform(text)));
@@ -291,14 +412,12 @@ fn arb_nix_text(args: RecursiveParams) -> impl Strategy<Value = (ArcTy, NixTextS
                 .clone() // TODO: gen a list of more than 1 elem
                 .prop_map(|(ty, text)| (ArcTy::List(ty), format!("[({text})]")));
 
-            prop_oneof![wrapped, list_strat, attr_strat(inner.clone())]
-            // prop_oneof![
-            //     inner.clone().prop_map(ArcTy::List),
-            //     (inner.clone(), inner.clone())
-            //         .prop_map(|(param, body)| ArcTy::Lambda { param, body }),
-            //     prop::collection::btree_map(arb_smol_str_ident(), inner.clone(), 0..5)
-            //         .prop_map(|map| ArcTy::AttrSet(AttrSetTy::from_fields(map)))
-            // ]
+            prop_oneof![
+                wrapped,
+                list_strat,
+                func_strat(inner.clone()),
+                attr_strat(inner.clone())
+            ]
         },
     )
 }
@@ -330,6 +449,6 @@ proptest! {
     fn test_type_check((ty, text) in arb_nix()) {
         let root_ty = get_inferred_root(&text);
 
-        prop_assert_eq!(root_ty, ty);
+        prop_assert_eq!(root_ty, ty.normalize_vars());
     }
 }
