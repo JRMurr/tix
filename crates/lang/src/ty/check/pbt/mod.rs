@@ -19,7 +19,8 @@ fn arb_prim() -> impl Strategy<Value = PrimitiveTy> {
 }
 
 prop_compose! {
-    fn arb_smol_str_ident()(string in "[a-z]+([a-z]|[A-Z]|[0-9]|_)*") -> SmolStr {
+    // put a 10 char limit on idents, should be enough....
+    fn arb_smol_str_ident()(string in "_pbt_([a-z]|[A-Z]|[0-9]|_){1,10}") -> SmolStr {
         string.into()
     }
 }
@@ -78,15 +79,26 @@ impl Arbitrary for ArcTy {
 type NixFileStr = String;
 
 fn arb_bool_str() -> impl Strategy<Value = NixFileStr> {
+    // let leaf = any::<bool>().prop_map(|b| b.to_string());
+
     prop_oneof![any::<bool>().prop_map(|b| b.to_string()),]
 }
 
 fn arb_int_str() -> impl Strategy<Value = NixFileStr> {
+    // let leaf = any::<i32>().prop_map(|i| i.to_string());
+
     prop_oneof![any::<i32>().prop_map(|i| i.to_string())]
 }
 
+prop_compose! {
+    fn arb_simple_float()(f in -1.0..2.0) -> f64 {
+        f
+    }
+}
+
+
 fn arb_float_str() -> impl Strategy<Value = NixFileStr> {
-    prop_oneof![any::<f32>().prop_map(|f| format!("{f:.4}"))]
+    prop_oneof![arb_simple_float().prop_map(|f| format!("{f:.4}"))]
 }
 
 fn arb_str_value() -> impl Strategy<Value = NixFileStr> {
@@ -95,7 +107,7 @@ fn arb_str_value() -> impl Strategy<Value = NixFileStr> {
 
 fn wrap_in_let(str_gen: impl Strategy<Value = NixFileStr>) -> impl Strategy<Value = NixFileStr> {
     (str_gen, arb_smol_str_ident())
-        .prop_map(|(val, ident)| format!("(let {ident} = {val}; in {ident})"))
+        .prop_map(|(val, ident)| format!("(let {ident} = ({val}); in {ident})"))
 }
 
 fn wrap_in_attr(str_gen: impl Strategy<Value = NixFileStr>) -> impl Strategy<Value = NixFileStr> {
@@ -112,7 +124,7 @@ fn wrap_in_attr(str_gen: impl Strategy<Value = NixFileStr>) -> impl Strategy<Val
         // .boxed(),
     );
 
-    let extra_fields = prop::collection::vec(key_val_gen, 0..3);
+    let extra_fields = prop::collection::vec(key_val_gen, 0..5);
     let desired_ident = arb_smol_str_ident();
 
     (extra_fields, desired_ident, str_gen).prop_filter_map(
@@ -212,14 +224,14 @@ fn arb_nix_file() -> impl Strategy<Value = (ArcTy, String)> {
 }
 
 proptest! {
+    // default to a smallish value, use the `pbt.sh` script to do more
     #![proptest_config(ProptestConfig {
-        cases: 10000, .. ProptestConfig::default()
+        cases: 256, .. ProptestConfig::default()
     })]
     #[test]
     fn test_type_check((ty, file) in arb_nix_file()) {
         let root_ty = get_inferred_root(&file);
 
         prop_assert_eq!(root_ty, ty);
-        // expect_ty_inference(&file, ty)
     }
 }

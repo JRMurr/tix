@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 0b0f13cdc6e8c092d95c537215b674290c20469bddcac294c78d64972665a5b5 # shrinks to (ty, file) = (List(Bool), "(let in = [(false)]; in in)")
