@@ -6,11 +6,11 @@ use rowan::ast::AstNode;
 use smol_str::SmolStr;
 
 use super::{
+    ast_utils::{get_str_literal, name_kind_of_set, name_of_ident, AttrKind},
     AstPtr, Attrpath, BindingValue, Bindings, Expr, ExprId, InterpolPart, Literal, Module,
     ModuleSourceMap, Name, NameId, NameKind,
-    ast_utils::{AttrKind, get_str_literal, name_kind_of_set, name_of_ident},
 };
-use crate::{DocComments, ModuleTypeDecMap, Pat, comment::DocCommentCtx};
+use crate::{comment::DocCommentCtx, DocComments, ModuleTypeDecMap, Pat};
 
 struct LowerCtx {
     exprs: Arena<Expr>,
@@ -215,21 +215,24 @@ impl LowerCtx {
             Expr::Literal(Literal::String(lit.into()))
         } else {
             let parts = s.normalized_parts();
-            Expr::StringInterpolation(self.lower_string_interpolation(parts.into_iter()).collect())
+            Expr::StringInterpolation(self.lower_string_interpolation(parts))
         };
         self.alloc_expr(expr, ptr)
     }
 
     fn lower_string_interpolation(
         &mut self,
-        parts: impl Iterator<Item = rnix::ast::InterpolPart<String>>,
-    ) -> impl Iterator<Item = InterpolPart<SmolStr>> {
-        parts.map(|p| match p {
-            ast::InterpolPart::Literal(lit) => InterpolPart::Literal(lit.into()),
-            ast::InterpolPart::Interpolation(interpol) => {
-                InterpolPart::Interpol(self.lower_expr_opt(interpol.expr()))
-            }
-        })
+        parts: Vec<rnix::ast::InterpolPart<String>>,
+    ) -> Box<[InterpolPart<SmolStr>]> {
+        parts
+            .into_iter()
+            .map(|p| match p {
+                ast::InterpolPart::Literal(lit) => InterpolPart::Literal(lit.into()),
+                ast::InterpolPart::Interpolation(interpol) => {
+                    InterpolPart::Interpol(self.lower_expr_opt(interpol.expr()))
+                }
+            })
+            .collect()
     }
 
     fn lower_lambda(&mut self, lam: &ast::Lambda, ptr: AstPtr) -> ExprId {
