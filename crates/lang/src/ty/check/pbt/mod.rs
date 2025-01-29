@@ -226,6 +226,51 @@ fn text_from_ty(ty: &ArcTy) -> impl Strategy<Value = NixTextStr> {
     // non_type_modifying_transform(inner).boxed()
 }
 
+fn attr_strat(
+    inner: impl Strategy<Value = (TyRef, NixTextStr)>,
+) -> impl Strategy<Value = (ArcTy, NixTextStr)> {
+    let single_attr = prop::collection::vec((arb_smol_str_ident(), inner), 1..5).prop_filter_map(
+        "duplicate ident names",
+        |elems| {
+            let all_ident: HashSet<_> = elems.iter().map(|x| x.0.clone()).collect();
+
+            if all_ident.len() != elems.len() {
+                return None;
+            }
+
+            let type_fields: BTreeMap<SmolStr, TyRef> = elems
+                .iter()
+                .map(|(key, (ty, _))| (key.clone(), ty.clone()))
+                .collect();
+
+            let ret_ty = AttrSetTy::from_fields(type_fields);
+
+            let fields: Vec<_> = elems
+                .iter()
+                .map(|(key, (_, val))| {
+                    let key = key.clone();
+                    format!("{key}=({val});")
+                })
+                .collect();
+
+            let fields = format!("({{{}}})", fields.join(" "));
+
+            Some((ret_ty, fields))
+        },
+    );
+
+    let merged_attrs = prop::collection::vec(single_attr, 1..3).prop_map(|children| {
+        children
+            .into_iter()
+            .reduce(|(acc_ty, acc_text), (ty, text)| {
+                (acc_ty.merge(ty.clone()), format!("{acc_text} // {text}"))
+            })
+            .expect("should have at least one elem in the children list for attr merging")
+    });
+
+    merged_attrs.prop_map(|(ty, text)| (ArcTy::AttrSet(ty), text))
+}
+
 fn arb_nix_text(args: RecursiveParams) -> impl Strategy<Value = (ArcTy, NixTextStr)> {
     let leaf = any::<PrimitiveTy>()
         .prop_flat_map(|prim| (Just(ArcTy::Primitive(prim)), prim_ty_to_string(prim)));
@@ -246,60 +291,7 @@ fn arb_nix_text(args: RecursiveParams) -> impl Strategy<Value = (ArcTy, NixTextS
                 .clone() // TODO: gen a list of more than 1 elem
                 .prop_map(|(ty, text)| (ArcTy::List(ty), format!("[({text})]")));
 
-            let attr_strat = prop::collection::vec((arb_smol_str_ident(), inner.clone()), 1..5)
-                .prop_filter_map("duplicate ident names", |elems| {
-                    let all_ident: HashSet<_> = elems.iter().map(|x| x.0.clone()).collect();
-
-                    if all_ident.len() != elems.len() {
-                        return None;
-                    }
-
-                    let type_fields: BTreeMap<SmolStr, TyRef> = elems
-                        .iter()
-                        .map(|(key, (ty, _))| (key.clone(), ty.clone()))
-                        .collect();
-
-                    let ret_ty = AttrSetTy::from_fields(type_fields);
-
-                    let fields: Vec<_> = elems
-                        .iter()
-                        .map(|(key, (_, val))| {
-                            let key = key.clone();
-                            format!("{key}=({val});")
-                        })
-                        .collect();
-
-                    let fields = format!("({{{}}})", fields.join(" "));
-
-                    Some((ret_ty, fields))
-                });
-
-            let attr_strat = prop::collection::vec(attr_strat, 1..3).prop_map(|children| {
-                children
-                    .into_iter()
-                    .reduce(|(acc_ty, acc_text), (ty, text)| {
-                        (acc_ty.merge(ty.clone()), format!("{acc_text} // {text}"))
-                    })
-                    .expect("should have at least one elem in the children list for attr merging")
-            });
-
-            // // merge attr sets
-            // let attr_strat = attr_strat.prop_recursive(3, 10, 3, |inner| {
-            //     prop::collection::vec(inner, 1..3).prop_map(|children| {
-            //         children
-            //             .into_iter()
-            //             .reduce(|(acc_ty, acc_text), (ty, text)| {
-            //                 (acc_ty.merge(ty.clone()), format!("{acc_text} // {text}"))
-            //             })
-            //             .expect(
-            //                 "should have atleast one elem in the children list for attr merging",
-            //             )
-            //     })
-            // });
-
-            let attr_strat = attr_strat.prop_map(|(ty, text)| (ArcTy::AttrSet(ty), text));
-
-            prop_oneof![wrapped, list_strat, attr_strat]
+            prop_oneof![wrapped, list_strat, attr_strat(inner.clone())]
             // prop_oneof![
             //     inner.clone().prop_map(ArcTy::List),
             //     (inner.clone(), inner.clone())
