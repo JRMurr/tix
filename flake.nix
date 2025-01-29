@@ -35,6 +35,7 @@
           default = pkgs.mkShell {
             buildInputs = with pkgs; [
               rustAttrs.rust-shell
+              (pkgs.cargo-tarpaulin.override ({ rustPlatform = rustAttrs.rustPlatform; }))
 
               # common
               just

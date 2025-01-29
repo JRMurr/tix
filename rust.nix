@@ -17,6 +17,7 @@ let
   };
 in
 {
+  inherit rustPlatform;
   rust-shell = (
     rustVersion.override {
       extensions = [
