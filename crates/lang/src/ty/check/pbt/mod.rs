@@ -108,7 +108,10 @@ fn arb_str_value() -> impl Strategy<Value = NixFileStr> {
 
 fn wrap_in_let(str_gen: impl Strategy<Value = NixFileStr>) -> impl Strategy<Value = NixFileStr> {
     (str_gen, arb_smol_str_ident())
-        .prop_map(|(val, ident)| format!("(let {ident} = ({val}); in {ident})"))
+        .prop_flat_map(|(val, ident)| prop_oneof![
+            Just(format!("(let {ident} = ({val}); in {ident})")),
+            Just(format!("(let {ident} = (a: a); in ({ident} ({val})))"))
+        ])
 }
 
 fn wrap_in_attr(str_gen: impl Strategy<Value = NixFileStr>) -> impl Strategy<Value = NixFileStr> {
