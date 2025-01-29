@@ -3,18 +3,23 @@ use indoc::indoc;
 use super::check_file;
 use crate::{arc_ty, tests::TestDatabase, ty::ArcTy};
 
-#[track_caller]
-pub fn expect_ty_inference(src: &str, expected: ArcTy) {
+pub fn get_inferred_root(src: &str) -> ArcTy {
     let (db, file) = TestDatabase::single_file(src).unwrap();
     let module = crate::module(&db, file);
     let inference = check_file(&db, file).expect("No inference error");
 
-    let root_ty = inference
+    inference
         .expr_ty_map
         .get(&module.entry_expr)
-        .expect("No type for root module entry");
+        .expect("No type for root module entry")
+        .clone()
+}
 
-    assert_eq!(root_ty, &expected)
+#[track_caller]
+pub fn expect_ty_inference(src: &str, expected: ArcTy) {
+    let root_ty = get_inferred_root(src);
+
+    assert_eq!(root_ty, expected)
 }
 
 macro_rules! test_case {
