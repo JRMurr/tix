@@ -13,11 +13,11 @@ use derive_more::Debug;
 pub use primitive::PrimitiveTy;
 
 // just to make it easy to share the constraints...
-pub trait RefType: Eq + std::hash::Hash {}
-impl<T> RefType for T where T: Eq + std::hash::Hash {}
+pub trait RefType: Eq + std::hash::Hash + Ord {}
+impl<T> RefType for T where T: Eq + Ord + std::hash::Hash {}
 
 // the mono type
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Ty<R, VarType = u32>
 where
     R: RefType,

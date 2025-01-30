@@ -34,10 +34,10 @@ pub struct TypeDecl {
     pub type_expr: KnownTy,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct KnownTyRef(pub Arc<Ty<KnownTyRef, TypeVarValue>>);
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum TypeVarValue {
     Generic(SmolStr),   // A generic with a given identifier
     Reference(SmolStr), // A reference to a different Type, should be resolved during checking

@@ -7,7 +7,7 @@ use crate::arc_ty::TyRef;
 
 use super::Ty;
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct AttrSetTy<RefType> {
     // TODO: i think the value here needs to be a TyId or Schema
     pub fields: BTreeMap<SmolStr, RefType>,

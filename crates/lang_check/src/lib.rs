@@ -35,7 +35,7 @@ pub fn check_file(db: &dyn AstDb, file: NixFile) -> Result<InferenceResult, Infe
     check.infer_prog(grouped_defs)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Copy, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Copy, Hash, PartialOrd, Ord)]
 #[debug("TyId({_0:?})")]
 pub struct TyId(u32);
 
