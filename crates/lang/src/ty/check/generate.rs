@@ -149,6 +149,7 @@ impl CheckCtx<'_> {
                     BinOP::Normal(NormalBinOp::Expr(_)) => {
                         // TODO: should reject function types here if its not an equality check
                         // right now ill allow it but nix will throw an error...
+                        // TODO: equality checks actually allow for both sides to be different...
                         constraints.unify_var(e, lhs_ty, rhs_ty);
 
                         Ty::Primitive(PrimitiveTy::Bool).intern_ty(self)

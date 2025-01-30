@@ -1,14 +1,24 @@
 mod check;
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 pub use check::check_file;
 use derive_more::Debug;
 // use miette::Diagnostic;
 use smol_str::SmolStr;
 
+// just to make it easy to share the constraints...
+pub trait RefType: Eq + std::hash::Hash {}
+impl<T> RefType for T where T: Eq + std::hash::Hash {}
+
 // the mono type
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Ty<RefType, VarType = u32> {
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Ty<R, VarType = u32>
+where
+    R: RefType,
+{
     // TODO: should specify whats a unification var vs type var
     /// A type quantifier (ie the `a` in `a -> a`)
     #[allow(clippy::enum_variant_names)]
@@ -20,11 +30,16 @@ pub enum Ty<RefType, VarType = u32> {
     Primitive(PrimitiveTy),
 
     #[debug("List({_0:?})")]
-    List(RefType),
+    List(R),
     #[debug("Lambda({param:?} -> {body:?})")]
-    Lambda { param: RefType, body: RefType },
+    Lambda {
+        param: R,
+        body: R,
+    },
     #[debug("{_0:?}")]
-    AttrSet(AttrSetTy<RefType>),
+    AttrSet(AttrSetTy<R>),
+
+    Union(BTreeSet<R>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -67,19 +82,19 @@ impl From<crate::Literal> for PrimitiveTy {
     }
 }
 
-impl<T> From<crate::Literal> for Ty<T> {
+impl<T: RefType> From<crate::Literal> for Ty<T> {
     fn from(value: crate::Literal) -> Self {
         Ty::Primitive(value.into())
     }
 }
 
-impl<T> From<PrimitiveTy> for Ty<T> {
+impl<T: RefType> From<PrimitiveTy> for Ty<T> {
     fn from(value: PrimitiveTy) -> Self {
         Ty::Primitive(value)
     }
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
 pub struct AttrSetTy<RefType> {
     // TODO: i think the value here needs to be a TyId or Schema
     fields: BTreeMap<SmolStr, RefType>,
@@ -172,7 +187,7 @@ impl<RefType: Clone + Debug> AttrSetTy<RefType> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[debug("{_0:?}")]
 pub struct TyRef(Arc<Ty<TyRef>>);
 

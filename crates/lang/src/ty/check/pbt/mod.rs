@@ -222,6 +222,7 @@ fn text_from_ty(ty: &ArcTy) -> impl Strategy<Value = NixTextStr> {
                 })
                 .boxed()
         }
+        Ty::Union(_hash_set) => todo!("text_from_ty union"),
     };
 
     inner.prop_flat_map(non_type_modifying_transform)

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use collect::collect_type_decls;
 use derive_more::Debug;
 use lang::Ty;
-use pest::{Parser, iterators::Pairs};
+use pest::{iterators::Pairs, Parser};
 use pest_derive::Parser;
 use smol_str::SmolStr;
 
@@ -33,10 +33,10 @@ pub struct TypeDecl {
     pub type_expr: KnownTy,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct KnownTyRef(Arc<KnownTy>);
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TypeVarValue {
     Generic(SmolStr),   // A generic with a given identifier
     Reference(SmolStr), // A reference to a different Type, should be resolved during checking

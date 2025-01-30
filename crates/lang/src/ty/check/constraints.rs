@@ -38,6 +38,7 @@ pub type DeferrableConstraint = Constraint<DeferrableConstraintKind>;
 #[derive(Debug, PartialEq, Clone, Eq)]
 pub enum RootConstraintKind {
     Eq(TyId, TyId),
+    // Join(TyId, TyId), // merge together in a union type
     Deferrable(DeferrableConstraintKind),
 }
 
