@@ -114,7 +114,7 @@ impl AttrSetTy<TyRef> {
 impl<'db> Collector<'db> {
     pub fn new(ctx: CheckCtx<'db>) -> Self {
         Self {
-            cache: HashMap::with_capacity(ctx.table.len()),
+            cache: HashMap::with_capacity(ctx.table.types.len()),
             ctx,
         }
     }

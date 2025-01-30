@@ -3,6 +3,7 @@ mod constraints;
 mod generate;
 mod infer;
 mod solve;
+mod storage;
 
 #[cfg(test)]
 mod tests;
@@ -14,7 +15,8 @@ use std::collections::{HashMap, HashSet};
 
 pub(crate) use constraints::*;
 use derive_more::Debug;
-use ena::unify::{self, InPlaceUnificationTable, UnifyKey, UnifyValue};
+use storage::TypeStorage;
+// use ena::unify::{self, InPlaceUnificationTable, UnifyKey, UnifyValue};
 use thiserror::Error;
 
 use super::{ArcTy, AttrSetTy, PrimitiveTy, Ty};
@@ -53,69 +55,51 @@ impl From<usize> for TyId {
     }
 }
 
-#[derive(Clone, Debug)]
-pub enum TypeVariableValue {
-    Known(Ty<TyId>),
-    Unknown,
-}
-
-impl UnifyKey for TyId {
-    type Value = TypeVariableValue;
-
-    fn index(&self) -> u32 {
-        self.0
-    }
-
-    fn from_index(u: u32) -> Self {
-        TyId(u)
-    }
-
-    fn tag() -> &'static str {
-        "TyId"
+impl From<TyId> for usize {
+    #[inline]
+    fn from(value: TyId) -> Self {
+        value.0 as usize
     }
 }
 
-impl UnifyValue for TypeVariableValue {
-    type Error = unify::NoError;
+// impl UnifyKey for TyId {
+//     type Value = TypeVariableValue;
 
-    fn unify_values(value1: &Self, value2: &Self) -> Result<Self, Self::Error> {
-        match (value1, value2) {
-            // We never equate two type variables, both of which
-            // have known types. Instead, we recursively equate
-            // those types.
-            (&TypeVariableValue::Known { .. }, &TypeVariableValue::Known { .. }) => {
-                unreachable!("equating two type variables, both of which have known types")
-            }
-            // If one side is known, prefer that one.
-            (&TypeVariableValue::Known { .. }, &TypeVariableValue::Unknown) => Ok(value1.clone()),
-            (&TypeVariableValue::Unknown, &TypeVariableValue::Known { .. }) => Ok(value2.clone()),
+//     fn index(&self) -> u32 {
+//         self.0
+//     }
 
-            // both unknown, doesn't matter
-            (&TypeVariableValue::Unknown, &TypeVariableValue::Unknown) => {
-                Ok(TypeVariableValue::Unknown)
-            }
-        }
-    }
-}
+//     fn from_index(u: u32) -> Self {
+//         TyId(u)
+//     }
 
-impl TypeVariableValue {
-    /// If this value is known, returns the type it is known to be.
-    /// Otherwise, `None`.
-    pub(crate) fn known(&self) -> Option<Ty<TyId>> {
-        match self {
-            TypeVariableValue::Unknown => None,
-            TypeVariableValue::Known(value) => Some(value.clone()),
-        }
-    }
+//     fn tag() -> &'static str {
+//         "TyId"
+//     }
+// }
 
-    #[allow(dead_code)]
-    pub(crate) fn is_unknown(&self) -> bool {
-        match *self {
-            TypeVariableValue::Unknown => true,
-            TypeVariableValue::Known { .. } => false,
-        }
-    }
-}
+// impl UnifyValue for TypeVariableValue {
+//     type Error = unify::NoError;
+
+//     fn unify_values(value1: &Self, value2: &Self) -> Result<Self, Self::Error> {
+//         match (value1, value2) {
+//             // We never equate two type variables, both of which
+//             // have known types. Instead, we recursively equate
+//             // those types.
+//             (&TypeVariableValue::Known { .. }, &TypeVariableValue::Known { .. }) => {
+//                 unreachable!("equating two type variables, both of which have known types")
+//             }
+//             // If one side is known, prefer that one.
+//             (&TypeVariableValue::Known { .. }, &TypeVariableValue::Unknown) => Ok(value1.clone()),
+//             (&TypeVariableValue::Unknown, &TypeVariableValue::Known { .. }) => Ok(value2.clone()),
+
+//             // both unknown, doesn't matter
+//             (&TypeVariableValue::Unknown, &TypeVariableValue::Unknown) => {
+//                 Ok(TypeVariableValue::Unknown)
+//             }
+//         }
+//     }
+// }
 
 pub type FreeVars = HashSet<TyId>;
 
@@ -212,7 +196,7 @@ pub struct CheckCtx<'db> {
     module: &'db Module,
     name_res: &'db NameResolution,
 
-    table: InPlaceUnificationTable<TyId>,
+    table: TypeStorage,
 
     poly_type_env: HashMap<NameId, TySchema>,
 
@@ -224,7 +208,7 @@ impl<'db> CheckCtx<'db> {
         Self {
             module,
             name_res,
-            table: InPlaceUnificationTable::new(),
+            table: TypeStorage::new(),
             poly_type_env: HashMap::new(),
             prim_cache: HashMap::new(),
         }
@@ -240,13 +224,13 @@ impl<'db> CheckCtx<'db> {
                 if let Some(t) = self.prim_cache.get(prim) {
                     *t
                 } else {
-                    let id = self.table.new_key(TypeVariableValue::Known(ty.clone()));
+                    let id = self.table.insert(ty.clone());
                     self.prim_cache.insert(*prim, id);
                     id
                 }
             }
-            Some(ty) => self.table.new_key(TypeVariableValue::Known(ty)),
-            None => self.table.new_key(TypeVariableValue::Unknown),
+            Some(ty) => self.table.insert(ty),
+            None => self.table.new_ty(),
         }
     }
 
@@ -281,8 +265,8 @@ impl<'db> CheckCtx<'db> {
 
     fn get_ty(&mut self, id: TyId) -> Ty<TyId> {
         self.table
-            .inlined_probe_value(id)
-            .known()
+            .get(id)
+            // .known()
             .unwrap_or(Ty::TyVar(id.0))
     }
 }

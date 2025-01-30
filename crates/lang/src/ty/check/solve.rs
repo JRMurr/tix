@@ -5,7 +5,7 @@ use smol_str::SmolStr;
 use super::{
     AttrMergeConstraint, AttrSetTy, BinOverloadConstraint, CheckCtx, ConstraintCtx,
     DeferrableConstraintKind, InferenceError, RootConstraint, RootConstraintKind, SolveError, Ty,
-    TyId, TypeVariableValue,
+    TyId,
 };
 use crate::{OverloadBinOp, PrimitiveTy};
 
@@ -74,7 +74,8 @@ impl CheckCtx<'_> {
     }
 
     fn solve_constraint(&mut self, constraint: &RootConstraint) -> SolveResult {
-        let snapshot = self.table.snapshot();
+        // TODO: this is probably making perf awful......
+        let snapshot = self.table.clone();
 
         let res: SolveResult = match &constraint.kind {
             RootConstraintKind::Eq(lhs, rhs) => self.unify(*lhs, *rhs).into(),
@@ -91,10 +92,10 @@ impl CheckCtx<'_> {
 
         match res {
             SolveResult::Solved => {
-                self.table.commit(snapshot);
+                // self.table.commit(snapshot);
             }
             _ => {
-                self.table.rollback_to(snapshot);
+                self.table = snapshot;
             }
         }
 
@@ -102,7 +103,7 @@ impl CheckCtx<'_> {
     }
 
     fn solve_negation(&mut self, ty_id: TyId) -> SolveResult {
-        let Some(ty) = self.table.inlined_probe_value(ty_id).known() else {
+        let Some(ty) = self.table.get(ty_id) else {
             return SolveResult::Deferred;
         };
 
@@ -113,8 +114,8 @@ impl CheckCtx<'_> {
     }
 
     fn get_known_pair(&mut self, lhs: TyId, rhs: TyId) -> Option<(Ty<TyId>, Ty<TyId>)> {
-        let lhs_val = self.table.inlined_probe_value(lhs).known()?;
-        let rhs_val = self.table.inlined_probe_value(rhs).known()?;
+        let lhs_val = self.table.get(lhs)?;
+        let rhs_val = self.table.get(rhs)?;
 
         Some((lhs_val, rhs_val))
     }
@@ -210,31 +211,32 @@ impl CheckCtx<'_> {
     }
 
     fn unify(&mut self, lhs: TyId, rhs: TyId) -> UnifyResult {
-        let lhs_val = self.table.inlined_probe_value(lhs);
-        let rhs_val = self.table.inlined_probe_value(rhs);
+        // let lhs_val = self.table.get(lhs);
+        // let rhs_val = self.table.get(rhs);
 
         let res = self.unify_inner(lhs, rhs)?;
 
-        let is_ty_var = matches!(res, Ty::TyVar(_));
+        self.table.unify(lhs, rhs, res.clone());
 
-        match (lhs_val, rhs_val) {
-            (TypeVariableValue::Known(_), TypeVariableValue::Known(_)) => {}
-            // _ => self.table.union(lhs, rhs),
-            (TypeVariableValue::Known(_), _) | (_, TypeVariableValue::Known(_)) => {
-                self.table.union(lhs, rhs);
-                // self.table
-                //     .union_value(rhs, TypeVariableValue::Known(res.clone()));
-            }
-            (TypeVariableValue::Unknown, TypeVariableValue::Unknown) => {
-                if !is_ty_var {
-                    self.table
-                        .union_value(lhs, TypeVariableValue::Known(res.clone()));
-                }
-                // self.table
-                //     .union_value(lhs, TypeVariableValue::Known(res.clone()));
-                self.table.union(lhs, rhs);
-            }
-        }
+        // let is_ty_var = matches!(res, Ty::TyVar(_));
+
+        // match (lhs_val, rhs_val) {
+        //     (Some(_), Some(_)) => {}
+        //     // _ => self.table.union(lhs, rhs),
+        //     (Some(_), _) | (_, Some(_)) => {
+        //         self.table.union(lhs, rhs);
+        //         // self.table
+        //         //     .union_value(rhs, Some(res.clone()));
+        //     }
+        //     (None, None) => {
+        //         if !is_ty_var {
+        //             self.table.union_value(lhs, Some(res.clone()));
+        //         }
+        //         // self.table
+        //         //     .union_value(lhs, Some(res.clone()));
+        //         self.table.union(lhs, rhs);
+        //     }
+        // }
 
         Ok(res)
     }
