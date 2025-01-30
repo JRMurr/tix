@@ -196,12 +196,12 @@ impl CheckCtx<'_> {
                 let then_ty = self.generate_constraints(constraints, *then_body);
                 let else_ty = self.generate_constraints(constraints, *else_body);
 
-                constraints.add(Constraint {
-                    kind: RootConstraintKind::Eq(then_ty, else_ty),
-                    location: e,
-                });
+                // constraints.add(Constraint {
+                //     kind: RootConstraintKind::Eq(then_ty, else_ty),
+                //     location: e,
+                // });
 
-                then_ty
+                Ty::Union([then_ty, else_ty].into()).intern_ty(self)
             }
             Expr::LetIn { bindings, body } => {
                 // TODO: we might be doing instantiates twice here
