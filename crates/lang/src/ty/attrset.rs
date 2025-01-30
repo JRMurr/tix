@@ -3,6 +3,8 @@ use std::collections::BTreeMap;
 use derive_more::Debug;
 use smol_str::SmolStr;
 
+use super::{Ty, TyRef};
+
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
 pub struct AttrSetTy<RefType> {
     // TODO: i think the value here needs to be a TyId or Schema
@@ -92,6 +94,30 @@ impl<RefType: Clone + Debug> AttrSetTy<RefType> {
             fields,
             dyn_ty: self.dyn_ty.clone(),
             rest: self.rest.clone(),
+        }
+    }
+}
+
+impl AttrSetTy<TyRef> {
+    pub fn from_internal<'a>(
+        iter: impl IntoIterator<Item = (&'a str, Ty<TyRef>)>,
+        rest: Option<TyRef>,
+    ) -> Self {
+        let fields: BTreeMap<SmolStr, TyRef> = iter
+            .into_iter()
+            .map(|(name, ty)| (SmolStr::from(name), ty.into()))
+            .collect();
+        // Arc::get_mut(&mut fields)
+        //     .unwrap()
+        //     .sort_by(|(lhs, ..), (rhs, ..)| lhs.cmp(rhs));
+        // assert!(
+        //     fields.windows(2).all(|w| w[0].0 != w[1].0),
+        //     "Duplicated fields",
+        // );
+        Self {
+            fields,
+            rest,
+            dyn_ty: None,
         }
     }
 }

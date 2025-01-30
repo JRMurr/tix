@@ -2,17 +2,16 @@ mod attrset;
 mod check;
 mod primitive;
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::Arc,
-};
+mod union;
+
+use std::sync::Arc;
 
 pub use attrset::AttrSetTy;
 pub use check::check_file;
 pub use primitive::PrimitiveTy;
 
 use derive_more::Debug;
-use smol_str::SmolStr;
+use union::Union;
 
 // just to make it easy to share the constraints...
 pub trait RefType: Eq + std::hash::Hash {}
@@ -44,7 +43,7 @@ where
     #[debug("{_0:?}")]
     AttrSet(AttrSetTy<R>),
 
-    Union(BTreeSet<R>),
+    Union(Union<R>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -56,30 +55,6 @@ pub type ArcTy = Ty<TyRef>;
 impl From<ArcTy> for TyRef {
     fn from(value: ArcTy) -> Self {
         TyRef(Arc::new(value))
-    }
-}
-
-impl AttrSetTy<TyRef> {
-    pub fn from_internal<'a>(
-        iter: impl IntoIterator<Item = (&'a str, Ty<TyRef>)>,
-        rest: Option<TyRef>,
-    ) -> Self {
-        let fields: BTreeMap<SmolStr, TyRef> = iter
-            .into_iter()
-            .map(|(name, ty)| (SmolStr::from(name), ty.into()))
-            .collect();
-        // Arc::get_mut(&mut fields)
-        //     .unwrap()
-        //     .sort_by(|(lhs, ..), (rhs, ..)| lhs.cmp(rhs));
-        // assert!(
-        //     fields.windows(2).all(|w| w[0].0 != w[1].0),
-        //     "Duplicated fields",
-        // );
-        Self {
-            fields,
-            rest,
-            dyn_ty: None,
-        }
     }
 }
 
