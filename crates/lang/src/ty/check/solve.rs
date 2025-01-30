@@ -75,7 +75,7 @@ impl CheckCtx<'_> {
 
     fn solve_constraint(&mut self, constraint: &RootConstraint) -> SolveResult {
         // TODO: this is probably making perf awful......
-        let snapshot = self.table.clone();
+        // let snapshot = self.table.clone();
 
         let res: SolveResult = match &constraint.kind {
             RootConstraintKind::Eq(lhs, rhs) => self.unify(*lhs, *rhs).into(),
@@ -90,14 +90,14 @@ impl CheckCtx<'_> {
             },
         };
 
-        match res {
-            SolveResult::Solved => {
-                // self.table.commit(snapshot);
-            }
-            _ => {
-                self.table = snapshot;
-            }
-        }
+        // match res {
+        //     SolveResult::Solved => {
+        //         // self.table.commit(snapshot);
+        //     }
+        //     _ => {
+        //         self.table = snapshot;
+        //     }
+        // }
 
         res
     }
