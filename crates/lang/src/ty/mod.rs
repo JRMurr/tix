@@ -1,12 +1,17 @@
+mod attrset;
 mod check;
+mod primitive;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
 };
 
+pub use attrset::AttrSetTy;
 pub use check::check_file;
+pub use primitive::PrimitiveTy;
+
 use derive_more::Debug;
-// use miette::Diagnostic;
 use smol_str::SmolStr;
 
 // just to make it easy to share the constraints...
@@ -40,151 +45,6 @@ where
     AttrSet(AttrSetTy<R>),
 
     Union(BTreeSet<R>),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum PrimitiveTy {
-    Null,
-    Bool,
-    Int,
-    Float,
-    String,
-    Path,
-    Uri,
-}
-
-impl PrimitiveTy {
-    pub fn is_number(&self) -> bool {
-        matches!(self, PrimitiveTy::Float | PrimitiveTy::Int)
-    }
-
-    pub fn is_float(&self) -> bool {
-        matches!(self, PrimitiveTy::Float)
-    }
-
-    pub fn is_addable(&self) -> bool {
-        matches!(
-            self,
-            PrimitiveTy::String | PrimitiveTy::Path | PrimitiveTy::Float | PrimitiveTy::Int
-        )
-    }
-}
-
-impl From<crate::Literal> for PrimitiveTy {
-    fn from(value: crate::Literal) -> Self {
-        match value {
-            crate::Literal::Float(_) => PrimitiveTy::Float,
-            crate::Literal::Integer(_) => PrimitiveTy::Int,
-            crate::Literal::String(_) => PrimitiveTy::String,
-            crate::Literal::Path(_) => PrimitiveTy::Path,
-            crate::Literal::Uri => PrimitiveTy::Uri,
-        }
-    }
-}
-
-impl<T: RefType> From<crate::Literal> for Ty<T> {
-    fn from(value: crate::Literal) -> Self {
-        Ty::Primitive(value.into())
-    }
-}
-
-impl<T: RefType> From<PrimitiveTy> for Ty<T> {
-    fn from(value: PrimitiveTy) -> Self {
-        Ty::Primitive(value)
-    }
-}
-
-#[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
-pub struct AttrSetTy<RefType> {
-    // TODO: i think the value here needs to be a TyId or Schema
-    fields: BTreeMap<SmolStr, RefType>,
-
-    // TODO: this only allows for one dynamic field
-    // once type level literals work we should support a map of these
-    dyn_ty: Option<RefType>,
-
-    // TODO: only really used in type inference
-    // https://bernsteinbear.com/blog/row-poly/
-    rest: Option<RefType>,
-}
-
-impl<RefType> AttrSetTy<RefType> {
-    pub fn new() -> Self {
-        Self {
-            fields: Default::default(),
-            dyn_ty: None,
-            rest: None,
-        }
-    }
-
-    pub fn from_fields(fields: BTreeMap<SmolStr, RefType>) -> Self {
-        Self {
-            fields,
-            dyn_ty: None,
-            rest: None,
-        }
-    }
-
-    pub fn from_rest(rest: RefType) -> Self {
-        Self {
-            fields: Default::default(),
-            dyn_ty: None,
-            rest: Some(rest),
-        }
-    }
-
-    pub fn keys(&self) -> std::collections::btree_map::Keys<'_, SmolStr, RefType> {
-        self.fields.keys()
-    }
-
-    pub fn get(&self, key: &SmolStr) -> Option<&RefType> {
-        self.fields.get(key)
-    }
-}
-
-impl<RefType: Clone + Debug> AttrSetTy<RefType> {
-    pub fn merge(self, other: Self) -> Self {
-        // TODO: handle dyn_ty
-        // TODO: not sure if this will always be the case but for now it is
-        // assert!(
-        //     self.rest.is_some(),
-        //     "tried to merge but we don't have a rest type"
-        // );
-        // assert!(
-        //     other.rest.is_none(),
-        //     "tried to merge but other has a rest field still"
-        // );
-
-        // TODO: not sure if this should error if other has fields with the same key as self
-
-        let mut fields: BTreeMap<SmolStr, RefType> = BTreeMap::new();
-
-        for (k, v) in self.fields.iter().chain(other.fields.iter()) {
-            fields.insert(k.clone(), v.clone());
-        }
-
-        Self {
-            fields,
-            dyn_ty: None, // TODO: handle
-            rest: other.rest,
-        }
-    }
-
-    pub fn get_sub_set(&self, keys: impl Iterator<Item = SmolStr>) -> Self {
-        let mut fields = BTreeMap::new();
-        for key in keys {
-            let value = self
-                .get(&key)
-                .unwrap_or_else(|| panic!("Missing key {key}"));
-            fields.insert(key, value.clone());
-        }
-
-        Self {
-            fields,
-            dyn_ty: self.dyn_ty.clone(),
-            rest: self.rest.clone(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
