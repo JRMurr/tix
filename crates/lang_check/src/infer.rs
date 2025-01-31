@@ -247,12 +247,21 @@ impl CheckCtx<'_> {
                 })
             }
             Ty::Primitive(_) => ty,
+            Ty::Union(inner) => {
+                let new_children = inner
+                    .iter()
+                    .map(|v| self.instantiate_ty(*v, substitutions))
+                    .collect();
+
+                Ty::Union(new_children)
+            }
         };
 
         new_ty.intern(self)
     }
 
     fn generalize(&mut self, ty: TyId, deferred: &DeferredConstraints) -> TySchema {
+        let (ty, _) = self.table.flatten(ty);
         let mut free_vars = self.free_type_vars(ty);
 
         // let to_root = |ty_id| {}

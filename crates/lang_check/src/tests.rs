@@ -222,18 +222,33 @@ test_case!(
 );
 
 test_case!(
+    if_else,
+    "
+    let
+        fib = n:
+            if n == 0 then
+                ''zero''
+            else if n == 1 then
+                ''1''
+            else
+                ''BIG'';
+    in
+        fib 3
+    ",
+    String
+);
+
+test_case!(
     rec_fun,
     "
     let
-        fib =
-            n:
+        fib = n:
             if n == 0 then
-            0
+                0
             else if n == 1 then
-            1
+                1
             else
-            fib (n - 1) + fib (n - 2);
-
+                fib (n - 1) + fib (n - 2);
     in
         fib 3
     ",

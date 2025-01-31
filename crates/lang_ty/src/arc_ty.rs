@@ -47,6 +47,12 @@ impl ArcTy {
             },
             Ty::AttrSet(attr_set_ty) => ArcTy::AttrSet(attr_set_ty.normalize_inner(free)),
             Ty::Primitive(_) => self.clone(),
+            Ty::Union(union) => ArcTy::Union(
+                union
+                    .iter()
+                    .map(|v| v.0.normalize_inner(free).into())
+                    .collect(),
+            ),
         }
     }
 
@@ -70,6 +76,11 @@ impl ArcTy {
                 set.extend(attr_set_ty.free_type_vars());
             }
             Ty::Primitive(_) => {}
+            Ty::Union(union) => {
+                for v in union.iter() {
+                    set.extend(&v.0.free_type_vars());
+                }
+            }
         }
 
         set

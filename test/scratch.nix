@@ -45,18 +45,13 @@
 #   if param == 1 then tmp else tmp
 # )
 let
-  /**
-    type: fib :: int -> int
-  */
   fib =
     n:
     if n == 0 then
-      0
-    else if n == 1 then
-      1
+      "zero"
+    # else if n == 1 then
+    #   ''1''
     else
-      fib (n - 1) + fib (n - 2);
-
+      "BIG";
 in
-# test = fib;
 fib 3

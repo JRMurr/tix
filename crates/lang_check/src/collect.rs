@@ -64,7 +64,7 @@ impl<'db> Collector<'db> {
             expr_ty_map.insert(expr, ty);
         }
 
-        // dbg!(&self.ctx.table);
+        dbg!(&self.ctx.table);
 
         InferenceResult {
             name_ty_map,
@@ -131,6 +131,12 @@ impl<'db> Collector<'db> {
                 self.canonicalize_attrset(attr_set_ty, subs)
             }
             Ty::Primitive(p) => ArcTy::Primitive(p),
+            Ty::Union(inner) => Ty::Union(
+                inner
+                    .iter()
+                    .map(|v| self.canonicalize_type(*v, subs).into())
+                    .collect(),
+            ),
         }
     }
 

@@ -248,6 +248,17 @@ impl CheckCtx<'_> {
                 // self.unify_var(id, rhs)?;
                 other
             }
+            (Ty::Union(a), Ty::Union(b)) => {
+                use itertools::Itertools;
+
+                let pairs = (a.iter()).cartesian_product(b.iter());
+
+                for (p1, p2) in pairs {
+                    self.unify(*p1, *p2)?;
+                }
+
+                Ty::Union(a)
+            }
             (Ty::List(a), Ty::List(b)) => {
                 self.unify(a, b)?;
                 Ty::List(a)

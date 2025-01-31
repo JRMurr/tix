@@ -113,6 +113,8 @@ impl TypeStorage {
         if !is_ty_var {
             self.types.insert(root, new_val);
         }
+
+        self.flatten_inner(root, &mut HashSet::default());
     }
 
     /// if ty_id is a union recursively unify all inner unions to flatten it out
@@ -169,12 +171,14 @@ impl TypeStorage {
         // only a union wth one element so we can just use that value to set
         let val = if inner.len() == 1 {
             let ty_id = inner.iter().next().cloned().unwrap();
-            Ty::TyVar(ty_id.0)
+            self.get(ty_id)
         } else {
-            Ty::Union(inner.clone())
+            Some(Ty::Union(inner.clone()))
         };
 
-        self.types.insert(root, val);
+        if let Some(v) = val {
+            self.types.insert(root, v);
+        }
 
         // can still return the inner union in the single value case for recursion
         Some((root, inner))
