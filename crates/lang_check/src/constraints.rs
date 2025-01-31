@@ -35,14 +35,36 @@ impl RootConstraint {
 
 pub type DeferrableConstraint = Constraint<DeferrableConstraintKind>;
 
-#[derive(Debug, PartialEq, Clone, Eq)]
+#[derive(Debug, PartialEq, Clone, Eq, PartialOrd, Ord)]
 pub enum RootConstraintKind {
     Eq(TyId, TyId),
     // Join(TyId, TyId), // merge together in a union type
     Deferrable(DeferrableConstraintKind),
 }
 
-#[derive(Debug, PartialEq, Clone, Eq)]
+// impl Ord for RootConstraintKind {
+//     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+//         if self == other {
+//             return std::cmp::Ordering::Equal;
+//         }
+//         match (self, other) {
+//             (RootConstraintKind::Eq(_, _), RootConstraintKind::Eq(_, _)) => {
+//                 std::cmp::Ordering::Less
+//             }
+//             (RootConstraintKind::Eq(_, _), RootConstraintKind::Deferrable(_)) => {
+//                 std::cmp::Ordering::Less
+//             }
+//             (RootConstraintKind::Deferrable(_), RootConstraintKind::Eq(_, _)) => {
+//                 std::cmp::Ordering::Greater
+//             }
+//             (RootConstraintKind::Deferrable(_), RootConstraintKind::Deferrable(_)) => {
+//                 std::cmp::Ordering::Less
+//             }
+//         }
+//     }
+// }
+
+#[derive(Debug, PartialEq, Clone, Eq, PartialOrd, Ord)]
 pub enum DeferrableConstraintKind {
     BinOp(BinOverloadConstraint),
     Negation(TyId),
@@ -81,7 +103,7 @@ impl From<BinOverloadConstraint> for RootConstraintKind {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone, PartialOrd, Ord)]
 pub struct BinOverloadConstraint {
     pub(crate) op: OverloadBinOp,
     pub(crate) lhs: TyId,
@@ -89,7 +111,7 @@ pub struct BinOverloadConstraint {
     pub(crate) ret_val: TyId,
 }
 
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone, PartialOrd, Ord)]
 pub struct AttrMergeConstraint {
     pub(crate) lhs: TyId,
     pub(crate) rhs: TyId,

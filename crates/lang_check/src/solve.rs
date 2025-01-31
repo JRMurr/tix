@@ -42,6 +42,8 @@ impl CheckCtx<'_> {
 
         let mut constraints = constraint_ctx.constraints;
 
+        constraints.sort_by(|a, b| a.kind.cmp(&b.kind));
+
         while made_progress {
             made_progress = false;
 
@@ -114,8 +116,8 @@ impl CheckCtx<'_> {
     }
 
     fn get_known_pair(&mut self, lhs: TyId, rhs: TyId) -> Option<(Ty<TyId>, Ty<TyId>)> {
-        let lhs_val = self.table.get(lhs)?;
-        let rhs_val = self.table.get(rhs)?;
+        let lhs_val = self.table.flatten(lhs)?;
+        let rhs_val = self.table.flatten(rhs)?;
 
         Some((lhs_val, rhs_val))
     }

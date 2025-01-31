@@ -35,9 +35,14 @@ where
     #[debug("List({_0:?})")]
     List(R),
     #[debug("Lambda({param:?} -> {body:?})")]
-    Lambda { param: R, body: R },
+    Lambda {
+        param: R,
+        body: R,
+    },
     #[debug("{_0:?}")]
-    AttrSet(AttrSetTy<R>),
+    AttrSet(AttrSetTy<R>), // TODO: might always want these in an arc to avoid cloning the hash map
+
+    Union(Union<R>), // TODO: might always want these in an arc to avoid cloning the hash set
 }
 
 impl<R, VarType> Ty<R, VarType>
@@ -75,6 +80,11 @@ where
 
                 if let Some(rest_ty) = &attr_set_ty.rest {
                     set.extend(get_ty(rest_ty).free_vars(get_ty))
+                }
+            }
+            Ty::Union(union) => {
+                for v in union.iter() {
+                    set.extend(get_ty(v).free_vars(get_ty));
                 }
             }
         }

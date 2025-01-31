@@ -272,7 +272,7 @@ pub enum Expr {
     PathInterpolation(Box<[InterpolPart<SmolStr>]>),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum OverloadBinOp {
     Add,
     Sub,

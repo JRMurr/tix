@@ -30,6 +30,10 @@ impl<R: RefType> Union<R> {
         Self { set }
     }
 
+    pub fn remove(&mut self, value: &R) -> bool {
+        self.set.remove(value)
+    }
+
     pub fn is_super_set(&self, other: &Self) -> bool {
         self.set.is_superset(&other.set)
     }
@@ -44,6 +48,10 @@ impl<R: RefType> Union<R> {
 
     pub fn iter(&self) -> std::collections::btree_set::Iter<'_, R> {
         self.set.iter()
+    }
+
+    pub fn len(&self) -> usize {
+        self.set.len()
     }
 }
 
