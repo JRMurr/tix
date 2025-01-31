@@ -116,12 +116,13 @@ impl TypeStorage {
     }
 
     /// if ty_id is a union recursively unify all inner unions to flatten it out
-    pub fn flatten(&mut self, ty_id: TyId) -> Option<Ty<TyId>> {
-        // self.flatten_inner(ty_id);
-        match self.flatten_inner(ty_id, &mut HashSet::default()) {
-            Some((root, _)) => self.types.get(&root).cloned(),
-            _ => self.get(ty_id),
-        }
+    pub fn flatten(&mut self, ty_id: TyId) -> (TyId, Option<Ty<TyId>>) {
+        self.flatten_inner(ty_id, &mut HashSet::default());
+        self.get_root_value(ty_id)
+        // match self.flatten_inner(ty_id, &mut HashSet::default()) {
+        //     Some((root, _)) => self.types.get(&root).cloned(),
+        //     _ => self.get_root_value(ty_id),
+        // }
     }
 
     /// Returns the root id of the flattened union (if TyId was a union)

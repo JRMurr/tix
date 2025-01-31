@@ -1,13 +1,12 @@
-use std::collections::{BTreeMap, HashSet};
-
-use smol_str::SmolStr;
-
 use super::{
     AttrMergeConstraint, AttrSetTy, BinOverloadConstraint, CheckCtx, ConstraintCtx,
     DeferrableConstraintKind, InferenceError, RootConstraint, RootConstraintKind, SolveError, Ty,
     TyId,
 };
 use crate::{Intern, OverloadBinOp, PrimitiveTy};
+use smol_str::SmolStr;
+use std::collections::{BTreeMap, HashSet};
+use thiserror::Error;
 
 #[derive(Debug, PartialEq, Eq)]
 enum SolveResult {
@@ -22,13 +21,23 @@ impl From<InferenceError> for SolveResult {
     }
 }
 
-type UnifyResult = Result<Ty<TyId>, InferenceError>;
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum UnifyError {
+    #[error(transparent)]
+    InferenceError(#[from] InferenceError),
+
+    #[error("Union not fully resolved ({0:?})")]
+    DeferUnion(TyId, TyId),
+}
+
+type UnifyResult = Result<Ty<TyId>, UnifyError>;
 
 impl From<UnifyResult> for SolveResult {
     fn from(value: UnifyResult) -> Self {
         match value {
             Ok(_) => SolveResult::Solved,
-            Err(e) => SolveResult::Err(e),
+            Err(UnifyError::InferenceError(e)) => SolveResult::Err(e),
+            Err(UnifyError::DeferUnion(_, _)) => SolveResult::Deferred,
         }
     }
 }
@@ -116,8 +125,8 @@ impl CheckCtx<'_> {
     }
 
     fn get_known_pair(&mut self, lhs: TyId, rhs: TyId) -> Option<(Ty<TyId>, Ty<TyId>)> {
-        let lhs_val = self.table.flatten(lhs)?;
-        let rhs_val = self.table.flatten(rhs)?;
+        let lhs_val = self.table.flatten(lhs).1?;
+        let rhs_val = self.table.flatten(rhs).1?;
 
         Some((lhs_val, rhs_val))
     }
@@ -213,42 +222,20 @@ impl CheckCtx<'_> {
     }
 
     fn unify(&mut self, lhs: TyId, rhs: TyId) -> UnifyResult {
-        // let lhs_val = self.table.get(lhs);
-        // let rhs_val = self.table.get(rhs);
-
         let res = self.unify_inner(lhs, rhs)?;
-
         self.table.unify(lhs, rhs, res.clone());
-
-        // let is_ty_var = matches!(res, Ty::TyVar(_));
-
-        // match (lhs_val, rhs_val) {
-        //     (Some(_), Some(_)) => {}
-        //     // _ => self.table.union(lhs, rhs),
-        //     (Some(_), _) | (_, Some(_)) => {
-        //         self.table.union(lhs, rhs);
-        //         // self.table
-        //         //     .union_value(rhs, Some(res.clone()));
-        //     }
-        //     (None, None) => {
-        //         if !is_ty_var {
-        //             self.table.union_value(lhs, Some(res.clone()));
-        //         }
-        //         // self.table
-        //         //     .union_value(lhs, Some(res.clone()));
-        //         self.table.union(lhs, rhs);
-        //     }
-        // }
-
         Ok(res)
     }
 
     fn unify_inner(&mut self, lhs: TyId, rhs: TyId) -> UnifyResult {
+        let (lhs, lhs_ty) = self.get_flat_ty(lhs);
+        let (rhs, rhs_ty) = self.get_flat_ty(rhs);
+
         if lhs == rhs {
-            return Ok(self.get_ty(lhs));
+            return Ok(lhs_ty);
         }
 
-        let ty = match (self.get_ty(lhs), self.get_ty(rhs)) {
+        let ty = match (lhs_ty.clone(), rhs_ty.clone()) {
             // TODO: Don't think i need a contains in check since how i init the type vars should handle that
             // i things are sad will need to do that and error
             // (Ty::TyVar(a), Ty::TyVar(b)) => {
@@ -323,7 +310,7 @@ impl CheckCtx<'_> {
         &mut self,
         mut lhs: AttrSetTy<TyId>,
         rhs: AttrSetTy<TyId>,
-    ) -> Result<AttrSetTy<TyId>, InferenceError> {
+    ) -> Result<AttrSetTy<TyId>, UnifyError> {
         use itertools::Itertools;
         let lhs_keys: HashSet<&SmolStr> = lhs.keys().collect();
         let rhs_keys: HashSet<&SmolStr> = rhs.keys().collect();
@@ -390,7 +377,7 @@ impl CheckCtx<'_> {
                 // rhs.rest = Some(new_rest);
                 // return Ok(rhs);
             }
-            return Err(InferenceError::UnifyEmptyRest(lhs_missing));
+            return Err(InferenceError::UnifyEmptyRest(lhs_missing).into());
         } else if rhs_keys.is_subset(&lhs_keys) {
             // rhs is missing keys the lhs has
             if let Some(rest) = rhs.rest {
@@ -403,7 +390,7 @@ impl CheckCtx<'_> {
                 // lhs.rest = Some(new_rest);
                 return Ok(lhs);
             }
-            return Err(InferenceError::UnifyEmptyRest(rhs_missing));
+            return Err(InferenceError::UnifyEmptyRest(rhs_missing).into());
         }
 
         // both are missing stuff so need to unify the two

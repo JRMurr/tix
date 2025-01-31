@@ -4,6 +4,7 @@ mod primitive;
 
 #[cfg(any(test, feature = "proptest_support"))]
 pub mod arbitrary;
+mod union;
 
 use std::collections::HashSet;
 
@@ -11,6 +12,7 @@ pub use arc_ty::{ArcTy, Substitutions, TyRef};
 pub use attrset::AttrSetTy;
 use derive_more::Debug;
 pub use primitive::PrimitiveTy;
+use union::Union;
 
 // just to make it easy to share the constraints...
 pub trait RefType: Eq + std::hash::Hash + Ord + Clone {}

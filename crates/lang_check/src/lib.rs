@@ -292,9 +292,12 @@ impl<'db> CheckCtx<'db> {
     }
 
     fn get_ty(&mut self, id: TyId) -> Ty<TyId> {
-        self.table
-            .get(id)
-            // .known()
-            .unwrap_or(Ty::TyVar(id.0))
+        self.table.get(id).unwrap_or(Ty::TyVar(id.0))
+    }
+
+    fn get_flat_ty(&mut self, id: TyId) -> (TyId, Ty<TyId>) {
+        let (root, ty) = self.table.flatten(id);
+
+        (root, ty.unwrap_or(Ty::TyVar(id.0)))
     }
 }
