@@ -1,16 +1,18 @@
 use std::collections::{HashMap, HashSet};
 
+use rustc_hash::FxHashMap;
+
 use super::{
-    AttrMergeConstraint, BinOverloadConstraint, CheckCtx, Constraint, ConstraintCtx,
-    DeferrableConstraint, DeferrableConstraintKind, FreeVars, InferenceError, InferenceResult,
-    RootConstraintKind, SolveError, TyId, TySchema, collect::Collector,
+    collect::Collector, AttrMergeConstraint, BinOverloadConstraint, CheckCtx, Constraint,
+    ConstraintCtx, DeferrableConstraint, DeferrableConstraintKind, FreeVars, InferenceError,
+    InferenceResult, RootConstraintKind, SolveError, TyId, TySchema,
 };
 use crate::{
-    AttrSetTy, Ty,
     nameres::{DependentGroup, GroupedDefs},
+    AttrSetTy, Ty,
 };
 
-type Substitutions = HashMap<TyId, TyId>;
+type Substitutions = FxHashMap<TyId, TyId>;
 
 type DeferredConstraints = Vec<DeferrableConstraint>;
 
@@ -81,7 +83,7 @@ impl CheckCtx<'_> {
     }
 
     pub fn instantiate(&mut self, scheme: &TySchema, constraints: &mut ConstraintCtx) -> TyId {
-        let mut substitutions = HashMap::new();
+        let mut substitutions = HashMap::default();
         for &var in &scheme.vars {
             substitutions.insert(var, self.new_ty_var());
         }

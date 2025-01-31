@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 
+use rustc_hash::FxHashMap;
 use smol_str::SmolStr;
 
 use super::{CheckCtx, InferenceResult, TyId};
@@ -10,7 +11,7 @@ pub struct Collector<'db> {
     ctx: CheckCtx<'db>,
 }
 
-pub(crate) type Substitutions = HashMap<u32, u32>;
+pub(crate) type Substitutions = FxHashMap<u32, u32>;
 
 impl ArcTy {
     /// Normalize all the ty vars to start from 0 instead
@@ -152,11 +153,11 @@ impl<'db> Collector<'db> {
             //     .poly_type_env
             //     .get(&name)
             //     .expect("Should have generalized all names by now");
-            let ty = self.canonicalize_type(ty, &HashMap::new());
+            let ty = self.canonicalize_type(ty, &HashMap::default());
             name_ty_map.insert(name, ty.normalize_vars());
         }
         for (expr, ty) in expr_tys {
-            let mut ty = self.canonicalize_type(ty, &HashMap::new());
+            let mut ty = self.canonicalize_type(ty, &HashMap::default());
 
             if expr == self.ctx.module.entry_expr {
                 ty = ty.normalize_vars();
