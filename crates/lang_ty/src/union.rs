@@ -34,6 +34,10 @@ impl<R: RefType> Union<R> {
         self.set.remove(value)
     }
 
+    pub fn contains(&self, value: &R) -> bool {
+        self.set.contains(value)
+    }
+
     pub fn is_super_set(&self, other: &Self) -> bool {
         self.set.is_superset(&other.set)
     }
