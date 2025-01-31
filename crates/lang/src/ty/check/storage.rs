@@ -1,6 +1,8 @@
-use std::collections::HashMap;
-
 use union_find::{QuickFindUf, UnionByRank, UnionFind};
+
+// use ena::unify::{InPlaceUnificationTable, UnifyKey};
+use rustc_hash::FxHashMap;
+// use union_find::{QuickFindUf, UnionByRank};
 
 use crate::Ty;
 
@@ -31,17 +33,33 @@ use super::TyId;
 //     }
 // }
 
+// impl UnifyKey for TyId {
+//     type Value = ();
+
+//     fn index(&self) -> u32 {
+//         self.0
+//     }
+
+//     fn from_index(u: u32) -> Self {
+//         TyId(u)
+//     }
+
+//     fn tag() -> &'static str {
+//         "TyId"
+//     }
+// }
+
 #[derive(Debug, Clone)]
 pub struct TypeStorage {
     pub(crate) uf: QuickFindUf<UnionByRank>,
-    pub(crate) types: HashMap<TyId, Ty<TyId>>,
+    pub(crate) types: FxHashMap<TyId, Ty<TyId>>,
 }
 
 impl TypeStorage {
     pub fn new() -> Self {
         Self {
-            uf: QuickFindUf::new(0),
-            types: HashMap::new(),
+            uf: QuickFindUf::new(0), //InPlaceUnificationTable::new(), // QuickFindUf::new(0),
+            types: FxHashMap::default(),
         }
     }
 
@@ -51,6 +69,7 @@ impl TypeStorage {
 
     pub fn new_ty(&mut self) -> TyId {
         self.uf.insert(UnionByRank::default()).into()
+        // self.uf.new_key(())
     }
 
     pub fn insert(&mut self, val: Ty<TyId>) -> TyId {
@@ -71,16 +90,14 @@ impl TypeStorage {
         let lhs = self.find(lhs);
         let rhs = self.find(rhs);
 
-        let root = if self.uf.union(lhs.into(), rhs.into()) {
-            // table did a union, need to clean up the type table
+        let root = if lhs == rhs {
+            lhs
+        } else {
+            // self.uf.union(lhs, rhs);
+            self.uf.union(lhs.into(), rhs.into());
             self.types.remove(&lhs);
             self.types.remove(&rhs);
-
-            // get new root
             self.find(lhs)
-        } else {
-            // no union can just use either key
-            lhs
         };
 
         let is_ty_var = matches!(new_val, Ty::TyVar(_));
