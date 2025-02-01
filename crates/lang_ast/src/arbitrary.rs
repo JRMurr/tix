@@ -1,50 +1,6 @@
 use proptest::prelude::{prop_oneof, Arbitrary, BoxedStrategy, Just, Strategy};
 
-use crate::{ArcTy, BoolBinOp, ExprBinOp, OverloadBinOp, PrimitiveTy};
-
-use super::arb_arc_ty;
-
-impl Default for RecursiveParams {
-    fn default() -> Self {
-        // TODO: picked basically at random...
-        Self {
-            depth: 4,                // levels deep
-            desired_size: 64,        // total nodes
-            expected_branch_size: 3, // items per collection
-        }
-    }
-}
-
-impl Arbitrary for ArcTy {
-    type Parameters = RecursiveParams;
-    type Strategy = BoxedStrategy<ArcTy>;
-
-    fn arbitrary_with(args: Self::Parameters) -> Self::Strategy {
-        arb_arc_ty(args).boxed()
-    }
-}
-
-pub fn arb_prim() -> impl Strategy<Value = PrimitiveTy> {
-    prop_oneof![
-        Just(PrimitiveTy::Null),
-        Just(PrimitiveTy::Bool),
-        Just(PrimitiveTy::Int),
-        Just(PrimitiveTy::Float),
-        Just(PrimitiveTy::String),
-        // Just(PrimitiveTy::Path),
-        // no uri
-    ]
-    .boxed()
-}
-
-impl Arbitrary for PrimitiveTy {
-    type Parameters = ();
-    type Strategy = BoxedStrategy<PrimitiveTy>;
-
-    fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
-        arb_prim().boxed()
-    }
-}
+use crate::{BoolBinOp, ExprBinOp, OverloadBinOp};
 
 impl Arbitrary for OverloadBinOp {
     type Parameters = ();

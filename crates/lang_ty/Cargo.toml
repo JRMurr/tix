@@ -10,6 +10,8 @@ log = { workspace = true }
 smol_str = { workspace = true }
 rustc-hash = { workspace = true }
 
+proptest = { workspace = true, optional = true }
 
-[dev-dependencies]
-proptest = { workspace = true }
+
+[features]
+proptest_support = ["dep:proptest"]

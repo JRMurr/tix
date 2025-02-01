@@ -2,7 +2,7 @@ pub mod arc_ty;
 mod attrset;
 mod primitive;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "proptest_support"))]
 pub mod arbitrary;
 
 pub use arc_ty::{ArcTy, Substitutions, TyRef};

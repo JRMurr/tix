@@ -538,6 +538,7 @@ dependencies = [
  "miette",
  "ordered-float",
  "petgraph",
+ "proptest",
  "rnix",
  "rowan",
  "salsa",

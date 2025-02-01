@@ -29,6 +29,9 @@ union-find = "0.4.3"
 
 [dev-dependencies]
 proptest = { workspace = true }
+lang_ast = { path = "../lang_ast", features = ["proptest_support"] }
+lang_ty = { path = "../lang_ty", features = ["proptest_support"] }
+
 
 [lib]
 path = "src/lib.rs"

@@ -1,9 +1,6 @@
 use std::collections::{BTreeMap, HashSet};
 
-mod arbitrary;
-
-use arbitrary::RecursiveParams;
-
+use lang_ty::{arbitrary::RecursiveParams, ArcTy, PrimitiveTy};
 use proptest::prelude::{
     any, prop, prop_assert_eq, prop_compose, prop_oneof, proptest, BoxedStrategy, Just,
     ProptestConfig, Strategy,
@@ -11,12 +8,9 @@ use proptest::prelude::{
 // use proptest::prelude::*;
 use smol_str::SmolStr;
 
-use crate::{
-    ty::check::tests::get_inferred_root, ArcTy, AttrSetTy, BoolBinOp, OverloadBinOp, PrimitiveTy,
-    Ty, TyRef,
-};
-
-use super::collect::Substitutions;
+// use crate::{
+//     ty::check::tests::get_inferred_root, ArcTy, AttrSetTy, OverloadBinOp, PrimitiveTy, Ty,
+// };
 
 fn arb_arc_ty(args: RecursiveParams) -> impl Strategy<Value = ArcTy> {
     let leaf = any::<PrimitiveTy>().prop_map(ArcTy::Primitive);
