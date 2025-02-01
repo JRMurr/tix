@@ -7,6 +7,7 @@ edition = "2021"
 [dependencies]
 lang_ast = { path = "../lang_ast" }
 lang_ty = { path = "../lang_ty" }
+comment_parser = { path = "../comment_parser" }
 
 smol_str = { workspace = true }
 thiserror = { workspace = true }

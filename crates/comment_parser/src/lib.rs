@@ -21,6 +21,7 @@ pub fn parse_comment_text(source: &str) -> Result<Pairs<Rule>, ParseError> {
     Ok(CommentParser::parse(Rule::comment_content, source)?)
 }
 
+// TODO: might worth adding this as salsa query
 pub fn parse_and_collect(source: &str) -> Result<Vec<TypeDecl>, ParseError> {
     let pairs = parse_comment_text(source)?;
 
@@ -34,7 +35,7 @@ pub struct TypeDecl {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct KnownTyRef(Arc<KnownTy>);
+pub struct KnownTyRef(pub Arc<Ty<KnownTyRef, TypeVarValue>>);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TypeVarValue {

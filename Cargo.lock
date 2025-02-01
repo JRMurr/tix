@@ -528,6 +528,7 @@ dependencies = [
 name = "lang_check"
 version = "0.1.0"
 dependencies = [
+ "comment_parser",
  "dashmap",
  "derive_more",
  "indoc",

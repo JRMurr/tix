@@ -5,6 +5,8 @@ mod primitive;
 #[cfg(any(test, feature = "proptest_support"))]
 pub mod arbitrary;
 
+use std::collections::HashSet;
+
 pub use arc_ty::{ArcTy, Substitutions, TyRef};
 pub use attrset::AttrSetTy;
 use derive_more::Debug;
@@ -36,6 +38,49 @@ where
     Lambda { param: R, body: R },
     #[debug("{_0:?}")]
     AttrSet(AttrSetTy<R>),
+}
+
+impl<R, VarType> Ty<R, VarType>
+where
+    R: RefType,
+    VarType: Eq + std::hash::Hash + Clone,
+{
+    pub fn free_vars_by_ref(ty_id: R, get_ty: &mut impl FnMut(&R) -> Self) -> HashSet<VarType> {
+        let ty = get_ty(&ty_id);
+
+        ty.free_vars(get_ty)
+    }
+
+    pub fn free_vars(&self, get_ty: &mut impl FnMut(&R) -> Self) -> HashSet<VarType> {
+        let mut set = HashSet::new();
+
+        match self {
+            Ty::TyVar(var) => {
+                set.insert(var.clone());
+            }
+            Ty::Primitive(_) => {}
+            Ty::List(inner) => set.extend(get_ty(inner).free_vars(get_ty)),
+            Ty::Lambda { param, body } => {
+                set.extend(get_ty(param).free_vars(get_ty));
+                set.extend(get_ty(body).free_vars(get_ty))
+            }
+            Ty::AttrSet(attr_set_ty) => {
+                attr_set_ty.fields.values().for_each(|v| {
+                    set.extend(get_ty(v).free_vars(get_ty));
+                });
+
+                if let Some(dyn_ty) = &attr_set_ty.dyn_ty {
+                    set.extend(get_ty(dyn_ty).free_vars(get_ty))
+                }
+
+                if let Some(rest_ty) = &attr_set_ty.rest {
+                    set.extend(get_ty(rest_ty).free_vars(get_ty))
+                }
+            }
+        }
+
+        set
+    }
 }
 
 #[macro_export]
@@ -110,7 +155,4 @@ macro_rules! arc_ty {
             body: $crate::TyRef::from($crate::arc_ty!($($ret)*)),
         }
     };
-
-
-
 }

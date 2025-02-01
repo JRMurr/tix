@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use comment_parser::parse_and_collect;
 use rustc_hash::FxHashMap;
 
 use crate::Intern;
@@ -59,8 +60,51 @@ impl CheckCtx<'_> {
 
         for def in &group {
             let ty = self.generate_constraints(&mut constraints, def.expr());
+
+            let name_id = def.name();
+
+            // TODO: get global decs
+            let decls = self
+                .module
+                .type_dec_map
+                .docs_for_name(name_id)
+                .map(|docs| {
+                    let parsed: Vec<_> = docs
+                        .iter()
+                        .flat_map(|doc| parse_and_collect(doc).expect("TODO: No parse error"))
+                        .collect();
+
+                    parsed
+                })
+                .unwrap_or_default();
+
+            let name_str = &self.module[name_id].text;
+
+            let type_annotation = decls.iter().find_map(|decl| {
+                dbg!(&decl.identifier, name_str);
+                if decl.identifier == *name_str {
+                    Some(decl.type_expr.clone())
+                } else {
+                    None
+                }
+            });
+
+            dbg!(&type_annotation);
+
+            let ty_id = if let Some(known_ty) = type_annotation {
+                let schema = self.intern_known_ty(name_id, known_ty);
+
+                dbg!(&schema);
+
+                // TODO: it might be better to have a special constraint
+                // for eq a schema to avoid instantiate but its probably fine
+                self.instantiate(&schema, &mut constraints)
+            } else {
+                self.ty_for_name_no_instantiate(name_id)
+            };
+
             constraints.add(Constraint {
-                kind: RootConstraintKind::Eq(self.ty_for_name_no_instantiate(def.name()), ty),
+                kind: RootConstraintKind::Eq(ty_id, ty),
                 location: def.expr(),
             });
         }
@@ -73,6 +117,12 @@ impl CheckCtx<'_> {
         // i don't think it will cause invalid programs to type check but might make
         // errors / canonicalized generics look weird
         for def in &group {
+            let name_id = def.name();
+            if self.poly_type_env.contains_key(&name_id) {
+                // had a type manual type def
+                continue;
+            }
+
             let name_ty = self.ty_for_name_no_instantiate(def.name());
             let generalized_val = self.generalize(name_ty, &deferred_constraints);
             self.poly_type_env.insert(def.name(), generalized_val);
@@ -241,37 +291,12 @@ impl CheckCtx<'_> {
     }
 
     fn free_type_vars(&mut self, ty_id: TyId) -> FreeVars {
-        let mut set = HashSet::new();
+        let res = Ty::free_vars_by_ref(ty_id, &mut |id| {
+            let id = self.table.find(*id);
 
-        let ty_id = self.table.find(ty_id);
+            self.get_ty(id)
+        });
 
-        let ty = self.get_ty(ty_id);
-
-        match ty {
-            Ty::TyVar(_) => {
-                set.insert(ty_id);
-            }
-            Ty::List(inner) => set.extend(&self.free_type_vars(inner)),
-            Ty::Lambda { param, body } => {
-                set.extend(&self.free_type_vars(param));
-                set.extend(&self.free_type_vars(body));
-            }
-            Ty::AttrSet(attr_set_ty) => {
-                attr_set_ty.fields.values().for_each(|v| {
-                    set.extend(&self.free_type_vars(*v));
-                });
-
-                if let Some(dyn_ty) = attr_set_ty.dyn_ty {
-                    set.extend(&self.free_type_vars(dyn_ty));
-                }
-
-                if let Some(rest_ty) = attr_set_ty.rest {
-                    set.extend(&self.free_type_vars(rest_ty));
-                }
-            }
-            Ty::Primitive(_) => {}
-        }
-
-        set
+        res.iter().map(|id| self.table.find(id.into())).collect()
     }
 }

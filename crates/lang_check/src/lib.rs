@@ -11,6 +11,7 @@ mod tests;
 #[cfg(test)]
 mod pbt;
 
+use comment_parser::{KnownTy, TypeVarValue};
 pub(crate) use constraints::*;
 use derive_more::Debug;
 use lang_ast::{AstDb, ExprId, Module, NameId, NameResolution, NixFile, OverloadBinOp};
@@ -45,6 +46,13 @@ impl From<u32> for TyId {
     }
 }
 
+impl From<&u32> for TyId {
+    #[inline]
+    fn from(value: &u32) -> Self {
+        TyId(*value)
+    }
+}
+
 impl From<usize> for TyId {
     #[inline]
     fn from(value: usize) -> Self {
@@ -70,14 +78,11 @@ pub struct TySchema {
 }
 
 pub trait Intern {
-    type Output;
-    fn intern(self, ctx: &mut CheckCtx) -> Self::Output;
+    fn intern(self, ctx: &mut CheckCtx) -> TyId;
 }
 
 impl Intern for Ty<TyId> {
-    type Output = TyId;
-
-    fn intern(self, ctx: &mut CheckCtx) -> Self::Output {
+    fn intern(self, ctx: &mut CheckCtx) -> TyId {
         ctx.alloc_ty(Some(self))
     }
 }
@@ -197,6 +202,64 @@ impl<'db> CheckCtx<'db> {
             Some(ty) => self.table.insert(ty),
             None => self.table.new_ty(),
         }
+    }
+
+    fn intern_known_ty(&mut self, name: NameId, ty: KnownTy) -> TySchema {
+        let free_vars = ty.free_vars(&mut |known_ref| known_ref.0.as_ref().clone());
+
+        let subs: HashMap<TypeVarValue, TyId> = free_vars
+            .iter()
+            .map(|var| {
+                let ty_id = match var {
+                    TypeVarValue::Generic(_) => self.new_ty_var(),
+                    TypeVarValue::Reference(name) => todo!("Handle reference sub for {name}"),
+                };
+                (var.clone(), ty_id)
+            })
+            .collect();
+
+        let ty = self.intern_know_ty_inner(&ty, &subs);
+
+        let schema = TySchema {
+            vars: subs.values().cloned().collect(),
+            ty,
+            constraints: Box::new([]),
+        };
+
+        self.poly_type_env.insert(name, schema.clone());
+        schema
+    }
+
+    // TODO: this is very similar logic to instantiate
+    fn intern_know_ty_inner(
+        &mut self,
+        ty: &KnownTy,
+        substitutions: &HashMap<TypeVarValue, TyId>,
+    ) -> TyId {
+        let ty: Ty<TyId> = match ty {
+            Ty::TyVar(var) => {
+                let replacement = substitutions
+                    .get(var)
+                    .unwrap_or_else(|| panic!("No replacement for {var:?}"));
+                Ty::TyVar(replacement.0)
+            }
+            Ty::Primitive(primitive_ty) => Ty::Primitive(*primitive_ty),
+            Ty::List(inner) => {
+                let new_inner = self.intern_know_ty_inner(&inner.0, substitutions);
+                Ty::List(new_inner)
+            }
+            Ty::Lambda { param, body } => {
+                let new_param = self.intern_know_ty_inner(&param.0, substitutions);
+                let new_body = self.intern_know_ty_inner(&body.0, substitutions);
+                Ty::Lambda {
+                    param: new_param,
+                    body: new_body,
+                }
+            }
+            Ty::AttrSet(_attr_set_ty) => todo!(),
+        };
+
+        ty.intern(self)
     }
 
     fn new_ty_var(&mut self) -> TyId {

@@ -46,7 +46,7 @@
 # )
 let
   /**
-    type: foo :: int -> int
+    type: fib :: int -> int
   */
   fib =
     n:
@@ -57,5 +57,6 @@ let
     else
       fib (n - 1) + fib (n - 2);
 
+  test = fib;
 in
-fib 3
+test 3

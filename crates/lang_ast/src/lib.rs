@@ -70,7 +70,7 @@ pub struct Module {
     exprs: Arena<Expr>,
     names: Arena<Name>,
     pub entry_expr: ExprId,
-    type_dec_map: ModuleTypeDecMap,
+    pub type_dec_map: ModuleTypeDecMap,
 }
 
 impl Module {
