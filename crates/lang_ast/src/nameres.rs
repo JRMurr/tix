@@ -5,7 +5,7 @@ use petgraph::graph::DiGraph;
 use smol_str::SmolStr;
 
 use super::{BindingValue, Expr, ExprId, Module, NameId};
-use crate::{Bindings, db::NixFile, module};
+use crate::{db::NixFile, module, Bindings};
 
 pub type ScopeId = Id<ScopeData>;
 
@@ -58,7 +58,7 @@ pub enum ResolveResult {
 }
 
 #[salsa::tracked]
-pub fn scopes(db: &dyn crate::Db, file: NixFile) -> ModuleScopes {
+pub fn scopes(db: &dyn crate::AstDb, file: NixFile) -> ModuleScopes {
     let module = crate::module(db, file);
     ModuleScopes::new(module)
 }
@@ -235,7 +235,7 @@ pub struct NameResolution {
 }
 
 #[salsa::tracked]
-pub fn name_resolution(db: &dyn crate::Db, file: NixFile) -> NameResolution {
+pub fn name_resolution(db: &dyn crate::AstDb, file: NixFile) -> NameResolution {
     let module = module(db, file);
     let scopes = scopes(db, file);
     let resolve_map = module
@@ -398,7 +398,7 @@ pub type GroupedDefs = Vec<DependentGroup>;
 type DepGraph = DiGraph<NameId, ()>;
 
 #[salsa::tracked]
-pub fn group_def(db: &dyn crate::Db, file: NixFile) -> GroupedDefs {
+pub fn group_def(db: &dyn crate::AstDb, file: NixFile) -> GroupedDefs {
     let module = module(db, file);
     let name_res = name_resolution(db, file);
 

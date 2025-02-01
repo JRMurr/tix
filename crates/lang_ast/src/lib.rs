@@ -15,7 +15,7 @@ use std::{collections::HashMap, ops};
 
 use comment::gather_doc_comments;
 use db::NixFile;
-pub use db::{Db, RootDatabase};
+pub use db::{AstDb, RootDatabase};
 // use derive_more::Debug;
 use derive_more::From;
 use la_arena::{Arena, ArenaMap, Idx as Id};
@@ -25,7 +25,7 @@ use rnix::NixLanguage;
 use smol_str::SmolStr;
 
 #[salsa::tracked]
-pub fn module_and_source_maps(db: &dyn crate::Db, file: NixFile) -> (Module, ModuleSourceMap) {
+pub fn module_and_source_maps(db: &dyn crate::AstDb, file: NixFile) -> (Module, ModuleSourceMap) {
     let root = db.parse_file(file);
 
     let docs = gather_doc_comments(&root);
@@ -34,7 +34,7 @@ pub fn module_and_source_maps(db: &dyn crate::Db, file: NixFile) -> (Module, Mod
 }
 
 #[salsa::tracked]
-pub fn module(db: &dyn crate::Db, file: NixFile) -> Module {
+pub fn module(db: &dyn crate::AstDb, file: NixFile) -> Module {
     module_and_source_maps(db, file).0
 }
 

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use rnix::Root;
 use salsa::Event;
 
-use crate::{Db, db::NixFile};
+use crate::{db::NixFile, AstDb};
 
 const DEFAULT_IMPORT_FILE: &str = "default.nix";
 
@@ -19,7 +19,7 @@ impl salsa::Database for TestDatabase {
 }
 
 #[salsa::db]
-impl Db for TestDatabase {
+impl AstDb for TestDatabase {
     fn parse_file(&self, file: NixFile) -> Root {
         let src = file.contents(self);
         rnix::Root::parse(src).tree()

@@ -19,7 +19,7 @@ pub struct NixFile {
 // impl Eq for ParseError {}
 
 #[salsa::db]
-pub trait Db: salsa::Database {
+pub trait AstDb: salsa::Database {
     // fn read_file(&self, path: PathBuf) -> Result<NixFile, std::io::Error>;
 
     fn parse_file(&self, file: NixFile) -> Root;
@@ -49,7 +49,7 @@ impl salsa::Database for RootDatabase {
 }
 
 #[salsa::db]
-impl Db for RootDatabase {
+impl AstDb for RootDatabase {
     // TODO: I don't think this will be tracked by salsa so will re-parse if called many times
     // Root is !Send + !Sync so having it tracked by salsa is sad.
     // Could store it in the db itself but would need to handle re-parsing on file change

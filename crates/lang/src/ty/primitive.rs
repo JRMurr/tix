@@ -1,5 +1,7 @@
 use super::{RefType, Ty};
 
+use lang_ast::Literal;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PrimitiveTy {
     Null,
@@ -28,20 +30,20 @@ impl PrimitiveTy {
     }
 }
 
-impl From<crate::Literal> for PrimitiveTy {
-    fn from(value: crate::Literal) -> Self {
+impl From<Literal> for PrimitiveTy {
+    fn from(value: Literal) -> Self {
         match value {
-            crate::Literal::Float(_) => PrimitiveTy::Float,
-            crate::Literal::Integer(_) => PrimitiveTy::Int,
-            crate::Literal::String(_) => PrimitiveTy::String,
-            crate::Literal::Path(_) => PrimitiveTy::Path,
-            crate::Literal::Uri => PrimitiveTy::Uri,
+            Literal::Float(_) => PrimitiveTy::Float,
+            Literal::Integer(_) => PrimitiveTy::Int,
+            Literal::String(_) => PrimitiveTy::String,
+            Literal::Path(_) => PrimitiveTy::Path,
+            Literal::Uri => PrimitiveTy::Uri,
         }
     }
 }
 
-impl<T: RefType> From<crate::Literal> for Ty<T> {
-    fn from(value: crate::Literal) -> Self {
+impl<T: RefType> From<Literal> for Ty<T> {
+    fn from(value: Literal) -> Self {
         Ty::Primitive(value.into())
     }
 }
