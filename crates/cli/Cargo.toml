@@ -10,6 +10,7 @@ clap = { version = "4.2", features = ["derive"] }
 miette = { workspace = true, features = ["fancy"] }
 thiserror = { workspace = true }
 lang_ast = { path = "../lang_ast" }
+lang_check = { path = "../lang_check" }
 
 
 [[bin]]
