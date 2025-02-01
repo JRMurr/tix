@@ -8,6 +8,6 @@ edition = "2021"
 pest = "2"
 pest_derive = "2"
 smol_str = { workspace = true }
-lang = { path = "../lang" }
+lang_ty = { path = "../lang_ty" }
 derive_more = { workspace = true, features = ["debug"] }
 # la-arena = { workspace = true }
