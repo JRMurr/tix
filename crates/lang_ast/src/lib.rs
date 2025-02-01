@@ -14,13 +14,12 @@ mod tests;
 use std::{collections::HashMap, ops};
 
 use comment::gather_doc_comments;
-use db::NixFile;
-pub use db::{AstDb, RootDatabase};
+pub use db::{AstDb, NixFile, RootDatabase};
 // use derive_more::Debug;
 use derive_more::From;
 use la_arena::{Arena, ArenaMap, Idx as Id};
 use lower::lower;
-pub use nameres::scopes;
+pub use nameres::{group_def, name_resolution, scopes, NameResolution};
 use rnix::NixLanguage;
 use smol_str::SmolStr;
 

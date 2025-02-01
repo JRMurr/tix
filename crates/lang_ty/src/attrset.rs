@@ -3,20 +3,22 @@ use std::collections::BTreeMap;
 use derive_more::Debug;
 use smol_str::SmolStr;
 
-use super::{Ty, TyRef};
+use crate::arc_ty::TyRef;
+
+use super::Ty;
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
 pub struct AttrSetTy<RefType> {
     // TODO: i think the value here needs to be a TyId or Schema
-    pub(crate) fields: BTreeMap<SmolStr, RefType>,
+    pub fields: BTreeMap<SmolStr, RefType>,
 
     // TODO: this only allows for one dynamic field
     // once type level literals work we should support a map of these
-    pub(crate) dyn_ty: Option<RefType>,
+    pub dyn_ty: Option<RefType>,
 
     // TODO: only really used in type inference
     // https://bernsteinbear.com/blog/row-poly/
-    pub(crate) rest: Option<RefType>,
+    pub rest: Option<RefType>,
 }
 
 impl<RefType> AttrSetTy<RefType> {

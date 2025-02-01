@@ -3,7 +3,8 @@ members = [
     "crates/cli",
     "crates/comment_parser",
     "crates/lang",
-    "crates/lang_ast", "crates/lang_ty",
+    "crates/lang_ast",
+    "crates/lang_ty",
 ]
 resolver = "2"
 
@@ -22,7 +23,7 @@ petgraph = "0.7.0"
 rnix = "0.11.0"
 # TODO: same as rnix, not sure if we need copying from nixdoc for now
 rowan = "0.15"
-
+rustc-hash = "2.1.0"
 
 [profile.test.package.proptest]
 opt-level = 3

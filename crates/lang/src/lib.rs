@@ -19,16 +19,16 @@ use storage::TypeStorage;
 // use ena::unify::{self, InPlaceUnificationTable, UnifyKey, UnifyValue};
 use thiserror::Error;
 
-use super::{ArcTy, AttrSetTy, PrimitiveTy, Ty};
-use crate::{db::NixFile, nameres::NameResolution, ExprId, Module, NameId, OverloadBinOp};
+use lang_ast::{AstDb, ExprId, Module, NameId, NameResolution, NixFile, OverloadBinOp};
+use lang_ty::{ArcTy, AttrSetTy, PrimitiveTy, Ty};
 
 #[salsa::tracked]
-pub fn check_file(db: &dyn crate::Db, file: NixFile) -> Result<InferenceResult, InferenceError> {
-    let module = crate::module(db, file);
+pub fn check_file(db: &dyn AstDb, file: NixFile) -> Result<InferenceResult, InferenceError> {
+    let module = lang_ast::module(db, file);
 
-    let name_res = crate::nameres::name_resolution(db, file);
+    let name_res = lang_ast::name_resolution(db, file);
 
-    let grouped_defs = crate::nameres::group_def(db, file);
+    let grouped_defs = lang_ast::group_def(db, file);
 
     let check = CheckCtx::new(&module, &name_res);
 

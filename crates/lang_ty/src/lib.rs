@@ -1,12 +1,11 @@
+pub mod arc_ty;
 mod attrset;
 mod primitive;
 
-use std::sync::Arc;
-
+pub use arc_ty::{ArcTy, Substitutions, TyRef};
 pub use attrset::AttrSetTy;
-pub use primitive::PrimitiveTy;
-
 use derive_more::Debug;
+pub use primitive::PrimitiveTy;
 
 // just to make it easy to share the constraints...
 pub trait RefType: Eq + std::hash::Hash {}
@@ -34,18 +33,6 @@ where
     Lambda { param: R, body: R },
     #[debug("{_0:?}")]
     AttrSet(AttrSetTy<R>),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[debug("{_0:?}")]
-pub struct TyRef(Arc<Ty<TyRef>>);
-
-pub type ArcTy = Ty<TyRef>;
-
-impl From<ArcTy> for TyRef {
-    fn from(value: ArcTy) -> Self {
-        TyRef(Arc::new(value))
-    }
 }
 
 #[macro_export]
