@@ -225,7 +225,7 @@ test_case!(
     if_else,
     "
     let
-        fib = n:
+        display = n:
             if n == 0 then
                 ''zero''
             else if n == 1 then
@@ -233,7 +233,7 @@ test_case!(
             else
                 ''BIG'';
     in
-        fib 3
+        display 3
     ",
     String
 );

@@ -21,12 +21,30 @@ pub struct AttrSetTy<RefType> {
     pub rest: Option<RefType>,
 }
 
-impl<RefType> AttrSetTy<RefType> {
+impl<RefType: Clone> AttrSetTy<RefType> {
     pub fn new() -> Self {
         Self {
             fields: Default::default(),
             dyn_ty: None,
             rest: None,
+        }
+    }
+
+    pub fn map_values(&self, mut f: impl FnMut(RefType) -> RefType) -> AttrSetTy<RefType> {
+        let fields = self
+            .fields
+            .iter()
+            .map(|(k, v)| (k.clone(), f(v.clone())))
+            .collect();
+
+        let dyn_ty = self.dyn_ty.clone().map(&mut f);
+
+        let rest = self.rest.clone().map(f);
+
+        Self {
+            fields,
+            dyn_ty,
+            rest,
         }
     }
 

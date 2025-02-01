@@ -51,6 +51,8 @@ use super::TyId;
 //     }
 // }
 
+type TyMapping = FxHashMap<TyId, Ty<TyId>>;
+
 #[derive(Debug, Clone)]
 pub struct TypeStorage {
     pub(crate) uf: QuickFindUf<UnionByRank>,
@@ -135,15 +137,18 @@ impl TypeStorage {
     ) -> Option<(TyId, Union<TyId>)> {
         let (ty_id, ty) = self.get_root_value(ty_id);
 
-        if seen.contains(&ty_id) {
-            return None;
-        }
-
-        seen.insert(ty_id);
-
         let Some(Ty::Union(inner)) = ty else {
             return None;
         };
+
+        if seen.contains(&ty_id) {
+            // TODO: Not sure if this is needed
+            // dbg!(&ty_id, &seen);
+            // return None;
+            panic!("cycle in union flattening")
+        }
+
+        seen.insert(ty_id);
 
         let mut inner: Union<TyId> = inner.iter().map(|t| self.find(*t)).collect();
 
@@ -182,5 +187,32 @@ impl TypeStorage {
 
         // can still return the inner union in the single value case for recursion
         Some((root, inner))
+    }
+
+    fn root_ty(&mut self, ty: &Ty<TyId>) -> Ty<TyId> {
+        match ty {
+            Ty::TyVar(id) => Ty::TyVar(self.find((*id).into()).0),
+            Ty::Primitive(primitive_ty) => Ty::Primitive(*primitive_ty),
+            Ty::List(inner) => Ty::List(self.find(*inner)),
+            Ty::Lambda { param, body } => Ty::Lambda {
+                param: self.find(*param),
+                body: self.find(*body),
+            },
+            Ty::AttrSet(inner) => Ty::AttrSet(inner.map_values(|id| self.find(id))),
+            Ty::Union(union) => Ty::Union(union.iter().map(|i| self.find(*i)).collect()),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn root_type_view(&mut self) -> TyMapping {
+        self.types
+            .clone()
+            .iter()
+            .map(|(key, ty)| {
+                let ty = self.root_ty(ty);
+
+                (*key, ty)
+            })
+            .collect()
     }
 }

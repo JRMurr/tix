@@ -94,6 +94,29 @@ where
         set
     }
 }
+// TODO: would love to have this work but it confuses me...
+// impl<R, VarType> Ty<R, VarType>
+// where
+//     R: RefType + Clone + Into<VarType>,
+//     VarType: Clone + Into<R>,
+// {
+//     pub fn map_values(&self, mut f: impl FnMut(R) -> R) -> R {
+//         match self {
+//             Ty::TyVar(id) => {
+//                 let id: R = (*id).into();
+
+//             }
+//             Ty::Primitive(primitive_ty) => Ty::Primitive(*primitive_ty),
+//             Ty::List(inner) => Ty::List(self.find(*inner)),
+//             Ty::Lambda { param, body } => Ty::Lambda {
+//                 param: self.find(*param),
+//                 body: self.find(*body),
+//             },
+//             Ty::AttrSet(inner) => Ty::AttrSet(inner.map_values(|id| self.find(id))),
+//             Ty::Union(union) => Ty::Union(union.iter().map(|i| self.find(*i)).collect()),
+//         }
+//     }
+// }
 
 #[macro_export]
 macro_rules! arc_ty {

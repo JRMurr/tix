@@ -37,21 +37,26 @@
 # in
 # simple.foo
 
-# (
-#   param:
-#   let
-#     tmp = ("test");
-#   in
-#   if param == 1 then tmp else tmp
-# )
+# let
+#   display =
+#     n:
+#     if n == 0 then
+#       ''zero''
+#     else if n == 1 then
+#       ''1''
+#     else
+#       ''BIG'';
+# in
+# display 3
+
 let
   fib =
     n:
     if n == 0 then
-      "zero"
-    # else if n == 1 then
-    #   ''1''
+      0
+    else if n == 1 then
+      1
     else
-      "BIG";
+      fib (n - 1) + fib (n - 2);
 in
 fib 3

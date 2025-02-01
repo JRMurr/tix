@@ -53,6 +53,8 @@ impl CheckCtx<'_> {
 
         constraints.sort_by(|a, b| a.kind.cmp(&b.kind));
 
+        // dbg!(&constraints);
+
         while made_progress {
             made_progress = false;
 
@@ -141,6 +143,7 @@ impl CheckCtx<'_> {
         let op = overload_constraint.op;
 
         let Some(ret_ty) = self.solve_bin_op_inner(op, &lhs_val, &rhs_val) else {
+            // dbg!(self.table.root_type_view(), overload_constraint);
             return SolveResult::Err(InferenceError::InvalidBinOp(
                 overload_constraint.op,
                 lhs_val,
