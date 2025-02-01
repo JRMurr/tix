@@ -108,7 +108,7 @@ impl From<AttrMergeConstraint> for RootConstraintKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ConstraintCtx {
     pub(crate) constraints: Vec<RootConstraint>,
 }

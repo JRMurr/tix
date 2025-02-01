@@ -14,31 +14,6 @@ use smol_str::SmolStr;
 
 use crate::tests::get_inferred_root;
 
-// use crate::{
-//     ty::check::tests::get_inferred_root, ArcTy, AttrSetTy, OverloadBinOp, PrimitiveTy, Ty,
-// };
-
-fn arb_arc_ty(args: RecursiveParams) -> impl Strategy<Value = ArcTy> {
-    let leaf = any::<PrimitiveTy>().prop_map(ArcTy::Primitive);
-
-    leaf.prop_recursive(
-        args.depth,
-        args.desired_size,
-        args.expected_branch_size,
-        |inner| {
-            let inner = inner.prop_map(TyRef::from);
-
-            prop_oneof![
-                inner.clone().prop_map(ArcTy::List),
-                (inner.clone(), inner.clone())
-                    .prop_map(|(param, body)| ArcTy::Lambda { param, body }),
-                prop::collection::btree_map(arb_smol_str_ident(), inner.clone(), 0..5)
-                    .prop_map(|map| ArcTy::AttrSet(AttrSetTy::from_fields(map)))
-            ]
-        },
-    )
-}
-
 // TODO: would be nice to make a wrapper type around String to mark at the type level its a nix string
 // would make it slightly nicer type safety
 
