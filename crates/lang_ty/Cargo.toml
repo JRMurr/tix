@@ -1,0 +1,7 @@
+[package]
+name = "lang_ty"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+lang_ast = { path = "../lang_ast" }

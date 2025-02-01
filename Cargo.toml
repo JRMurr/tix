@@ -3,7 +3,7 @@ members = [
     "crates/cli",
     "crates/comment_parser",
     "crates/lang",
-    "crates/lang_ast",
+    "crates/lang_ast", "crates/lang_ty",
 ]
 resolver = "2"
 
