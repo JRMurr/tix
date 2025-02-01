@@ -12,6 +12,8 @@ use proptest::prelude::{
 // use proptest::prelude::*;
 use smol_str::SmolStr;
 
+use crate::tests::get_inferred_root;
+
 // use crate::{
 //     ty::check::tests::get_inferred_root, ArcTy, AttrSetTy, OverloadBinOp, PrimitiveTy, Ty,
 // };

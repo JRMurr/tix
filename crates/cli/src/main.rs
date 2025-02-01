@@ -2,6 +2,7 @@ use std::{error::Error, path::PathBuf};
 
 use clap::Parser;
 use lang_ast::{module_and_source_maps, RootDatabase};
+use lang_check::check_file;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]

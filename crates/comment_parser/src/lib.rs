@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use collect::collect_type_decls;
 use derive_more::Debug;
-use lang::Ty;
+use lang_ty::Ty;
 use pest::{iterators::Pairs, Parser};
 use pest_derive::Parser;
 use smol_str::SmolStr;
@@ -55,25 +55,25 @@ impl From<KnownTy> for KnownTyRef {
 macro_rules! known_ty {
     // -- Match on known primitives -----------------------------------------
     (null) => {
-        $crate::KnownTy::Primitive(::lang::PrimitiveTy::Null)
+        $crate::KnownTy::Primitive(::lang_ty::PrimitiveTy::Null)
     };
     (bool) => {
-        $crate::KnownTy::Primitive(::lang::PrimitiveTy::Bool)
+        $crate::KnownTy::Primitive(::lang_ty::PrimitiveTy::Bool)
     };
     (int) => {
-        $crate::KnownTy::Primitive(::lang::PrimitiveTy::Int)
+        $crate::KnownTy::Primitive(::lang_ty::PrimitiveTy::Int)
     };
     (float) => {
-        $crate::KnownTy::Primitive(::lang::PrimitiveTy::Float)
+        $crate::KnownTy::Primitive(::lang_ty::PrimitiveTy::Float)
     };
     (string) => {
-        $crate::KnownTy::Primitive(::lang::PrimitiveTy::String)
+        $crate::KnownTy::Primitive(::lang_ty::PrimitiveTy::String)
     };
     (path) => {
-        $crate::KnownTy::Primitive(::lang::PrimitiveTy::Path)
+        $crate::KnownTy::Primitive(::lang_ty::PrimitiveTy::Path)
     };
     (uri) => {
-        $crate::KnownTy::Primitive(::lang::PrimitiveTy::Uri)
+        $crate::KnownTy::Primitive(::lang_ty::PrimitiveTy::Uri)
     };
     // -- TyVar syntax: TyVar(N) --------------------------------------------
     // (TyVar($n:expr)) => {

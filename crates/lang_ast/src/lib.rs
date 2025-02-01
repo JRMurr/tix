@@ -10,8 +10,8 @@ pub mod nameres;
 
 #[cfg(any(test, feature = "proptest_support"))]
 pub mod arbitrary;
-#[cfg(test)]
-mod tests;
+#[cfg(any(test, feature = "proptest_support"))]
+pub mod tests;
 
 use std::{collections::HashMap, ops};
 

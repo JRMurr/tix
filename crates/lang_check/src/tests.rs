@@ -1,11 +1,12 @@
 use indoc::indoc;
+use lang_ast::{module, tests::TestDatabase};
+use lang_ty::{arc_ty, ArcTy};
 
 use super::check_file;
-use crate::{arc_ty, tests::TestDatabase, ty::ArcTy};
 
 pub fn get_inferred_root(src: &str) -> ArcTy {
     let (db, file) = TestDatabase::single_file(src).unwrap();
-    let module = crate::module(&db, file);
+    let module = module(&db, file);
     let inference = check_file(&db, file).expect("No inference error");
 
     inference

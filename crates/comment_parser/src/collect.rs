@@ -1,3 +1,4 @@
+use lang_ty::PrimitiveTy;
 use pest::iterators::Pairs;
 
 use crate::{KnownTy, Rule, TypeDecl, TypeVarValue};
@@ -14,7 +15,7 @@ pub fn collect_type_decls(pairs: Pairs<Rule>) -> Vec<TypeDecl> {
             Rule::type_line => {
                 let mut inner = pair.into_inner();
                 let ident_rule = inner.next().unwrap(); // identifier
-                // let expr_rule = inner.next().unwrap(); // type_expr
+                                                        // let expr_rule = inner.next().unwrap(); // type_expr
 
                 decls.push(TypeDecl {
                     identifier: ident_rule.as_str().into(),
@@ -48,12 +49,12 @@ pub fn collect_type_expr(mut pairs: Pairs<Rule>) -> Option<KnownTy> {
         | Rule::type_ref
         | Rule::primitive_ref => collect_type_expr(curr.into_inner()).unwrap(),
         Rule::list_type => KnownTy::List(collect_type_expr(curr.into_inner()).unwrap().into()),
-        Rule::string_ref => KnownTy::Primitive(lang::PrimitiveTy::String),
-        Rule::int_ref => KnownTy::Primitive(lang::PrimitiveTy::Int),
-        Rule::bool_ref => KnownTy::Primitive(lang::PrimitiveTy::Bool),
-        Rule::float_ref => KnownTy::Primitive(lang::PrimitiveTy::Float),
-        Rule::path_ref => KnownTy::Primitive(lang::PrimitiveTy::Path),
-        Rule::null_ref => KnownTy::Primitive(lang::PrimitiveTy::Null),
+        Rule::string_ref => KnownTy::Primitive(PrimitiveTy::String),
+        Rule::int_ref => KnownTy::Primitive(PrimitiveTy::Int),
+        Rule::bool_ref => KnownTy::Primitive(PrimitiveTy::Bool),
+        Rule::float_ref => KnownTy::Primitive(PrimitiveTy::Float),
+        Rule::path_ref => KnownTy::Primitive(PrimitiveTy::Path),
+        Rule::null_ref => KnownTy::Primitive(PrimitiveTy::Null),
         Rule::generic_ident => KnownTy::TyVar(TypeVarValue::Generic(curr.as_str().into())),
         Rule::user_type => KnownTy::TyVar(TypeVarValue::Reference(curr.as_str().into())),
         Rule::other_text | Rule::EOI | Rule::WHITESPACE | Rule::NEWLINE | Rule::ANY_WHITESPACE => {

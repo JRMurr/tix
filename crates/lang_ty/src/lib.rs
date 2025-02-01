@@ -42,43 +42,43 @@ where
 macro_rules! arc_ty {
     // -- Match on known primitives -----------------------------------------
     (Null) => {
-        $crate::ty::Ty::<$crate::ty::TyRef>::Primitive($crate::ty::PrimitiveTy::Null)
+        $crate::Ty::<$crate::TyRef>::Primitive($crate::PrimitiveTy::Null)
     };
     (Bool) => {
-        $crate::ty::Ty::<$crate::ty::TyRef>::Primitive($crate::ty::PrimitiveTy::Bool)
+        $crate::Ty::<$crate::TyRef>::Primitive($crate::PrimitiveTy::Bool)
     };
     (Int) => {
-        $crate::ty::Ty::<$crate::ty::TyRef>::Primitive($crate::ty::PrimitiveTy::Int)
+        $crate::Ty::<$crate::TyRef>::Primitive($crate::PrimitiveTy::Int)
     };
     (Float) => {
-        $crate::ty::Ty::<$crate::ty::TyRef>::Primitive($crate::ty::PrimitiveTy::Float)
+        $crate::Ty::<$crate::TyRef>::Primitive($crate::PrimitiveTy::Float)
     };
     (String) => {
-        $crate::ty::Ty::<$crate::ty::TyRef>::Primitive($crate::ty::PrimitiveTy::String)
+        $crate::Ty::<$crate::TyRef>::Primitive($crate::PrimitiveTy::String)
     };
     (Path) => {
-        $crate::ty::Ty::<$crate::ty::TyRef>::Primitive($crate::ty::PrimitiveTy::Path)
+        $crate::Ty::<$crate::TyRef>::Primitive($crate::PrimitiveTy::Path)
     };
     (Uri) => {
-        $crate::ty::Ty::<$crate::ty::TyRef>::Primitive($crate::ty::PrimitiveTy::Uri)
+        $crate::Ty::<$crate::TyRef>::Primitive($crate::PrimitiveTy::Uri)
     };
     // -- TyVar syntax: TyVar(N) --------------------------------------------
     (# $n:expr) => {
-        $crate::ty::Ty::<$crate::ty::TyRef>::TyVar($n)
+        $crate::Ty::<$crate::TyRef>::TyVar($n)
     };
     (TyVar($n:expr)) => {
-        $crate::ty::Ty::<$crate::ty::TyRef>::TyVar($n)
+        $crate::Ty::<$crate::TyRef>::TyVar($n)
     };
 
     // // -- List syntax: List(T) ---------------------------------------------
     // (List($elem:tt)) => {
-    //     $crate::ty::Ty::<$crate::ty::TyRef>::List($crate::ty::TyRef::from($crate::arc_ty!($elem)))
+    //     $crate::Ty::<$crate::TyRef>::List($crate::TyRef::from($crate::arc_ty!($elem)))
     // };
     (($($inner:tt)*)) => { $crate::arc_ty!($($inner)*) };
-    ([$($inner:tt)*]) => { $crate::ty::Ty::<$crate::ty::TyRef>::List($crate::ty::TyRef::from($crate::arc_ty!($($inner)*)))};
+    ([$($inner:tt)*]) => { $crate::Ty::<$crate::TyRef>::List($crate::TyRef::from($crate::arc_ty!($($inner)*)))};
 
     ({ $($key:literal : $ty:tt),* $(,)? }) => {{
-        $crate::ty::Ty::<$crate::ty::TyRef>::AttrSet($crate::ty::AttrSetTy::<$crate::ty::TyRef>::from_internal(
+        $crate::Ty::<$crate::TyRef>::AttrSet($crate::AttrSetTy::<$crate::TyRef>::from_internal(
             [
                 $(($key, $crate::arc_ty!($ty)),)*
             ],
@@ -87,7 +87,7 @@ macro_rules! arc_ty {
     }};
 
     ({ $($key:literal : $ty:tt),* $(,)?;  $rest:tt }) => {{
-        $crate::ty::Ty::<$crate::ty::TyRef>::AttrSet($crate::ty::AttrSetTy::<$crate::ty::TyRef>::from_internal(
+        $crate::Ty::<$crate::TyRef>::AttrSet($crate::AttrSetTy::<$crate::TyRef>::from_internal(
             [
                 $(($key, $crate::arc_ty!($ty)),)*
             ],
@@ -96,18 +96,18 @@ macro_rules! arc_ty {
     }};
 
     // ({ $($key:literal : $ty:tt),* $(,)? }) => {{
-    //     $crate::ty::Ty::Attrset($crate::ty::Attrset::from_internal(
+    //     $crate::Ty::Attrset($crate::Attrset::from_internal(
     //         [
-    //             $(($key, ty!($ty), $crate::ty::AttrSource::Unknown),)*
+    //             $(($key, ty!($ty), $crate::AttrSource::Unknown),)*
     //         ],
     //         None,
     //     ))
     // }};
 
     ($arg:tt -> $($ret:tt)*) => {
-        $crate::ty::Ty::Lambda::<$crate::ty::TyRef> {
-            param: $crate::ty::TyRef::from($crate::arc_ty!($arg)),
-            body: $crate::ty::TyRef::from($crate::arc_ty!($($ret)*)),
+        $crate::Ty::Lambda::<$crate::TyRef> {
+            param: $crate::TyRef::from($crate::arc_ty!($arg)),
+            body: $crate::TyRef::from($crate::arc_ty!($($ret)*)),
         }
     };
 
