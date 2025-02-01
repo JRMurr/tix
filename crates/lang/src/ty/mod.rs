@@ -2,8 +2,6 @@ mod attrset;
 mod check;
 mod primitive;
 
-mod union;
-
 use std::sync::Arc;
 
 pub use attrset::AttrSetTy;
@@ -11,7 +9,6 @@ pub use check::check_file;
 pub use primitive::PrimitiveTy;
 
 use derive_more::Debug;
-use union::Union;
 
 // just to make it easy to share the constraints...
 pub trait RefType: Eq + std::hash::Hash {}
@@ -36,14 +33,9 @@ where
     #[debug("List({_0:?})")]
     List(R),
     #[debug("Lambda({param:?} -> {body:?})")]
-    Lambda {
-        param: R,
-        body: R,
-    },
+    Lambda { param: R, body: R },
     #[debug("{_0:?}")]
     AttrSet(AttrSetTy<R>),
-
-    Union(Union<R>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

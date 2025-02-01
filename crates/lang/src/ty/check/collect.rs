@@ -41,7 +41,6 @@ impl ArcTy {
             },
             Ty::AttrSet(attr_set_ty) => ArcTy::AttrSet(attr_set_ty.normalize_inner(free)),
             Ty::Primitive(_) => self.clone(),
-            Ty::Union(_hash_set) => todo!("normalize inner union"),
         }
     }
 
@@ -65,7 +64,6 @@ impl ArcTy {
                 set.extend(attr_set_ty.free_type_vars());
             }
             Ty::Primitive(_) => {}
-            Ty::Union(_hash_set) => todo!("free type vars union"),
         }
 
         set
@@ -235,7 +233,6 @@ impl<'db> Collector<'db> {
                 self.canonicalize_attrset(attr_set_ty, subs)
             }
             Ty::Primitive(p) => ArcTy::Primitive(p),
-            Ty::Union(_hash_set) => todo!("collect union"),
         }
     }
 

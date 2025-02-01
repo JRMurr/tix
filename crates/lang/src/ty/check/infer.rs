@@ -198,7 +198,6 @@ impl CheckCtx<'_> {
                 })
             }
             Ty::Primitive(_) => ty,
-            Ty::Union(_hash_set) => todo!("inst union"),
         };
 
         new_ty.intern_ty(self)
@@ -271,7 +270,6 @@ impl CheckCtx<'_> {
                 }
             }
             Ty::Primitive(_) => {}
-            Ty::Union(_hash_set) => todo!("free type vars infer union"),
         }
 
         set
