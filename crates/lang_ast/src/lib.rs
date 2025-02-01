@@ -6,7 +6,7 @@ mod ast_utils;
 mod comment;
 mod db;
 mod lower;
-mod nameres;
+pub mod nameres;
 
 #[cfg(test)]
 mod tests;

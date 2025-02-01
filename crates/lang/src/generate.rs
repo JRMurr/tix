@@ -1,16 +1,15 @@
-use std::collections::BTreeMap;
-
-use smol_str::SmolStr;
+use crate::Intern;
 
 use super::{
     AttrMergeConstraint, BinOverloadConstraint, CheckCtx, Constraint, ConstraintCtx,
     DeferrableConstraintKind, RootConstraintKind, TyId,
 };
-use crate::{
-    nameres::ResolveResult,
-    ty::{AttrSetTy, PrimitiveTy, Ty},
-    BinOP, BindingValue, Bindings, Expr, ExprId, Literal, NormalBinOp,
+use lang_ast::{
+    nameres::ResolveResult, BinOP, BindingValue, Bindings, Expr, ExprId, Literal, NormalBinOp,
 };
+use lang_ty::{AttrSetTy, PrimitiveTy, Ty};
+use smol_str::SmolStr;
+use std::collections::BTreeMap;
 
 impl CheckCtx<'_> {
     pub(super) fn generate_constraints(
@@ -32,15 +31,15 @@ impl CheckCtx<'_> {
             Expr::Missing => self.new_ty_var(),
             Expr::Literal(lit) => {
                 let lit: Ty<TyId> = lit.clone().into();
-                lit.intern_ty(self)
+                lit.intern(self)
             }
             Expr::Reference(var_name) => match self.name_res.get(e) {
                 None => {
                     // true, false, and null can be shadowed...
                     // so if theres no hit on them return the normal types
                     match var_name.as_str() {
-                        "true" | "false" => Ty::Primitive(PrimitiveTy::Bool).intern_ty(self),
-                        "null" => Ty::Primitive(PrimitiveTy::Null).intern_ty(self),
+                        "true" | "false" => Ty::Primitive(PrimitiveTy::Bool).intern(self),
+                        "null" => Ty::Primitive(PrimitiveTy::Null).intern(self),
                         _ => self.new_ty_var(),
                     }
                 }
@@ -66,7 +65,7 @@ impl CheckCtx<'_> {
                             param: arg_ty,
                             body: ret_ty,
                         }
-                        .intern_ty(self),
+                        .intern(self),
                     ),
                     location: e,
                 });
@@ -105,7 +104,7 @@ impl CheckCtx<'_> {
                         rest,
                         dyn_ty: None,
                     })
-                    .intern_ty(self);
+                    .intern(self);
 
                     constraints.unify_var(e, param_ty, attr);
                 }
@@ -115,7 +114,7 @@ impl CheckCtx<'_> {
                     param: param_ty,
                     body: body_ty,
                 }
-                .intern_ty(self)
+                .intern(self)
             }
             Expr::BinOp { lhs, rhs, op } => {
                 let lhs_ty = self.generate_constraints(constraints, *lhs);
@@ -140,7 +139,7 @@ impl CheckCtx<'_> {
                         ret_ty
                     }
                     BinOP::Normal(NormalBinOp::Bool(_)) => {
-                        let bool_ty = Ty::Primitive(PrimitiveTy::Bool).intern_ty(self);
+                        let bool_ty = Ty::Primitive(PrimitiveTy::Bool).intern(self);
                         constraints.unify_var(e, lhs_ty, rhs_ty);
                         constraints.unify_var(e, lhs_ty, bool_ty);
 
@@ -152,11 +151,11 @@ impl CheckCtx<'_> {
                         // TODO: equality checks actually allow for both sides to be different...
                         constraints.unify_var(e, lhs_ty, rhs_ty);
 
-                        Ty::Primitive(PrimitiveTy::Bool).intern_ty(self)
+                        Ty::Primitive(PrimitiveTy::Bool).intern(self)
                     }
                     BinOP::Normal(NormalBinOp::ListConcat) => {
                         let list_elem_ty = self.new_ty_var();
-                        let list_ty = Ty::List(list_elem_ty).intern_ty(self);
+                        let list_ty = Ty::List(list_elem_ty).intern(self);
                         constraints.unify_var(e, lhs_ty, rhs_ty);
                         constraints.unify_var(e, lhs_ty, list_ty);
 
@@ -189,7 +188,7 @@ impl CheckCtx<'_> {
                 constraints.add(Constraint {
                     kind: RootConstraintKind::Eq(
                         cond_ty,
-                        Ty::Primitive(PrimitiveTy::Bool).intern_ty(self),
+                        Ty::Primitive(PrimitiveTy::Bool).intern(self),
                     ),
                     location: e,
                 });
@@ -217,7 +216,7 @@ impl CheckCtx<'_> {
             } => {
                 let attr_ty = self.generate_bind_constraints(constraints, bindings, e);
 
-                Ty::AttrSet(attr_ty).intern_ty(self)
+                Ty::AttrSet(attr_ty).intern(self)
             }
             Expr::Select {
                 set,
@@ -227,7 +226,7 @@ impl CheckCtx<'_> {
                 let set_ty = self.generate_constraints(constraints, *set);
 
                 let str_ty: Ty<TyId> = PrimitiveTy::String.into();
-                let str_ty = str_ty.intern_ty(self);
+                let str_ty = str_ty.intern(self);
 
                 let ret_ty = attrpath.iter().fold(set_ty, |set_ty, &attr| {
                     let attr_ty = self.generate_constraints(constraints, attr);
@@ -238,7 +237,7 @@ impl CheckCtx<'_> {
                     };
                     let (attr_with_field, value_ty) = self.attr_with_field(opt_key);
                     // this will make sure the set has the field we asked for
-                    constraints.unify_var(e, set_ty, Ty::AttrSet(attr_with_field).intern_ty(self));
+                    constraints.unify_var(e, set_ty, Ty::AttrSet(attr_with_field).intern(self));
                     // returns the value for the field we asked for
                     value_ty
                 });
@@ -257,13 +256,13 @@ impl CheckCtx<'_> {
                     constraints.unify_var(*elem, list_elem_ty, elem_ty);
                 }
 
-                Ty::List(list_elem_ty).intern_ty(self)
+                Ty::List(list_elem_ty).intern(self)
             }
             Expr::UnaryOp { op, expr } => {
                 let ty = self.generate_constraints(constraints, *expr);
                 match op {
                     rnix::ast::UnaryOpKind::Invert => {
-                        let bool_ty = Ty::Primitive(PrimitiveTy::Bool).intern_ty(self);
+                        let bool_ty = Ty::Primitive(PrimitiveTy::Bool).intern(self);
                         constraints.unify_var(*expr, ty, bool_ty);
                     }
                     rnix::ast::UnaryOpKind::Negate => {
@@ -286,7 +285,7 @@ impl CheckCtx<'_> {
                     dyn_ty: None,
                     rest: Some(self.new_ty_var()),
                 })
-                .intern_ty(self);
+                .intern(self);
 
                 constraints.unify_var(*set, set_ty, any_attr);
 
@@ -298,7 +297,7 @@ impl CheckCtx<'_> {
                 constraints.unify_var(
                     *cond,
                     cond_ty,
-                    Ty::Primitive(PrimitiveTy::Bool).intern_ty(self),
+                    Ty::Primitive(PrimitiveTy::Bool).intern(self),
                 );
 
                 self.generate_constraints(constraints, *body)
@@ -358,7 +357,7 @@ impl CheckCtx<'_> {
                   //     constraints.unify_var(
                   //         e,
                   //         attr_set_ty,
-                  //         Ty::AttrSet(attr_with_field).intern_ty(self),
+                  //         Ty::AttrSet(attr_with_field).intern(self),
                   //     );
 
                   //     value_ty

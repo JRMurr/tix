@@ -206,7 +206,7 @@ impl CheckCtx<'_> {
 
     fn unify_var_ty(&mut self, lhs: TyId, rhs: Ty<TyId>) -> UnifyResult {
         // let ret = self.unify(var, rhs.clone())?;
-        let rhs_id = rhs.clone().intern_ty(self);
+        let rhs_id = rhs.clone().intern(self);
         self.unify(lhs, rhs_id)
     }
 
@@ -350,7 +350,7 @@ impl CheckCtx<'_> {
             // both have the same fields, just need to unify the rest
             let rest = match (lhs.rest, rhs.rest) {
                 (Some(lhs_rest), Some(rhs_rest)) => {
-                    Some(self.unify(lhs_rest, rhs_rest)?.intern_ty(self))
+                    Some(self.unify(lhs_rest, rhs_rest)?.intern(self))
                 }
                 // both have no rest => done
                 (None, None) => None,
@@ -384,7 +384,7 @@ impl CheckCtx<'_> {
 
                 // let new_rest = self
                 //     .unify_var_ty(rest, Ty::AttrSet(lhs_missing))?
-                //     .intern_ty(self);
+                //     .intern(self);
                 // rhs.rest = Some(new_rest);
                 // return Ok(rhs);
             }
@@ -397,7 +397,7 @@ impl CheckCtx<'_> {
 
                 // let new_rest = self
                 //     .unify_var_ty(rest, Ty::AttrSet(rhs_missing))?
-                //     .intern_ty(self);
+                //     .intern(self);
                 // lhs.rest = Some(new_rest);
                 return Ok(lhs);
             }

@@ -2,15 +2,15 @@ use std::collections::{HashMap, HashSet};
 
 use rustc_hash::FxHashMap;
 
+use crate::Intern;
+
 use super::{
     collect::Collector, AttrMergeConstraint, BinOverloadConstraint, CheckCtx, Constraint,
     ConstraintCtx, DeferrableConstraint, DeferrableConstraintKind, FreeVars, InferenceError,
     InferenceResult, RootConstraintKind, SolveError, TyId, TySchema,
 };
-use crate::{
-    nameres::{DependentGroup, GroupedDefs},
-    AttrSetTy, Ty,
-};
+use lang_ast::nameres::{DependentGroup, GroupedDefs};
+use lang_ty::{AttrSetTy, Ty};
 
 type Substitutions = FxHashMap<TyId, TyId>;
 
@@ -200,7 +200,7 @@ impl CheckCtx<'_> {
             Ty::Primitive(_) => ty,
         };
 
-        new_ty.intern_ty(self)
+        new_ty.intern(self)
     }
 
     fn generalize(&mut self, ty: TyId, deferred: &DeferredConstraints) -> TySchema {

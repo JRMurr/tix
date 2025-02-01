@@ -14,6 +14,8 @@ miette = { workspace = true }
 la-arena = { workspace = true }
 derive_more = { workspace = true, features = ["debug", "from"] }
 log = { workspace = true }
+# TODO: replace refs to this with my own type
+rnix = { workspace = true }
 
 salsa = { workspace = true }
 dashmap = "6.1.0"

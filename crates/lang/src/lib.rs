@@ -11,16 +11,13 @@ mod tests;
 #[cfg(test)]
 mod pbt;
 
-use std::collections::{HashMap, HashSet};
-
 pub(crate) use constraints::*;
 use derive_more::Debug;
-use storage::TypeStorage;
-// use ena::unify::{self, InPlaceUnificationTable, UnifyKey, UnifyValue};
-use thiserror::Error;
-
 use lang_ast::{AstDb, ExprId, Module, NameId, NameResolution, NixFile, OverloadBinOp};
 use lang_ty::{ArcTy, AttrSetTy, PrimitiveTy, Ty};
+use std::collections::{HashMap, HashSet};
+use storage::TypeStorage;
+use thiserror::Error;
 
 #[salsa::tracked]
 pub fn check_file(db: &dyn AstDb, file: NixFile) -> Result<InferenceResult, InferenceError> {
@@ -62,45 +59,6 @@ impl From<TyId> for usize {
     }
 }
 
-// impl UnifyKey for TyId {
-//     type Value = TypeVariableValue;
-
-//     fn index(&self) -> u32 {
-//         self.0
-//     }
-
-//     fn from_index(u: u32) -> Self {
-//         TyId(u)
-//     }
-
-//     fn tag() -> &'static str {
-//         "TyId"
-//     }
-// }
-
-// impl UnifyValue for TypeVariableValue {
-//     type Error = unify::NoError;
-
-//     fn unify_values(value1: &Self, value2: &Self) -> Result<Self, Self::Error> {
-//         match (value1, value2) {
-//             // We never equate two type variables, both of which
-//             // have known types. Instead, we recursively equate
-//             // those types.
-//             (&TypeVariableValue::Known { .. }, &TypeVariableValue::Known { .. }) => {
-//                 unreachable!("equating two type variables, both of which have known types")
-//             }
-//             // If one side is known, prefer that one.
-//             (&TypeVariableValue::Known { .. }, &TypeVariableValue::Unknown) => Ok(value1.clone()),
-//             (&TypeVariableValue::Unknown, &TypeVariableValue::Known { .. }) => Ok(value2.clone()),
-
-//             // both unknown, doesn't matter
-//             (&TypeVariableValue::Unknown, &TypeVariableValue::Unknown) => {
-//                 Ok(TypeVariableValue::Unknown)
-//             }
-//         }
-//     }
-// }
-
 pub type FreeVars = HashSet<TyId>;
 
 // the poly type
@@ -111,8 +69,15 @@ pub struct TySchema {
     pub constraints: Box<[DeferrableConstraint]>,
 }
 
-impl Ty<TyId> {
-    fn intern_ty(self, ctx: &mut CheckCtx) -> TyId {
+pub trait Intern {
+    type Output;
+    fn intern(self, ctx: &mut CheckCtx) -> Self::Output;
+}
+
+impl Intern for Ty<TyId> {
+    type Output = TyId;
+
+    fn intern(self, ctx: &mut CheckCtx) -> Self::Output {
         ctx.alloc_ty(Some(self))
     }
 }
