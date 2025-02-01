@@ -9,3 +9,7 @@ derive_more = { workspace = true, features = ["debug", "from"] }
 log = { workspace = true }
 smol_str = { workspace = true }
 rustc-hash = { workspace = true }
+
+
+[dev-dependencies]
+proptest = { workspace = true }

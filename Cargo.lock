@@ -552,6 +552,7 @@ dependencies = [
  "derive_more",
  "lang_ast",
  "log",
+ "proptest",
  "rustc-hash 2.1.0",
  "smol_str",
 ]

@@ -2,6 +2,9 @@ pub mod arc_ty;
 mod attrset;
 mod primitive;
 
+#[cfg(test)]
+pub mod arbitrary;
+
 pub use arc_ty::{ArcTy, Substitutions, TyRef};
 pub use attrset::AttrSetTy;
 use derive_more::Debug;

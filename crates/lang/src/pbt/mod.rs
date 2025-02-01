@@ -18,13 +18,6 @@ use crate::{
 
 use super::collect::Substitutions;
 
-prop_compose! {
-    // put a 10 char limit on identifiers, should be enough....
-    fn arb_smol_str_ident()(string in "_pbt_([a-z]|[A-Z]|[0-9]|_){1,10}") -> SmolStr {
-        string.into()
-    }
-}
-
 fn arb_arc_ty(args: RecursiveParams) -> impl Strategy<Value = ArcTy> {
     let leaf = any::<PrimitiveTy>().prop_map(ArcTy::Primitive);
 
