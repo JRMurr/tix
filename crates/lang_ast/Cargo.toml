@@ -1,0 +1,21 @@
+[package]
+name = "lang_ast"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+la-arena = { workspace = true }
+derive_more = { workspace = true, features = ["debug", "from"] }
+log = { workspace = true }
+salsa = { workspace = true }
+smol_str = { workspace = true }
+thiserror = { workspace = true }
+petgraph = { workspace = true }
+miette = { workspace = true }
+
+dashmap = "6.1.0"
+ordered-float = "4.6.0"
+# TODO: 11.1 is on github as of 12-19-24 but not released. Only added pipe operators
+rnix = "0.11.0"
+# TODO: same as rnix, not sure if we need copying from nixdoc for now
+rowan = "0.15"

@@ -508,7 +508,6 @@ checksum = "3752f229dcc5a481d60f385fa479ff46818033d881d2d801aa27dffcfb5e8306"
 name = "lang"
 version = "0.1.0"
 dependencies = [
- "clap",
  "dashmap",
  "derive_more",
  "indoc",
@@ -526,6 +525,24 @@ dependencies = [
  "smol_str",
  "thiserror 2.0.9",
  "union-find",
+]
+
+[[package]]
+name = "lang_ast"
+version = "0.1.0"
+dependencies = [
+ "dashmap",
+ "derive_more",
+ "la-arena",
+ "log",
+ "miette",
+ "ordered-float",
+ "petgraph",
+ "rnix",
+ "rowan",
+ "salsa",
+ "smol_str",
+ "thiserror 2.0.9",
 ]
 
 [[package]]

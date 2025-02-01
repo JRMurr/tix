@@ -1,5 +1,10 @@
 [workspace]
-members = ["crates/cli", "crates/comment_parser", "crates/lang"]
+members = [
+    "crates/cli",
+    "crates/comment_parser",
+    "crates/lang",
+    "crates/lang_ast",
+]
 resolver = "2"
 
 
@@ -11,6 +16,8 @@ la-arena = "0.3.1"
 derive_more = { version = "1.0.0" }
 log = "0.4.25"
 proptest = "1.6.0"
+salsa = { git = "https://github.com/salsa-rs/salsa", rev = "88a1d7774d78f048fbd77d40abca9ebd729fd1f0" }
+petgraph = "0.7.0"
 
 
 [profile.test.package.proptest]
