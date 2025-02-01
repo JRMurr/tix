@@ -418,6 +418,9 @@ pub fn group_def(db: &dyn crate::AstDb, file: NixFile) -> GroupedDefs {
     for (name_id, _) in module.names() {
         let node_id = dep_graph.add_node(name_id);
         name_to_node_id.insert(name_id, node_id);
+
+        // make sure every name shows up
+        dep_graph.add_edge(node_id, node_id, ());
     }
 
     // for name_id in name_deps.name_to_expr.keys() {

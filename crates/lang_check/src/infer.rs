@@ -34,6 +34,8 @@ impl CheckCtx<'_> {
             self.new_ty_var();
         }
 
+        // let groups = if groups.is_empty() { todo!() } else { groups };
+
         for group in groups {
             self.infer_scc_group(group)?;
         }
@@ -81,7 +83,6 @@ impl CheckCtx<'_> {
             let name_str = &self.module[name_id].text;
 
             let type_annotation = decls.iter().find_map(|decl| {
-                dbg!(&decl.identifier, name_str);
                 if decl.identifier == *name_str {
                     Some(decl.type_expr.clone())
                 } else {
@@ -93,8 +94,6 @@ impl CheckCtx<'_> {
 
             let ty_id = if let Some(known_ty) = type_annotation {
                 let schema = self.intern_known_ty(name_id, known_ty);
-
-                dbg!(&schema);
 
                 // TODO: it might be better to have a special constraint
                 // for eq a schema to avoid instantiate but its probably fine

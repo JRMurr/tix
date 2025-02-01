@@ -57,6 +57,6 @@ let
     else
       fib (n - 1) + fib (n - 2);
 
-  test = fib;
 in
-test 3
+# test = fib;
+fib 3
