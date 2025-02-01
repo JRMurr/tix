@@ -1,11 +1,9 @@
 mod attrset;
-mod check;
 mod primitive;
 
 use std::sync::Arc;
 
 pub use attrset::AttrSetTy;
-pub use check::check_file;
 pub use primitive::PrimitiveTy;
 
 use derive_more::Debug;

@@ -514,6 +514,7 @@ dependencies = [
  "itertools",
  "la-arena",
  "lang_ast",
+ "lang_ty",
  "log",
  "miette",
  "petgraph",
@@ -547,7 +548,10 @@ dependencies = [
 name = "lang_ty"
 version = "0.1.0"
 dependencies = [
+ "derive_more",
  "lang_ast",
+ "log",
+ "smol_str",
 ]
 
 [[package]]

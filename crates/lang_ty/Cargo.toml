@@ -5,3 +5,6 @@ edition = "2021"
 
 [dependencies]
 lang_ast = { path = "../lang_ast" }
+derive_more = { workspace = true, features = ["debug", "from"] }
+log = { workspace = true }
+smol_str = { workspace = true }
