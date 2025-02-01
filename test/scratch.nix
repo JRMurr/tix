@@ -44,11 +44,18 @@
 #   in
 #   if param == 1 then tmp else tmp
 # )
+let
+  /**
+    type: foo :: int -> int
+  */
+  fib =
+    n:
+    if n == 0 then
+      0
+    else if n == 1 then
+      1
+    else
+      fib (n - 1) + fib (n - 2);
 
-(
-  param:
-  let
-    tmp = (({ _pbt_a = ((un_used_param: null)); }));
-  in
-  if param == (un_used_param: null) then tmp else tmp
-)
+in
+fib 3

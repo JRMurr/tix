@@ -80,7 +80,7 @@ mod tests {
     use crate::{known_ty, parse_comment_text};
 
     #[test]
-    fn it_works() {
+    fn big_doc_comment() {
         let example_comment = r#"
         This is some text
         type:
@@ -122,6 +122,25 @@ mod tests {
                 },
             },
         ];
+
+        assert_eq!(decs, expected)
+    }
+
+    #[test]
+    fn simple() {
+        let example_comment = r#"
+            type: foo :: int -> int
+        "#;
+        let pairs = parse_comment_text(example_comment).expect("No parse error");
+
+        let decs = collect_type_decls(pairs);
+
+        let expected = vec![TypeDecl {
+            identifier: "foo".into(),
+            type_expr: known_ty! {
+                int -> int
+            },
+        }];
 
         assert_eq!(decs, expected)
     }
