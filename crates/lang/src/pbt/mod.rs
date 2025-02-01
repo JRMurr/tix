@@ -1,6 +1,10 @@
 use std::collections::{BTreeMap, HashSet};
 
-use lang_ty::{arbitrary::RecursiveParams, ArcTy, PrimitiveTy};
+use lang_ast::{BoolBinOp, OverloadBinOp};
+use lang_ty::{
+    arbitrary::{arb_smol_str_ident, RecursiveParams},
+    ArcTy, AttrSetTy, PrimitiveTy, Ty, TyRef,
+};
 use proptest::prelude::{
     any, prop, prop_assert_eq, prop_compose, prop_oneof, proptest, BoxedStrategy, Just,
     ProptestConfig, Strategy,
@@ -213,68 +217,6 @@ fn text_from_ty(ty: &ArcTy) -> impl Strategy<Value = NixTextStr> {
 
     inner.prop_flat_map(non_type_modifying_transform)
     // non_type_modifying_transform(inner).boxed()
-}
-
-impl AttrSetTy<TyRef> {
-    /// Each child of the attrset for now will be unique
-    /// so we need to make sure each child has its own unique ty vars
-    fn spread_free_vars(&self, num_free_vars: &mut usize) -> Self {
-        // let mut num_free_vars = 0;
-
-        let fields = self
-            .fields
-            .iter()
-            .map(|(k, v)| {
-                let free_vars = v.0.free_type_vars();
-
-                let subs: Substitutions = free_vars
-                    .iter()
-                    .enumerate()
-                    .map(|(i, var)| (*var, (*num_free_vars + i + 1) as u32))
-                    .collect();
-
-                *num_free_vars += free_vars.len();
-
-                let ty = v.0.normalize_inner(&subs).into();
-
-                (k.clone(), ty)
-            })
-            .collect();
-
-        // let dyn_ty = self
-        //     .dyn_ty
-        //     .clone()
-        //     .map(|dyn_ty| dyn_ty.0.normalize_inner(free).into());
-
-        // let rest = self
-        //     .rest
-        //     .clone()
-        //     .map(|rest| rest.0.normalize_inner(free).into());
-
-        Self {
-            fields,
-            dyn_ty: None, // TODO:
-            rest: None,   // TODO:
-        }
-    }
-}
-
-impl ArcTy {
-    // TODO: make spread_free_vars for all variants
-    fn offset_free_vars(&self, num_free_vars: &mut usize) -> Self {
-        let free_vars = self.free_type_vars();
-
-        // TODO: extract this
-        let subs: Substitutions = free_vars
-            .iter()
-            .enumerate()
-            .map(|(i, var)| (*var, (*num_free_vars + i + 1) as u32))
-            .collect();
-
-        *num_free_vars += free_vars.len();
-
-        self.normalize_inner(&subs)
-    }
 }
 
 fn attr_strat(

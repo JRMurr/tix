@@ -7,7 +7,7 @@ use crate::{AttrSetTy, Ty};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[debug("{_0:?}")]
-pub struct TyRef(Arc<Ty<TyRef>>);
+pub struct TyRef(pub Arc<Ty<TyRef>>);
 
 pub type ArcTy = Ty<TyRef>;
 

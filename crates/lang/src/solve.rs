@@ -7,7 +7,7 @@ use super::{
     DeferrableConstraintKind, InferenceError, RootConstraint, RootConstraintKind, SolveError, Ty,
     TyId,
 };
-use crate::{OverloadBinOp, PrimitiveTy};
+use crate::{Intern, OverloadBinOp, PrimitiveTy};
 
 #[derive(Debug, PartialEq, Eq)]
 enum SolveResult {
