@@ -52,41 +52,50 @@ where
     R: RefType,
     VarType: Eq + std::hash::Hash + Clone,
 {
-    pub fn free_vars_by_ref(ty_id: R, get_ty: &mut impl FnMut(&R) -> Self) -> HashSet<VarType> {
+    pub fn free_vars_by_ref(
+        ty_id: R,
+        get_ty: &mut impl FnMut(&R) -> Option<Self>,
+    ) -> HashSet<VarType> {
         let ty = get_ty(&ty_id);
 
-        ty.free_vars(get_ty)
+        ty.map(|ty| ty.free_vars(get_ty)).unwrap_or_default()
     }
 
-    pub fn free_vars(&self, get_ty: &mut impl FnMut(&R) -> Self) -> HashSet<VarType> {
+    pub fn free_vars(&self, get_ty: &mut impl FnMut(&R) -> Option<Self>) -> HashSet<VarType> {
         let mut set = HashSet::new();
+
+        let mut go = |id| {
+            if let Some(ty) = get_ty(id) {
+                set.extend(ty.free_vars(get_ty));
+            }
+        };
 
         match self {
             Ty::TyVar(var) => {
                 set.insert(var.clone());
             }
             Ty::Primitive(_) => {}
-            Ty::List(inner) => set.extend(get_ty(inner).free_vars(get_ty)),
+            Ty::List(inner) => go(inner), //set.extend(get_ty(inner).free_vars(get_ty)),
             Ty::Lambda { param, body } => {
-                set.extend(get_ty(param).free_vars(get_ty));
-                set.extend(get_ty(body).free_vars(get_ty))
+                go(param);
+                go(body);
             }
             Ty::AttrSet(attr_set_ty) => {
                 attr_set_ty.fields.values().for_each(|v| {
-                    set.extend(get_ty(v).free_vars(get_ty));
+                    go(v);
                 });
 
                 if let Some(dyn_ty) = &attr_set_ty.dyn_ty {
-                    set.extend(get_ty(dyn_ty).free_vars(get_ty))
+                    go(dyn_ty);
                 }
 
                 if let Some(rest_ty) = &attr_set_ty.rest {
-                    set.extend(get_ty(rest_ty).free_vars(get_ty))
+                    go(rest_ty);
                 }
             }
             Ty::Union(union) => {
                 for v in union.iter() {
-                    set.extend(get_ty(v).free_vars(get_ty));
+                    go(v);
                 }
             }
         }

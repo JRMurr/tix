@@ -205,7 +205,7 @@ impl<'db> CheckCtx<'db> {
     }
 
     fn intern_known_ty(&mut self, name: NameId, ty: KnownTy) -> TySchema {
-        let free_vars = ty.free_vars(&mut |known_ref| known_ref.0.as_ref().clone());
+        let free_vars = ty.free_vars(&mut |known_ref| Some(known_ref.0.as_ref().clone()));
 
         let subs: HashMap<TypeVarValue, TyId> = free_vars
             .iter()

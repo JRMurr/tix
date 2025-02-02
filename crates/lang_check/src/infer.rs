@@ -299,10 +299,18 @@ impl CheckCtx<'_> {
     }
 
     fn free_type_vars(&mut self, ty_id: TyId) -> FreeVars {
+        let mut seen = HashSet::new();
+
         let res = Ty::free_vars_by_ref(ty_id, &mut |id| {
             let id = self.table.find(*id);
 
-            self.get_ty(id)
+            if seen.contains(&id) {
+                return None;
+            }
+
+            seen.insert(id);
+
+            Some(self.get_ty(id))
         });
 
         res.iter().map(|id| self.table.find(id.into())).collect()

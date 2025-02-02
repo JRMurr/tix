@@ -144,9 +144,9 @@ impl TypeStorage {
 
         if seen.contains(&ty_id) {
             // TODO: Not sure if this is needed
-            // dbg!(&ty_id, &seen);
-            // return None;
-            panic!("cycle in union flattening")
+            dbg!(&ty_id, &inner, &seen, self.root_type_view());
+            return None;
+            // panic!("cycle in union flattening")
         }
 
         seen.insert(ty_id);
