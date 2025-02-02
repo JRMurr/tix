@@ -105,14 +105,14 @@ impl InferenceResult {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum InferenceError {
-    #[error("Could not union {0:?} and {1:?}")]
-    InvalidUnion(Ty<TyId>, Ty<TyId>),
+    #[error("Could not unify {0:?} and {1:?}")]
+    InvalidUnification(Ty<TyId>, Ty<TyId>),
 
     #[error("Unifying attr set {0:?} with empty ")]
     UnifyEmptyRest(AttrSetTy<TyId>),
 
-    #[error("Could union attr set {0:?} and  {1:?}")]
-    InvalidAttrUnion(AttrSetTy<TyId>, AttrSetTy<TyId>),
+    #[error("Could not unify attr set {0:?} and {1:?}")]
+    InvalidAttrUnification(AttrSetTy<TyId>, AttrSetTy<TyId>),
 
     #[error("Can not negate non number type {0:?}")]
     InvalidNegation(Ty<TyId>),
