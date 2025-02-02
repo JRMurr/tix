@@ -290,7 +290,7 @@ impl CheckCtx<'_> {
                 Ty::AttrSet(self.unify_attr(lhs, rhs)?)
             }
             (l, r) if l == r => l,
-            (l, r) => return Err(InferenceError::InvalidUnification(l, r)),
+            (l, r) => return Err(InferenceError::InvalidUnification(l, r).into()),
         };
 
         Ok(ty)
@@ -422,7 +422,7 @@ impl CheckCtx<'_> {
                 new_attr.rest = Some(new_rest);
                 Ok(new_attr)
             }
-            _ => Err(InferenceError::InvalidAttrUnification(lhs, rhs)),
+            _ => Err(InferenceError::InvalidAttrUnification(lhs, rhs).into()),
         }
     }
 }

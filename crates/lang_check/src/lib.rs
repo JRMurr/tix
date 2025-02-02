@@ -257,6 +257,7 @@ impl<'db> CheckCtx<'db> {
                 }
             }
             Ty::AttrSet(_attr_set_ty) => todo!(),
+            Ty::Union(_inner) => todo!(),
         };
 
         ty.intern(self)
