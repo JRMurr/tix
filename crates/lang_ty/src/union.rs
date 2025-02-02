@@ -57,6 +57,10 @@ impl<R: RefType> Union<R> {
     pub fn len(&self) -> usize {
         self.set.len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.set.is_empty()
+    }
 }
 
 impl<R: RefType> FromIterator<R> for Union<R> {
