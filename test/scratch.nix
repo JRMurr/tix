@@ -50,6 +50,9 @@
 # display 3
 
 let
+  /**
+    type: fib :: int -> int
+  */
   fib =
     n:
     if n == 0 then

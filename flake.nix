@@ -37,6 +37,7 @@
               rustAttrs.rust-shell
               (pkgs.cargo-tarpaulin.override ({ rustPlatform = rustAttrs.rustPlatform; }))
 
+              gdb # im in hell
               # common
               just
             ];
