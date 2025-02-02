@@ -88,7 +88,7 @@ impl CheckCtx<'_> {
                 }
             });
 
-            dbg!(&type_annotation);
+            // dbg!(&type_annotation);
 
             let ty_id = if let Some(known_ty) = type_annotation {
                 let schema = self.intern_known_ty(name_id, known_ty);

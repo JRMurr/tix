@@ -242,6 +242,9 @@ test_case!(
     rec_fun,
     "
     let
+    /**
+        type: fib :: int -> int
+    */
         fib = n:
             if n == 0 then
                 0
@@ -310,11 +313,11 @@ test_case!(
     simple_ty_annotation,
     "
     let
-            /**
-                type: foo :: string
-            */
-            foo = ''hi'';
-        in
+        /**
+            type: foo :: string
+        */
+        foo = ''hi'';
+    in
         foo
     ",
     String

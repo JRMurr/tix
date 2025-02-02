@@ -64,7 +64,7 @@ impl<'db> Collector<'db> {
             expr_ty_map.insert(expr, ty);
         }
 
-        dbg!(&self.ctx.table);
+        // dbg!(&self.ctx.table);
 
         InferenceResult {
             name_ty_map,
