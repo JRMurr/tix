@@ -47,13 +47,13 @@ impl CheckCtx<'_> {
         &mut self,
         constraint_ctx: ConstraintCtx,
     ) -> Result<(), SolveError> {
-        let mut made_progress = true;
-
         let mut constraints = constraint_ctx.constraints;
 
         constraints.sort_by(|a, b| a.kind.cmp(&b.kind));
 
         // dbg!(&constraints);
+
+        let mut made_progress = true;
 
         while made_progress {
             made_progress = false;
@@ -68,11 +68,27 @@ impl CheckCtx<'_> {
                     SolveResult::Deferred => {
                         still_unsolved.push(constraint);
                     }
-                    SolveResult::Err(inference_error) => return Err(inference_error.into()),
+                    SolveResult::Err(_) => {
+                        // allow an invalid union for now
+                        // only throw if no progress has been made
+                        still_unsolved.push(constraint);
+                        // return Err(inference_error.into())
+                    }
                 }
             }
 
             constraints = still_unsolved;
+        }
+
+        // TODO: if we got here and we could now solve again we should try
+        // to keep solving
+        for constraint in constraints.iter().rev() {
+            // let constraint = dbg!(self.table.root_constraint_view(constraint));
+
+            if let SolveResult::Err(inference_error) = self.solve_constraint(constraint) {
+                // dbg!(self.table.root_type_view());
+                return Err(inference_error.into());
+            }
         }
 
         // TODO: if the remaining constraints are overload constraints
@@ -143,7 +159,6 @@ impl CheckCtx<'_> {
         let op = overload_constraint.op;
 
         let Some(ret_ty) = self.solve_bin_op_inner(op, &lhs_val, &rhs_val) else {
-            // dbg!(self.table.root_type_view(), overload_constraint);
             return SolveResult::Err(InferenceError::InvalidBinOp(
                 overload_constraint.op,
                 lhs_val,
@@ -237,6 +252,12 @@ impl CheckCtx<'_> {
         if lhs == rhs {
             return Ok(lhs_ty);
         }
+
+        // dbg!(
+        //     // self.table.root_type_view(),
+        //     (lhs, rhs,) // self.table.debug_get_union_inner(lhs),
+        //                 // self.table.debug_get_union_inner(rhs)
+        // );
 
         let ty = match (lhs_ty.clone(), rhs_ty.clone()) {
             // TODO: Don't think i need a contains in check since how i init the type vars should handle that

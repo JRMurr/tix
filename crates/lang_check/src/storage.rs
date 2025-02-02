@@ -7,6 +7,8 @@ use union_find::{QuickFindUf, UnionByRank, UnionFind};
 use rustc_hash::FxHashMap;
 // use union_find::{QuickFindUf, UnionByRank};
 
+use crate::RootConstraint;
+
 use super::TyId;
 
 // #[derive(Clone, Debug)]
@@ -203,6 +205,14 @@ impl TypeStorage {
     }
 
     #[allow(dead_code)]
+    pub fn root_constraint_view(&mut self, constraint: &RootConstraint) -> RootConstraint {
+        RootConstraint {
+            kind: constraint.kind.map(|ty_id| self.find(ty_id)),
+            location: constraint.location,
+        }
+    }
+
+    #[allow(dead_code)]
     pub fn root_type_view(&mut self) -> TyMapping {
         self.types
             .clone()
@@ -212,6 +222,18 @@ impl TypeStorage {
 
                 (*key, ty)
             })
+            .collect()
+    }
+
+    #[allow(dead_code)]
+    pub fn debug_get_union_inner(&mut self, ty_id: TyId) -> Vec<Ty<TyId>> {
+        let Some(Ty::Union(union)) = self.get(ty_id) else {
+            return Vec::new();
+        };
+
+        union
+            .iter()
+            .map(|t| self.get(*t).unwrap_or(Ty::TyVar(t.0)))
             .collect()
     }
 }

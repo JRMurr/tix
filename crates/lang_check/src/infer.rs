@@ -61,8 +61,6 @@ impl CheckCtx<'_> {
         let mut constraints = ConstraintCtx::new();
 
         for def in &group {
-            let ty = self.generate_constraints(&mut constraints, def.expr());
-
             let name_id = def.name();
 
             // TODO: get global decs
@@ -101,6 +99,8 @@ impl CheckCtx<'_> {
             } else {
                 self.ty_for_name_no_instantiate(name_id)
             };
+
+            let ty = self.generate_constraints(&mut constraints, def.expr());
 
             constraints.add(Constraint {
                 kind: RootConstraintKind::Eq(ty_id, ty),

@@ -42,6 +42,17 @@ pub enum RootConstraintKind {
     Deferrable(DeferrableConstraintKind),
 }
 
+impl RootConstraintKind {
+    pub fn map(&self, mut mapper: impl FnMut(TyId) -> TyId) -> Self {
+        match self {
+            RootConstraintKind::Eq(l, r) => RootConstraintKind::Eq(mapper(*l), mapper(*r)),
+            RootConstraintKind::Deferrable(deferrable_constraint_kind) => {
+                RootConstraintKind::Deferrable(deferrable_constraint_kind.map(mapper))
+            }
+        }
+    }
+}
+
 // impl Ord for RootConstraintKind {
 //     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
 //         if self == other {
@@ -80,6 +91,30 @@ impl DeferrableConstraintKind {
             DeferrableConstraintKind::Negation(ty_id) => [*ty_id].into(),
             DeferrableConstraintKind::AttrMerge(attr_merge) => {
                 [attr_merge.lhs, attr_merge.rhs, attr_merge.ret_val].into()
+            }
+        }
+    }
+
+    // mostly used to map the ty id to the root values for debugging
+    pub fn map(&self, mut mapper: impl FnMut(TyId) -> TyId) -> Self {
+        match self {
+            DeferrableConstraintKind::BinOp(bin) => {
+                DeferrableConstraintKind::BinOp(BinOverloadConstraint {
+                    op: bin.op,
+                    lhs: mapper(bin.lhs),
+                    rhs: mapper(bin.rhs),
+                    ret_val: mapper(bin.ret_val),
+                })
+            }
+            DeferrableConstraintKind::Negation(ty_id) => {
+                DeferrableConstraintKind::Negation(mapper(*ty_id))
+            }
+            DeferrableConstraintKind::AttrMerge(attr) => {
+                DeferrableConstraintKind::AttrMerge(AttrMergeConstraint {
+                    lhs: mapper(attr.lhs),
+                    rhs: mapper(attr.rhs),
+                    ret_val: mapper(attr.ret_val),
+                })
             }
         }
     }
