@@ -1,13 +1,21 @@
 use indoc::indoc;
-use lang_ast::{module, tests::TestDatabase};
-use lang_ty::{arc_ty, ArcTy};
+use lang_ast::{module, tests::TestDatabase, Module};
+use lang_ty::{arc_ty, ArcTy, PrimitiveTy};
+
+use crate::{InferenceError, InferenceResult};
 
 use super::check_file;
 
-pub fn get_inferred_root(src: &str) -> ArcTy {
+pub fn check_str(src: &str) -> (Module, Result<InferenceResult, InferenceError>) {
     let (db, file) = TestDatabase::single_file(src).unwrap();
     let module = module(&db, file);
-    let inference = check_file(&db, file).expect("No inference error");
+    (module, check_file(&db, file))
+}
+
+pub fn get_inferred_root(src: &str) -> ArcTy {
+    let (module, inference) = check_str(src);
+
+    let inference = inference.expect("No type error");
 
     inference
         .expr_ty_map
@@ -16,11 +24,24 @@ pub fn get_inferred_root(src: &str) -> ArcTy {
         .clone()
 }
 
+pub fn get_check_error(src: &str) -> InferenceError {
+    let (_, inference) = check_str(src);
+
+    inference.expect_err("Expected an inference error")
+}
+
 #[track_caller]
 pub fn expect_ty_inference(src: &str, expected: ArcTy) {
     let root_ty = get_inferred_root(src);
 
     assert_eq!(root_ty, expected)
+}
+
+#[track_caller]
+pub fn expect_inference_error(src: &str, expected: InferenceError) {
+    let error = get_check_error(src);
+
+    assert_eq!(error, expected)
 }
 
 macro_rules! test_case {
@@ -269,3 +290,35 @@ test_case!(
     ",
     Float
 );
+
+test_case!(
+    simple_ty_annotation,
+    "
+    let
+            /**
+                type: foo :: string
+            */
+            foo = ''hi'';
+        in
+        foo
+    ",
+    String
+);
+
+#[test]
+fn type_annotation_mis_match() {
+    let file = indoc! { "
+        let
+            /**
+                type: foo :: string
+            */
+            foo = 1;
+        in
+        foo
+    " };
+
+    let string_ty = PrimitiveTy::String.into();
+    let int_ty = PrimitiveTy::Int.into();
+
+    expect_inference_error(file, InferenceError::InvalidUnification(string_ty, int_ty))
+}
