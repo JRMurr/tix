@@ -4,7 +4,7 @@ mod primitive;
 
 #[cfg(any(test, feature = "proptest_support"))]
 pub mod arbitrary;
-mod union;
+pub mod union;
 
 use std::collections::HashSet;
 

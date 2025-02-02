@@ -1,12 +1,11 @@
 use std::collections::HashSet;
 
+use lang_ty::{union::Union, Ty};
 use union_find::{QuickFindUf, UnionByRank, UnionFind};
 
 // use ena::unify::{InPlaceUnificationTable, UnifyKey};
 use rustc_hash::FxHashMap;
 // use union_find::{QuickFindUf, UnionByRank};
-
-use crate::{ty::union::Union, Ty};
 
 use super::TyId;
 

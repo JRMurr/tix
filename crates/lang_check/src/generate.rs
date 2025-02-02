@@ -201,7 +201,7 @@ impl CheckCtx<'_> {
                 //     location: e,
                 // });
 
-                Ty::Union([then_ty, else_ty].into()).intern_ty(self)
+                Ty::Union([then_ty, else_ty].into()).intern(self)
             }
             Expr::LetIn { bindings, body } => {
                 // TODO: we might be doing instantiates twice here

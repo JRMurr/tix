@@ -5,7 +5,7 @@ use rustc_hash::FxHashMap;
 
 use crate::{AttrSetTy, Ty};
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[debug("{_0:?}")]
 pub struct TyRef(pub Arc<Ty<TyRef>>);
 
