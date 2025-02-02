@@ -49,17 +49,25 @@
 # in
 # display 3
 
-let
-  /**
-    type: fib :: int -> int
-  */
-  fib =
-    n:
-    if n == 0 then
-      0
-    else if n == 1 then
-      1
-    else
-      fib (n - 1) + fib (n - 2);
-in
-fib 3
+(
+  param:
+  let
+    tmp = (
+      (
+        ({
+          _pbt_0EIXC9G_u = (null);
+          _pbt_u7_n_u4_W2 = ((-0.2382) * ((0.1526) * ((1538430809) - ((999973906) / (-245347219)))));
+          _pbt__nx__X_T = ((((-775235504) * (976876505)) + (170057216)) - (-467874792));
+          _pbt_4_w____C9W = ((((true) && (true)) || (false)) || ((false) || (true)));
+          _pbt__5_8_ = (({ }));
+        })._pbt__5_8_
+      )
+    );
+  in
+  if
+    param == (({ _pbt_a = ([ ((({ _pbt_1 = ((728909406) + (291607382)); })._pbt_1)) ]); })._pbt_a)
+  then
+    tmp
+  else
+    tmp
+)

@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 
 DEFAULT_PROPTEST_CASES=50000
+DEFAULT_PROPTEST_SHRINK=1024
 
-# allow passing in cases as arg
+
 PROPTEST_CASES=${1:-$DEFAULT_PROPTEST_CASES}
+PROPTEST_MAX_SHRINK_ITERS=${2:-DEFAULT_PROPTEST_SHRINK}
 
-PROPTEST_CASES=$PROPTEST_CASES cargo test --package lang_check --lib -- pbt::test_type_check --exact --show-output 
+PROPTEST_CASES=$PROPTEST_CASES PROPTEST_MAX_SHRINK_ITERS=$PROPTEST_MAX_SHRINK_ITERS cargo test --package lang_check --lib -- pbt::test_type_check --exact --show-output 

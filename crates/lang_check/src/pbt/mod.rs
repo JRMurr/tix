@@ -1,5 +1,3 @@
-use std::collections::{BTreeMap, HashSet};
-
 use lang_ast::{BoolBinOp, OverloadBinOp};
 use lang_ty::{
     arbitrary::{arb_smol_str_ident, RecursiveParams},
@@ -9,10 +7,23 @@ use proptest::prelude::{
     any, prop, prop_assert_eq, prop_compose, prop_oneof, proptest, BoxedStrategy, Just,
     ProptestConfig, Strategy,
 };
+use std::collections::{BTreeMap, HashSet};
 // use proptest::prelude::*;
+use crate::tests::get_inferred_root;
 use smol_str::SmolStr;
 
-use crate::tests::get_inferred_root;
+proptest! {
+    // default to a smallish value, use the `pbt.sh` script to do more
+    #![proptest_config(ProptestConfig {
+        cases: 256, .. ProptestConfig::default()
+    })]
+    #[test]
+    fn test_type_check((ty, text) in arb_nix()) {
+        let root_ty = get_inferred_root(&text);
+
+        prop_assert_eq!(root_ty, ty.normalize_vars());
+    }
+}
 
 // TODO: would be nice to make a wrapper type around String to mark at the type level its a nix string
 // would make it slightly nicer type safety
@@ -345,17 +356,4 @@ fn arb_nix() -> impl Strategy<Value = (ArcTy, NixTextStr)> {
         }),
         arb_nix_text_from_ty()
     ]
-}
-
-proptest! {
-    // default to a smallish value, use the `pbt.sh` script to do more
-    #![proptest_config(ProptestConfig {
-        cases: 256, .. ProptestConfig::default()
-    })]
-    #[test]
-    fn test_type_check((ty, text) in arb_nix()) {
-        let root_ty = get_inferred_root(&text);
-
-        prop_assert_eq!(root_ty, ty.normalize_vars());
-    }
 }

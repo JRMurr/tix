@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc ca7dbae6c1e1c43edd19b9a63f1852f36e00daf527051a962f70074afcb4ecaa # shrinks to (ty, text) = (Lambda(List(Int) -> AttrSetTy { fields: {}, dyn_ty: None, rest: None }), "(let _pbt_E = (a: a); in (_pbt_E ((param: let tmp = ((({_pbt_0EIXC9G_u=(null); _pbt_u7_n_u4_W2=((-0.2382) * ((0.1526) * ((1538430809) - ((999973906) / (-245347219))))); _pbt__nx__X_T=((((-775235504) * (976876505)) + (170057216)) - (-467874792)); _pbt_4_w____C9W=((((true) && (true)) || (false)) || ((false) || (true))); _pbt__5_8_=(({}));})._pbt__5_8_)); in if param == (let _pbt_0 = (a: a); in (_pbt_0 ([((({_pbt_BbkL_8=((728909406) + (291607382));})._pbt_BbkL_8))]))) then tmp else tmp))))")
+cc ca9dfe0d50fbb39f90c632955f6303346c99ba4f54b0f59c913900fe1ba8e08d # shrinks to (ty, text) = (List(Lambda(Int -> Lambda(TyVar(1) -> Float))), "[((param: let tmp = ((un_used_param: (0.0749) * (-0.3111))); in if param == (let _pbt_C = ((0) - (-55)); in _pbt_C) then tmp else tmp))]")

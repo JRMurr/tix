@@ -3,7 +3,7 @@ use std::sync::Arc;
 use derive_more::Debug;
 use rustc_hash::FxHashMap;
 
-use crate::{AttrSetTy, Ty};
+use crate::{union::Union, AttrSetTy, Ty};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[debug("{_0:?}")]
@@ -47,12 +47,22 @@ impl ArcTy {
             },
             Ty::AttrSet(attr_set_ty) => ArcTy::AttrSet(attr_set_ty.normalize_inner(free)),
             Ty::Primitive(_) => self.clone(),
-            Ty::Union(union) => ArcTy::Union(
-                union
+            Ty::Union(union) => {
+                let inner: Union<_> = union
                     .iter()
                     .map(|v| v.0.normalize_inner(free).into())
-                    .collect(),
-            ),
+                    .collect();
+
+                // // TODO: would be better to do this during collection
+                // // would need to do value equality during collection
+                // if inner.len() == 1 {
+                //     let elem: &TyRef = inner.iter().next().unwrap();
+
+                //     return Arc::unwrap_or_clone(elem.0.clone());
+                // }
+
+                ArcTy::Union(inner)
+            }
         }
     }
 
