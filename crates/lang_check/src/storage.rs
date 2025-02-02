@@ -143,15 +143,18 @@ impl TypeStorage {
         };
 
         if seen.contains(&ty_id) {
-            // TODO: Not sure if this is needed
-            dbg!(&ty_id, &inner, &seen, self.root_type_view());
-            return None;
-            // panic!("cycle in union flattening")
+            // dbg!(&ty_id, &inner, &seen, self.root_type_view());
+            // return None;
+            panic!("cycle in union flattening")
         }
 
         seen.insert(ty_id);
 
         let mut inner: Union<TyId> = inner.iter().map(|t| self.find(*t)).collect();
+
+        // remove any refs to itself to avoid cycles
+        // TODO: not sure if this will catch all cases but good for now
+        inner.remove(&ty_id);
 
         let mut inner_unions = Vec::with_capacity(inner.len());
 
