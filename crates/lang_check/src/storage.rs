@@ -207,6 +207,63 @@ impl TypeStorage {
         }
     }
 
+    pub fn check_eq(&mut self, lhs: TyId, rhs: TyId) -> bool {
+        self.check_eq_inner(lhs, rhs, &mut FxHashMap::default())
+    }
+
+    // Check if two types are "structurally" equal
+    // that is the right side could be come the left side by replacing the free vars correctly
+    // we store mappings in var_mapping like
+    // [left_side_ty] => right_side_ty
+    // INVARIANT: this should be called after solving so all ty-vars seen are free vars
+    fn check_eq_inner(
+        &mut self,
+        lhs: TyId,
+        rhs: TyId,
+        var_mapping: &mut FxHashMap<TyId, TyId>,
+    ) -> bool {
+        let (lhs, lhs_ty) = self.get_root_value(lhs);
+        let (rhs, rhs_ty) = self.get_root_value(rhs);
+
+        let (Some(lhs_ty), Some(rhs_ty)) = (lhs_ty, rhs_ty) else {
+            return false;
+        };
+
+        match (lhs_ty, rhs_ty) {
+            (Ty::Primitive(l), Ty::Primitive(r)) => l == r,
+            (Ty::TyVar(l), Ty::TyVar(r)) => {
+                let l = self.find(l.into());
+                let r = self.find(r.into());
+
+                // they are the same so no need to do anything
+                if l == r {
+                    return true;
+                }
+
+                // if we stored a mapping from the left side to the right side
+                // check if the replacement still holds
+                if let Some(val) = var_mapping.get(&l) {
+                    return *val == r;
+                }
+
+                // newly seen free var
+                // add it to the mapping to make sure it holds elsewhere
+
+                var_mapping.insert(l, r);
+
+                true
+            }
+            (Ty::List(l), Ty::List(r)) => self.check_eq_inner(l, r, var_mapping),
+            (Ty::AttrSet(l), Ty::AttrSet(r)) => {
+                todo!();
+            }
+            (Ty::Union(a), Ty::Union(b)) => {
+                todo!();
+            }
+            _ => false,
+        }
+    }
+
     #[allow(dead_code)]
     pub fn root_constraint_view(&mut self, constraint: &RootConstraint) -> RootConstraint {
         RootConstraint {
