@@ -3,6 +3,26 @@
 A very simple/basic type checker for nix.
 
 
+## High level design
+
+The rough structure of the type checker is using hindley milner type inference with some home grown extensions.
+Hindley Milner on its own does not really handle operator overloading which causes issues for most of nix's binary operators.
+I also want to support union types since that matches nix's dynamic nature more than something like type classes from haskell.
+
+My "ideology" for the type checker is do as much inference as is reasonable but defer to comments with type annotations when it would be too hard to infer.
+(Not sure how well the current impl follows that...)
+
+Rough pipeline
+- Parse program into ast `lang_ast/lower.rs`
+- Do name resolution to roughly structure the ast to find variable dependencies/scopes `lang_ast/nameres.rs`
+- Go over the grouped definitions "bottom up" and infer a group at a time `lang_check/infer.rs`
+
+
+Inference Pipeline
+- First for each expression generate constraints on what the variable could be
+- After generating constraints solve them in one go
+  - If a constraint could not be solved fully "defer it" to be solved in a higher up group
+  - This is where "let generalization" happens
 
 ## links
 - https://github.com/oxalica/nil
