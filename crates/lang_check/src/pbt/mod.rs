@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashSet};
 use lang_ast::{BoolBinOp, OverloadBinOp};
 use lang_ty::{
     arbitrary::{arb_smol_str_ident, RecursiveParams},
-    ArcTy, AttrSetTy, OutputTy, PrimitiveTy, TyRef,
+    AttrSetTy, OutputTy, PrimitiveTy, TyRef,
 };
 use proptest::prelude::{
     any, prop, prop_assert_eq, prop_compose, prop_oneof, proptest, BoxedStrategy, Just,
@@ -142,7 +142,7 @@ fn non_type_modifying_transform(text: NixTextStr) -> impl Strategy<Value = NixTe
     ]
 }
 
-fn text_from_ty(ty: &ArcTy) -> impl Strategy<Value = NixTextStr> {
+fn text_from_ty(ty: &OutputTy) -> impl Strategy<Value = NixTextStr> {
     let inner = match ty {
         OutputTy::Primitive(primitive_ty) => prim_ty_to_string(*primitive_ty).boxed(),
         OutputTy::List(inner_ref) => {
@@ -206,7 +206,7 @@ fn text_from_ty(ty: &ArcTy) -> impl Strategy<Value = NixTextStr> {
 
 fn attr_strat(
     inner: impl Strategy<Value = (TyRef, NixTextStr)>,
-) -> impl Strategy<Value = (ArcTy, NixTextStr)> {
+) -> impl Strategy<Value = (OutputTy, NixTextStr)> {
     let single_attr = prop::collection::vec((arb_smol_str_ident(), inner), 1..5).prop_filter_map(
         "duplicate ident names",
         |elems| {
@@ -267,7 +267,7 @@ fn prim_assert_builtin(prim: PrimitiveTy) -> &'static str {
 
 fn func_strat<S: Strategy<Value = (TyRef, NixTextStr)> + Clone>(
     inner: S,
-) -> impl Strategy<Value = (ArcTy, NixTextStr)> {
+) -> impl Strategy<Value = (OutputTy, NixTextStr)> {
     // "fully_known" — param is a primitive, constrained via assertion builtin.
     // Applying `__pbt_assert_<prim> __pbt_p` forces `__pbt_p <: prim` through
     // application contravariance, reliably constraining the param type.
@@ -309,7 +309,7 @@ fn func_strat<S: Strategy<Value = (TyRef, NixTextStr)> + Clone>(
     prop_oneof![fully_known, generic]
 }
 
-fn arb_nix_text(args: RecursiveParams) -> impl Strategy<Value = (ArcTy, NixTextStr)> {
+fn arb_nix_text(args: RecursiveParams) -> impl Strategy<Value = (OutputTy, NixTextStr)> {
     let leaf = any::<PrimitiveTy>()
         .prop_flat_map(|prim| (Just(OutputTy::Primitive(prim)), prim_ty_to_string(prim)));
 
@@ -339,8 +339,8 @@ fn arb_nix_text(args: RecursiveParams) -> impl Strategy<Value = (ArcTy, NixTextS
     )
 }
 
-fn arb_nix_text_from_ty() -> impl Strategy<Value = (ArcTy, NixTextStr)> {
-    any::<ArcTy>()
+fn arb_nix_text_from_ty() -> impl Strategy<Value = (OutputTy, NixTextStr)> {
+    any::<OutputTy>()
         .prop_filter(
             "Skip types that can't be precisely generated as Nix code",
             |ty| !ty.contains_union_or_intersection() && !ty.has_non_primitive_lambda_param(),
@@ -354,14 +354,14 @@ fn arb_nix_text_from_ty() -> impl Strategy<Value = (ArcTy, NixTextStr)> {
 
 /// Primitives with arithmetic/boolean operations, optionally wrapped in
 /// let-bindings or attrset field selection.
-fn arb_primitive() -> impl Strategy<Value = (ArcTy, NixTextStr)> {
+fn arb_primitive() -> impl Strategy<Value = (OutputTy, NixTextStr)> {
     any::<PrimitiveTy>()
         .prop_flat_map(|prim| (Just(OutputTy::Primitive(prim)), prim_ty_to_string(prim)))
         .prop_flat_map(|(ty, text)| (Just(ty), non_type_modifying_transform(text)))
 }
 
 /// Lists and attrsets of primitives, including `//` merging.
-fn arb_structural() -> impl Strategy<Value = (ArcTy, NixTextStr)> {
+fn arb_structural() -> impl Strategy<Value = (OutputTy, NixTextStr)> {
     let leaf = any::<PrimitiveTy>()
         .prop_flat_map(|prim| (Just(OutputTy::Primitive(prim)), prim_ty_to_string(prim)))
         .prop_map(|(ty, text)| (TyRef::from(ty), text));
@@ -376,7 +376,7 @@ fn arb_structural() -> impl Strategy<Value = (ArcTy, NixTextStr)> {
 
 /// Lambdas (assertion-constrained + generic) with primitive or structural
 /// bodies. Tests generalization, extrusion, and early canonicalization.
-fn arb_lambda() -> impl Strategy<Value = (ArcTy, NixTextStr)> {
+fn arb_lambda() -> impl Strategy<Value = (OutputTy, NixTextStr)> {
     let leaf = any::<PrimitiveTy>()
         .prop_flat_map(|prim| (Just(OutputTy::Primitive(prim)), prim_ty_to_string(prim)))
         .prop_map(|(ty, text)| (TyRef::from(ty), text));
@@ -396,9 +396,9 @@ fn arb_lambda() -> impl Strategy<Value = (ArcTy, NixTextStr)> {
 
 /// Combined strategy: full recursive generation + type-directed generation.
 /// Lower case count for breadth coverage across all type forms.
-fn arb_combined() -> impl Strategy<Value = (ArcTy, NixTextStr)> {
+fn arb_combined() -> impl Strategy<Value = (OutputTy, NixTextStr)> {
     // Weight toward arb_nix_text (always succeeds) since arb_nix_text_from_ty
-    // has a high rejection rate — randomly generated ArcTy values often contain
+    // has a high rejection rate — randomly generated OutputTy values often contain
     // unions/intersections or non-primitive lambda params that get filtered out.
     prop_oneof![
         9 => arb_nix_text(RecursiveParams {

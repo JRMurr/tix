@@ -1,4 +1,4 @@
-use crate::{ArcTy, AttrSetTy, OutputTy, PrimitiveTy, Substitutions, TyRef};
+use crate::{AttrSetTy, OutputTy, PrimitiveTy, Substitutions, TyRef};
 use proptest::{
     prelude::{any, prop, prop_oneof, Arbitrary, BoxedStrategy, Just, Strategy},
     prop_compose,
@@ -12,7 +12,7 @@ pub struct RecursiveParams {
     pub expected_branch_size: u32,
 }
 
-fn arb_arc_ty(args: RecursiveParams) -> impl Strategy<Value = ArcTy> {
+fn arb_arc_ty(args: RecursiveParams) -> impl Strategy<Value = OutputTy> {
     let leaf = any::<PrimitiveTy>().prop_map(OutputTy::Primitive);
 
     leaf.prop_recursive(

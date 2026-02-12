@@ -254,11 +254,8 @@ impl ModuleScopes {
 /// Name resolution of all references.
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct NameResolution {
-    // `None` value for unresolved names.
+    /// `None` value for unresolved names.
     resolve_map: HashMap<ExprId, Option<ResolveResult>>,
-    // // All names from the common pattern `inherit (builtins) ...`.
-    // // This is used for tracking builtins names even through aliasing.
-    // inherited_builtins: HashSet<NameId>,
 }
 
 #[salsa::tracked]
@@ -298,30 +295,17 @@ impl NameResolution {
 
 #[derive(Debug)]
 struct NameDependencies {
-    edges: Vec<(NameId, NameId)>, // (from, to)
-    // dep_graph: DepGraph,
+    edges: Vec<(NameId, NameId)>,
     name_to_expr: HashMap<NameId, ExprId>,
-    // name_to_node_id: HashMap<NameId, NodeIndex<DefaultIx>>,
 }
 
 impl NameDependencies {
     pub fn new(module: &Module, name_res: &NameResolution) -> Self {
-        // let num_names = module.names.len(); // number of nodes
-        let num_refs = name_res.resolve_map.len(); // upper bound on the number of edges
-
-        // let mut dep_graph = DepGraph::with_capacity(num_names, num_refs);
-        // let mut name_to_node_id = HashMap::new();
-
-        // for (name_id, _) in module.names() {
-        //     let node_id = dep_graph.add_node(());
-        //     name_to_node_id.insert(name_id, node_id);
-        // }
+        let num_refs = name_res.resolve_map.len();
 
         let mut name_deps = Self {
             edges: Vec::with_capacity(num_refs),
-            // dep_graph,
             name_to_expr: HashMap::new(),
-            // name_to_node_id,
         };
 
         name_deps.traverse_expr(module, name_res, module.entry_expr, None);

@@ -47,9 +47,6 @@ pub enum OutputTy {
 #[debug("{_0:?}")]
 pub struct TyRef(pub Arc<OutputTy>);
 
-/// The canonical output type. This is what InferenceResult maps names/exprs to.
-pub type ArcTy = OutputTy;
-
 impl From<OutputTy> for TyRef {
     fn from(value: OutputTy) -> Self {
         TyRef(Arc::new(value))
@@ -157,7 +154,7 @@ impl OutputTy {
     /// Collect free type variables in order of first appearance, deduplicated.
     pub fn free_type_vars(&self) -> Vec<u32> {
         let mut result = Vec::new();
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = rustc_hash::FxHashSet::default();
         self.collect_free_type_vars(&mut result, &mut seen);
         result
     }
@@ -165,7 +162,7 @@ impl OutputTy {
     fn collect_free_type_vars(
         &self,
         result: &mut Vec<u32>,
-        seen: &mut std::collections::HashSet<u32>,
+        seen: &mut rustc_hash::FxHashSet<u32>,
     ) {
         match self {
             OutputTy::TyVar(x) => {
@@ -289,6 +286,9 @@ impl fmt::Display for PrimitiveTy {
             PrimitiveTy::String => write!(f, "string"),
             PrimitiveTy::Path => write!(f, "path"),
             PrimitiveTy::Uri => write!(f, "uri"),
+            // Number displays as "int | float" to match user expectations. This is
+            // distinct from OutputTy::Union([Int, Float]) which would be structurally
+            // different but semantically equivalent in display.
             PrimitiveTy::Number => write!(f, "int | float"),
         }
     }
@@ -326,7 +326,7 @@ impl AttrSetTy<TyRef> {
     /// Collect free type variables in order of first appearance, deduplicated.
     pub fn free_type_vars(&self) -> Vec<u32> {
         let mut result = Vec::new();
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = rustc_hash::FxHashSet::default();
         for v in self.fields.values() {
             for var in v.0.free_type_vars() {
                 if seen.insert(var) {

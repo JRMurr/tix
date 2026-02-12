@@ -103,7 +103,7 @@ impl CheckCtx<'_> {
                 }))
             }
 
-            Expr::BinOp { lhs, rhs, op } => self.infer_bin_op(e, lhs, rhs, &op),
+            Expr::BinOp { lhs, rhs, op } => self.infer_bin_op(lhs, rhs, &op),
 
             Expr::IfThenElse {
                 cond,
@@ -127,7 +127,7 @@ impl CheckCtx<'_> {
             }
 
             Expr::LetIn { bindings, body } => {
-                self.infer_bindings(&bindings, e)?;
+                self.infer_bindings(&bindings)?;
                 self.infer_expr(body)
             }
 
@@ -135,7 +135,7 @@ impl CheckCtx<'_> {
                 is_rec: _,
                 bindings,
             } => {
-                let attr_ty = self.infer_bindings_to_attrset(&bindings, e)?;
+                let attr_ty = self.infer_bindings_to_attrset(&bindings)?;
                 Ok(self.alloc_concrete(Ty::AttrSet(attr_ty)))
             }
 
@@ -317,7 +317,6 @@ impl CheckCtx<'_> {
 
     fn infer_bin_op(
         &mut self,
-        _e: ExprId,
         lhs: ExprId,
         rhs: ExprId,
         op: &BinOP,
@@ -420,7 +419,7 @@ impl CheckCtx<'_> {
 
     /// Infer bindings (for let-in or attrset bodies). Returns nothing for let-in,
     /// returns the AttrSetTy for attrsets.
-    fn infer_bindings(&mut self, bindings: &Bindings, _e: ExprId) -> Result<(), InferenceError> {
+    fn infer_bindings(&mut self, bindings: &Bindings) -> Result<(), InferenceError> {
         // Infer inherit-from expressions.
         for &from_expr in bindings.inherit_froms.iter() {
             self.infer_expr(from_expr)?;
@@ -450,7 +449,6 @@ impl CheckCtx<'_> {
     fn infer_bindings_to_attrset(
         &mut self,
         bindings: &Bindings,
-        _e: ExprId,
     ) -> Result<AttrSetTy<TyId>, InferenceError> {
         for &from_expr in bindings.inherit_froms.iter() {
             self.infer_expr(from_expr)?;

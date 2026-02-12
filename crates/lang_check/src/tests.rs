@@ -1,6 +1,6 @@
 use indoc::indoc;
 use lang_ast::{module, tests::TestDatabase, Module};
-use lang_ty::{arc_ty, ArcTy, PrimitiveTy};
+use lang_ty::{arc_ty, OutputTy, PrimitiveTy};
 
 use crate::{InferenceError, InferenceResult};
 
@@ -12,7 +12,7 @@ pub fn check_str(src: &str) -> (Module, Result<InferenceResult, InferenceError>)
     (module, check_file(&db, file))
 }
 
-pub fn get_inferred_root(src: &str) -> ArcTy {
+pub fn get_inferred_root(src: &str) -> OutputTy {
     let (module, inference) = check_str(src);
 
     let inference = inference.expect("No type error");
@@ -31,7 +31,7 @@ pub fn get_check_error(src: &str) -> InferenceError {
 }
 
 #[track_caller]
-pub fn expect_ty_inference(src: &str, expected: ArcTy) {
+pub fn expect_ty_inference(src: &str, expected: OutputTy) {
     let root_ty = get_inferred_root(src);
 
     assert_eq!(root_ty, expected)
@@ -328,11 +328,11 @@ fn type_annotation_mis_match() {
 /// Look up the type of a named binding by its text name.
 /// When the same name has multiple NameIds (e.g. definition + inherit reference),
 /// prefer the version without unions/intersections (the clean early-canonicalized form).
-fn get_name_type(src: &str, name: &str) -> ArcTy {
+fn get_name_type(src: &str, name: &str) -> OutputTy {
     let (module, inference) = check_str(src);
     let inference = inference.expect("No type error");
 
-    let mut best: Option<ArcTy> = None;
+    let mut best: Option<OutputTy> = None;
     for (name_id, name_data) in module.names() {
         if name_data.text == name {
             if let Some(ty) = inference.name_ty_map.get(&name_id) {

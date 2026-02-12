@@ -15,7 +15,7 @@ use comment_parser::{ParsedTy, TypeVarValue};
 use derive_more::Debug;
 use infer_expr::{PendingMerge, PendingOverload};
 use lang_ast::{AstDb, ExprId, Module, NameId, NameResolution, NixFile, OverloadBinOp};
-use lang_ty::{ArcTy, OutputTy, PrimitiveTy, Ty};
+use lang_ty::{OutputTy, PrimitiveTy, Ty};
 use std::collections::{HashMap, HashSet};
 use storage::TypeStorage;
 use thiserror::Error;
@@ -54,7 +54,7 @@ impl From<&u32> for TyId {
 impl From<usize> for TyId {
     #[inline]
     fn from(value: usize) -> Self {
-        (value as u32).into()
+        u32::try_from(value).expect("TyId overflow").into()
     }
 }
 
@@ -67,17 +67,17 @@ impl From<TyId> for usize {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InferenceResult {
-    pub name_ty_map: HashMap<NameId, ArcTy>,
-    pub expr_ty_map: HashMap<ExprId, ArcTy>,
+    pub name_ty_map: HashMap<NameId, OutputTy>,
+    pub expr_ty_map: HashMap<ExprId, OutputTy>,
 }
 
 impl InferenceResult {
-    pub fn ty_for_name(&self, name: NameId) -> ArcTy {
-        self.name_ty_map.get(&name).unwrap().clone()
+    pub fn ty_for_name(&self, name: NameId) -> Option<OutputTy> {
+        self.name_ty_map.get(&name).cloned()
     }
 
-    pub fn ty_for_expr(&self, expr: ExprId) -> ArcTy {
-        self.expr_ty_map.get(&expr).unwrap().clone()
+    pub fn ty_for_expr(&self, expr: ExprId) -> Option<OutputTy> {
+        self.expr_ty_map.get(&expr).cloned()
     }
 }
 
