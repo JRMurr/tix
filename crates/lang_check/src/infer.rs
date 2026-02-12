@@ -335,17 +335,6 @@ impl CheckCtx<'_> {
             }
             self.pending_merges = remaining_merges;
 
-            // Resolve negations.
-            let negations = std::mem::take(&mut self.pending_negations);
-            let mut remaining_negations = Vec::new();
-            for neg_ty in negations {
-                match self.try_resolve_negation(neg_ty)? {
-                    true => made_progress = true,
-                    false => remaining_negations.push(neg_ty),
-                }
-            }
-            self.pending_negations = remaining_negations;
-
             if !made_progress {
                 break;
             }
@@ -358,18 +347,66 @@ impl CheckCtx<'_> {
         let lhs_concrete = self.find_concrete(ov.lhs);
         let rhs_concrete = self.find_concrete(ov.rhs);
 
-        let (Some(lhs_ty), Some(rhs_ty)) = (lhs_concrete, rhs_concrete) else {
-            return Ok(false); // Not enough info yet.
-        };
+        // Full resolution: both operands are concrete.
+        if let (Some(lhs_ty), Some(rhs_ty)) = (&lhs_concrete, &rhs_concrete) {
+            let ret_ty = self
+                .solve_bin_op_types(ov.op, lhs_ty, rhs_ty)
+                .ok_or_else(|| {
+                    InferenceError::InvalidBinOp(ov.op, lhs_ty.clone(), rhs_ty.clone())
+                })?;
 
-        let ret_ty = self
-            .solve_bin_op_types(ov.op, &lhs_ty, &rhs_ty)
-            .ok_or_else(|| InferenceError::InvalidBinOp(ov.op, lhs_ty.clone(), rhs_ty.clone()))?;
+            let ret_id = self.alloc_concrete(ret_ty);
+            self.constrain(ret_id, ov.ret)?;
+            self.constrain(ov.ret, ret_id)?;
+            return Ok(true);
+        }
 
-        let ret_id = self.alloc_concrete(ret_ty);
-        self.constrain(ret_id, ov.ret)?;
-        self.constrain(ov.ret, ret_id)?;
-        Ok(true)
+        // Partial resolution: when one operand is a known numeric type,
+        // constrain the unknown side and result to Number (upper bound only).
+        // This gives e.g. `add 1` → `number -> number` instead of `a -> b`.
+        let lhs_numeric = lhs_concrete
+            .as_ref()
+            .is_some_and(|t| matches!(t, Ty::Primitive(p) if p.is_number()));
+        let rhs_numeric = rhs_concrete
+            .as_ref()
+            .is_some_and(|t| matches!(t, Ty::Primitive(p) if p.is_number()));
+
+        if lhs_numeric || rhs_numeric {
+            let number = self.alloc_prim(PrimitiveTy::Number);
+            // Only constrain the unknown side — the known side is already concrete.
+            if lhs_numeric && rhs_concrete.is_none() {
+                self.constrain(ov.rhs, number)?;
+            }
+            if rhs_numeric && lhs_concrete.is_none() {
+                self.constrain(ov.lhs, number)?;
+            }
+            // Result bounded above by Number. We only add upper bound (not lower)
+            // so that later full resolution can pin to a more specific type like Int.
+            // constrain(Int, Number) succeeds because Int <: Number.
+            self.constrain(ov.ret, number)?;
+        }
+
+        // Partial resolution for + with string/path lhs: the return type of
+        // Nix's + is always the lhs type when lhs is string or path.
+        if ov.op.is_add() {
+            let lhs_is_string = matches!(&lhs_concrete, Some(Ty::Primitive(PrimitiveTy::String)));
+            let lhs_is_path = matches!(&lhs_concrete, Some(Ty::Primitive(PrimitiveTy::Path)));
+
+            if lhs_is_string || lhs_is_path {
+                let ret_prim = if lhs_is_string {
+                    PrimitiveTy::String
+                } else {
+                    PrimitiveTy::Path
+                };
+                let ret_id = self.alloc_prim(ret_prim);
+                // Pin ret to the lhs type in both directions — full resolution
+                // will produce the same type, so this is safe.
+                self.constrain(ret_id, ov.ret)?;
+                self.constrain(ov.ret, ret_id)?;
+            }
+        }
+
+        Ok(false) // Keep deferred for full precision later.
     }
 
     fn try_resolve_merge(&mut self, mg: &PendingMerge) -> Result<bool, InferenceError> {
@@ -393,17 +430,6 @@ impl CheckCtx<'_> {
         self.constrain(merged_id, mg.ret)?;
         self.constrain(mg.ret, merged_id)?;
         Ok(true)
-    }
-
-    fn try_resolve_negation(&mut self, ty_id: TyId) -> Result<bool, InferenceError> {
-        let Some(ty) = self.find_concrete(ty_id) else {
-            return Ok(false);
-        };
-
-        match ty {
-            Ty::Primitive(p) if p.is_number() => Ok(true),
-            _ => Err(InferenceError::InvalidNegation(ty)),
-        }
     }
 
     /// Check if a variable has been pinned to a simple concrete type — i.e. the
@@ -485,15 +511,15 @@ impl CheckCtx<'_> {
             return None;
         };
 
-        // Both numbers — float wins.
+        // Both numbers — float wins, Number stays Number.
         if l.is_number() && r.is_number() {
-            let has_float = l.is_float() || r.is_float();
-            let ret_ty = if has_float {
-                Primitive(PrimitiveTy::Float)
-            } else {
-                lhs.clone()
-            };
-            return Some(ret_ty);
+            if l.is_float() || r.is_float() {
+                return Some(Primitive(PrimitiveTy::Float));
+            }
+            if matches!(l, PrimitiveTy::Number) || matches!(r, PrimitiveTy::Number) {
+                return Some(Primitive(PrimitiveTy::Number));
+            }
+            return Some(lhs.clone()); // both Int
         }
 
         if !op.is_add() {

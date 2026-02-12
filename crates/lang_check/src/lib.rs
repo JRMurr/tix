@@ -122,9 +122,6 @@ pub struct CheckCtx<'db> {
     /// Pending attrset merge constraints to resolve later.
     pending_merges: Vec<PendingMerge>,
 
-    /// Pending negation checks to resolve later.
-    pending_negations: Vec<TyId>,
-
     /// Overloads that couldn't be resolved in their SCC group and should be
     /// re-instantiated per call-site during extrusion.
     /// Maps from operand TyId → list of deferred overloads referencing that var.
@@ -147,7 +144,6 @@ impl<'db> CheckCtx<'db> {
             prim_cache: HashMap::new(),
             pending_overloads: Vec::new(),
             pending_merges: Vec::new(),
-            pending_negations: Vec::new(),
             deferred_overloads: Vec::new(),
             early_canonical: HashMap::new(),
         }

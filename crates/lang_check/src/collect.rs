@@ -81,7 +81,26 @@ impl<'a> StandaloneCanon<'a> {
             .collect();
 
         match concrete.len() {
-            0 => OutputTy::TyVar(var_id.0),
+            0 => {
+                // No concrete lower bounds. If the variable has primitive-only upper
+                // bounds, use them: a value bounded above by Number IS a Number in
+                // output position. This turns `ret <: Number` into `number` instead
+                // of a free type variable.
+                if let Some(v) = self.table.get_var(var_id) {
+                    let prim_uppers: Vec<TyId> = v
+                        .upper_bounds
+                        .iter()
+                        .copied()
+                        .filter(|&ub| {
+                            matches!(self.table.get(ub), TypeEntry::Concrete(Ty::Primitive(_)))
+                        })
+                        .collect();
+                    if !prim_uppers.is_empty() {
+                        return self.expand_bounds_as_intersection(&prim_uppers, var_id);
+                    }
+                }
+                OutputTy::TyVar(var_id.0)
+            }
             1 => concrete.into_iter().next().unwrap(),
             _ => OutputTy::Union(concrete.into_iter().map(TyRef::from).collect()),
         }
@@ -383,7 +402,29 @@ impl<'db> Collector<'db> {
             .collect();
 
         match concrete.len() {
-            0 => OutputTy::TyVar(var_id.0),
+            0 => {
+                // No concrete lower bounds. If the variable has primitive-only upper
+                // bounds, use them: a value bounded above by Number IS a Number in
+                // output position. This turns `ret <: Number` into `number` instead
+                // of a free type variable.
+                if let Some(v) = self.ctx.table.get_var(var_id) {
+                    let prim_uppers: Vec<TyId> = v
+                        .upper_bounds
+                        .iter()
+                        .copied()
+                        .filter(|&ub| {
+                            matches!(
+                                self.ctx.table.get(ub),
+                                TypeEntry::Concrete(Ty::Primitive(_))
+                            )
+                        })
+                        .collect();
+                    if !prim_uppers.is_empty() {
+                        return self.expand_bounds_as_intersection(&prim_uppers, var_id);
+                    }
+                }
+                OutputTy::TyVar(var_id.0)
+            }
             1 => concrete.into_iter().next().unwrap(),
             _ => OutputTy::Union(concrete.into_iter().map(TyRef::from).collect()),
         }

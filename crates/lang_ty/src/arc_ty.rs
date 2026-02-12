@@ -289,6 +289,7 @@ impl fmt::Display for PrimitiveTy {
             PrimitiveTy::String => write!(f, "string"),
             PrimitiveTy::Path => write!(f, "path"),
             PrimitiveTy::Uri => write!(f, "uri"),
+            PrimitiveTy::Number => write!(f, "number"),
         }
     }
 }

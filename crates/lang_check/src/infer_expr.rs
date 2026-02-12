@@ -201,9 +201,11 @@ impl CheckCtx<'_> {
                         Ok(ty)
                     }
                     rnix::ast::UnaryOpKind::Negate => {
-                        // Negation: we need to verify the operand is a number.
-                        // We check this at solve time by inspecting the concrete type.
-                        self.pending_negations.push(ty);
+                        // Negation: constrain the operand to Number immediately.
+                        // This catches errors like `-"hello"` at inference time and
+                        // gives `a: -a` the type `number -> number`.
+                        let number = self.alloc_prim(PrimitiveTy::Number);
+                        self.constrain(ty, number)?;
                         Ok(ty)
                     }
                 }
@@ -283,6 +285,22 @@ impl CheckCtx<'_> {
         match op {
             BinOP::Overload(overload_op) => {
                 let ret_ty = self.new_var();
+
+                // For non-+ arithmetic ops (-, *, /), immediately constrain
+                // both operands and the result to Number. This gives partial
+                // type information even when operands are still polymorphic
+                // (e.g. `a: b: a - b` → `number -> number -> number`).
+                // + is excluded because it's also valid for strings and paths.
+                if !overload_op.is_add() {
+                    let number = self.alloc_prim(PrimitiveTy::Number);
+                    self.constrain(lhs_ty, number)?;
+                    self.constrain(rhs_ty, number)?;
+                    self.constrain(ret_ty, number)?;
+                }
+
+                // Still push the overload for deferred full resolution, which
+                // will pin to the precise type (int vs float) when both
+                // operands become concrete.
                 self.pending_overloads.push(PendingOverload {
                     op: *overload_op,
                     lhs: lhs_ty,

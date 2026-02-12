@@ -107,6 +107,9 @@ macro_rules! arc_ty {
     (Uri) => {
         $crate::OutputTy::Primitive($crate::PrimitiveTy::Uri)
     };
+    (Number) => {
+        $crate::OutputTy::Primitive($crate::PrimitiveTy::Number)
+    };
     // -- TyVar syntax: TyVar(N) --------------------------------------------
     (# $n:expr) => {
         $crate::OutputTy::TyVar($n)

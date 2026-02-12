@@ -12,6 +12,21 @@
   `test_structural_typing`, `test_lambda_typing`, and `test_combined_typing` (lower
   case count for breadth).
 
+### Number Primitive + Partial Resolution
+
+- Within the same SCC group, multiple uses of a polymorphic function (like `apply`)
+  share the same type variables. This means partial resolution constraints from one
+  use site (e.g. `apply add 2` adds Number bounds) contaminate other use sites
+  (e.g. `apply (x: x + "hi") "foo"` also shows `number -> number` instead of `string`).
+  Per-use instantiation within SCC groups would fix this but isn't currently implemented.
+
+- The `Number` primitive is synthetic — it doesn't correspond to a real Nix type.
+  The comment parser doesn't recognize `number` in type annotations yet (deferred).
+
+- The upper-bound fallback in canonicalization (variables with only primitive upper
+  bounds display as that primitive in positive position) may be too aggressive in
+  some edge cases. Monitor for false positives in PBT.
+
 ### Overload Resolution + Extrusion
 
 - `find_pinned_concrete`: a targeted fix for variables that were fully resolved by

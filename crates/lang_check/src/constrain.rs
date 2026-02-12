@@ -87,6 +87,8 @@ impl CheckCtx<'_> {
 
             // Identical primitives are subtypes of each other.
             (Ty::Primitive(p1), Ty::Primitive(p2)) if p1 == p2 => Ok(()),
+            // Primitive subtyping: Int <: Number, Float <: Number.
+            (Ty::Primitive(p1), Ty::Primitive(p2)) if p1.is_subtype_of(p2) => Ok(()),
 
             // Type mismatch.
             _ => Err(InferenceError::TypeMismatch(sub.clone(), sup.clone())),

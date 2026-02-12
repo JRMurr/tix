@@ -131,6 +131,7 @@ macro_rules! synth_ty {
     (@ty $ctx:expr; String) => { $ctx.alloc_prim(PrimitiveTy::String) };
     (@ty $ctx:expr; Null) => { $ctx.alloc_prim(PrimitiveTy::Null) };
     (@ty $ctx:expr; Path) => { $ctx.alloc_prim(PrimitiveTy::Path) };
+    (@ty $ctx:expr; Number) => { $ctx.alloc_prim(PrimitiveTy::Number) };
     // Variable reference (catch-all — must be last)
     (@ty $ctx:expr; $var:ident) => { $var };
 }
@@ -198,9 +199,7 @@ impl CheckCtx<'_> {
             // Priority 3 — Value constants
             // =================================================================
             "langVersion" | "currentTime" => Ok(self.alloc_prim(PrimitiveTy::Int)),
-            "nixVersion" | "currentSystem" | "storeDir" => {
-                Ok(self.alloc_prim(PrimitiveTy::String))
-            }
+            "nixVersion" | "currentSystem" | "storeDir" => Ok(self.alloc_prim(PrimitiveTy::String)),
 
             // Unknown builtins get a fresh type variable — graceful degradation.
             _ => Ok(self.new_var()),
