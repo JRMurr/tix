@@ -1,3 +1,4 @@
+use std::fmt;
 use std::sync::Arc;
 
 use derive_more::Debug;
@@ -180,6 +181,122 @@ impl OutputTy {
         }
 
         set
+    }
+}
+
+// ==============================================================================
+// Display — human-readable type printing
+// ==============================================================================
+//
+// Type variables are rendered as lowercase letters (a, b, c, ..., z, a1, b1, ...).
+// Operator precedence is handled by checking whether parentheses are needed:
+//   `->` is right-associative and lowest precedence
+//   `|` is next
+//   `&` is next
+//   atoms (primitives, lists, attrsets, type vars) are highest
+
+/// Convert a type variable index to a letter-based name: 0→a, 1→b, ..., 25→z, 26→a1, ...
+fn tyvar_name(idx: u32) -> String {
+    let letter = (b'a' + (idx % 26) as u8) as char;
+    let suffix = idx / 26;
+    if suffix == 0 {
+        letter.to_string()
+    } else {
+        format!("{letter}{suffix}")
+    }
+}
+
+impl fmt::Display for OutputTy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            OutputTy::TyVar(x) => write!(f, "{}", tyvar_name(*x)),
+            OutputTy::Primitive(p) => write!(f, "{p}"),
+            OutputTy::List(inner) => write!(f, "[{inner}]"),
+            OutputTy::Lambda { param, body } => {
+                // Parenthesize the param if it's a lambda, union, or intersection
+                // to avoid ambiguity (-> is right-associative).
+                let needs_parens = matches!(
+                    &*param.0,
+                    OutputTy::Lambda { .. } | OutputTy::Union(_) | OutputTy::Intersection(_)
+                );
+                if needs_parens {
+                    write!(f, "({param}) -> {body}")
+                } else {
+                    write!(f, "{param} -> {body}")
+                }
+            }
+            OutputTy::AttrSet(attr) => write!(f, "{attr}"),
+            OutputTy::Union(members) => {
+                for (i, m) in members.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, " | ")?;
+                    }
+                    // Parenthesize lambdas inside unions to avoid ambiguity.
+                    let needs_parens = matches!(&*m.0, OutputTy::Lambda { .. });
+                    if needs_parens {
+                        write!(f, "({m})")?;
+                    } else {
+                        write!(f, "{m}")?;
+                    }
+                }
+                Ok(())
+            }
+            OutputTy::Intersection(members) => {
+                for (i, m) in members.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, " & ")?;
+                    }
+                    // Parenthesize lambdas and unions inside intersections.
+                    let needs_parens =
+                        matches!(&*m.0, OutputTy::Lambda { .. } | OutputTy::Union(_));
+                    if needs_parens {
+                        write!(f, "({m})")?;
+                    } else {
+                        write!(f, "{m}")?;
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl fmt::Display for TyRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&*self.0, f)
+    }
+}
+
+impl fmt::Display for PrimitiveTy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PrimitiveTy::Null => write!(f, "null"),
+            PrimitiveTy::Bool => write!(f, "bool"),
+            PrimitiveTy::Int => write!(f, "int"),
+            PrimitiveTy::Float => write!(f, "float"),
+            PrimitiveTy::String => write!(f, "string"),
+            PrimitiveTy::Path => write!(f, "path"),
+            PrimitiveTy::Uri => write!(f, "uri"),
+        }
+    }
+}
+
+impl fmt::Display for AttrSetTy<TyRef> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{{ ")?;
+        for (i, (k, v)) in self.fields.iter().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            write!(f, "{k}: {v}")?;
+        }
+        if self.open {
+            if !self.fields.is_empty() {
+                write!(f, ", ")?;
+            }
+            write!(f, "...")?;
+        }
+        write!(f, " }}")
     }
 }
 
