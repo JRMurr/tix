@@ -403,3 +403,28 @@ test_case!(
     "__pbt_assert_int",
     (Int -> Int)
 );
+
+// ==============================================================================
+// Nix builtin type inference
+// ==============================================================================
+
+// Global builtins (available without `builtins.` prefix).
+test_case!(builtin_tostring, "toString 42", String);
+test_case!(builtin_isnull, "isNull null", Bool);
+// `throw` returns a fresh type variable — the return type is unconstrained.
+test_case!(builtin_throw, "throw \"err\"", (# 0));
+
+// Builtins accessed via the `builtins` attrset.
+test_case!(builtin_head, "builtins.head [1 2 3]", Int);
+test_case!(builtin_length, "builtins.length [1 2]", Int);
+test_case!(builtin_map, "builtins.map (x: x + 1) [1 2]", [Int]);
+test_case!(builtin_filter, "builtins.filter (x: x == 1) [1 2]", [Int]);
+test_case!(builtin_tail, "builtins.tail [''a'' ''b'']", [String]);
+test_case!(builtin_attr_names, "builtins.attrNames { a = 1; }", [String]);
+
+// Polymorphism through let — each use of `h` gets independent type vars.
+test_case!(
+    builtin_polymorphic_let,
+    "let h = builtins.head; in { a = h [1]; b = h [''x'']; }",
+    { "a": Int, "b": String }
+);

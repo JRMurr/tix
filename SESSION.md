@@ -33,6 +33,17 @@
   extruding the original, and that extruded reference picks up use-site bounds. A full
   fix would propagate early-canonical types through expression-level canonicalization.
 
+### Builtin Types
+
+- Deferred builtins (arithmetic `add`/`sub`/`mul`/`div`, `baseNameOf`/`dirOf`,
+  `derivation`, `genericClosure`, fetch functions) return fresh type variables
+  because they need type system extensions (`number` union, `stringish` union,
+  complex structural types). They won't cause errors but provide no type info.
+
+- The `builtins` attrset is synthesized fresh on every reference to the name
+  `"builtins"`. This is correct but potentially expensive if `builtins` is
+  referenced many times. Could cache the attrset structure and extrude it.
+
 ### Missing Features
 
 - `with` expression support

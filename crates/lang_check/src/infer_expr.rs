@@ -244,6 +244,7 @@ impl CheckCtx<'_> {
                 match var_name.as_str() {
                     "true" | "false" => Ok(self.alloc_prim(PrimitiveTy::Bool)),
                     "null" => Ok(self.alloc_prim(PrimitiveTy::Null)),
+                    "builtins" => self.synth_builtins_attrset(),
                     #[cfg(test)]
                     name if name.starts_with("__pbt_assert_") => {
                         self.infer_pbt_assert_builtin(name)
@@ -264,9 +265,7 @@ impl CheckCtx<'_> {
                 ResolveResult::WithExprs(_) => {
                     todo!("handle with exprs in reference")
                 }
-                ResolveResult::Builtin(_name) => {
-                    todo!("handle builtin exprs in reference")
-                }
+                ResolveResult::Builtin(name) => self.synthesize_builtin(name),
             },
         }
     }

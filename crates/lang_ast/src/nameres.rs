@@ -50,11 +50,40 @@ pub enum ResolveResult {
     /// Reference to a Name.
     Definition(NameId),
     /// Reference to a builtin value.
-    #[allow(dead_code)]
     Builtin(&'static str),
     /// Attr of one of some `with` expressions, from innermost to outermost.
     /// It must not be empty.
     WithExprs(Vec<ExprId>),
+}
+
+// ==============================================================================
+// Builtin Metadata
+// ==============================================================================
+
+/// Returns the static name string if `name` is a known global builtin
+/// (i.e. available without the `builtins.` prefix in Nix).
+pub fn lookup_global_builtin(name: &str) -> Option<&'static str> {
+    match name {
+        "abort" => Some("abort"),
+        "baseNameOf" => Some("baseNameOf"),
+        "derivation" => Some("derivation"),
+        "dirOf" => Some("dirOf"),
+        "fetchGit" => Some("fetchGit"),
+        "fetchMercurial" => Some("fetchMercurial"),
+        "fetchTarball" => Some("fetchTarball"),
+        "fetchTree" => Some("fetchTree"),
+        "fetchurl" => Some("fetchurl"),
+        "fromTOML" => Some("fromTOML"),
+        "import" => Some("import"),
+        "isNull" => Some("isNull"),
+        "map" => Some("map"),
+        "placeholder" => Some("placeholder"),
+        "removeAttrs" => Some("removeAttrs"),
+        "scopedImport" => Some("scopedImport"),
+        "throw" => Some("throw"),
+        "toString" => Some("toString"),
+        _ => None,
+    }
 }
 
 #[salsa::tracked]
@@ -103,11 +132,9 @@ impl ModuleScopes {
             return Some(ResolveResult::Definition(*name));
         }
         // 2. Global builtin names.
-        // if let Some((name, b)) = ALL_BUILTINS.get_entry(name) {
-        //     if b.is_global {
-        //         return Some(ResolveResult::Builtin(name));
-        //     }
-        // }
+        if let Some(static_name) = lookup_global_builtin(name) {
+            return Some(ResolveResult::Builtin(static_name));
+        }
         // 3. "with" exprs.
         let withs = self
             .ancestors(scope)
@@ -327,7 +354,9 @@ impl NameDependencies {
                         // scc but would be nice to do from the beginning
                         self.edges.push((curr_binding, *id));
                     }
-                    ResolveResult::Builtin(_) => todo!(),
+                    ResolveResult::Builtin(_) => {
+                        // Builtins don't depend on user-defined names; nothing to record.
+                    }
                     ResolveResult::WithExprs(_vec) => todo!(),
                 }
             }

@@ -394,13 +394,16 @@ fn arb_lambda() -> impl Strategy<Value = (ArcTy, NixTextStr)> {
 /// Combined strategy: full recursive generation + type-directed generation.
 /// Lower case count for breadth coverage across all type forms.
 fn arb_combined() -> impl Strategy<Value = (ArcTy, NixTextStr)> {
+    // Weight toward arb_nix_text (always succeeds) since arb_nix_text_from_ty
+    // has a high rejection rate — randomly generated ArcTy values often contain
+    // unions/intersections or non-primitive lambda params that get filtered out.
     prop_oneof![
-        arb_nix_text(RecursiveParams {
+        9 => arb_nix_text(RecursiveParams {
             depth: 8,
             desired_size: 256,
             expected_branch_size: 3,
         }),
-        arb_nix_text_from_ty()
+        1 => arb_nix_text_from_ty()
     ]
 }
 
@@ -430,7 +433,9 @@ proptest! {
 
 proptest! {
     #![proptest_config(ProptestConfig {
-        cases: 64, .. ProptestConfig::default()
+        cases: 64,
+        max_local_rejects: 500_000,
+        .. ProptestConfig::default()
     })]
 
     #[test]

@@ -1,3 +1,4 @@
+mod builtins;
 pub(crate) mod collect;
 mod constrain;
 mod infer;
