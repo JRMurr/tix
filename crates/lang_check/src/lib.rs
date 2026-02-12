@@ -14,7 +14,7 @@ use comment_parser::{ParsedTy, TypeVarValue};
 use derive_more::Debug;
 use infer_expr::{PendingMerge, PendingOverload};
 use lang_ast::{AstDb, ExprId, Module, NameId, NameResolution, NixFile, OverloadBinOp};
-use lang_ty::{ArcTy, PrimitiveTy, Ty};
+use lang_ty::{ArcTy, OutputTy, PrimitiveTy, Ty};
 use std::collections::{HashMap, HashSet};
 use storage::TypeStorage;
 use thiserror::Error;
@@ -128,6 +128,11 @@ pub struct CheckCtx<'db> {
     /// re-instantiated per call-site during extrusion.
     /// Maps from operand TyId → list of deferred overloads referencing that var.
     deferred_overloads: Vec<PendingOverload>,
+
+    /// Early-canonicalized types for names, captured at generalization time
+    /// before use-site extrusions contaminate polymorphic variables with
+    /// concrete bounds.
+    early_canonical: HashMap<NameId, OutputTy>,
 }
 
 impl<'db> CheckCtx<'db> {
@@ -143,6 +148,7 @@ impl<'db> CheckCtx<'db> {
             pending_merges: Vec::new(),
             pending_negations: Vec::new(),
             deferred_overloads: Vec::new(),
+            early_canonical: HashMap::new(),
         }
     }
 

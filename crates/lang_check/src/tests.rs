@@ -324,3 +324,66 @@ fn type_annotation_mis_match() {
 
     expect_inference_error(file, InferenceError::TypeMismatch(int_ty, string_ty))
 }
+
+/// Look up the type of a named binding by its text name.
+/// When the same name has multiple NameIds (e.g. definition + inherit reference),
+/// prefer the version without unions/intersections (the clean early-canonicalized form).
+fn get_name_type(src: &str, name: &str) -> ArcTy {
+    let (module, inference) = check_str(src);
+    let inference = inference.expect("No type error");
+
+    let mut best: Option<ArcTy> = None;
+    for (name_id, name_data) in module.names() {
+        if name_data.text == name {
+            if let Some(ty) = inference.name_ty_map.get(&name_id) {
+                let is_better = match &best {
+                    None => true,
+                    Some(prev) => {
+                        !ty.contains_union_or_intersection()
+                            && prev.contains_union_or_intersection()
+                    }
+                };
+                if is_better {
+                    best = Some(ty.clone());
+                }
+            }
+        }
+    }
+    best.unwrap_or_else(|| panic!("Name '{name}' not found in module"))
+}
+
+/// Early canonicalization captures the polymorphic type of `apply` before
+/// use-site extrusions add concrete bounds (`int`, `string`) from call sites
+/// like `apply add 2` or `apply (x: x + "hi") "foo"`.
+#[test]
+fn apply_polymorphism() {
+    let file = indoc! { "
+        let
+            apply = fn: args: fn args;
+            add = a: b: a + b;
+            addTwo = apply add 2;
+            strApply = apply (x: x + \"hi\") \"foo\";
+        in
+        {
+            inherit apply addTwo strApply;
+        }
+    " };
+
+    // `apply` should have the clean polymorphic type (a -> b) -> a -> b,
+    // not contaminated by concrete bounds from use sites.
+    let apply_ty = get_name_type(file, "apply");
+    assert!(
+        !apply_ty.contains_union_or_intersection(),
+        "apply should be purely polymorphic, got: {apply_ty}"
+    );
+    // Normalized: (a -> b) -> a -> b, i.e. Lambda { param: Lambda(0 -> 1), body: Lambda(0 -> 1) }
+    let expected = arc_ty!(((# 0) -> (# 1)) -> (# 0) -> (# 1));
+    assert_eq!(apply_ty, expected, "apply should be (a -> b) -> a -> b");
+
+    // `addTwo` and `strApply` should be polymorphic (a -> b).
+    let add_two_ty = get_name_type(file, "addTwo");
+    assert_eq!(add_two_ty, arc_ty!((# 0) -> (# 1)));
+
+    let str_apply_ty = get_name_type(file, "strApply");
+    assert_eq!(str_apply_ty, arc_ty!((# 0) -> (# 1)));
+}

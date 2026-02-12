@@ -1,6 +1,7 @@
 pub mod arc_ty;
 mod attrset;
 mod primitive;
+pub mod simplify;
 
 #[cfg(any(test, feature = "proptest_support"))]
 pub mod arbitrary;

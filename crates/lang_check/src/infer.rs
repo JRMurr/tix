@@ -11,9 +11,10 @@ use std::collections::HashMap;
 use comment_parser::parse_and_collect;
 
 use super::{CheckCtx, InferenceError, InferenceResult, TyId};
-use crate::collect::Collector;
+use crate::collect::{canonicalize_standalone, Collector};
 use crate::infer_expr::{PendingMerge, PendingOverload};
 use crate::storage::TypeEntry;
+use lang_ty::simplify::simplify;
 use lang_ast::nameres::{DependentGroup, GroupedDefs};
 use lang_ast::OverloadBinOp;
 use lang_ty::{AttrSetTy, PrimitiveTy, Ty};
@@ -108,6 +109,17 @@ impl CheckCtx<'_> {
         // per call-site during extrusion.
         let remaining = std::mem::take(&mut self.pending_overloads);
         self.deferred_overloads.extend(remaining);
+
+        // Snapshot each name's canonical type NOW, before exit_level and before
+        // use-site extrusions add concrete bounds (int, string, etc.) back onto
+        // polymorphic variables via constrain(). This preserves the clean
+        // polymorphic form (e.g. `(a -> b) -> a -> b` for `apply`).
+        for &(name_id, ty) in &inferred {
+            let poly_ty = self.resolve_to_concrete_id(ty).unwrap_or(ty);
+            let output = canonicalize_standalone(&self.table, poly_ty, true);
+            let simplified = simplify(&output);
+            self.early_canonical.insert(name_id, simplified);
+        }
 
         self.table.exit_level();
 

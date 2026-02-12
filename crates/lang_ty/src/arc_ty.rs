@@ -157,30 +157,41 @@ impl OutputTy {
         }
     }
 
-    /// Collect free type variables in order of first appearance.
+    /// Collect free type variables in order of first appearance, deduplicated.
     pub fn free_type_vars(&self) -> Vec<u32> {
-        let mut set = Vec::new();
+        let mut result = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        self.collect_free_type_vars(&mut result, &mut seen);
+        result
+    }
+
+    fn collect_free_type_vars(&self, result: &mut Vec<u32>, seen: &mut std::collections::HashSet<u32>) {
         match self {
             OutputTy::TyVar(x) => {
-                set.push(*x);
+                if seen.insert(*x) {
+                    result.push(*x);
+                }
             }
-            OutputTy::List(inner) => set.extend(&inner.0.free_type_vars()),
+            OutputTy::List(inner) => inner.0.collect_free_type_vars(result, seen),
             OutputTy::Lambda { param, body } => {
-                set.extend(&param.0.free_type_vars());
-                set.extend(&body.0.free_type_vars());
+                param.0.collect_free_type_vars(result, seen);
+                body.0.collect_free_type_vars(result, seen);
             }
             OutputTy::AttrSet(attr_set_ty) => {
-                set.extend(attr_set_ty.free_type_vars());
+                for v in attr_set_ty.fields.values() {
+                    v.0.collect_free_type_vars(result, seen);
+                }
+                if let Some(dyn_ty) = &attr_set_ty.dyn_ty {
+                    dyn_ty.0.collect_free_type_vars(result, seen);
+                }
             }
             OutputTy::Primitive(_) => {}
             OutputTy::Union(members) | OutputTy::Intersection(members) => {
                 for m in members {
-                    set.extend(&m.0.free_type_vars());
+                    m.0.collect_free_type_vars(result, seen);
                 }
             }
         }
-
-        set
     }
 }
 

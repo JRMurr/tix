@@ -29,13 +29,15 @@
 
 ### Canonicalization / Type Display
 
-- Polymorphic types like `apply = fn: args: fn args` show use-site contamination in
-  their canonical type (e.g. `((int | string) -> a) -> b -> ...` instead of
-  `(a -> b) -> a -> b`). This is correct un-simplified SimpleSub behavior: when a
-  polymorphic type is extruded at a use site, fresh variables are linked back to
-  originals via bounds, and use-site constraints flow back. The canonicalization then
-  follows these bounds to the contaminated originals. Type simplification (Section 4.2
-  / co-occurrence analysis) would merge co-occurring variables and clean this up.
+- Early canonicalization captures clean polymorphic types for name bindings, but the
+  root expression type (the final attrset in `test/basic.nix`) still shows contaminated
+  types for inherited names. The inherit creates a new NameId whose type comes from
+  extruding the original, and that extruded reference picks up use-site bounds. A full
+  fix would propagate early-canonical types through expression-level canonicalization.
+
+- PBT test (`pbt::test_type_check`) may need updating for early canonicalization — it
+  was designed before this change and may produce types that differ between early and
+  late canonicalization for certain generated patterns.
 
 ### Missing Features
 
@@ -54,5 +56,8 @@
   overload list with proper intersection types for overloaded functions)
 - Type narrowing / flow-sensitive typing (TypeScript-style discriminated unions)
 - Literal / singleton types (`"circle"` as a type, not just `string`)
-- Type simplification via co-occurrence analysis and variable merging
-  (Parreaux Section 5)
+- Co-occurrence simplification (`lang_ty::simplify`) currently handles polar-only
+  variable removal and has scaffolding for co-occurrence merging, but the path-based
+  co-occurrence grouping is strict — variables that appear at structurally different
+  positions (e.g. different attrset fields) won't be merged. This could be relaxed
+  to use "occurrence signature" based grouping per the SimpleSub paper §4.2.

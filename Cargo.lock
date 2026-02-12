@@ -224,6 +224,7 @@ dependencies = [
  "clap",
  "lang_ast",
  "lang_check",
+ "lang_ty",
  "miette",
  "thiserror 2.0.9",
 ]
