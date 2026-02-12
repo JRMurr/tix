@@ -34,14 +34,23 @@ identifier = @{
     ASCII_ALPHA ~ (ASCII_ALPHANUMERIC | "_")*
 }
 
-// One segment in an arrow chain can be parenthesized, a list, or a simple/base type variable.
 // A minimal arrow-based type expression, e.g. `Int -> String`, `[a] -> (a -> b) -> [b]`.
+// Precedence (lowest to highest): `->` > `|` > `&` > atoms.
 type_expr = {
     arrow_segment ~ ("->" ~ arrow_segment)*
 }
 
-// One segment in an arrow chain can be parenthesized, a list, or a simple/base type variable.
-arrow_segment = { paren_type | list_type | type_ref }
+// One segment in an arrow chain. Union has lower precedence than intersection.
+arrow_segment = { union_type }
+
+// Union type: `int | string | null`
+union_type = { isect_type ~ ("|" ~ isect_type)* }
+
+// Intersection type: `{ foo: int } & { bar: string }`
+isect_type = { atom_type ~ ("&" ~ atom_type)* }
+
+// Atoms: parenthesized, list, or a simple/base type reference.
+atom_type = { paren_type | list_type | type_ref }
 
 paren_type = {
     "(" ~ type_expr ~ ")"
