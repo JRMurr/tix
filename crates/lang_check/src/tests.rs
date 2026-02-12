@@ -511,3 +511,22 @@ fn sub_string_error() {
         InferenceError::TypeMismatch(PrimitiveTy::String.into(), PrimitiveTy::Number.into(),)
     );
 }
+
+// ==============================================================================
+// String / Path interpolation
+// ==============================================================================
+
+test_case!(interpolation_simple, "let name = \"world\"; in \"hello ${name}\"", String);
+
+// Sub-expressions are inferred independently; the overall expression is always string.
+test_case!(interpolation_non_string_expr, "\"count: ${1 + 2}\"", String);
+
+test_case!(interpolation_nested, "let c = \"!\"; in \"a ${\"b ${c}\"}\"", String);
+
+test_case!(
+    interpolation_let_binding,
+    "let x = 42; in \"value: ${toString x}\"",
+    String
+);
+
+test_case!(interpolation_multiline, "let name = \"world\"; in ''hello ${name}''", String);

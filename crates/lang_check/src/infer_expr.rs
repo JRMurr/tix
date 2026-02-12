@@ -10,8 +10,8 @@ use std::collections::BTreeMap;
 
 use super::{CheckCtx, InferenceError, TyId};
 use lang_ast::{
-    nameres::ResolveResult, BinOP, BindingValue, Bindings, Expr, ExprId, Literal, NormalBinOp,
-    OverloadBinOp,
+    nameres::ResolveResult, BinOP, BindingValue, Bindings, Expr, ExprId, InterpolPart, Literal,
+    NormalBinOp, OverloadBinOp,
 };
 use lang_ty::{AttrSetTy, PrimitiveTy, Ty};
 use smol_str::SmolStr;
@@ -234,8 +234,21 @@ impl CheckCtx<'_> {
             }
 
             Expr::With { env, body } => todo!("handle with {env:?} {body:?}"),
-            Expr::StringInterpolation(_) => todo!(),
-            Expr::PathInterpolation(_) => todo!(),
+            Expr::StringInterpolation(parts) | Expr::PathInterpolation(parts) => {
+                // Nix implicitly coerces interpolated sub-expressions via toString,
+                // so we infer each sub-expression (to populate ty_for_expr) but don't
+                // constrain its type. The overall expression is string or path.
+                for part in parts.iter() {
+                    if let InterpolPart::Interpol(expr_id) = part {
+                        self.infer_expr(*expr_id)?;
+                    }
+                }
+                let prim = match expr {
+                    Expr::PathInterpolation(_) => PrimitiveTy::Path,
+                    _ => PrimitiveTy::String,
+                };
+                Ok(self.alloc_prim(prim))
+            }
         }
     }
 

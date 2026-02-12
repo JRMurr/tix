@@ -62,7 +62,6 @@
 ### Missing Features
 
 - `with` expression support
-- `StringInterpolation` and `PathInterpolation` expression support
 - Dynamic attrset fields in Select expressions
 - Proper intersection of field types in `merge_attrset_intersection` (currently
   takes the non-TyVar one)
