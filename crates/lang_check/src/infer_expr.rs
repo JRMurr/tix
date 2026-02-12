@@ -1,0 +1,429 @@
+// ==============================================================================
+// Single-Pass AST Inference
+// ==============================================================================
+//
+// Replaces the two-phase generate+solve approach. Each expression is inferred
+// in a single walk, calling constrain() inline. This is the SimpleSub approach
+// where constraints are immediately propagated through the bounds graph.
+
+use std::collections::BTreeMap;
+
+use super::{CheckCtx, InferenceError, TyId};
+use lang_ast::{
+    nameres::ResolveResult, BinOP, BindingValue, Bindings, Expr, ExprId, Literal, NormalBinOp,
+    OverloadBinOp,
+};
+use lang_ty::{AttrSetTy, PrimitiveTy, Ty};
+use smol_str::SmolStr;
+
+impl CheckCtx<'_> {
+    /// Infer the type of an expression and record it in the expr→type map.
+    pub(super) fn infer_expr(&mut self, e: ExprId) -> Result<TyId, InferenceError> {
+        let ty = self.infer_expr_inner(e)?;
+
+        // Record the inferred type for this expression.
+        let expr_slot = self.ty_for_expr(e);
+        self.constrain(ty, expr_slot)?;
+        self.constrain(expr_slot, ty)?;
+
+        Ok(ty)
+    }
+
+    fn infer_expr_inner(&mut self, e: ExprId) -> Result<TyId, InferenceError> {
+        let expr = &self.module[e];
+        match expr.clone() {
+            Expr::Missing => Ok(self.new_var()),
+
+            Expr::Literal(lit) => {
+                let prim: PrimitiveTy = lit.into();
+                Ok(self.alloc_prim(prim))
+            }
+
+            Expr::Reference(var_name) => self.infer_reference(e, &var_name),
+
+            Expr::Apply { fun, arg } => {
+                let fun_ty = self.infer_expr(fun)?;
+                let arg_ty = self.infer_expr(arg)?;
+                let ret_ty = self.new_var();
+
+                // fun_ty <: (arg_ty -> ret_ty)
+                let lambda_ty = self.alloc_concrete(Ty::Lambda {
+                    param: arg_ty,
+                    body: ret_ty,
+                });
+                self.constrain(fun_ty, lambda_ty)?;
+
+                Ok(ret_ty)
+            }
+
+            Expr::Lambda { param, pat, body } => {
+                // Use the pre-allocated name slot directly as the Lambda's param type,
+                // and lift it to the current level. This ensures:
+                // 1. The Lambda param is the same TyId the body references via name resolution
+                // 2. The param is at the right level for extrusion to detect it as generalizable
+                // 3. Deferred overloads that reference the param TyId are found in the extrude cache
+                let param_ty = if let Some(name) = param {
+                    let name_ty = self.ty_for_name_direct(name);
+                    self.table.set_var_level(name_ty, self.table.current_level);
+                    name_ty
+                } else {
+                    self.new_var()
+                };
+
+                if let Some(pat) = &pat {
+                    let mut fields = BTreeMap::new();
+
+                    for &(name, default_expr) in pat.fields.iter() {
+                        let default_ty = default_expr
+                            .map(|e| self.infer_expr(e))
+                            .transpose()?;
+                        let Some(name) = name else { continue };
+                        let name_ty = self.ty_for_name_direct(name);
+                        // Lift pattern field names to current level for generalization.
+                        self.table.set_var_level(name_ty, self.table.current_level);
+                        if let Some(default_ty) = default_ty {
+                            self.constrain(default_ty, name_ty)?;
+                        }
+                        let field_text = self.module[name].text.clone();
+                        fields.insert(field_text, name_ty);
+                    }
+
+                    let attr = self.alloc_concrete(Ty::AttrSet(AttrSetTy {
+                        fields,
+                        dyn_ty: None,
+                        open: pat.ellipsis,
+                    }));
+
+                    self.constrain(param_ty, attr)?;
+                    self.constrain(attr, param_ty)?;
+                }
+
+                let body_ty = self.infer_expr(body)?;
+                Ok(self.alloc_concrete(Ty::Lambda {
+                    param: param_ty,
+                    body: body_ty,
+                }))
+            }
+
+            Expr::BinOp { lhs, rhs, op } => self.infer_bin_op(e, lhs, rhs, &op),
+
+            Expr::IfThenElse {
+                cond,
+                then_body,
+                else_body,
+            } => {
+                let cond_ty = self.infer_expr(cond)?;
+                let bool_ty = self.alloc_prim(PrimitiveTy::Bool);
+                self.constrain(cond_ty, bool_ty)?;
+
+                let then_ty = self.infer_expr(then_body)?;
+                let else_ty = self.infer_expr(else_body)?;
+
+                // Both branches flow into a result variable — this is where
+                // union types naturally arise when branches have different types.
+                let result = self.new_var();
+                self.constrain(then_ty, result)?;
+                self.constrain(else_ty, result)?;
+
+                Ok(result)
+            }
+
+            Expr::LetIn { bindings, body } => {
+                self.infer_bindings(&bindings, e)?;
+                self.infer_expr(body)
+            }
+
+            Expr::AttrSet {
+                is_rec: _,
+                bindings,
+            } => {
+                let attr_ty = self.infer_bindings_to_attrset(&bindings, e)?;
+                Ok(self.alloc_concrete(Ty::AttrSet(attr_ty)))
+            }
+
+            Expr::Select {
+                set,
+                attrpath,
+                default_expr,
+            } => {
+                let set_ty = self.infer_expr(set)?;
+
+                let ret_ty = attrpath.iter().try_fold(set_ty, |set_ty, &attr| {
+                    let attr_ty = self.infer_expr(attr)?;
+                    let str_ty = self.alloc_prim(PrimitiveTy::String);
+                    self.constrain(attr_ty, str_ty)?;
+
+                    let opt_key = match &self.module[attr] {
+                        Expr::Literal(Literal::String(key)) => key.clone(),
+                        _ => todo!("Dynamic attr fields not supported yet in select"),
+                    };
+
+                    let value_ty = self.new_var();
+                    // Constrain set_ty to have the field we're selecting.
+                    let field_attr = self.alloc_concrete(Ty::AttrSet(AttrSetTy {
+                        fields: [(opt_key, value_ty)].into_iter().collect(),
+                        dyn_ty: None,
+                        open: true, // there may be more fields
+                    }));
+                    self.constrain(set_ty, field_attr)?;
+
+                    Ok::<TyId, InferenceError>(value_ty)
+                })?;
+
+                if let Some(default_expr) = default_expr {
+                    let default_ty = self.infer_expr(default_expr)?;
+                    // The result is the union of the field type and the default type.
+                    let union_var = self.new_var();
+                    self.constrain(ret_ty, union_var)?;
+                    self.constrain(default_ty, union_var)?;
+                    Ok(union_var)
+                } else {
+                    Ok(ret_ty)
+                }
+            }
+
+            Expr::List(inner) => {
+                // All elements flow into a single element variable.
+                // Heterogeneous lists naturally produce union types.
+                let elem_ty = self.new_var();
+                for elem_expr in &inner {
+                    let et = self.infer_expr(*elem_expr)?;
+                    self.constrain(et, elem_ty)?;
+                }
+                Ok(self.alloc_concrete(Ty::List(elem_ty)))
+            }
+
+            Expr::UnaryOp { op, expr } => {
+                let ty = self.infer_expr(expr)?;
+                match op {
+                    rnix::ast::UnaryOpKind::Invert => {
+                        let bool_ty = self.alloc_prim(PrimitiveTy::Bool);
+                        self.constrain(ty, bool_ty)?;
+                        self.constrain(bool_ty, ty)?;
+                        Ok(ty)
+                    }
+                    rnix::ast::UnaryOpKind::Negate => {
+                        // Negation: we need to verify the operand is a number.
+                        // We check this at solve time by inspecting the concrete type.
+                        self.pending_negations.push(ty);
+                        Ok(ty)
+                    }
+                }
+            }
+
+            Expr::HasAttr { set, attrpath: _ } => {
+                let set_ty = self.infer_expr(set)?;
+
+                // Constrain set_ty to be an (open) attrset.
+                let any_attr = self.alloc_concrete(Ty::AttrSet(AttrSetTy {
+                    fields: BTreeMap::new(),
+                    dyn_ty: None,
+                    open: true,
+                }));
+                self.constrain(set_ty, any_attr)?;
+
+                Ok(self.alloc_prim(PrimitiveTy::Bool))
+            }
+
+            Expr::Assert { cond, body } => {
+                let cond_ty = self.infer_expr(cond)?;
+                let bool_ty = self.alloc_prim(PrimitiveTy::Bool);
+                self.constrain(cond_ty, bool_ty)?;
+
+                self.infer_expr(body)
+            }
+
+            Expr::With { env, body } => todo!("handle with {env:?} {body:?}"),
+            Expr::StringInterpolation(_) => todo!(),
+            Expr::PathInterpolation(_) => todo!(),
+        }
+    }
+
+    fn infer_reference(
+        &mut self,
+        e: ExprId,
+        var_name: &SmolStr,
+    ) -> Result<TyId, InferenceError> {
+        match self.name_res.get(e) {
+            None => {
+                // true, false, and null can be shadowed...
+                match var_name.as_str() {
+                    "true" | "false" => Ok(self.alloc_prim(PrimitiveTy::Bool)),
+                    "null" => Ok(self.alloc_prim(PrimitiveTy::Null)),
+                    _ => Ok(self.new_var()),
+                }
+            }
+            Some(res) => match res {
+                &ResolveResult::Definition(name) => {
+                    // If the name is in poly_type_env, instantiate via extrude.
+                    if let Some(&poly_ty) = self.poly_type_env.get(&name) {
+                        Ok(self.extrude(poly_ty, true))
+                    } else {
+                        // Not yet generalized — return the pre-allocated TyId directly.
+                        Ok(self.ty_for_name_direct(name))
+                    }
+                }
+                ResolveResult::WithExprs(_) => {
+                    todo!("handle with exprs in reference")
+                }
+                ResolveResult::Builtin(_name) => {
+                    todo!("handle builtin exprs in reference")
+                }
+            },
+        }
+    }
+
+    fn infer_bin_op(
+        &mut self,
+        _e: ExprId,
+        lhs: ExprId,
+        rhs: ExprId,
+        op: &BinOP,
+    ) -> Result<TyId, InferenceError> {
+        let lhs_ty = self.infer_expr(lhs)?;
+        let rhs_ty = self.infer_expr(rhs)?;
+
+        match op {
+            BinOP::Overload(overload_op) => {
+                let ret_ty = self.new_var();
+                self.pending_overloads.push(PendingOverload {
+                    op: *overload_op,
+                    lhs: lhs_ty,
+                    rhs: rhs_ty,
+                    ret: ret_ty,
+                });
+                Ok(ret_ty)
+            }
+
+            BinOP::Normal(NormalBinOp::Bool(_)) => {
+                let bool_ty = self.alloc_prim(PrimitiveTy::Bool);
+                self.constrain(lhs_ty, bool_ty)?;
+                self.constrain(rhs_ty, bool_ty)?;
+                Ok(bool_ty)
+            }
+
+            BinOP::Normal(NormalBinOp::Expr(_)) => {
+                // Comparison/equality — both sides should be same type, returns Bool.
+                self.constrain(lhs_ty, rhs_ty)?;
+                self.constrain(rhs_ty, lhs_ty)?;
+                Ok(self.alloc_prim(PrimitiveTy::Bool))
+            }
+
+            BinOP::Normal(NormalBinOp::ListConcat) => {
+                let elem_ty = self.new_var();
+                let list_ty = self.alloc_concrete(Ty::List(elem_ty));
+                self.constrain(lhs_ty, list_ty)?;
+                self.constrain(list_ty, lhs_ty)?;
+                self.constrain(rhs_ty, list_ty)?;
+                self.constrain(list_ty, rhs_ty)?;
+                Ok(list_ty)
+            }
+
+            BinOP::Normal(NormalBinOp::AttrUpdate) => {
+                // attr merge: we'll handle this as a pending constraint
+                let ret_ty = self.new_var();
+                self.pending_merges.push(PendingMerge {
+                    lhs: lhs_ty,
+                    rhs: rhs_ty,
+                    ret: ret_ty,
+                });
+                Ok(ret_ty)
+            }
+        }
+    }
+
+    /// Infer bindings (for let-in or attrset bodies). Returns nothing for let-in,
+    /// returns the AttrSetTy for attrsets.
+    fn infer_bindings(
+        &mut self,
+        bindings: &Bindings,
+        _e: ExprId,
+    ) -> Result<(), InferenceError> {
+        // Infer inherit-from expressions.
+        for &from_expr in bindings.inherit_froms.iter() {
+            self.infer_expr(from_expr)?;
+        }
+
+        for &(name, value) in bindings.statics.iter() {
+            if self.poly_type_env.contains_key(&name) {
+                // Already inferred in a previous SCC group.
+                continue;
+            }
+
+            let name_ty = self.ty_for_name_direct(name);
+            let value_ty = match value {
+                BindingValue::Inherit(e) | BindingValue::Expr(e) | BindingValue::InheritFrom(e) => {
+                    self.infer_expr(e)?
+                }
+            };
+            // Value type flows into the name slot.
+            self.constrain(value_ty, name_ty)?;
+            self.constrain(name_ty, value_ty)?;
+        }
+
+        Ok(())
+    }
+
+    /// Like infer_bindings, but also constructs the AttrSetTy for use in attrset expressions.
+    fn infer_bindings_to_attrset(
+        &mut self,
+        bindings: &Bindings,
+        _e: ExprId,
+    ) -> Result<AttrSetTy<TyId>, InferenceError> {
+        for &from_expr in bindings.inherit_froms.iter() {
+            self.infer_expr(from_expr)?;
+        }
+
+        let mut fields = BTreeMap::new();
+        for &(name, value) in bindings.statics.iter() {
+            let name_text = self.module[name].text.clone();
+
+            if let Some(&poly_ty) = self.poly_type_env.get(&name) {
+                let instantiated = self.extrude(poly_ty, true);
+                fields.insert(name_text, instantiated);
+                continue;
+            }
+
+            let name_ty = self.ty_for_name_direct(name);
+            let value_ty = match value {
+                BindingValue::Inherit(e) | BindingValue::Expr(e) | BindingValue::InheritFrom(e) => {
+                    self.infer_expr(e)?
+                }
+            };
+            self.constrain(value_ty, name_ty)?;
+            self.constrain(name_ty, value_ty)?;
+            fields.insert(name_text, value_ty);
+        }
+
+        let dyn_ty = if !bindings.dynamics.is_empty() {
+            todo!()
+        } else {
+            None
+        };
+
+        Ok(AttrSetTy {
+            fields,
+            dyn_ty,
+            open: false,
+        })
+    }
+}
+
+// ==============================================================================
+// Pending constraint types for deferred resolution
+// ==============================================================================
+
+#[derive(Debug, Clone)]
+pub struct PendingOverload {
+    pub op: OverloadBinOp,
+    pub lhs: TyId,
+    pub rhs: TyId,
+    pub ret: TyId,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingMerge {
+    pub lhs: TyId,
+    pub rhs: TyId,
+    pub ret: TyId,
+}

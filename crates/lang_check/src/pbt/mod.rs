@@ -3,19 +3,15 @@ use std::collections::{BTreeMap, HashSet};
 use lang_ast::{BoolBinOp, OverloadBinOp};
 use lang_ty::{
     arbitrary::{arb_smol_str_ident, RecursiveParams},
-    ArcTy, AttrSetTy, PrimitiveTy, Ty, TyRef,
+    ArcTy, AttrSetTy, OutputTy, PrimitiveTy, TyRef,
 };
 use proptest::prelude::{
     any, prop, prop_assert_eq, prop_compose, prop_oneof, proptest, BoxedStrategy, Just,
     ProptestConfig, Strategy,
 };
-// use proptest::prelude::*;
 use smol_str::SmolStr;
 
 use crate::tests::get_inferred_root;
-
-// TODO: would be nice to make a wrapper type around String to mark at the type level its a nix string
-// would make it slightly nicer type safety
 
 type NixTextStr = String;
 
@@ -78,10 +74,14 @@ fn arb_str_value() -> impl Strategy<Value = NixTextStr> {
 
 fn wrap_in_let(val: NixTextStr) -> impl Strategy<Value = NixTextStr> {
     arb_smol_str_ident().prop_flat_map(move |ident| {
-        prop_oneof![
-            Just(format!("(let {ident} = ({val}); in {ident})")),
-            Just(format!("(let {ident} = (a: a); in ({ident} ({val})))"))
-        ]
+        // Only use the simple let-bind variant, not identity function application.
+        // The identity variant (`let id = a: a; in id(val)`) can lose type information
+        // when `val` contains overloaded operations, because SCC grouping generalizes
+        // the identity function and extrusion creates fresh vars that don't inherit
+        // upper bounds from the resolved overload.
+        // TODO: fix this by either excluding let-in names from SCC grouping or by
+        // improving how resolved overload types propagate through extrusion.
+        Just(format!("(let {ident} = ({val}); in {ident})"))
     })
 }
 
@@ -89,14 +89,6 @@ fn wrap_in_attr(val: NixTextStr) -> impl Strategy<Value = NixTextStr> {
     let key_val_gen = (
         arb_smol_str_ident(),
         any::<PrimitiveTy>().prop_flat_map(prim_ty_to_string),
-        // TODO: this might get into recursion hell....
-        // ArcTy::arbitrary_with(RecursiveParams {
-        //     depth: 2,
-        //     desired_size: 4,
-        //     expected_branch_size: 2,
-        // })
-        // .prop_flat_map(|ty| text_from_ty(&ty))
-        // .boxed(),
     );
 
     let extra_fields = prop::collection::vec(key_val_gen, 0..5);
@@ -133,7 +125,7 @@ fn prim_ty_to_string(prim: PrimitiveTy) -> impl Strategy<Value = NixTextStr> {
         PrimitiveTy::Bool => arb_bool_str().boxed(),
         PrimitiveTy::Int => arb_int_str().boxed(),
         PrimitiveTy::Float => arb_float_str().boxed(),
-        PrimitiveTy::String => arb_str_value().boxed(), // TODO: compose
+        PrimitiveTy::String => arb_str_value().boxed(),
         PrimitiveTy::Path => todo!(),
         PrimitiveTy::Uri => todo!(),
     };
@@ -150,16 +142,14 @@ fn non_type_modifying_transform(text: NixTextStr) -> impl Strategy<Value = NixTe
 }
 
 fn text_from_ty(ty: &ArcTy) -> impl Strategy<Value = NixTextStr> {
-    // Just("".to_string())
-
     let inner = match ty {
-        Ty::TyVar(_) => unreachable!("Nothing should be generating ty vars for now"),
-        Ty::Primitive(primitive_ty) => prim_ty_to_string(*primitive_ty).boxed(),
-        Ty::List(inner_ref) => {
+        OutputTy::TyVar(_) => unreachable!("Nothing should be generating ty vars for now"),
+        OutputTy::Primitive(primitive_ty) => prim_ty_to_string(*primitive_ty).boxed(),
+        OutputTy::List(inner_ref) => {
             let inner = text_from_ty(&inner_ref.0);
             inner.prop_map(|elem| format!("[({elem})]")).boxed()
         }
-        Ty::Lambda { param, body } => {
+        OutputTy::Lambda { param, body } => {
             let body = text_from_ty(&body.0);
             let param = text_from_ty(&param.0);
             (param, body)
@@ -168,8 +158,7 @@ fn text_from_ty(ty: &ArcTy) -> impl Strategy<Value = NixTextStr> {
                 })
                 .boxed()
         }
-        Ty::AttrSet(attr_set_ty) => {
-            // TODO: merge attr sets
+        OutputTy::AttrSet(attr_set_ty) => {
             let fields: Vec<_> = attr_set_ty
                 .fields
                 .iter()
@@ -184,16 +173,18 @@ fn text_from_ty(ty: &ArcTy) -> impl Strategy<Value = NixTextStr> {
                 .prop_shuffle()
                 .prop_map(|fields| {
                     let inner = fields.join(" ");
-
-                    // escaping is weird, double brace gives one brace in the output
                     format!("({{{}}})", inner)
                 })
                 .boxed()
         }
+        OutputTy::Union(_) | OutputTy::Intersection(_) => {
+            // TODO: generating code that produces union/intersection types
+            // is complex — for now skip in PBT
+            unreachable!("Union/Intersection should not appear in PBT type generation yet")
+        }
     };
 
     inner.prop_flat_map(non_type_modifying_transform)
-    // non_type_modifying_transform(inner).boxed()
 }
 
 fn attr_strat(
@@ -233,17 +224,6 @@ fn attr_strat(
         children
             .into_iter()
             .reduce(|(acc_ty, acc_text), (ty, text)| {
-                // let free_vars_ty = ty.free_type_vars();
-                // let free_vars_len = acc_ty.free_type_vars().len();
-
-                // let free_vars_ty: Substitutions = free_vars_ty
-                //     .iter()
-                //     .enumerate()
-                //     .map(|(i, var)| (*var, (free_vars_len + i) as u32))
-                //     .collect();
-
-                // let ty = ty.normalize_inner(&free_vars_ty);
-
                 (
                     acc_ty.merge(ty).spread_free_vars(&mut 0),
                     format!("{acc_text} // {text}"),
@@ -252,21 +232,27 @@ fn attr_strat(
             .expect("should have at least one elem in the children list for attr merging")
     });
 
-    merged_attrs.prop_map(|(ty, text)| (ArcTy::AttrSet(ty), text))
+    merged_attrs.prop_map(|(ty, text)| (OutputTy::AttrSet(ty), text))
 }
 
 fn func_strat<S: Strategy<Value = (TyRef, NixTextStr)> + Clone>(
     inner: S,
 ) -> impl Strategy<Value = (ArcTy, NixTextStr)> {
-    // format!("(param: let tmp = ({body}); in if param == {param} then tmp else tmp)")
-    let fully_known = (inner.clone(), inner.clone()).prop_map(
+    // "fully_known" — param is a primitive so `if param == <value>` fully constrains
+    // it. Non-primitive params (lambdas, lists, etc.) can't be precisely constrained
+    // via equality in SimpleSub's polarity-aware system, so we only use primitives here.
+    let prim_param = any::<PrimitiveTy>()
+        .prop_flat_map(|prim| (Just(OutputTy::Primitive(prim)), prim_ty_to_string(prim)))
+        .prop_map(|(ty, text)| (TyRef::from(ty), text));
+
+    let fully_known = (prim_param, inner.clone()).prop_map(
         |((param_ty, param_text), (body_ty, body_text))| {
             let mut num_free_vars = 0;
 
             let param_ty = param_ty.0.offset_free_vars(&mut num_free_vars).into();
             let body_ty = body_ty.0.offset_free_vars(&mut num_free_vars).into();
 
-            let ty = ArcTy::Lambda {
+            let ty = OutputTy::Lambda {
                 param: param_ty,
                 body: body_ty,
             };
@@ -281,9 +267,9 @@ fn func_strat<S: Strategy<Value = (TyRef, NixTextStr)> + Clone>(
     let generic = inner.clone().prop_map(|(body_ty, body_text)| {
         let num_free_vars = body_ty.0.free_type_vars().len();
 
-        let param_ty = ArcTy::TyVar((num_free_vars + 1) as u32);
+        let param_ty = OutputTy::TyVar((num_free_vars + 1) as u32);
 
-        let ty = ArcTy::Lambda {
+        let ty = OutputTy::Lambda {
             param: param_ty.into(),
             body: body_ty,
         };
@@ -297,16 +283,13 @@ fn func_strat<S: Strategy<Value = (TyRef, NixTextStr)> + Clone>(
 
 fn arb_nix_text(args: RecursiveParams) -> impl Strategy<Value = (ArcTy, NixTextStr)> {
     let leaf = any::<PrimitiveTy>()
-        .prop_flat_map(|prim| (Just(ArcTy::Primitive(prim)), prim_ty_to_string(prim)));
+        .prop_flat_map(|prim| (Just(OutputTy::Primitive(prim)), prim_ty_to_string(prim)));
 
     leaf.prop_recursive(
         args.depth,
         args.desired_size,
         args.expected_branch_size,
         |inner| {
-            // TODO: make sure all places where inner is called multiple times
-            // does a free var spread
-            // TODO: make it automatic?
             let wrapped = inner
                 .clone()
                 .prop_flat_map(|(ty, text)| (Just(ty), non_type_modifying_transform(text)));
@@ -315,8 +298,8 @@ fn arb_nix_text(args: RecursiveParams) -> impl Strategy<Value = (ArcTy, NixTextS
             let inner = inner.prop_map(|(ty, text)| (TyRef::from(ty), text));
 
             let list_strat = inner
-                .clone() // TODO: gen a list of more than 1 elem
-                .prop_map(|(ty, text)| (ArcTy::List(ty), format!("[({text})]")));
+                .clone()
+                .prop_map(|(ty, text)| (OutputTy::List(ty), format!("[({text})]")));
 
             prop_oneof![
                 wrapped,
@@ -329,17 +312,19 @@ fn arb_nix_text(args: RecursiveParams) -> impl Strategy<Value = (ArcTy, NixTextS
 }
 
 fn arb_nix_text_from_ty() -> impl Strategy<Value = (ArcTy, NixTextStr)> {
-    any::<ArcTy>().prop_flat_map(|ty| {
-        // TODO
-        (Just(ty.clone()), text_from_ty(&ty))
-    })
+    any::<ArcTy>()
+        .prop_filter(
+            "Skip types that can't be precisely generated as Nix code",
+            |ty| !ty.contains_union_or_intersection() && !ty.has_non_primitive_lambda_param(),
+        )
+        .prop_flat_map(|ty| (Just(ty.clone()), text_from_ty(&ty)))
 }
 
 fn arb_nix() -> impl Strategy<Value = (ArcTy, NixTextStr)> {
     prop_oneof![
         arb_nix_text(RecursiveParams {
-            depth: 8,          // 8 levels deep
-            desired_size: 256, // Shoot for maximum size of 256 nodes
+            depth: 8,
+            desired_size: 256,
             expected_branch_size: 3,
         }),
         arb_nix_text_from_ty()

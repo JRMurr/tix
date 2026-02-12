@@ -1,40 +1,31 @@
-use std::collections::{HashMap, HashSet};
+// ==============================================================================
+// Inference Orchestration — SCC groups, generalization, extrude
+// ==============================================================================
+//
+// This module drives the overall inference process: iterating over SCC groups,
+// inferring each definition, resolving pending constraints, and generalizing
+// type variables via SimpleSub's level-based approach (extrude).
+
+use std::collections::HashMap;
 
 use comment_parser::parse_and_collect;
-use rustc_hash::FxHashMap;
 
-use crate::Intern;
-
-use super::{
-    collect::Collector, AttrMergeConstraint, BinOverloadConstraint, CheckCtx, Constraint,
-    ConstraintCtx, DeferrableConstraint, DeferrableConstraintKind, FreeVars, InferenceError,
-    InferenceResult, RootConstraintKind, SolveError, TyId, TySchema,
-};
+use super::{CheckCtx, InferenceError, InferenceResult, TyId};
+use crate::collect::Collector;
+use crate::infer_expr::{PendingMerge, PendingOverload};
+use crate::storage::TypeEntry;
 use lang_ast::nameres::{DependentGroup, GroupedDefs};
-use lang_ty::{AttrSetTy, Ty};
-
-type Substitutions = FxHashMap<TyId, TyId>;
-
-type DeferredConstraints = Vec<DeferrableConstraint>;
-
-fn get_deferred(result: Result<(), SolveError>) -> Result<DeferredConstraints, InferenceError> {
-    match result {
-        Ok(_) => Ok(Vec::new()),
-        Err(e) => match e.deferrable() {
-            Some(constraints) => Ok(constraints),
-            None => Err(e.inference_error().unwrap()),
-        },
-    }
-}
+use lang_ast::OverloadBinOp;
+use lang_ty::{AttrSetTy, PrimitiveTy, Ty};
 
 impl CheckCtx<'_> {
     pub fn infer_prog(mut self, groups: GroupedDefs) -> Result<InferenceResult, InferenceError> {
+        // Pre-allocate TyIds for all names and expressions so they can be
+        // referenced before they are inferred (needed for recursive definitions).
         let len = self.module.names().len() + self.module.exprs().len();
         for _ in 0..len {
-            self.new_ty_var();
+            self.new_var();
         }
-
-        // let groups = if groups.is_empty() { todo!() } else { groups };
 
         for group in groups {
             self.infer_scc_group(group)?;
@@ -43,259 +34,464 @@ impl CheckCtx<'_> {
         self.infer_root()?;
 
         let mut collector = Collector::new(self);
-
         Ok(collector.finalize_inference())
     }
 
     fn infer_root(&mut self) -> Result<(), InferenceError> {
-        let mut constraints = ConstraintCtx::new();
-        self.generate_constraints(&mut constraints, self.module.entry_expr);
-
-        // TODO: i think its fine to not do anything with the defers here?
-        let _ = get_deferred(self.solve_constraints(constraints))?;
-
+        self.infer_expr(self.module.entry_expr)?;
+        self.resolve_pending()?;
         Ok(())
     }
 
     fn infer_scc_group(&mut self, group: DependentGroup) -> Result<(), InferenceError> {
-        let mut constraints = ConstraintCtx::new();
+        self.table.enter_level();
+
+        // Lift pre-allocated name vars to the current (inner) level so that
+        // type variables created during inference of this group are at the
+        // right level for generalization.
+        for def in &group {
+            let name_ty = self.ty_for_name_direct(def.name());
+            self.table.set_var_level(name_ty, self.table.current_level);
+        }
+
+        // Collect (name_id, inferred_ty) pairs for all definitions in the group.
+        let mut inferred: Vec<(lang_ast::NameId, TyId)> = Vec::new();
 
         for def in &group {
-            let ty = self.generate_constraints(&mut constraints, def.expr());
-
+            let ty = self.infer_expr(def.expr())?;
             let name_id = def.name();
 
-            // TODO: get global decs
-            let decls = self
+            // Link the pre-allocated name slot to the inferred type.
+            let name_slot = self.ty_for_name_direct(name_id);
+            self.constrain(ty, name_slot)?;
+            self.constrain(name_slot, ty)?;
+
+            // Check for type annotations in doc comments.
+            let type_annotation = self
                 .module
                 .type_dec_map
                 .docs_for_name(name_id)
-                .map(|docs| {
+                .and_then(|docs| {
                     let parsed: Vec<_> = docs
                         .iter()
                         .flat_map(|doc| parse_and_collect(doc).expect("TODO: No parse error"))
                         .collect();
+                    let name_str = &self.module[name_id].text;
+                    parsed.into_iter().find_map(|decl| {
+                        if decl.identifier == *name_str {
+                            Some(decl.type_expr)
+                        } else {
+                            None
+                        }
+                    })
+                });
 
-                    parsed
-                })
-                .unwrap_or_default();
-
-            let name_str = &self.module[name_id].text;
-
-            let type_annotation = decls.iter().find_map(|decl| {
-                if decl.identifier == *name_str {
-                    Some(decl.type_expr.clone())
-                } else {
-                    None
-                }
-            });
-
-            dbg!(&type_annotation);
-
-            let ty_id = if let Some(known_ty) = type_annotation {
-                let schema = self.intern_known_ty(name_id, known_ty);
-
-                // TODO: it might be better to have a special constraint
-                // for eq a schema to avoid instantiate but its probably fine
-                self.instantiate(&schema, &mut constraints)
-            } else {
-                self.ty_for_name_no_instantiate(name_id)
-            };
-
-            constraints.add(Constraint {
-                kind: RootConstraintKind::Eq(ty_id, ty),
-                location: def.expr(),
-            });
-        }
-
-        // dbg!(&self.table);
-        let deferred_constraints = get_deferred(self.solve_constraints(constraints))?;
-
-        // TODO: could there be cases where mutually dependent TypeDefs
-        // need to be generalized together (ie)?
-        // i don't think it will cause invalid programs to type check but might make
-        // errors / canonicalized generics look weird
-        for def in &group {
-            let name_id = def.name();
-            if self.poly_type_env.contains_key(&name_id) {
-                // had a type manual type def
-                continue;
+            if let Some(known_ty) = type_annotation {
+                let annotation_ty = self.intern_known_ty(name_id, known_ty);
+                self.constrain(ty, annotation_ty)?;
+                self.constrain(annotation_ty, ty)?;
             }
 
-            let name_ty = self.ty_for_name_no_instantiate(def.name());
-            let generalized_val = self.generalize(name_ty, &deferred_constraints);
-            self.poly_type_env.insert(def.name(), generalized_val);
+            inferred.push((name_id, ty));
         }
-        // TODO: should we assert that all deferred_constraints went somewhere?
+
+        // Resolve pending overload and merge constraints now that we have
+        // type information from the entire SCC group.
+        self.resolve_pending()?;
+
+        // Move unresolved overloads to deferred list — they'll be re-instantiated
+        // per call-site during extrusion.
+        let remaining = std::mem::take(&mut self.pending_overloads);
+        self.deferred_overloads.extend(remaining);
+
+        self.table.exit_level();
+
+        // Record the actual inferred type in poly_type_env.
+        // Using the actual inferred TyId (which may be concrete) rather than
+        // the pre-allocated name var, so extrude can properly recurse into
+        // the type structure.
+        for (name_id, ty) in inferred {
+            if self.poly_type_env.contains_key(&name_id) {
+                continue;
+            }
+            self.poly_type_env.insert(name_id, ty);
+        }
 
         Ok(())
     }
 
-    pub fn instantiate(&mut self, scheme: &TySchema, constraints: &mut ConstraintCtx) -> TyId {
-        let mut substitutions = HashMap::default();
-        for &var in &scheme.vars {
-            substitutions.insert(var, self.new_ty_var());
+    // ==========================================================================
+    // Extrude — SimpleSub's replacement for instantiation
+    // ==========================================================================
+    //
+    // When referencing a polymorphic name, we "extrude" its type to the current
+    // level. Variables at a deeper level get fresh copies at the current level,
+    // with appropriate subtyping constraints linking them to the original.
+    // The `polarity` parameter tracks variance: positive = output/covariant,
+    // negative = input/contravariant.
+
+    pub fn extrude(&mut self, ty_id: TyId, polarity: bool) -> TyId {
+        let mut cache = HashMap::new();
+        let result = self.extrude_inner(ty_id, polarity, &mut cache);
+
+        // Re-instantiate deferred overloads for any vars that were extruded.
+        // This creates per-call-site overload constraints with the fresh vars.
+        //
+        // When at least one operand of a deferred overload was extruded, we need
+        // a fresh copy of the entire overload for this call site. For operand
+        // vars already in the extrude cache (at either polarity), we use the
+        // cached fresh copy. For operand vars NOT in the cache (e.g. Select
+        // result vars connected only via bounds, not via structural type), we
+        // extrude them explicitly to create per-call-site copies.
+        //
+        // We use a fixed-point loop because extruding one overload's operands
+        // may add new entries to the cache, which then makes other overloads
+        // eligible for re-instantiation (e.g. when overload chains share
+        // intermediate result vars like `(a + b) + (c + d)`).
+        let deferred = self.deferred_overloads.clone();
+        let mut processed = vec![false; deferred.len()];
+        loop {
+            let mut made_progress = false;
+
+            for (i, ov) in deferred.iter().enumerate() {
+                if processed[i] {
+                    continue;
+                }
+
+                let find_extruded =
+                    |id: TyId, cache: &HashMap<(TyId, bool), TyId>| -> Option<TyId> {
+                        cache
+                            .get(&(id, false))
+                            .or_else(|| cache.get(&(id, true)))
+                            .copied()
+                    };
+
+                let any_extruded = find_extruded(ov.lhs, &cache).is_some()
+                    || find_extruded(ov.rhs, &cache).is_some()
+                    || find_extruded(ov.ret, &cache).is_some();
+
+                if any_extruded {
+                    // For each operand, use the cached fresh var if available,
+                    // otherwise extrude it now in positive polarity.
+                    let get_or_extrude =
+                        |id: TyId,
+                         this: &mut Self,
+                         cache: &mut HashMap<(TyId, bool), TyId>|
+                         -> TyId {
+                            if let Some(fresh) = find_extruded(id, cache) {
+                                fresh
+                            } else {
+                                this.extrude_inner(id, true, cache)
+                            }
+                        };
+
+                    let new_lhs = get_or_extrude(ov.lhs, self, &mut cache);
+                    let new_rhs = get_or_extrude(ov.rhs, self, &mut cache);
+                    let new_ret = get_or_extrude(ov.ret, self, &mut cache);
+
+                    self.pending_overloads.push(PendingOverload {
+                        op: ov.op,
+                        lhs: new_lhs,
+                        rhs: new_rhs,
+                        ret: new_ret,
+                    });
+
+                    processed[i] = true;
+                    made_progress = true;
+                }
+            }
+
+            if !made_progress {
+                break;
+            }
         }
 
-        // dbg!(&self.table);
-        // dbg!(&scheme);
-
-        // TODO: might want to make constraints snapshotable
-        for constraint in &scheme.constraints {
-            self.instantiate_constraint(constraint, &substitutions, constraints);
-        }
-
-        self.instantiate_ty(scheme.ty, &substitutions)
+        result
     }
 
-    pub fn instantiate_constraint(
+    fn extrude_inner(
         &mut self,
-        overload_constraint: &DeferrableConstraint,
-        substitutions: &Substitutions,
-        constraints: &mut ConstraintCtx,
-    ) {
-        let mut get_sub = |ty_id| {
-            let ty_id = self.table.find(ty_id);
-            let ty = self.get_ty(ty_id);
-            if matches!(ty, Ty::TyVar(_)) {
-                if let Some(&replacement) = substitutions.get(&ty_id) {
-                    return replacement;
-                }
-                panic!("No substitution found for {ty_id:?}")
-            }
+        ty_id: TyId,
+        polarity: bool,
+        cache: &mut HashMap<(TyId, bool), TyId>,
+    ) -> TyId {
+        let key = (ty_id, polarity);
+        if let Some(&cached) = cache.get(&key) {
+            return cached;
+        }
 
-            ty_id
+        let entry = self.table.get(ty_id).clone();
+
+        match entry {
+            TypeEntry::Variable(ref v) if v.level > self.table.current_level => {
+                // This variable was bound at a deeper level — it's polymorphic.
+                // However, if it has been pinned to a concrete type (has the same
+                // concrete type as both a direct lower and upper bound), it was
+                // fully resolved by e.g. overload resolution. Extrude the concrete
+                // type instead of creating a fresh variable, to avoid losing the
+                // resolved type information.
+                if let Some(pinned) = self.find_pinned_concrete(v) {
+                    // Insert into cache so deferred overload re-instantiation
+                    // can find this var was extruded.
+                    let concrete_id = self.alloc_concrete(pinned);
+                    let result = self.extrude_inner(concrete_id, polarity, cache);
+                    cache.insert(key, result);
+                    return result;
+                }
+
+                // Truly polymorphic — create a fresh variable at the current level.
+                let fresh = self.new_var();
+                cache.insert(key, fresh);
+
+                if polarity {
+                    // Positive position: fresh ≥ original (lower bound).
+                    self.constrain(ty_id, fresh).expect("extrude constrain");
+                } else {
+                    // Negative position: fresh ≤ original (upper bound).
+                    self.constrain(fresh, ty_id).expect("extrude constrain");
+                }
+                fresh
+            }
+            TypeEntry::Variable(_) => {
+                // Variable at current level or shallower — not polymorphic, return as-is.
+                ty_id
+            }
+            TypeEntry::Concrete(ty) => {
+                match ty {
+                    Ty::Lambda { param, body } => {
+                        // Insert a placeholder to handle recursive types.
+                        let placeholder = self.new_var();
+                        cache.insert(key, placeholder);
+
+                        let p = self.extrude_inner(param, !polarity, cache); // flip polarity
+                        let b = self.extrude_inner(body, polarity, cache);
+                        let result = self.alloc_concrete(Ty::Lambda { param: p, body: b });
+
+                        // Link placeholder to result.
+                        self.constrain(result, placeholder).expect("extrude link");
+                        self.constrain(placeholder, result).expect("extrude link");
+
+                        result
+                    }
+                    Ty::List(elem) => {
+                        let e = self.extrude_inner(elem, polarity, cache);
+                        self.alloc_concrete(Ty::List(e))
+                    }
+                    Ty::AttrSet(attr) => {
+                        let new_fields = attr
+                            .fields
+                            .iter()
+                            .map(|(k, &v)| (k.clone(), self.extrude_inner(v, polarity, cache)))
+                            .collect();
+                        let new_dyn = attr
+                            .dyn_ty
+                            .map(|d| self.extrude_inner(d, polarity, cache));
+                        self.alloc_concrete(Ty::AttrSet(AttrSetTy {
+                            fields: new_fields,
+                            dyn_ty: new_dyn,
+                            open: attr.open,
+                        }))
+                    }
+                    Ty::Primitive(_) => ty_id,
+                    Ty::TyVar(_) => ty_id,
+                }
+            }
+        }
+    }
+
+    // ==========================================================================
+    // Pending constraint resolution
+    // ==========================================================================
+    //
+    // After inferring an SCC group or the root, we resolve pending overload
+    // and merge constraints. These are deferred because they need both operand
+    // types to be at least partially known.
+
+    fn resolve_pending(&mut self) -> Result<(), InferenceError> {
+        // Fixed-point loop: keep trying until no more progress.
+        loop {
+            let mut made_progress = false;
+
+            // Resolve overloads.
+            let overloads = std::mem::take(&mut self.pending_overloads);
+            let mut remaining_overloads = Vec::new();
+            for ov in overloads {
+                match self.try_resolve_overload(&ov)? {
+                    true => made_progress = true,
+                    false => remaining_overloads.push(ov),
+                }
+            }
+            self.pending_overloads = remaining_overloads;
+
+            // Resolve merges.
+            let merges = std::mem::take(&mut self.pending_merges);
+            let mut remaining_merges = Vec::new();
+            for mg in merges {
+                match self.try_resolve_merge(&mg)? {
+                    true => made_progress = true,
+                    false => remaining_merges.push(mg),
+                }
+            }
+            self.pending_merges = remaining_merges;
+
+            // Resolve negations.
+            let negations = std::mem::take(&mut self.pending_negations);
+            let mut remaining_negations = Vec::new();
+            for neg_ty in negations {
+                match self.try_resolve_negation(neg_ty)? {
+                    true => made_progress = true,
+                    false => remaining_negations.push(neg_ty),
+                }
+            }
+            self.pending_negations = remaining_negations;
+
+            if !made_progress {
+                break;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn try_resolve_overload(
+        &mut self,
+        ov: &PendingOverload,
+    ) -> Result<bool, InferenceError> {
+        let lhs_concrete = self.find_concrete(ov.lhs);
+        let rhs_concrete = self.find_concrete(ov.rhs);
+
+        let (Some(lhs_ty), Some(rhs_ty)) = (lhs_concrete, rhs_concrete) else {
+            return Ok(false); // Not enough info yet.
         };
 
-        let location = overload_constraint.location;
-        match &overload_constraint.kind {
-            DeferrableConstraintKind::BinOp(bin_op) => {
-                constraints.add(Constraint {
-                    kind: BinOverloadConstraint {
-                        op: bin_op.op,
-                        lhs: get_sub(bin_op.lhs),
-                        rhs: get_sub(bin_op.rhs),
-                        ret_val: get_sub(bin_op.ret_val),
-                    }
-                    .into(),
-                    location,
-                });
-            }
-            DeferrableConstraintKind::Negation(ty_id) => constraints.add(Constraint {
-                location,
-                kind: DeferrableConstraintKind::Negation(get_sub(*ty_id)).into(),
-            }),
-            DeferrableConstraintKind::AttrMerge(attr_merge_constraint) => {
-                constraints.add(Constraint {
-                    kind: AttrMergeConstraint {
-                        lhs: get_sub(attr_merge_constraint.lhs),
-                        rhs: get_sub(attr_merge_constraint.rhs),
-                        ret_val: get_sub(attr_merge_constraint.ret_val),
-                    }
-                    .into(),
-                    location,
-                })
-            }
-        }
+        let ret_ty = self
+            .solve_bin_op_types(ov.op, &lhs_ty, &rhs_ty)
+            .ok_or_else(|| InferenceError::InvalidBinOp(ov.op, lhs_ty.clone(), rhs_ty.clone()))?;
+
+        let ret_id = self.alloc_concrete(ret_ty);
+        self.constrain(ret_id, ov.ret)?;
+        self.constrain(ov.ret, ret_id)?;
+        Ok(true)
     }
 
-    fn instantiate_ty(&mut self, ty_id: TyId, substitutions: &Substitutions) -> TyId {
-        // TODO: table.find is not inlined which could cause slowness
-        // doesnt seem to have the inlined value exposed...
-        let ty_id = self.table.find(ty_id);
+    fn try_resolve_merge(
+        &mut self,
+        mg: &PendingMerge,
+    ) -> Result<bool, InferenceError> {
+        let lhs_concrete = self.find_concrete(mg.lhs);
+        let rhs_concrete = self.find_concrete(mg.rhs);
 
-        let ty = self.get_ty(ty_id);
-
-        let new_ty = match ty {
-            Ty::TyVar(x) => {
-                if let Some(&replacement) = substitutions.get(&ty_id) {
-                    return replacement;
-                }
-                // this should have been unified by now...
-                panic!("No substitution found for Ty::TyVar({x})")
+        let (Some(Ty::AttrSet(lhs_attr)), Some(Ty::AttrSet(rhs_attr))) =
+            (&lhs_concrete, &rhs_concrete)
+        else {
+            if lhs_concrete.is_some() && rhs_concrete.is_some() {
+                return Err(InferenceError::InvalidAttrMerge(
+                    lhs_concrete.unwrap(),
+                    rhs_concrete.unwrap(),
+                ));
             }
-            Ty::Lambda { param, body } => {
-                let new_param = self.instantiate_ty(param, substitutions);
-                let new_body = self.instantiate_ty(body, substitutions);
-                Ty::Lambda {
-                    param: new_param,
-                    body: new_body,
-                }
-            }
-            Ty::List(inner) => {
-                let new_inner = self.instantiate_ty(inner, substitutions);
-                Ty::List(new_inner)
-            }
-            Ty::AttrSet(attr_set_ty) => {
-                let new_fields = attr_set_ty
-                    .fields
-                    .into_iter()
-                    .map(|(k, v)| (k, self.instantiate_ty(v, substitutions)))
-                    .collect();
-                let new_dyn_ty = attr_set_ty
-                    .dyn_ty
-                    .map(|v| self.instantiate_ty(v, substitutions));
-
-                let new_rest_ty = attr_set_ty
-                    .rest
-                    .map(|v| self.instantiate_ty(v, substitutions));
-
-                Ty::AttrSet(AttrSetTy {
-                    fields: new_fields,
-                    dyn_ty: new_dyn_ty,
-                    rest: new_rest_ty,
-                })
-            }
-            Ty::Primitive(_) => ty,
+            return Ok(false);
         };
 
-        new_ty.intern(self)
+        let merged = lhs_attr.clone().merge(rhs_attr.clone());
+        let merged_id = self.alloc_concrete(Ty::AttrSet(merged));
+        self.constrain(merged_id, mg.ret)?;
+        self.constrain(mg.ret, merged_id)?;
+        Ok(true)
     }
 
-    fn generalize(&mut self, ty: TyId, deferred: &DeferredConstraints) -> TySchema {
-        let mut free_vars = self.free_type_vars(ty);
+    fn try_resolve_negation(&mut self, ty_id: TyId) -> Result<bool, InferenceError> {
+        let Some(ty) = self.find_concrete(ty_id) else {
+            return Ok(false);
+        };
 
-        // let to_root = |ty_id| {}
+        match ty {
+            Ty::Primitive(p) if p.is_number() => Ok(true),
+            _ => Err(InferenceError::InvalidNegation(ty)),
+        }
+    }
 
-        let mut constraints = Vec::new();
+    /// Check if a variable has been pinned to a simple concrete type — i.e. the
+    /// same primitive type appears as both a direct lower and upper bound. This
+    /// indicates the variable was fully resolved (e.g. by overload resolution) and
+    /// is no longer truly polymorphic.
+    ///
+    /// Only primitives are considered "pinned" — types with internal structure
+    /// (Lambda, List, AttrSet) may contain polymorphic sub-components that need
+    /// proper extrusion.
+    fn find_pinned_concrete(&self, v: &crate::storage::TypeVariable) -> Option<Ty<TyId>> {
+        // Collect primitive types from direct lower bounds.
+        let lower_prims: Vec<_> = v
+            .lower_bounds
+            .iter()
+            .filter_map(|&lb| {
+                if let TypeEntry::Concrete(ty @ Ty::Primitive(_)) = self.table.get(lb) {
+                    Some(ty.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
 
-        // TODO: this will always track the deferred constraints if they have any free vars in there
-        // which should basically always be true since they are deferred
-        // in most cases this is probably fine but might lead to some
-        // dupe constraints when things are mutually dependent
-
-        for constraint in deferred {
-            let all_vars = constraint.kind.get_vars();
-            let maybe_free_vars = all_vars
-                .iter()
-                .map(|ty_id| self.free_type_vars(*ty_id))
-                // TODO: this is probably doing more work than it should
-                // could manually create a new hash set
-                .reduce(|acc, x| {
-                    let res: HashSet<TyId> = acc.union(&x).cloned().collect();
-                    res
-                })
-                .unwrap_or_default();
-            if !maybe_free_vars.is_empty() {
-                free_vars = free_vars.union(&maybe_free_vars).cloned().collect();
-                constraints.push(constraint.clone());
+        // Check if any of those also appear as a direct upper bound.
+        for &ub in &v.upper_bounds {
+            if let TypeEntry::Concrete(ub_ty @ Ty::Primitive(_)) = self.table.get(ub) {
+                if lower_prims.contains(ub_ty) {
+                    return Some(ub_ty.clone());
+                }
             }
         }
+        None
+    }
 
-        TySchema {
-            vars: free_vars,
-            ty,
-            constraints: constraints.into(),
+    /// Walk lower bounds of a variable to find a concrete type, if one exists.
+    fn find_concrete(&self, ty_id: TyId) -> Option<Ty<TyId>> {
+        match self.table.get(ty_id) {
+            TypeEntry::Concrete(ty) => Some(ty.clone()),
+            TypeEntry::Variable(v) => {
+                // Check lower bounds for a concrete type.
+                for &lb in &v.lower_bounds {
+                    if let Some(ty) = self.find_concrete(lb) {
+                        return Some(ty);
+                    }
+                }
+                None
+            }
         }
     }
 
-    fn free_type_vars(&mut self, ty_id: TyId) -> FreeVars {
-        let res = Ty::free_vars_by_ref(ty_id, &mut |id| {
-            let id = self.table.find(*id);
+    fn solve_bin_op_types(
+        &self,
+        op: OverloadBinOp,
+        lhs: &Ty<TyId>,
+        rhs: &Ty<TyId>,
+    ) -> Option<Ty<TyId>> {
+        use Ty::Primitive;
 
-            self.get_ty(id)
-        });
+        let (Primitive(l), Primitive(r)) = (lhs, rhs) else {
+            return None;
+        };
 
-        res.iter().map(|id| self.table.find(id.into())).collect()
+        // Both numbers — float wins.
+        if l.is_number() && r.is_number() {
+            let has_float = l.is_float() || r.is_float();
+            let ret_ty = if has_float {
+                Primitive(PrimitiveTy::Float)
+            } else {
+                lhs.clone()
+            };
+            return Some(ret_ty);
+        }
+
+        if !op.is_add() {
+            return None;
+        }
+
+        // Both addable (strings/paths) — lhs type wins.
+        if l.is_addable() && r.is_addable() {
+            Some(lhs.clone())
+        } else {
+            None
+        }
     }
 }

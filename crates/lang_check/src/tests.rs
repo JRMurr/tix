@@ -63,7 +63,7 @@ test_case!(
         bool = true;
         null = null;
         float = 3.14;
-        # TODO: overloading needs to handle the case when one of the know types is a type var
+        # add remains polymorphic with unresolved overload — variables for a, b, result
         add = a: b: a + b;
         lst = [(1) (2)];
     }
@@ -119,7 +119,7 @@ test_case!(
 test_case!(
     simple_let_gen_overload,
     "
-    let 
+    let
         add = a: b: a + b;
     in
         {
@@ -165,7 +165,6 @@ test_case!(
     overloads,
     "
     {
-        # pbt would be great for this....
         neg_int = -(1 * 5);
         neg_float = -(3.14);
 
@@ -208,6 +207,9 @@ test_case!(
     }
 );
 
+// With subtyping, row polymorphism is replaced by width subtyping.
+// An open attrset pattern (`{ ..., ... }`) means the function accepts
+// records with at least the specified fields.
 test_case!(
     row_poly,
     "
@@ -216,8 +218,7 @@ test_case!(
     (({
         "bar": (Path),
         "foo": (Int)
-        ;
-        (# 0) // since this is an arg param there can be more fields
+        ; ...
     }) -> Bool)
 );
 
@@ -317,8 +318,9 @@ fn type_annotation_mis_match() {
         foo
     " };
 
+    // With subtyping, this is a type mismatch between string and int.
     let string_ty = PrimitiveTy::String.into();
     let int_ty = PrimitiveTy::Int.into();
 
-    expect_inference_error(file, InferenceError::InvalidUnification(string_ty, int_ty))
+    expect_inference_error(file, InferenceError::TypeMismatch(int_ty, string_ty))
 }

@@ -1,70 +1,74 @@
-use std::collections::{BTreeMap, HashMap};
+// ==============================================================================
+// Polarity-Aware Canonicalization
+// ==============================================================================
+//
+// Converts internal TyId representation to canonical OutputTy.
+// Variables are expanded based on polarity:
+// - Positive position (output): variable → union of lower bounds
+// - Negative position (input): variable → intersection of upper bounds
+// Lambda params flip polarity.
 
-use smol_str::SmolStr;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use super::{CheckCtx, InferenceResult, TyId};
-use lang_ty::{ArcTy, AttrSetTy, Substitutions, Ty, TyRef};
+use crate::storage::TypeEntry;
+use lang_ty::{AttrSetTy, OutputTy, Ty, TyRef};
 
 pub struct Collector<'db> {
-    cache: HashMap<TyId, ArcTy>,
-    ctx: CheckCtx<'db>,
+    /// Cache keyed by (TyId, polarity).
+    cache: HashMap<(TyId, bool), OutputTy>,
+    /// Track which TyIds are currently being expanded (cycle detection).
+    in_progress: HashSet<(TyId, bool)>,
+    pub(crate) ctx: CheckCtx<'db>,
 }
 
 impl<'db> Collector<'db> {
     pub fn new(ctx: CheckCtx<'db>) -> Self {
         Self {
-            cache: HashMap::with_capacity(ctx.table.types.len()),
+            cache: HashMap::new(),
+            in_progress: HashSet::new(),
             ctx,
         }
     }
 
     pub fn finalize_inference(&mut self) -> InferenceResult {
-        let ctx = &mut self.ctx;
-
-        let name_tys: Vec<_> = ctx
+        let name_tys: Vec<_> = self
+            .ctx
             .module
             .names()
             .map(|(name, _)| {
-                // TODO: i think this is causing a new instantiation?
-                // let ty = ctx.ty_for_name(name);
-                // dbg!(&(name, name_txt));
-                let ty = u32::from(name.into_raw()).into();
+                let ty: TyId = (u32::from(name.into_raw())).into();
                 (name, ty)
             })
             .collect();
 
-        let expr_tys: Vec<_> = ctx
+        let expr_tys: Vec<_> = self
+            .ctx
             .module
             .exprs()
             .map(|(expr, _)| {
-                let ty = ctx.ty_for_expr(expr);
+                let ty = self.ctx.ty_for_expr(expr);
                 (expr, ty)
             })
             .collect();
 
-        let name_cnt = ctx.module.names().len();
-        let expr_cnt = ctx.module.exprs().len();
+        let name_cnt = self.ctx.module.names().len();
+        let expr_cnt = self.ctx.module.exprs().len();
         let mut name_ty_map = HashMap::with_capacity(name_cnt);
         let mut expr_ty_map = HashMap::with_capacity(expr_cnt);
+
         for (name, ty) in name_tys {
-            // let free_vars = ctx
-            //     .poly_type_env
-            //     .get(&name)
-            //     .expect("Should have generalized all names by now");
-            let ty = self.canonicalize_type(ty, &HashMap::default());
-            name_ty_map.insert(name, ty.normalize_vars());
+            let output = self.canonicalize(ty, true);
+            name_ty_map.insert(name, output.normalize_vars());
         }
+
         for (expr, ty) in expr_tys {
-            let mut ty = self.canonicalize_type(ty, &HashMap::default());
-
+            let mut output = self.canonicalize(ty, true);
             if expr == self.ctx.module.entry_expr {
-                ty = ty.normalize_vars();
+                output = output.normalize_vars();
             }
-
-            expr_ty_map.insert(expr, ty);
+            expr_ty_map.insert(expr, output);
         }
-
-        // dbg!(&self.ctx.table);
 
         InferenceResult {
             name_ty_map,
@@ -72,105 +76,223 @@ impl<'db> Collector<'db> {
         }
     }
 
-    fn canonicalize_type(&mut self, ty: TyId, subs: &Substitutions) -> ArcTy {
-        let i = self.ctx.table.find(ty);
-        if let Some(ty) = self.cache.get(&i).cloned() {
-            return ty;
+    /// Canonicalize a TyId into an OutputTy, expanding variables based on polarity.
+    fn canonicalize(&mut self, ty_id: TyId, positive: bool) -> OutputTy {
+        let key = (ty_id, positive);
+
+        if let Some(cached) = self.cache.get(&key) {
+            return cached.clone();
         }
 
-        let ret = self.canonicalize_type_uncached(ty, subs);
-        self.cache.insert(i, ret.clone());
-        ret
+        // Cycle detection.
+        if self.in_progress.contains(&key) {
+            return OutputTy::TyVar(ty_id.0);
+        }
+
+        self.in_progress.insert(key);
+        let result = self.canonicalize_inner(ty_id, positive);
+        self.in_progress.remove(&key);
+
+        self.cache.insert(key, result.clone());
+        result
     }
 
-    fn canonicalize_type_uncached(&mut self, ty_id: TyId, subs: &Substitutions) -> ArcTy {
-        // let ty = self.ctx.get_ty(ty_id);
-        let ty_id = self.ctx.table.find(ty_id);
-        let ty = self.ctx.get_ty(ty_id);
+    fn canonicalize_inner(&mut self, ty_id: TyId, positive: bool) -> OutputTy {
+        let entry = self.ctx.table.get(ty_id).clone();
 
-        // let ty = if let Some(t) = ty {
-        //     t
-        // } else {
-        //     let root = self.ctx.table.find(ty_id);
-        //     // eprintln!("{ty_id:?} is unknown\troot: {root:?}");
-        //     Ty::TyVar(root.0)
-        // };
-
-        match ty {
-            Ty::TyVar(x) => {
-                // TODO: this should just be a generic param at this point
-                // should eventually normalize the vars so they start from 0
-                // could maybe do that as a final pass on the name?
-                ArcTy::TyVar(x)
-                // if x != ty_id.0 {
-                //     self.canonicalize_type(TyId::from(x))
-                // } else {
-                //     ArcTy::TyVar(x)
-                // }
-            }
-            Ty::List(inner_id) => {
-                let c_inner = self.canonicalize_type(inner_id, subs);
-                ArcTy::List(c_inner.into())
-            }
-            Ty::Lambda { param, body } => {
-                let c_param = self.canonicalize_type(param, subs).into();
-                let c_body = self.canonicalize_type(body, subs).into();
-                ArcTy::Lambda {
-                    param: c_param,
-                    body: c_body,
+        match entry {
+            TypeEntry::Variable(v) => {
+                if positive {
+                    self.expand_bounds_as_union(&v.lower_bounds, ty_id)
+                } else {
+                    self.expand_bounds_as_intersection(&v.upper_bounds, ty_id)
                 }
             }
-            Ty::AttrSet(attr_set_ty) => {
-                // let c_attr = self.canonicalize_attrset(attr_set_ty);
-                // ArcTy::AttrSet(c_attr)
-                // ArcTy::AttrSet(AttrSetTy {
-                //     fields: BTreeMap::new(),
-                //     dyn_ty: None,
-                //     rest: None,
-                // })
-                self.canonicalize_attrset(attr_set_ty, subs)
-            }
-            Ty::Primitive(p) => ArcTy::Primitive(p),
+            TypeEntry::Concrete(ty) => self.canonicalize_concrete(&ty, positive),
         }
     }
 
-    fn canonicalize_attrset(
-        &mut self,
-        attr_set_ty: AttrSetTy<TyId>,
-        subs: &Substitutions,
-    ) -> ArcTy {
-        let mut new_fields = BTreeMap::<SmolStr, TyRef>::new();
-        for (k, &v_id) in &attr_set_ty.fields {
-            let field_ty = self.canonicalize_type(v_id, subs).into();
-            new_fields.insert(k.clone(), field_ty);
+    /// Expand lower bounds of a variable into a union (positive position).
+    fn expand_bounds_as_union(&mut self, bounds: &[TyId], var_id: TyId) -> OutputTy {
+        let bounds = bounds.to_vec();
+        let members: Vec<OutputTy> = bounds
+            .iter()
+            .map(|&b| self.canonicalize(b, true))
+            .collect();
+
+        let flattened = Self::flatten_union(members);
+
+        // Filter out bare type variables — in positive position, a TyVar bound
+        // means "something unknown flows in" which adds no information to a union.
+        let concrete: Vec<OutputTy> = flattened
+            .into_iter()
+            .filter(|m| !matches!(m, OutputTy::TyVar(_)))
+            .collect();
+
+        match concrete.len() {
+            0 => OutputTy::TyVar(var_id.0),
+            1 => concrete.into_iter().next().unwrap(),
+            _ => OutputTy::Union(concrete.into_iter().map(TyRef::from).collect()),
         }
-        let dyn_ty = attr_set_ty
-            .dyn_ty
-            .map(|d_id| self.canonicalize_type(d_id, subs).into());
+    }
 
-        let rest = attr_set_ty
-            .rest
-            .map(|r_id| self.canonicalize_type(r_id, subs));
+    /// Expand upper bounds of a variable into an intersection (negative position).
+    fn expand_bounds_as_intersection(&mut self, bounds: &[TyId], var_id: TyId) -> OutputTy {
+        let bounds = bounds.to_vec();
+        let members: Vec<OutputTy> = bounds
+            .iter()
+            .map(|&b| self.canonicalize(b, false))
+            .collect();
 
-        // TODO: not sure if still needs this explicit merge
-        // also need to figure out how to track "open" records like patterns
-        // right now if the rest points to an "unknown" type var not sure if that means it would be closed
-        // thats the case for row_poly.nix
-        match rest {
-            Some(Ty::AttrSet(other)) => {
-                let curr = AttrSetTy {
+        let flattened = Self::flatten_intersection(members);
+
+        // Filter out bare type variables — in negative position, a TyVar bound
+        // means "flows into something unknown" which adds no information.
+        let concrete: Vec<OutputTy> = flattened
+            .into_iter()
+            .filter(|m| !matches!(m, OutputTy::TyVar(_)))
+            .collect();
+
+        // Merge multiple attrsets into one (intersection of records = record with all fields).
+        let concrete = Self::merge_attrset_intersection(concrete);
+
+        match concrete.len() {
+            0 => OutputTy::TyVar(var_id.0),
+            1 => concrete.into_iter().next().unwrap(),
+            _ => OutputTy::Intersection(concrete.into_iter().map(TyRef::from).collect()),
+        }
+    }
+
+    fn canonicalize_concrete(&mut self, ty: &Ty<TyId>, positive: bool) -> OutputTy {
+        match ty {
+            Ty::Primitive(p) => OutputTy::Primitive(*p),
+            Ty::TyVar(x) => OutputTy::TyVar(*x),
+            Ty::List(elem) => {
+                let c_elem = self.canonicalize(*elem, positive);
+                OutputTy::List(TyRef::from(c_elem))
+            }
+            Ty::Lambda { param, body } => {
+                let c_param = self.canonicalize(*param, !positive);
+                let c_body = self.canonicalize(*body, positive);
+                OutputTy::Lambda {
+                    param: TyRef::from(c_param),
+                    body: TyRef::from(c_body),
+                }
+            }
+            Ty::AttrSet(attr) => {
+                let mut new_fields = BTreeMap::new();
+                for (k, &v) in &attr.fields {
+                    let c_field = self.canonicalize(v, positive);
+                    new_fields.insert(k.clone(), TyRef::from(c_field));
+                }
+                let dyn_ty = attr
+                    .dyn_ty
+                    .map(|d| TyRef::from(self.canonicalize(d, positive)));
+                OutputTy::AttrSet(AttrSetTy {
                     fields: new_fields,
                     dyn_ty,
-                    rest: None,
-                };
-
-                ArcTy::AttrSet(curr.merge(other))
+                    open: attr.open,
+                })
             }
-            _ => ArcTy::AttrSet(AttrSetTy {
-                fields: new_fields,
-                dyn_ty,
-                rest: rest.map(|r| r.into()),
-            }),
         }
+    }
+
+    /// Flatten nested unions and deduplicate members.
+    fn flatten_union(members: Vec<OutputTy>) -> Vec<OutputTy> {
+        let mut result = Vec::new();
+        let mut seen = HashSet::new();
+        for m in members {
+            match m {
+                OutputTy::Union(inner) => {
+                    for sub in inner {
+                        let sub_ty = (*sub.0).clone();
+                        if seen.insert(sub_ty.clone()) {
+                            result.push(sub_ty);
+                        }
+                    }
+                }
+                other => {
+                    if seen.insert(other.clone()) {
+                        result.push(other);
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    /// Flatten nested intersections and deduplicate members.
+    fn flatten_intersection(members: Vec<OutputTy>) -> Vec<OutputTy> {
+        let mut result = Vec::new();
+        let mut seen = HashSet::new();
+        for m in members {
+            match m {
+                OutputTy::Intersection(inner) => {
+                    for sub in inner {
+                        let sub_ty = (*sub.0).clone();
+                        if seen.insert(sub_ty.clone()) {
+                            result.push(sub_ty);
+                        }
+                    }
+                }
+                other => {
+                    if seen.insert(other.clone()) {
+                        result.push(other);
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    /// Merge multiple attrsets in an intersection into a single attrset.
+    /// The intersection of `{ foo: int }` and `{ bar: string }` is `{ foo: int, bar: string }`.
+    /// For overlapping fields, the field types are intersected.
+    fn merge_attrset_intersection(members: Vec<OutputTy>) -> Vec<OutputTy> {
+        let mut attrsets: Vec<AttrSetTy<TyRef>> = Vec::new();
+        let mut others: Vec<OutputTy> = Vec::new();
+
+        for m in members {
+            match m {
+                OutputTy::AttrSet(attr) => attrsets.push(attr),
+                other => others.push(other),
+            }
+        }
+
+        if attrsets.is_empty() {
+            return others;
+        }
+
+        // Merge all attrsets. For overlapping fields, take the most specific
+        // (for now, just take the non-TyVar one; a proper implementation would
+        // intersect field types).
+        let mut merged_fields: BTreeMap<smol_str::SmolStr, TyRef> = BTreeMap::new();
+        let mut any_open = false;
+
+        for attr in &attrsets {
+            any_open = any_open || attr.open;
+            for (k, v) in &attr.fields {
+                merged_fields
+                    .entry(k.clone())
+                    .and_modify(|existing| {
+                        // If the existing type is a TyVar and the new one isn't, prefer the new one.
+                        // If both are concrete and equal, keep either. Otherwise keep existing.
+                        // TODO: proper intersection of field types.
+                        if matches!(&*existing.0, OutputTy::TyVar(_)) {
+                            *existing = v.clone();
+                        }
+                    })
+                    .or_insert_with(|| v.clone());
+            }
+        }
+
+        let merged = OutputTy::AttrSet(AttrSetTy {
+            fields: merged_fields,
+            dyn_ty: None, // TODO: merge dyn_tys
+            open: any_open,
+        });
+
+        others.push(merged);
+        others
     }
 }
