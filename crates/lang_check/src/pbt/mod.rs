@@ -1,3 +1,22 @@
+// ==============================================================================
+// Property-Based Tests for Type Inference
+// ==============================================================================
+//
+// Generates random Nix ASTs (as text) paired with their expected types, then
+// verifies that the type checker infers the expected type.
+//
+// Known limitations:
+// - High rejection rate: arb_nix_text_from_ty generates random OutputTy values
+//   that often contain unions, intersections, or non-primitive lambda params,
+//   all of which are filtered out. The arb_combined strategy compensates by
+//   weighting 9:1 toward the always-succeeding arb_nix_text.
+// - No union/intersection coverage: generated types are limited to primitives,
+//   lists, lambdas, and attrsets. Union and intersection types would require
+//   generating if-then-else branches or multi-bounded variables.
+// - Path and Uri types trigger todo!() in prim_ty_to_string and are excluded
+//   from the arb_prim strategy. Path literals require valid filesystem syntax
+//   and Uri is rarely used.
+
 use std::collections::{BTreeMap, HashSet};
 
 use lang_ast::{BoolBinOp, OverloadBinOp};

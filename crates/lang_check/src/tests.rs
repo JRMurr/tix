@@ -389,7 +389,15 @@ fn apply_polymorphism() {
     // same SCC group and share variables through `apply` (which is not yet
     // generalized within the group). The Number constraints from `addTwo`'s
     // partial resolution propagate to `strApply`'s shared variables.
-    // TODO: separate SCC groups or per-use instantiation would give `string` here.
+    //
+    // TODO: this is an SCC grouping limitation — `apply`, `add`, `addTwo`, and
+    // `strApply` are all in the same group because they reference each other.
+    // Within an SCC group, names are not yet generalized, so all uses of `apply`
+    // share the same type variables. The Number upper bound added by `addTwo`'s
+    // `add 2` propagates to `strApply`'s variables. Fixing this requires either:
+    // 1. Splitting into separate SCC groups (apply+add in one, addTwo+strApply in another)
+    // 2. Per-use instantiation within a group (expensive, breaks the SimpleSub model)
+    // 3. Accepting this as a known limitation of monomorphic intra-group inference
     let str_apply_ty = get_name_type(file, "strApply");
     assert_eq!(str_apply_ty, arc_ty!(Number -> Number));
 }
