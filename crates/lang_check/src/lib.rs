@@ -89,9 +89,6 @@ pub enum InferenceError {
     #[error("Missing field: {0:?}")]
     MissingField(smol_str::SmolStr),
 
-    #[error("Can not negate non number type {0:?}")]
-    InvalidNegation(Ty<TyId>),
-
     #[error("Can not do binary operation ({1:?}) ({0:?}) ({2:?})")]
     InvalidBinOp(OverloadBinOp, Ty<TyId>, Ty<TyId>),
 
@@ -111,6 +108,11 @@ pub struct CheckCtx<'db> {
     poly_type_env: HashMap<NameId, TyId>,
 
     /// Cache (sub, sup) pairs already processed by constrain() to avoid cycles.
+    /// Intentionally never cleared between SCC groups: extrusion creates fresh
+    /// vars linked to old ones via constrain(), and re-processing those pairs
+    /// would cause infinite loops across extrusion boundaries. The tradeoff is
+    /// monotonic memory growth — for an LSP, consider scoping or clearing the
+    /// cache per SCC group with careful cycle-safety analysis.
     constrain_cache: HashSet<(TyId, TyId)>,
 
     /// Primitive type cache for deduplication.
@@ -193,7 +195,15 @@ impl<'db> CheckCtx<'db> {
             .map(|var| {
                 let ty_id = match var {
                     TypeVarValue::Generic(_) => self.new_var(),
-                    TypeVarValue::Reference(name) => todo!("Handle reference sub for {name}"),
+                    // TODO: resolve reference type vars by looking up the
+                    // referenced name in the type environment. A proper
+                    // implementation would search poly_type_env for `name`,
+                    // extrude the found TyId to get a fresh instance, and
+                    // use that — giving annotations like `/** @type Foo */`
+                    // the ability to refer to previously-defined type aliases.
+                    // For now, degrade to a fresh variable so annotations
+                    // with references don't panic.
+                    TypeVarValue::Reference(_name) => self.new_var(),
                 };
                 (var.clone(), ty_id)
             })

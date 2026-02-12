@@ -289,7 +289,7 @@ impl fmt::Display for PrimitiveTy {
             PrimitiveTy::String => write!(f, "string"),
             PrimitiveTy::Path => write!(f, "path"),
             PrimitiveTy::Uri => write!(f, "uri"),
-            PrimitiveTy::Number => write!(f, "number"),
+            PrimitiveTy::Number => write!(f, "int | float"),
         }
     }
 }
@@ -297,14 +297,23 @@ impl fmt::Display for PrimitiveTy {
 impl fmt::Display for AttrSetTy<TyRef> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{{ ")?;
-        for (i, (k, v)) in self.fields.iter().enumerate() {
-            if i > 0 {
+        let mut first = true;
+        for (k, v) in self.fields.iter() {
+            if !first {
                 write!(f, ", ")?;
             }
+            first = false;
             write!(f, "{k}: {v}")?;
         }
+        if let Some(dyn_ty) = &self.dyn_ty {
+            if !first {
+                write!(f, ", ")?;
+            }
+            first = false;
+            write!(f, "_: {dyn_ty}")?;
+        }
         if self.open {
-            if !self.fields.is_empty() {
+            if !first {
                 write!(f, ", ")?;
             }
             write!(f, "...")?;
@@ -314,17 +323,25 @@ impl fmt::Display for AttrSetTy<TyRef> {
 }
 
 impl AttrSetTy<TyRef> {
+    /// Collect free type variables in order of first appearance, deduplicated.
     pub fn free_type_vars(&self) -> Vec<u32> {
-        let mut set = Vec::new();
-        self.fields.values().for_each(|v| {
-            set.extend(&v.0.free_type_vars());
-        });
-
-        if let Some(dyn_ty) = &self.dyn_ty {
-            set.extend(&dyn_ty.0.free_type_vars());
+        let mut result = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for v in self.fields.values() {
+            for var in v.0.free_type_vars() {
+                if seen.insert(var) {
+                    result.push(var);
+                }
+            }
         }
-
-        set
+        if let Some(dyn_ty) = &self.dyn_ty {
+            for var in dyn_ty.0.free_type_vars() {
+                if seen.insert(var) {
+                    result.push(var);
+                }
+            }
+        }
+        result
     }
 
     pub(crate) fn normalize_inner(&self, free: &Substitutions) -> Self {

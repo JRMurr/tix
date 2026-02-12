@@ -115,17 +115,8 @@ impl ParsedTy {
     }
 }
 
-// =============================================================================
-// Backwards-compatible type aliases
-// =============================================================================
-//
-// KnownTy and KnownTyRef are kept as aliases so that existing code referencing
-// them continues to compile. New code should prefer ParsedTy/ParsedTyRef.
-
-pub type KnownTy = ParsedTy;
-pub type KnownTyRef = ParsedTyRef;
-
-// TODO: mostly copy pasted from the lang crate. Would be nice to generalize this macro to work for either type
+// TODO: Structurally duplicated from `arc_ty!` in `lang_ty`. If more variants
+// are added, consider extracting a shared `impl_ty_macro!` helper.
 #[macro_export]
 macro_rules! known_ty {
     // -- Match on known primitives -----------------------------------------

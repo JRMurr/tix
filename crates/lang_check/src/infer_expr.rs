@@ -157,7 +157,10 @@ impl CheckCtx<'_> {
                             // Dynamic select keys (e.g. `s.${k}`) are not supported yet.
                             // Return a fresh variable so inference can continue for the
                             // rest of the file instead of panicking.
-                            // TODO: support dynamic select keys via dyn_ty propagation.
+                            // TODO: constrain set_ty to have a dyn_ty, then return that
+                            // dyn_ty as the result. This would give `s.${k}` the type
+                            // of the attrset's dynamic field type instead of a completely
+                            // unconstrained variable.
                             return Ok(self.new_var());
                         }
                     };
@@ -463,7 +466,19 @@ impl CheckCtx<'_> {
         }
 
         let dyn_ty = if !bindings.dynamics.is_empty() {
-            todo!()
+            // TODO: infer dynamic binding types for LSP completeness.
+            // A proper implementation would unify all dynamic value types into
+            // a single element variable (like list inference does), constrain
+            // each key to string, and set dyn_ty to that element variable.
+            // This would give `{ ${k} = 1; ${j} = 2; }` the type
+            // `{ _: int, ... }` instead of `{ ... }`.
+            // For now, infer the expressions (to populate sub-expression types)
+            // but don't track dynamic keys in the attrset type.
+            for &(key_expr, value_expr) in bindings.dynamics.iter() {
+                self.infer_expr(key_expr)?;
+                self.infer_expr(value_expr)?;
+            }
+            None
         } else {
             None
         };

@@ -109,6 +109,11 @@ impl CheckCtx<'_> {
         // use-site extrusions add concrete bounds (int, string, etc.) back onto
         // polymorphic variables via constrain(). This preserves the clean
         // polymorphic form (e.g. `(a -> b) -> a -> b` for `apply`).
+        //
+        // Caveat: if a later SCC group adds cross-group constraints that further
+        // refine a name's type, this snapshot will be stale. Currently annotations
+        // are processed within the same SCC group so this doesn't happen, but
+        // cross-group constraint additions would require invalidation.
         for &(name_id, ty) in &inferred {
             let poly_ty = self.resolve_to_concrete_id(ty).unwrap_or(ty);
             let output = canonicalize_standalone(&self.table, poly_ty, true);
@@ -151,6 +156,12 @@ impl CheckCtx<'_> {
 
         // Re-instantiate deferred overloads for any vars that were extruded.
         // This creates per-call-site overload constraints with the fresh vars.
+        //
+        // NOTE: This fixed-point loop is O(n²) in the worst case (n deferred
+        // overloads where each pass resolves one). A worklist approach — only
+        // re-checking overloads whose operands were just added to the cache —
+        // would be O(n). Not a concern for typical Nix code, but worth
+        // revisiting if profiling shows extrude as a bottleneck.
         //
         // When at least one operand of a deferred overload was extruded, we need
         // a fresh copy of the entire overload for this call site. For operand
@@ -467,17 +478,30 @@ impl CheckCtx<'_> {
         None
     }
 
-    /// If `ty_id` is a Variable, walk its direct lower bounds to find a Concrete
-    /// entry and return that TyId. Used to resolve partial-application result
-    /// variables (which point to a Lambda via lower bounds) so poly_type_env
-    /// stores the structural type that extrude can traverse.
+    /// Walk lower bounds transitively to find a Concrete entry and return its
+    /// TyId. Used to resolve partial-application result variables (which point
+    /// to a Lambda via lower bounds) so poly_type_env stores the structural type
+    /// that extrude can traverse.
     fn resolve_to_concrete_id(&self, ty_id: TyId) -> Option<TyId> {
+        let mut visited = HashSet::new();
+        self.resolve_to_concrete_id_inner(ty_id, &mut visited)
+    }
+
+    fn resolve_to_concrete_id_inner(
+        &self,
+        ty_id: TyId,
+        visited: &mut HashSet<TyId>,
+    ) -> Option<TyId> {
+        if !visited.insert(ty_id) {
+            return None; // Cycle detected.
+        }
         match self.table.get(ty_id) {
             TypeEntry::Concrete(_) => Some(ty_id),
             TypeEntry::Variable(v) => {
-                for &lb in &v.lower_bounds {
-                    if matches!(self.table.get(lb), TypeEntry::Concrete(_)) {
-                        return Some(lb);
+                let bounds = v.lower_bounds.clone();
+                for lb in bounds {
+                    if let Some(id) = self.resolve_to_concrete_id_inner(lb, visited) {
+                        return Some(id);
                     }
                 }
                 None
