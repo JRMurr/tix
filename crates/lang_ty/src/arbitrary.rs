@@ -1,4 +1,4 @@
-use crate::{ArcTy, AttrSetTy, PrimitiveTy, Substitutions, TyRef};
+use crate::{ArcTy, AttrSetTy, OutputTy, PrimitiveTy, Substitutions, TyRef};
 use proptest::{
     prelude::{any, prop, prop_oneof, Arbitrary, BoxedStrategy, Just, Strategy},
     prop_compose,
@@ -13,7 +13,7 @@ pub struct RecursiveParams {
 }
 
 fn arb_arc_ty(args: RecursiveParams) -> impl Strategy<Value = ArcTy> {
-    let leaf = any::<PrimitiveTy>().prop_map(ArcTy::Primitive);
+    let leaf = any::<PrimitiveTy>().prop_map(OutputTy::Primitive);
 
     leaf.prop_recursive(
         args.depth,
@@ -23,11 +23,17 @@ fn arb_arc_ty(args: RecursiveParams) -> impl Strategy<Value = ArcTy> {
             let inner = inner.prop_map(TyRef::from);
 
             prop_oneof![
-                inner.clone().prop_map(ArcTy::List),
+                inner.clone().prop_map(OutputTy::List),
                 (inner.clone(), inner.clone())
-                    .prop_map(|(param, body)| ArcTy::Lambda { param, body }),
+                    .prop_map(|(param, body)| OutputTy::Lambda { param, body }),
                 prop::collection::btree_map(arb_smol_str_ident(), inner.clone(), 0..5)
-                    .prop_map(|map| ArcTy::AttrSet(AttrSetTy::from_fields(map)))
+                    .prop_map(|map| OutputTy::AttrSet(AttrSetTy::from_fields(map))),
+                // Union of 2-4 members
+                prop::collection::vec(inner.clone(), 2..5)
+                    .prop_map(OutputTy::Union),
+                // Intersection of 2-4 members
+                prop::collection::vec(inner.clone(), 2..5)
+                    .prop_map(OutputTy::Intersection),
             ]
         },
     )
@@ -51,9 +57,9 @@ impl Default for RecursiveParams {
     }
 }
 
-impl Arbitrary for ArcTy {
+impl Arbitrary for OutputTy {
     type Parameters = RecursiveParams;
-    type Strategy = BoxedStrategy<ArcTy>;
+    type Strategy = BoxedStrategy<OutputTy>;
 
     fn arbitrary_with(args: Self::Parameters) -> Self::Strategy {
         arb_arc_ty(args).boxed()
@@ -86,8 +92,6 @@ impl AttrSetTy<TyRef> {
     /// Each child of the attrset for now will be unique
     /// so we need to make sure each child has its own unique ty vars
     pub fn spread_free_vars(&self, num_free_vars: &mut usize) -> Self {
-        // let mut num_free_vars = 0;
-
         let fields = self
             .fields
             .iter()
@@ -108,30 +112,19 @@ impl AttrSetTy<TyRef> {
             })
             .collect();
 
-        // let dyn_ty = self
-        //     .dyn_ty
-        //     .clone()
-        //     .map(|dyn_ty| dyn_ty.0.normalize_inner(free).into());
-
-        // let rest = self
-        //     .rest
-        //     .clone()
-        //     .map(|rest| rest.0.normalize_inner(free).into());
-
         Self {
             fields,
             dyn_ty: None, // TODO:
-            rest: None,   // TODO:
+            open: false,
         }
     }
 }
 
-impl ArcTy {
+impl OutputTy {
     // TODO: make spread_free_vars for all variants
     pub fn offset_free_vars(&self, num_free_vars: &mut usize) -> Self {
         let free_vars = self.free_type_vars();
 
-        // TODO: extract this
         let subs: Substitutions = free_vars
             .iter()
             .enumerate()
