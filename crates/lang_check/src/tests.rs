@@ -530,3 +530,40 @@ test_case!(
 );
 
 test_case!(interpolation_multiline, "let name = \"world\"; in ''hello ${name}''", String);
+
+// ==============================================================================
+// `with` expression
+// ==============================================================================
+
+test_case!(with_simple, "with { x = 1; }; x", Int);
+
+test_case!(
+    with_let_binding,
+    "let s = { x = \"hi\"; }; in with s; x",
+    String
+);
+
+test_case!(
+    with_function,
+    "with { f = x: x + 1; }; f 5",
+    Int
+);
+
+// Nested `with` where both envs are the same: variables resolve through the innermost.
+test_case!(
+    with_nested_same_env,
+    "let e = { x = 1; y = \"hi\"; }; in with e; with e; { a = x; b = y; }",
+    { "a": Int, "b": String }
+);
+
+// Nested `with` with disjoint envs: only the innermost is constrained,
+// so names from the outer `with` that aren't in the inner one produce errors.
+// TODO: multi-`with` fallthrough would resolve `x` from the outer env.
+#[test]
+fn with_nested_disjoint_errors() {
+    let error = get_check_error(
+        "with { x = 1; }; with { y = \"hi\"; }; { a = x; b = y; }",
+    );
+    // `x` is constrained against the inner env `{ y = "hi"; }`, which lacks `x`.
+    assert!(matches!(error, InferenceError::MissingField(_)));
+}

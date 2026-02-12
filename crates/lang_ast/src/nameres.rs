@@ -357,7 +357,11 @@ impl NameDependencies {
                     ResolveResult::Builtin(_) => {
                         // Builtins don't depend on user-defined names; nothing to record.
                     }
-                    ResolveResult::WithExprs(_vec) => todo!(),
+                    ResolveResult::WithExprs(_) => {
+                        // No dependency edge needed: the env expression's own
+                        // dependencies are already captured via walk_child_exprs
+                        // in the Expr::With fallthrough arm.
+                    }
                 }
             }
             Expr::LetIn { bindings, body } => {

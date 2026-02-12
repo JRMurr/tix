@@ -233,7 +233,10 @@ impl CheckCtx<'_> {
                 self.infer_expr(body)
             }
 
-            Expr::With { env, body } => todo!("handle with {env:?} {body:?}"),
+            Expr::With { env, body } => {
+                self.infer_expr(env)?;
+                self.infer_expr(body)
+            }
             Expr::StringInterpolation(parts) | Expr::PathInterpolation(parts) => {
                 // Nix implicitly coerces interpolated sub-expressions via toString,
                 // so we infer each sub-expression (to populate ty_for_expr) but don't
@@ -277,8 +280,26 @@ impl CheckCtx<'_> {
                         Ok(self.ty_for_name_direct(name))
                     }
                 }
-                ResolveResult::WithExprs(_) => {
-                    todo!("handle with exprs in reference")
+                ResolveResult::WithExprs(with_exprs) => {
+                    // Use the innermost `with` scope. Nix checks inner-to-outer at
+                    // runtime, but statically we can only constrain one env. The
+                    // innermost is the right choice for the common single-`with` case.
+                    // TODO: multi-`with` fallthrough (outer env when inner lacks the field)
+                    let with_expr_id = with_exprs[0];
+                    let env_id = match &self.module[with_expr_id] {
+                        Expr::With { env, .. } => *env,
+                        _ => unreachable!("WithExprs should reference With nodes"),
+                    };
+
+                    let env_ty = self.ty_for_expr(env_id);
+                    let value_ty = self.new_var();
+                    let field_attr = self.alloc_concrete(Ty::AttrSet(AttrSetTy {
+                        fields: [(var_name.clone(), value_ty)].into_iter().collect(),
+                        dyn_ty: None,
+                        open: true,
+                    }));
+                    self.constrain(env_ty, field_attr)?;
+                    Ok(value_ty)
                 }
                 ResolveResult::Builtin(name) => self.synthesize_builtin(name),
             },

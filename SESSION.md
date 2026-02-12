@@ -61,7 +61,9 @@
 
 ### Missing Features
 
-- `with` expression support
+- Multi-`with` fallthrough: only the innermost `with` env is constrained for
+  unresolved names. Nix semantics would check outer `with` scopes when the inner
+  one lacks the attribute, but that requires runtime-like dynamic dispatch.
 - Dynamic attrset fields in Select expressions
 - Proper intersection of field types in `merge_attrset_intersection` (currently
   takes the non-TyVar one)
