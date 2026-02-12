@@ -187,8 +187,10 @@ pub fn canonicalize_standalone(table: &TypeStorage, ty_id: TyId, positive: bool)
 // ==============================================================================
 
 /// Flatten nested unions and deduplicate members.
-/// Uses structural normalization so that types differing only in TyVar IDs
-/// (e.g. two extrusions of the same polymorphic type) are recognized as duplicates.
+/// Uses structural equality (not normalize_vars) so that distinct type variables
+/// are preserved even if they'd normalize to the same index. This is slightly
+/// more verbose but avoids incorrectly merging structurally different types that
+/// happen to share the same shape after variable renumbering.
 fn flatten_union(members: Vec<OutputTy>) -> Vec<OutputTy> {
     let mut result = Vec::new();
     let mut seen = HashSet::new();
@@ -197,13 +199,13 @@ fn flatten_union(members: Vec<OutputTy>) -> Vec<OutputTy> {
             OutputTy::Union(inner) => {
                 for sub in inner {
                     let sub_ty = (*sub.0).clone();
-                    if seen.insert(sub_ty.normalize_vars()) {
+                    if seen.insert(sub_ty.clone()) {
                         result.push(sub_ty);
                     }
                 }
             }
             other => {
-                if seen.insert(other.normalize_vars()) {
+                if seen.insert(other.clone()) {
                     result.push(other);
                 }
             }
@@ -213,8 +215,7 @@ fn flatten_union(members: Vec<OutputTy>) -> Vec<OutputTy> {
 }
 
 /// Flatten nested intersections and deduplicate members.
-/// Uses structural normalization so that types differing only in TyVar IDs
-/// are recognized as duplicates.
+/// Uses structural equality (not normalize_vars) to avoid merging distinct types.
 fn flatten_intersection(members: Vec<OutputTy>) -> Vec<OutputTy> {
     let mut result = Vec::new();
     let mut seen = HashSet::new();
@@ -223,13 +224,13 @@ fn flatten_intersection(members: Vec<OutputTy>) -> Vec<OutputTy> {
             OutputTy::Intersection(inner) => {
                 for sub in inner {
                     let sub_ty = (*sub.0).clone();
-                    if seen.insert(sub_ty.normalize_vars()) {
+                    if seen.insert(sub_ty.clone()) {
                         result.push(sub_ty);
                     }
                 }
             }
             other => {
-                if seen.insert(other.normalize_vars()) {
+                if seen.insert(other.clone()) {
                     result.push(other);
                 }
             }

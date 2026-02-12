@@ -45,6 +45,7 @@ const ALL_BUILTIN_NAMES: &[&str] = &[
     "throw",
     "abort",
     "import",
+    "scopedImport",
     "attrNames",
     "hasAttr",
     "getEnv",
@@ -164,7 +165,9 @@ impl CheckCtx<'_> {
             "getEnv" => synth_ty!(self; => String -> String),
             "ceil" | "floor" => synth_ty!(self; => Float -> Int),
             "seq" | "deepSeq" | "trace" => synth_ty!(self; a, b => a -> b -> b),
-            "import" | "scopedImport" => synth_ty!(self; a, b => a -> b),
+            "import" => synth_ty!(self; a, b => a -> b),
+            // scopedImport takes an attrset scope and a path, returns the import result.
+            "scopedImport" => synth_ty!(self; a, b, c => a -> b -> c),
 
             // =================================================================
             // {..} builtins

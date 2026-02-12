@@ -248,7 +248,7 @@ fn apply_simplification(
                 .collect();
 
             match simplified.len() {
-                0 => OutputTy::TyVar(u32::MAX), // shouldn't happen in practice
+                0 => unreachable!("all union members removed during simplification"),
                 1 => (*simplified.into_iter().next().unwrap().0).clone(),
                 _ => OutputTy::Union(simplified),
             }
@@ -274,7 +274,7 @@ fn apply_simplification(
                 .collect();
 
             match simplified.len() {
-                0 => OutputTy::TyVar(u32::MAX), // shouldn't happen in practice
+                0 => unreachable!("all intersection members removed during simplification"),
                 1 => (*simplified.into_iter().next().unwrap().0).clone(),
                 _ => OutputTy::Intersection(simplified),
             }

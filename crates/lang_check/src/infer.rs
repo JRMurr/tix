@@ -86,7 +86,7 @@ impl CheckCtx<'_> {
                     .and_then(|docs| {
                         let parsed: Vec<_> = docs
                             .iter()
-                            .flat_map(|doc| parse_and_collect(doc).expect("TODO: No parse error"))
+                            .flat_map(|doc| parse_and_collect(doc).unwrap_or_default())
                             .collect();
                         let name_str = &self.module[name_id].text;
                         parsed.into_iter().find_map(|decl| {
