@@ -73,6 +73,12 @@ impl<'a> Canonicalizer<'a> {
     }
 
     /// Expand lower bounds of a variable into a union (positive position).
+    ///
+    /// When a variable has no concrete lower bounds but has primitive-only upper
+    /// bounds, we use those upper bounds as the type. This is a **display heuristic**,
+    /// not a type-theoretically sound transformation: `ret <: Number` doesn't mean
+    /// `ret` IS `Number`, but in practice the upper bound is the most informative
+    /// thing we can show for unconstrained return types of arithmetic operations.
     fn expand_bounds_as_union(&mut self, bounds: &[TyId], var_id: TyId) -> OutputTy {
         let bounds = bounds.to_vec();
         let members: Vec<OutputTy> = bounds.iter().map(|&b| self.canonicalize(b, true)).collect();

@@ -384,13 +384,25 @@ impl CheckCtx<'_> {
             }
 
             BinOP::Normal(NormalBinOp::ListConcat) => {
-                let elem_ty = self.new_var();
-                let list_ty = self.alloc_concrete(Ty::List(elem_ty));
-                self.constrain(lhs_ty, list_ty)?;
-                self.constrain(list_ty, lhs_ty)?;
-                self.constrain(rhs_ty, list_ty)?;
-                self.constrain(list_ty, rhs_ty)?;
-                Ok(list_ty)
+                // Use separate element variables for lhs, rhs, and result so that
+                // `[1] ++ ["hi"]` infers `[int | string]` instead of forcing both
+                // sides to unify into one element type.
+                let lhs_elem = self.new_var();
+                let rhs_elem = self.new_var();
+                let result_elem = self.new_var();
+
+                let lhs_list = self.alloc_concrete(Ty::List(lhs_elem));
+                let rhs_list = self.alloc_concrete(Ty::List(rhs_elem));
+
+                // Constrain operands to be lists.
+                self.constrain(lhs_ty, lhs_list)?;
+                self.constrain(rhs_ty, rhs_list)?;
+
+                // Each side's elements flow into the result (directional, not bidirectional).
+                self.constrain(lhs_elem, result_elem)?;
+                self.constrain(rhs_elem, result_elem)?;
+
+                Ok(self.alloc_concrete(Ty::List(result_elem)))
             }
 
             BinOP::Normal(NormalBinOp::AttrUpdate) => {

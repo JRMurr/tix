@@ -752,8 +752,24 @@ fn bidirectional_let_cycle() {
 test_case!(bool_inversion, "!true", Bool);
 test_case!(bool_inversion_lambda, "a: !a", (Bool -> Bool));
 
-// List concatenation.
+// List concatenation — homogeneous.
 test_case!(list_concat, "[1 2] ++ [3 4]", [Int]);
+
+// List concatenation — heterogeneous: `[1] ++ ["hi"]` should produce `[int | string]`.
+#[test]
+fn list_concat_heterogeneous() {
+    let ty = get_inferred_root("[1] ++ [\"hi\"]");
+    match &ty {
+        lang_ty::OutputTy::List(elem) => {
+            assert!(
+                matches!(&*elem.0, lang_ty::OutputTy::Union(_)),
+                "heterogeneous concat should have union element type, got: {}",
+                elem.0
+            );
+        }
+        _ => panic!("expected list type, got: {ty}"),
+    }
+}
 
 // Has-attr operator.
 test_case!(has_attr, "{ x = 1; } ? \"x\"", Bool);

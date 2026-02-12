@@ -31,7 +31,7 @@ pub enum TypeEntry {
 #[derive(Debug, Clone)]
 pub struct TypeStorage {
     entries: Vec<TypeEntry>,
-    pub current_level: u32,
+    pub(crate) current_level: u32,
 }
 
 impl TypeStorage {
@@ -110,5 +110,10 @@ impl TypeStorage {
     pub fn exit_level(&mut self) {
         assert!(self.current_level > 0, "exit_level called at level 0");
         self.current_level -= 1;
+    }
+
+    /// Number of entries (variables + concrete types) in the storage.
+    pub fn len(&self) -> usize {
+        self.entries.len()
     }
 }

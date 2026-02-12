@@ -174,13 +174,25 @@ impl<'db> CheckCtx<'db> {
     /// Get the pre-allocated TyId for a name (used during inference of the name's
     /// own definition, before it has been generalized).
     fn ty_for_name_direct(&self, name: NameId) -> TyId {
-        u32::from(name.into_raw()).into()
+        let id: TyId = u32::from(name.into_raw()).into();
+        debug_assert!(
+            usize::from(id) < self.table.len(),
+            "ty_for_name_direct: TyId {id:?} out of bounds (storage has {} entries)",
+            self.table.len()
+        );
+        id
     }
 
     /// Get the pre-allocated TyId for an expression.
     fn ty_for_expr(&self, i: ExprId) -> TyId {
         let idx = self.module.names().len() as u32 + u32::from(i.into_raw());
-        idx.into()
+        let id: TyId = idx.into();
+        debug_assert!(
+            usize::from(id) < self.table.len(),
+            "ty_for_expr: TyId {id:?} out of bounds (storage has {} entries)",
+            self.table.len()
+        );
+        id
     }
 
     // ==========================================================================

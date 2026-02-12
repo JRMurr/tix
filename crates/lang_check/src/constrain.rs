@@ -7,6 +7,27 @@
 // When a variable appears on the left, it gains an upper bound.
 // When a variable appears on the right, it gains a lower bound.
 // This naturally supports union and intersection types.
+//
+// Bidirectional vs. directional constraints
+// ------------------------------------------
+// Some call sites use bidirectional constraints (both directions):
+//   constrain(a, b); constrain(b, a);   // "a equals b"
+// This is used when two types must be identical, e.g.:
+// - Linking a name slot to its inferred type (name_slot ≡ inferred_ty)
+// - Pattern match bindings (param ≡ destructured attrset)
+// - Overload return type pinning (ret ≡ resolved_type)
+//
+// Other call sites use directional (one-way) constraints:
+//   constrain(sub, sup);                // "sub flows into sup"
+// This is used for genuine subtyping relationships:
+// - Function application: arg <: param (argument is subtype of parameter)
+// - If-then-else branches: then_ty <: result, else_ty <: result
+// - List concat elements: lhs_elem <: result_elem, rhs_elem <: result_elem
+//
+// The distinction matters for type variable bounds: bidirectional constraints
+// make both variables equivalent (same upper and lower bounds), while
+// directional constraints preserve the subtyping relationship and naturally
+// produce union/intersection types during canonicalization.
 
 use super::{CheckCtx, InferenceError, TyId};
 use crate::storage::TypeEntry;
