@@ -2,24 +2,17 @@
 
 ### PBT Generator Issues (deferred)
 
-- `wrap_in_let` identity variant (`let id = a: a; in id(val)`) loses type information
-  when `val` contains overloaded operations. Root cause: SCC grouping includes ALL
-  names (even let-in names), so the identity function gets let-generalized. During
-  extrusion, fresh vars inherit only lower bounds in positive polarity, and the
-  resolved overload type (e.g. Int) doesn't propagate as an upper bound to the
-  fresh var. Fix: either exclude let-in names from SCC grouping, or improve how
-  resolved overload types propagate through extrusion.
-
 - PBT `func_strat` `fully_known` variant: `if param == <value>` doesn't fully
-  constrain the param type in SimpleSub when the value has non-primitive types
-  (e.g. lambdas). In negative position, canonicalization uses upper bounds, but the
-  equality constraint may only establish lower bounds for nested sub-components.
-  Filtered out in PBT for now.
-
-- Union deduplication: if-then-else with identical branches can produce spurious
-  unions when the branch type contains lambda params that get different TyVar IDs
-  during canonicalization. The lambdas look structurally identical but have different
-  internal var numbering.
+  constrain the param type in SimpleSub when the value goes through variable
+  intermediaries (e.g. attrset select results of overloaded operations). The `==`
+  operator establishes bidirectional variable-to-variable links, and concrete types
+  flow correctly as lower bounds through the chain. However, in negative position,
+  canonicalization uses upper bounds, and the variable cycle has no concrete upper
+  bound — only lower bounds. Added explicit concrete propagation in the `==` case
+  (`find_concrete` + `alloc_concrete` + `constrain`) as a partial fix, but this only
+  helps when the concrete type is available at inference time (not for deferred
+  overloads). A proper fix likely requires type simplification or a different
+  canonicalization strategy.
 
 ### Overload Resolution + Extrusion
 
@@ -29,6 +22,20 @@
   (like open attrsets). A more principled fix would be to either (a) replace the
   Variable entry with a Concrete entry when overload resolution pins a var, or
   (b) improve extrusion to propagate both lower and upper bounds for resolved vars.
+
+- The deferred overload approach adds significant complexity to extrusion (fixed-point
+  loop for re-instantiation, interaction with constraint cache). Consider replacing
+  with intersection-type-based overloading (see Future Enhancements).
+
+### Canonicalization / Type Display
+
+- Polymorphic types like `apply = fn: args: fn args` show use-site contamination in
+  their canonical type (e.g. `((int | string) -> a) -> b -> ...` instead of
+  `(a -> b) -> a -> b`). This is correct un-simplified SimpleSub behavior: when a
+  polymorphic type is extruded at a use site, fresh variables are linked back to
+  originals via bounds, and use-site constraints flow back. The canonicalization then
+  follows these bounds to the contaminated originals. Type simplification (Section 4.2
+  / co-occurrence analysis) would merge co-occurring variables and clean this up.
 
 ### Missing Features
 

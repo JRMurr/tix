@@ -198,6 +198,8 @@ impl<'db> Collector<'db> {
     }
 
     /// Flatten nested unions and deduplicate members.
+    /// Uses structural normalization so that types differing only in TyVar IDs
+    /// (e.g. two extrusions of the same polymorphic type) are recognized as duplicates.
     fn flatten_union(members: Vec<OutputTy>) -> Vec<OutputTy> {
         let mut result = Vec::new();
         let mut seen = HashSet::new();
@@ -206,13 +208,13 @@ impl<'db> Collector<'db> {
                 OutputTy::Union(inner) => {
                     for sub in inner {
                         let sub_ty = (*sub.0).clone();
-                        if seen.insert(sub_ty.clone()) {
+                        if seen.insert(sub_ty.normalize_vars()) {
                             result.push(sub_ty);
                         }
                     }
                 }
                 other => {
-                    if seen.insert(other.clone()) {
+                    if seen.insert(other.normalize_vars()) {
                         result.push(other);
                     }
                 }
@@ -222,6 +224,8 @@ impl<'db> Collector<'db> {
     }
 
     /// Flatten nested intersections and deduplicate members.
+    /// Uses structural normalization so that types differing only in TyVar IDs
+    /// are recognized as duplicates.
     fn flatten_intersection(members: Vec<OutputTy>) -> Vec<OutputTy> {
         let mut result = Vec::new();
         let mut seen = HashSet::new();
@@ -230,13 +234,13 @@ impl<'db> Collector<'db> {
                 OutputTy::Intersection(inner) => {
                     for sub in inner {
                         let sub_ty = (*sub.0).clone();
-                        if seen.insert(sub_ty.clone()) {
+                        if seen.insert(sub_ty.normalize_vars()) {
                             result.push(sub_ty);
                         }
                     }
                 }
                 other => {
-                    if seen.insert(other.clone()) {
+                    if seen.insert(other.normalize_vars()) {
                         result.push(other);
                     }
                 }

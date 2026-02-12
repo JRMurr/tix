@@ -306,6 +306,22 @@ impl CheckCtx<'_> {
                 // Comparison/equality — both sides should be same type, returns Bool.
                 self.constrain(lhs_ty, rhs_ty)?;
                 self.constrain(rhs_ty, lhs_ty)?;
+
+                // After equality, explicitly propagate concrete types as upper bounds.
+                // The bidirectional constraint creates variable-to-variable links, but
+                // if one side's concrete type is behind an intermediary (e.g. attrset
+                // select result), the constrain_cache may prevent it from reaching the
+                // other side's upper bounds. We fix this by explicitly adding any
+                // discovered concrete type as an upper bound of the other operand.
+                if let Some(concrete) = self.find_concrete(rhs_ty) {
+                    let c_id = self.alloc_concrete(concrete);
+                    self.constrain(lhs_ty, c_id)?;
+                }
+                if let Some(concrete) = self.find_concrete(lhs_ty) {
+                    let c_id = self.alloc_concrete(concrete);
+                    self.constrain(rhs_ty, c_id)?;
+                }
+
                 Ok(self.alloc_prim(PrimitiveTy::Bool))
             }
 

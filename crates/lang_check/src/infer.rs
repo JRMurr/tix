@@ -44,6 +44,11 @@ impl CheckCtx<'_> {
     }
 
     fn infer_scc_group(&mut self, group: DependentGroup) -> Result<(), InferenceError> {
+        let group_names: Vec<_> = group
+            .iter()
+            .map(|def| self.module[def.name()].text.clone())
+            .collect();
+        eprintln!("SCC group: {group_names:?}");
         self.table.enter_level();
 
         // Lift pre-allocated name vars to the current (inner) level so that
@@ -106,15 +111,18 @@ impl CheckCtx<'_> {
 
         self.table.exit_level();
 
-        // Record the actual inferred type in poly_type_env.
-        // Using the actual inferred TyId (which may be concrete) rather than
-        // the pre-allocated name var, so extrude can properly recurse into
-        // the type structure.
+        // Record the inferred type in poly_type_env, resolving Variables to
+        // their concrete type where possible. This ensures extrude can traverse
+        // the full type structure (e.g. for partial applications like `add 1`
+        // whose inferred type is a Variable pointing to a Lambda via lower bounds).
+        // Without this, deferred overloads referencing internal vars of the
+        // Lambda won't be found in the extrude cache.
         for (name_id, ty) in inferred {
             if self.poly_type_env.contains_key(&name_id) {
                 continue;
             }
-            self.poly_type_env.insert(name_id, ty);
+            let poly_ty = self.resolve_to_concrete_id(ty).unwrap_or(ty);
+            self.poly_type_env.insert(name_id, poly_ty);
         }
 
         Ok(())
@@ -158,17 +166,9 @@ impl CheckCtx<'_> {
                     continue;
                 }
 
-                let find_extruded =
-                    |id: TyId, cache: &HashMap<(TyId, bool), TyId>| -> Option<TyId> {
-                        cache
-                            .get(&(id, false))
-                            .or_else(|| cache.get(&(id, true)))
-                            .copied()
-                    };
-
-                let any_extruded = find_extruded(ov.lhs, &cache).is_some()
-                    || find_extruded(ov.rhs, &cache).is_some()
-                    || find_extruded(ov.ret, &cache).is_some();
+                let any_extruded = cache.contains_key(&ov.lhs)
+                    || cache.contains_key(&ov.rhs)
+                    || cache.contains_key(&ov.ret);
 
                 if any_extruded {
                     // For each operand, use the cached fresh var if available,
@@ -176,9 +176,9 @@ impl CheckCtx<'_> {
                     let get_or_extrude =
                         |id: TyId,
                          this: &mut Self,
-                         cache: &mut HashMap<(TyId, bool), TyId>|
+                         cache: &mut HashMap<TyId, TyId>|
                          -> TyId {
-                            if let Some(fresh) = find_extruded(id, cache) {
+                            if let Some(&fresh) = cache.get(&id) {
                                 fresh
                             } else {
                                 this.extrude_inner(id, true, cache)
@@ -213,17 +213,16 @@ impl CheckCtx<'_> {
         &mut self,
         ty_id: TyId,
         polarity: bool,
-        cache: &mut HashMap<(TyId, bool), TyId>,
+        cache: &mut HashMap<TyId, TyId>,
     ) -> TyId {
-        let key = (ty_id, polarity);
-        if let Some(&cached) = cache.get(&key) {
+        if let Some(&cached) = cache.get(&ty_id) {
             return cached;
         }
 
         let entry = self.table.get(ty_id).clone();
 
         match entry {
-            TypeEntry::Variable(ref v) if v.level > self.table.current_level => {
+            TypeEntry::Variable(ref v) if v.level >= self.table.current_level => {
                 // This variable was bound at a deeper level — it's polymorphic.
                 // However, if it has been pinned to a concrete type (has the same
                 // concrete type as both a direct lower and upper bound), it was
@@ -235,13 +234,13 @@ impl CheckCtx<'_> {
                     // can find this var was extruded.
                     let concrete_id = self.alloc_concrete(pinned);
                     let result = self.extrude_inner(concrete_id, polarity, cache);
-                    cache.insert(key, result);
+                    cache.insert(ty_id, result);
                     return result;
                 }
 
                 // Truly polymorphic — create a fresh variable at the current level.
                 let fresh = self.new_var();
-                cache.insert(key, fresh);
+                cache.insert(ty_id, fresh);
 
                 if polarity {
                     // Positive position: fresh ≥ original (lower bound).
@@ -261,7 +260,7 @@ impl CheckCtx<'_> {
                     Ty::Lambda { param, body } => {
                         // Insert a placeholder to handle recursive types.
                         let placeholder = self.new_var();
-                        cache.insert(key, placeholder);
+                        cache.insert(ty_id, placeholder);
 
                         let p = self.extrude_inner(param, !polarity, cache); // flip polarity
                         let b = self.extrude_inner(body, polarity, cache);
@@ -444,8 +443,26 @@ impl CheckCtx<'_> {
         None
     }
 
+    /// If `ty_id` is a Variable, walk its direct lower bounds to find a Concrete
+    /// entry and return that TyId. Used to resolve partial-application result
+    /// variables (which point to a Lambda via lower bounds) so poly_type_env
+    /// stores the structural type that extrude can traverse.
+    fn resolve_to_concrete_id(&self, ty_id: TyId) -> Option<TyId> {
+        match self.table.get(ty_id) {
+            TypeEntry::Concrete(_) => Some(ty_id),
+            TypeEntry::Variable(v) => {
+                for &lb in &v.lower_bounds {
+                    if matches!(self.table.get(lb), TypeEntry::Concrete(_)) {
+                        return Some(lb);
+                    }
+                }
+                None
+            }
+        }
+    }
+
     /// Walk lower bounds of a variable to find a concrete type, if one exists.
-    fn find_concrete(&self, ty_id: TyId) -> Option<Ty<TyId>> {
+    pub(crate) fn find_concrete(&self, ty_id: TyId) -> Option<Ty<TyId>> {
         match self.table.get(ty_id) {
             TypeEntry::Concrete(ty) => Some(ty.clone()),
             TypeEntry::Variable(v) => {
