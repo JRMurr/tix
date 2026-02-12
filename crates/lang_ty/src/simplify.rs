@@ -76,8 +76,17 @@ impl VarInfo {
 // Analysis pass
 // ==============================================================================
 
-fn analyze(ty: &OutputTy, positive: bool, path: &mut Vec<PathSegment>, vars: &mut HashMap<u32, VarInfo>) {
-    let pol = if positive { Polarity::Positive } else { Polarity::Negative };
+fn analyze(
+    ty: &OutputTy,
+    positive: bool,
+    path: &mut Vec<PathSegment>,
+    vars: &mut HashMap<u32, VarInfo>,
+) {
+    let pol = if positive {
+        Polarity::Positive
+    } else {
+        Polarity::Negative
+    };
 
     match ty {
         OutputTy::TyVar(v) => {
@@ -188,9 +197,11 @@ fn apply_simplification(
             OutputTy::TyVar(resolved)
         }
         OutputTy::Primitive(_) => ty.clone(),
-        OutputTy::List(inner) => {
-            OutputTy::List(TyRef::from(apply_simplification(&inner.0, substitution, removable)))
-        }
+        OutputTy::List(inner) => OutputTy::List(TyRef::from(apply_simplification(
+            &inner.0,
+            substitution,
+            removable,
+        ))),
         OutputTy::Lambda { param, body } => OutputTy::Lambda {
             param: TyRef::from(apply_simplification(&param.0, substitution, removable)),
             body: TyRef::from(apply_simplification(&body.0, substitution, removable)),
@@ -228,7 +239,11 @@ fn apply_simplification(
                             return None;
                         }
                     }
-                    Some(TyRef::from(apply_simplification(&m.0, substitution, removable)))
+                    Some(TyRef::from(apply_simplification(
+                        &m.0,
+                        substitution,
+                        removable,
+                    )))
                 })
                 .collect();
 
@@ -250,7 +265,11 @@ fn apply_simplification(
                             return None;
                         }
                     }
-                    Some(TyRef::from(apply_simplification(&m.0, substitution, removable)))
+                    Some(TyRef::from(apply_simplification(
+                        &m.0,
+                        substitution,
+                        removable,
+                    )))
                 })
                 .collect();
 

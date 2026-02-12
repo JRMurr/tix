@@ -29,11 +29,9 @@ fn arb_arc_ty(args: RecursiveParams) -> impl Strategy<Value = ArcTy> {
                 prop::collection::btree_map(arb_smol_str_ident(), inner.clone(), 0..5)
                     .prop_map(|map| OutputTy::AttrSet(AttrSetTy::from_fields(map))),
                 // Union of 2-4 members
-                prop::collection::vec(inner.clone(), 2..5)
-                    .prop_map(OutputTy::Union),
+                prop::collection::vec(inner.clone(), 2..5).prop_map(OutputTy::Union),
                 // Intersection of 2-4 members
-                prop::collection::vec(inner.clone(), 2..5)
-                    .prop_map(OutputTy::Intersection),
+                prop::collection::vec(inner.clone(), 2..5).prop_map(OutputTy::Intersection),
             ]
         },
     )

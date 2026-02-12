@@ -43,10 +43,12 @@ pub fn collect_type_expr(mut pairs: Pairs<Rule>) -> Option<ParsedTy> {
 
     let curr = match curr.as_rule() {
         // Transparent wrappers — descend into their single child.
-        Rule::type_expr | Rule::arrow_segment | Rule::paren_type | Rule::type_ref
-        | Rule::primitive_ref | Rule::atom_type => {
-            collect_type_expr(curr.into_inner()).unwrap()
-        }
+        Rule::type_expr
+        | Rule::arrow_segment
+        | Rule::paren_type
+        | Rule::type_ref
+        | Rule::primitive_ref
+        | Rule::atom_type => collect_type_expr(curr.into_inner()).unwrap(),
 
         // Union type: `isect_type ("|" isect_type)*`
         // If only one member, unwrap to avoid a spurious Union wrapper.
@@ -55,9 +57,7 @@ pub fn collect_type_expr(mut pairs: Pairs<Rule>) -> Option<ParsedTy> {
         // Intersection type: `atom_type ("&" atom_type)*`
         Rule::isect_type => collect_intersection(curr.into_inner()),
 
-        Rule::list_type => {
-            ParsedTy::List(collect_type_expr(curr.into_inner()).unwrap().into())
-        }
+        Rule::list_type => ParsedTy::List(collect_type_expr(curr.into_inner()).unwrap().into()),
         Rule::string_ref => ParsedTy::Primitive(PrimitiveTy::String),
         Rule::int_ref => ParsedTy::Primitive(PrimitiveTy::Int),
         Rule::bool_ref => ParsedTy::Primitive(PrimitiveTy::Bool),
@@ -90,10 +90,13 @@ pub fn collect_type_expr(mut pairs: Pairs<Rule>) -> Option<ParsedTy> {
 fn collect_one(pair: pest::iterators::Pair<Rule>) -> ParsedTy {
     match pair.as_rule() {
         Rule::isect_type => collect_intersection(pair.into_inner()),
-        Rule::atom_type | Rule::paren_type | Rule::type_ref | Rule::primitive_ref
-        | Rule::arrow_segment | Rule::union_type | Rule::type_expr => {
-            collect_type_expr(pair.into_inner()).unwrap()
-        }
+        Rule::atom_type
+        | Rule::paren_type
+        | Rule::type_ref
+        | Rule::primitive_ref
+        | Rule::arrow_segment
+        | Rule::union_type
+        | Rule::type_expr => collect_type_expr(pair.into_inner()).unwrap(),
         Rule::list_type => ParsedTy::List(collect_type_expr(pair.into_inner()).unwrap().into()),
         Rule::string_ref => ParsedTy::Primitive(PrimitiveTy::String),
         Rule::int_ref => ParsedTy::Primitive(PrimitiveTy::Int),
@@ -110,9 +113,7 @@ fn collect_one(pair: pest::iterators::Pair<Rule>) -> ParsedTy {
 /// Collect a union type from its children: `isect_type ("|" isect_type)*`.
 /// If only one member, returns it directly (no spurious Union wrapper).
 fn collect_union(pairs: Pairs<Rule>) -> ParsedTy {
-    let members: Vec<ParsedTyRef> = pairs
-        .map(|p| ParsedTyRef::from(collect_one(p)))
-        .collect();
+    let members: Vec<ParsedTyRef> = pairs.map(|p| ParsedTyRef::from(collect_one(p))).collect();
 
     match members.len() {
         0 => unreachable!("union_type must have at least one member"),
@@ -127,9 +128,7 @@ fn collect_union(pairs: Pairs<Rule>) -> ParsedTy {
 /// Collect an intersection type from its children: `atom_type ("&" atom_type)*`.
 /// If only one member, returns it directly.
 fn collect_intersection(pairs: Pairs<Rule>) -> ParsedTy {
-    let members: Vec<ParsedTyRef> = pairs
-        .map(|p| ParsedTyRef::from(collect_one(p)))
-        .collect();
+    let members: Vec<ParsedTyRef> = pairs.map(|p| ParsedTyRef::from(collect_one(p))).collect();
 
     match members.len() {
         0 => unreachable!("isect_type must have at least one member"),

@@ -74,9 +74,7 @@ impl CheckCtx<'_> {
                     let mut fields = BTreeMap::new();
 
                     for &(name, default_expr) in pat.fields.iter() {
-                        let default_ty = default_expr
-                            .map(|e| self.infer_expr(e))
-                            .transpose()?;
+                        let default_ty = default_expr.map(|e| self.infer_expr(e)).transpose()?;
                         let Some(name) = name else { continue };
                         let name_ty = self.ty_for_name_direct(name);
                         // Lift pattern field names to current level for generalization.
@@ -239,11 +237,7 @@ impl CheckCtx<'_> {
         }
     }
 
-    fn infer_reference(
-        &mut self,
-        e: ExprId,
-        var_name: &SmolStr,
-    ) -> Result<TyId, InferenceError> {
+    fn infer_reference(&mut self, e: ExprId, var_name: &SmolStr) -> Result<TyId, InferenceError> {
         match self.name_res.get(e) {
             None => {
                 // true, false, and null can be shadowed...
@@ -354,11 +348,7 @@ impl CheckCtx<'_> {
 
     /// Infer bindings (for let-in or attrset bodies). Returns nothing for let-in,
     /// returns the AttrSetTy for attrsets.
-    fn infer_bindings(
-        &mut self,
-        bindings: &Bindings,
-        _e: ExprId,
-    ) -> Result<(), InferenceError> {
+    fn infer_bindings(&mut self, bindings: &Bindings, _e: ExprId) -> Result<(), InferenceError> {
         // Infer inherit-from expressions.
         for &from_expr in bindings.inherit_froms.iter() {
             self.infer_expr(from_expr)?;

@@ -88,9 +88,7 @@ impl OutputTy {
                 param: param.0.normalize_inner(free).into(),
                 body: body.0.normalize_inner(free).into(),
             },
-            OutputTy::AttrSet(attr_set_ty) => {
-                OutputTy::AttrSet(attr_set_ty.normalize_inner(free))
-            }
+            OutputTy::AttrSet(attr_set_ty) => OutputTy::AttrSet(attr_set_ty.normalize_inner(free)),
             OutputTy::Primitive(_) => self.clone(),
             OutputTy::Union(members) => OutputTy::Union(
                 members
@@ -142,8 +140,7 @@ impl OutputTy {
             OutputTy::TyVar(_) | OutputTy::Primitive(_) => false,
             OutputTy::List(inner) => inner.0.contains_union_or_intersection(),
             OutputTy::Lambda { param, body } => {
-                param.0.contains_union_or_intersection()
-                    || body.0.contains_union_or_intersection()
+                param.0.contains_union_or_intersection() || body.0.contains_union_or_intersection()
             }
             OutputTy::AttrSet(attr) => {
                 attr.fields
@@ -165,7 +162,11 @@ impl OutputTy {
         result
     }
 
-    fn collect_free_type_vars(&self, result: &mut Vec<u32>, seen: &mut std::collections::HashSet<u32>) {
+    fn collect_free_type_vars(
+        &self,
+        result: &mut Vec<u32>,
+        seen: &mut std::collections::HashSet<u32>,
+    ) {
         match self {
             OutputTy::TyVar(x) => {
                 if seen.insert(*x) {

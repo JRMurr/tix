@@ -268,11 +268,13 @@ fn func_strat<S: Strategy<Value = (TyRef, NixTextStr)> + Clone>(
     // "fully_known" — param is a primitive, constrained via assertion builtin.
     // Applying `__pbt_assert_<prim> __pbt_p` forces `__pbt_p <: prim` through
     // application contravariance, reliably constraining the param type.
-    let fully_known = (any::<PrimitiveTy>(), inner.clone()).prop_map(
-        |(prim, (body_ty, body_text))| {
+    let fully_known =
+        (any::<PrimitiveTy>(), inner.clone()).prop_map(|(prim, (body_ty, body_text))| {
             let mut num_free_vars = 0;
 
-            let param_ty: TyRef = OutputTy::Primitive(prim).offset_free_vars(&mut num_free_vars).into();
+            let param_ty: TyRef = OutputTy::Primitive(prim)
+                .offset_free_vars(&mut num_free_vars)
+                .into();
             let body_ty: TyRef = body_ty.0.offset_free_vars(&mut num_free_vars).into();
 
             let ty = OutputTy::Lambda {
@@ -281,13 +283,10 @@ fn func_strat<S: Strategy<Value = (TyRef, NixTextStr)> + Clone>(
             };
 
             let builtin = prim_assert_builtin(prim);
-            let text = format!(
-                "(__pbt_p: let __pbt_chk = {builtin} __pbt_p; in ({body_text}))"
-            );
+            let text = format!("(__pbt_p: let __pbt_chk = {builtin} __pbt_p; in ({body_text}))");
 
             (ty, text)
-        },
-    );
+        });
 
     // "generic" — unused param becomes a fresh type variable.
     let generic = inner.clone().prop_map(|(body_ty, body_text)| {
@@ -385,13 +384,11 @@ fn arb_lambda() -> impl Strategy<Value = (ArcTy, NixTextStr)> {
         let list_body = leaf
             .clone()
             .prop_map(|(ty, text)| (TyRef::from(OutputTy::List(ty)), format!("[({text})]")));
-        let attr_body = attr_strat(leaf.clone())
-            .prop_map(|(ty, text)| (TyRef::from(ty), text));
+        let attr_body = attr_strat(leaf.clone()).prop_map(|(ty, text)| (TyRef::from(ty), text));
         prop_oneof![prim_body, list_body, attr_body]
     };
 
-    func_strat(body)
-        .prop_flat_map(|(ty, text)| (Just(ty), non_type_modifying_transform(text)))
+    func_strat(body).prop_flat_map(|(ty, text)| (Just(ty), non_type_modifying_transform(text)))
 }
 
 /// Combined strategy: full recursive generation + type-directed generation.

@@ -33,12 +33,7 @@ impl CheckCtx<'_> {
             // sub is a variable — record sup as upper bound, propagate to existing lower bounds.
             (TypeEntry::Variable(_), _) => {
                 self.table.add_upper_bound(sub, sup);
-                let lower_bounds = self
-                    .table
-                    .get_var(sub)
-                    .unwrap()
-                    .lower_bounds
-                    .clone();
+                let lower_bounds = self.table.get_var(sub).unwrap().lower_bounds.clone();
                 for lb in lower_bounds {
                     self.constrain(lb, sup)?;
                 }
@@ -47,12 +42,7 @@ impl CheckCtx<'_> {
             // sup is a variable — record sub as lower bound, propagate to existing upper bounds.
             (_, TypeEntry::Variable(_)) => {
                 self.table.add_lower_bound(sup, sub);
-                let upper_bounds = self
-                    .table
-                    .get_var(sup)
-                    .unwrap()
-                    .upper_bounds
-                    .clone();
+                let upper_bounds = self.table.get_var(sup).unwrap().upper_bounds.clone();
                 for ub in upper_bounds {
                     self.constrain(sub, ub)?;
                 }
@@ -69,11 +59,7 @@ impl CheckCtx<'_> {
     }
 
     /// Structural subtyping between two concrete types.
-    fn constrain_concrete(
-        &mut self,
-        sub: &Ty<TyId>,
-        sup: &Ty<TyId>,
-    ) -> Result<(), InferenceError> {
+    fn constrain_concrete(&mut self, sub: &Ty<TyId>, sup: &Ty<TyId>) -> Result<(), InferenceError> {
         match (sub, sup) {
             // Lambda: contravariant in param, covariant in body.
             (

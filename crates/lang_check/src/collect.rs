@@ -71,10 +71,7 @@ impl<'a> StandaloneCanon<'a> {
 
     fn expand_bounds_as_union(&mut self, bounds: &[TyId], var_id: TyId) -> OutputTy {
         let bounds = bounds.to_vec();
-        let members: Vec<OutputTy> = bounds
-            .iter()
-            .map(|&b| self.canonicalize(b, true))
-            .collect();
+        let members: Vec<OutputTy> = bounds.iter().map(|&b| self.canonicalize(b, true)).collect();
 
         let flattened = flatten_union(members);
 
@@ -374,10 +371,7 @@ impl<'db> Collector<'db> {
     /// Expand lower bounds of a variable into a union (positive position).
     fn expand_bounds_as_union(&mut self, bounds: &[TyId], var_id: TyId) -> OutputTy {
         let bounds = bounds.to_vec();
-        let members: Vec<OutputTy> = bounds
-            .iter()
-            .map(|&b| self.canonicalize(b, true))
-            .collect();
+        let members: Vec<OutputTy> = bounds.iter().map(|&b| self.canonicalize(b, true)).collect();
 
         let flattened = flatten_union(members);
 

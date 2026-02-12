@@ -55,7 +55,10 @@ pub enum ParsedTy {
     #[debug("List({_0:?})")]
     List(ParsedTyRef),
     #[debug("Lambda({param:?} -> {body:?})")]
-    Lambda { param: ParsedTyRef, body: ParsedTyRef },
+    Lambda {
+        param: ParsedTyRef,
+        body: ParsedTyRef,
+    },
     #[debug("{_0:?}")]
     AttrSet(AttrSetTy<ParsedTyRef>),
     #[debug("Union({_0:?})")]

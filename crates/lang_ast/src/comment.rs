@@ -1,9 +1,8 @@
 use std::collections::HashMap;
 
 use rnix::{
-    NodeOrToken, Root, SyntaxNode, WalkEvent,
     ast::{self, AstToken},
-    match_ast,
+    match_ast, NodeOrToken, Root, SyntaxNode, WalkEvent,
 };
 use rowan::ast::AstNode;
 

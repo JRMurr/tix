@@ -14,9 +14,9 @@ use super::{CheckCtx, InferenceError, InferenceResult, TyId};
 use crate::collect::{canonicalize_standalone, Collector};
 use crate::infer_expr::{PendingMerge, PendingOverload};
 use crate::storage::TypeEntry;
-use lang_ty::simplify::simplify;
 use lang_ast::nameres::{DependentGroup, GroupedDefs};
 use lang_ast::OverloadBinOp;
+use lang_ty::simplify::simplify;
 use lang_ty::{AttrSetTy, PrimitiveTy, Ty};
 
 impl CheckCtx<'_> {
@@ -45,11 +45,6 @@ impl CheckCtx<'_> {
     }
 
     fn infer_scc_group(&mut self, group: DependentGroup) -> Result<(), InferenceError> {
-        let group_names: Vec<_> = group
-            .iter()
-            .map(|def| self.module[def.name()].text.clone())
-            .collect();
-        eprintln!("SCC group: {group_names:?}");
         self.table.enter_level();
 
         // Lift pre-allocated name vars to the current (inner) level so that
@@ -73,24 +68,24 @@ impl CheckCtx<'_> {
             self.constrain(name_slot, ty)?;
 
             // Check for type annotations in doc comments.
-            let type_annotation = self
-                .module
-                .type_dec_map
-                .docs_for_name(name_id)
-                .and_then(|docs| {
-                    let parsed: Vec<_> = docs
-                        .iter()
-                        .flat_map(|doc| parse_and_collect(doc).expect("TODO: No parse error"))
-                        .collect();
-                    let name_str = &self.module[name_id].text;
-                    parsed.into_iter().find_map(|decl| {
-                        if decl.identifier == *name_str {
-                            Some(decl.type_expr)
-                        } else {
-                            None
-                        }
-                    })
-                });
+            let type_annotation =
+                self.module
+                    .type_dec_map
+                    .docs_for_name(name_id)
+                    .and_then(|docs| {
+                        let parsed: Vec<_> = docs
+                            .iter()
+                            .flat_map(|doc| parse_and_collect(doc).expect("TODO: No parse error"))
+                            .collect();
+                        let name_str = &self.module[name_id].text;
+                        parsed.into_iter().find_map(|decl| {
+                            if decl.identifier == *name_str {
+                                Some(decl.type_expr)
+                            } else {
+                                None
+                            }
+                        })
+                    });
 
             if let Some(known_ty) = type_annotation {
                 let annotation_ty = self.intern_known_ty(name_id, known_ty);
@@ -186,10 +181,7 @@ impl CheckCtx<'_> {
                     // For each operand, use the cached fresh var if available,
                     // otherwise extrude it now in positive polarity.
                     let get_or_extrude =
-                        |id: TyId,
-                         this: &mut Self,
-                         cache: &mut HashMap<TyId, TyId>|
-                         -> TyId {
+                        |id: TyId, this: &mut Self, cache: &mut HashMap<TyId, TyId>| -> TyId {
                             if let Some(&fresh) = cache.get(&id) {
                                 fresh
                             } else {
@@ -294,9 +286,7 @@ impl CheckCtx<'_> {
                             .iter()
                             .map(|(k, &v)| (k.clone(), self.extrude_inner(v, polarity, cache)))
                             .collect();
-                        let new_dyn = attr
-                            .dyn_ty
-                            .map(|d| self.extrude_inner(d, polarity, cache));
+                        let new_dyn = attr.dyn_ty.map(|d| self.extrude_inner(d, polarity, cache));
                         self.alloc_concrete(Ty::AttrSet(AttrSetTy {
                             fields: new_fields,
                             dyn_ty: new_dyn,
@@ -364,10 +354,7 @@ impl CheckCtx<'_> {
         Ok(())
     }
 
-    fn try_resolve_overload(
-        &mut self,
-        ov: &PendingOverload,
-    ) -> Result<bool, InferenceError> {
+    fn try_resolve_overload(&mut self, ov: &PendingOverload) -> Result<bool, InferenceError> {
         let lhs_concrete = self.find_concrete(ov.lhs);
         let rhs_concrete = self.find_concrete(ov.rhs);
 
@@ -385,10 +372,7 @@ impl CheckCtx<'_> {
         Ok(true)
     }
 
-    fn try_resolve_merge(
-        &mut self,
-        mg: &PendingMerge,
-    ) -> Result<bool, InferenceError> {
+    fn try_resolve_merge(&mut self, mg: &PendingMerge) -> Result<bool, InferenceError> {
         let lhs_concrete = self.find_concrete(mg.lhs);
         let rhs_concrete = self.find_concrete(mg.rhs);
 
