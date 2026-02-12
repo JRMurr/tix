@@ -259,13 +259,25 @@ fn merge_attrset_intersection(members: Vec<OutputTy>) -> Vec<OutputTy> {
     // Merge all attrsets. For overlapping fields, if both have concrete types
     // that differ, produce an Intersection for that field.
     let mut merged_fields: BTreeMap<smol_str::SmolStr, TyRef> = BTreeMap::new();
-    let mut any_open = false;
+    // Intersection of attrsets is open only if ALL inputs are open: a closed
+    // attrset asserts "exactly these fields", so intersecting with it closes
+    // the result.
+    let mut all_open = true;
     let mut merged_dyn: Option<TyRef> = None;
 
     for attr in &attrsets {
-        any_open = any_open || attr.open;
-        if merged_dyn.is_none() {
-            merged_dyn.clone_from(&attr.dyn_ty);
+        all_open = all_open && attr.open;
+        // Intersect dyn_ty values: if multiple attrsets have a dyn_ty, the
+        // result's dyn_ty is the intersection of all of them.
+        match (&merged_dyn, &attr.dyn_ty) {
+            (None, Some(_)) => merged_dyn.clone_from(&attr.dyn_ty),
+            (Some(existing), Some(new)) if existing != new => {
+                merged_dyn = Some(TyRef::from(OutputTy::Intersection(vec![
+                    existing.clone(),
+                    new.clone(),
+                ])));
+            }
+            _ => {}
         }
         for (k, v) in &attr.fields {
             merged_fields
@@ -285,7 +297,7 @@ fn merge_attrset_intersection(members: Vec<OutputTy>) -> Vec<OutputTy> {
     let merged = OutputTy::AttrSet(AttrSetTy {
         fields: merged_fields,
         dyn_ty: merged_dyn,
-        open: any_open,
+        open: all_open,
     });
 
     others.push(merged);

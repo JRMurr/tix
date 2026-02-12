@@ -32,7 +32,11 @@ impl PrimitiveTy {
     pub fn is_addable(&self) -> bool {
         matches!(
             self,
-            PrimitiveTy::String | PrimitiveTy::Path | PrimitiveTy::Float | PrimitiveTy::Int
+            PrimitiveTy::String
+                | PrimitiveTy::Path
+                | PrimitiveTy::Float
+                | PrimitiveTy::Int
+                | PrimitiveTy::Number
         )
     }
 
