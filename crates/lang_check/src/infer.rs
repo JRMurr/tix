@@ -19,6 +19,17 @@ use lang_ast::OverloadBinOp;
 use lang_ty::simplify::simplify;
 use lang_ty::{AttrSetTy, PrimitiveTy, Ty};
 
+/// Result of attempting to resolve a single overloaded binary operation.
+enum OverloadProgress {
+    /// Both operands were concrete; the return type has been fully constrained.
+    FullyResolved,
+    /// Some constraints were added (e.g. Number upper bound) but the overload
+    /// still needs another iteration to fully resolve.
+    PartialProgress,
+    /// No new constraints could be added — operands are still unknown.
+    NoProgress,
+}
+
 impl CheckCtx<'_> {
     pub fn infer_prog(mut self, groups: GroupedDefs) -> Result<InferenceResult, InferenceError> {
         // Pre-allocate TyIds for all names and expressions so they can be
@@ -329,8 +340,15 @@ impl CheckCtx<'_> {
             let mut remaining_overloads = Vec::new();
             for ov in overloads {
                 match self.try_resolve_overload(&ov)? {
-                    true => made_progress = true,
-                    false => remaining_overloads.push(ov),
+                    OverloadProgress::FullyResolved => made_progress = true,
+                    OverloadProgress::PartialProgress => {
+                        // Partial work was done (constraints added) but the
+                        // overload isn't fully resolved yet. Keep it pending
+                        // and mark progress so the loop iterates again.
+                        made_progress = true;
+                        remaining_overloads.push(ov);
+                    }
+                    OverloadProgress::NoProgress => remaining_overloads.push(ov),
                 }
             }
             self.pending_overloads = remaining_overloads;
@@ -354,7 +372,10 @@ impl CheckCtx<'_> {
         Ok(())
     }
 
-    fn try_resolve_overload(&mut self, ov: &PendingOverload) -> Result<bool, InferenceError> {
+    fn try_resolve_overload(
+        &mut self,
+        ov: &PendingOverload,
+    ) -> Result<OverloadProgress, InferenceError> {
         let lhs_concrete = self.find_concrete(ov.lhs);
         let rhs_concrete = self.find_concrete(ov.rhs);
 
@@ -369,8 +390,14 @@ impl CheckCtx<'_> {
             let ret_id = self.alloc_concrete(ret_ty);
             self.constrain(ret_id, ov.ret)?;
             self.constrain(ov.ret, ret_id)?;
-            return Ok(true);
+            return Ok(OverloadProgress::FullyResolved);
         }
+
+        // Track the constrain_cache size to detect whether partial resolution
+        // actually added new constraints. If all constraints were already cached,
+        // no real progress was made and we should report NoProgress to avoid an
+        // infinite loop.
+        let cache_size_before = self.constrain_cache.len();
 
         // Partial resolution: when one operand is a known numeric type,
         // constrain the unknown side and result to Number (upper bound only).
@@ -417,7 +444,14 @@ impl CheckCtx<'_> {
             }
         }
 
-        Ok(false) // Keep deferred for full precision later.
+        // Only report partial progress if new constraint cache entries were
+        // actually created. If the cache didn't grow, the constraints were all
+        // redundant and re-iterating would produce an infinite loop.
+        if self.constrain_cache.len() > cache_size_before {
+            Ok(OverloadProgress::PartialProgress)
+        } else {
+            Ok(OverloadProgress::NoProgress)
+        }
     }
 
     fn try_resolve_merge(&mut self, mg: &PendingMerge) -> Result<bool, InferenceError> {
