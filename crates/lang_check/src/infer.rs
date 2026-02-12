@@ -6,7 +6,7 @@
 // inferring each definition, resolving pending constraints, and generalizing
 // type variables via SimpleSub's level-based approach (extrude).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use comment_parser::parse_and_collect;
 
@@ -413,16 +413,18 @@ impl CheckCtx<'_> {
         let lhs_concrete = self.find_concrete(mg.lhs);
         let rhs_concrete = self.find_concrete(mg.rhs);
 
-        let (Some(Ty::AttrSet(lhs_attr)), Some(Ty::AttrSet(rhs_attr))) =
-            (&lhs_concrete, &rhs_concrete)
-        else {
-            if lhs_concrete.is_some() && rhs_concrete.is_some() {
-                return Err(InferenceError::InvalidAttrMerge(
-                    lhs_concrete.unwrap(),
-                    rhs_concrete.unwrap(),
-                ));
+        match (&lhs_concrete, &rhs_concrete) {
+            (Some(Ty::AttrSet(_)), Some(Ty::AttrSet(_))) => {}
+            (Some(lhs), Some(rhs)) => {
+                return Err(InferenceError::InvalidAttrMerge(lhs.clone(), rhs.clone()));
             }
-            return Ok(false);
+            _ => return Ok(false),
+        }
+        // Both are AttrSets — safe to destructure after the guard above.
+        let (Some(Ty::AttrSet(lhs_attr)), Some(Ty::AttrSet(rhs_attr))) =
+            (lhs_concrete, rhs_concrete)
+        else {
+            unreachable!()
         };
 
         let merged = lhs_attr.clone().merge(rhs_attr.clone());
@@ -485,12 +487,25 @@ impl CheckCtx<'_> {
 
     /// Walk lower bounds of a variable to find a concrete type, if one exists.
     pub(crate) fn find_concrete(&self, ty_id: TyId) -> Option<Ty<TyId>> {
+        let mut visited = HashSet::new();
+        self.find_concrete_inner(ty_id, &mut visited)
+    }
+
+    fn find_concrete_inner(
+        &self,
+        ty_id: TyId,
+        visited: &mut HashSet<TyId>,
+    ) -> Option<Ty<TyId>> {
+        if !visited.insert(ty_id) {
+            return None; // Cycle detected — stop recursing.
+        }
         match self.table.get(ty_id) {
             TypeEntry::Concrete(ty) => Some(ty.clone()),
             TypeEntry::Variable(v) => {
                 // Check lower bounds for a concrete type.
-                for &lb in &v.lower_bounds {
-                    if let Some(ty) = self.find_concrete(lb) {
+                let bounds = v.lower_bounds.clone();
+                for lb in bounds {
+                    if let Some(ty) = self.find_concrete_inner(lb, visited) {
                         return Some(ty);
                     }
                 }

@@ -153,7 +153,13 @@ impl CheckCtx<'_> {
 
                     let opt_key = match &self.module[attr] {
                         Expr::Literal(Literal::String(key)) => key.clone(),
-                        _ => todo!("Dynamic attr fields not supported yet in select"),
+                        _ => {
+                            // Dynamic select keys (e.g. `s.${k}`) are not supported yet.
+                            // Return a fresh variable so inference can continue for the
+                            // rest of the file instead of panicking.
+                            // TODO: support dynamic select keys via dyn_ty propagation.
+                            return Ok(self.new_var());
+                        }
                     };
 
                     let value_ty = self.new_var();

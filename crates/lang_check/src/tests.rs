@@ -567,3 +567,208 @@ fn with_nested_disjoint_errors() {
     // `x` is constrained against the inner env `{ y = "hi"; }`, which lacks `x`.
     assert!(matches!(error, InferenceError::MissingField(_)));
 }
+
+// ==============================================================================
+// Recursive / self-referential types
+// ==============================================================================
+
+// Self-recursive function — tests cycle detection in canonicalization and extrude.
+// `f` calls itself, so its type is recursive. The key constraint is that this
+// doesn't diverge during inference or canonicalization.
+#[test]
+fn recursive_function() {
+    let ty = get_inferred_root("let f = x: f x; in f");
+    // f :: a -> b where f is applied recursively. The exact shape depends on
+    // how the cycle is broken, but it must be a lambda.
+    assert!(
+        matches!(&ty, lang_ty::OutputTy::Lambda { .. }),
+        "recursive function should produce a lambda type, got: {ty}"
+    );
+}
+
+// Mutually recursive functions — tests SCC grouping and mutual type flow.
+#[test]
+fn mutual_recursion_types() {
+    let ty = get_inferred_root("let f = x: g x; g = x: f x; in { inherit f g; }");
+    // Both f and g are in the same SCC group and are mutually recursive lambdas.
+    match &ty {
+        lang_ty::OutputTy::AttrSet(attr) => {
+            assert!(attr.fields.contains_key("f"), "should have field f");
+            assert!(attr.fields.contains_key("g"), "should have field g");
+        }
+        _ => panic!("expected attrset, got: {ty}"),
+    }
+}
+
+// ==============================================================================
+// List edge cases
+// ==============================================================================
+
+// Empty list — the element type is unconstrained, producing a list of a free var.
+test_case!(empty_list, "[]", [(# 0)]);
+
+// Nested list — list of lists of ints.
+test_case!(nested_list, "[[1 2] [3 4]]", [[Int]]);
+
+// Heterogeneous list — elements of different types produce a union element type.
+#[test]
+fn heterogeneous_list() {
+    let ty = get_inferred_root("[1 \"hi\" true]");
+    match &ty {
+        lang_ty::OutputTy::List(elem) => {
+            assert!(
+                matches!(&*elem.0, lang_ty::OutputTy::Union(_)),
+                "heterogeneous list should have union element type, got: {}",
+                elem.0
+            );
+        }
+        _ => panic!("expected list type, got: {ty}"),
+    }
+}
+
+// List of functions — all elements are lambdas with `+ int_literal`. The `+`
+// overload partially resolves: the int operand constrains the other side to
+// Number (not pinned to Int since `+` is deferred). Both param and result
+// canonicalize to Number.
+test_case!(
+    list_of_functions,
+    "[(x: x + 1) (x: x + 2)]",
+    [Number -> Number]
+);
+
+// ==============================================================================
+// `with` scoping — shadowing rules
+// ==============================================================================
+
+// Local let binding should shadow the `with` environment.
+test_case!(let_shadows_with, "let x = 1; in with { x = \"hi\"; }; x", Int);
+
+// Lambda parameter should shadow the `with` environment.
+test_case!(
+    lambda_param_shadows_with,
+    "(x: with { x = \"hi\"; }; x) 1",
+    Int
+);
+
+// ==============================================================================
+// Select edge cases
+// ==============================================================================
+
+// Select with a default expression — the result is the union of the field type
+// and the default type, since either branch is possible at runtime.
+#[test]
+fn select_default() {
+    let ty = get_inferred_root("let s = { x = 1; }; in s.x or \"fallback\"");
+    // Should be union of Int and String (field exists with Int, default is String).
+    match &ty {
+        lang_ty::OutputTy::Union(members) => {
+            assert_eq!(members.len(), 2, "expected 2 union members, got: {ty}");
+        }
+        // If the checker is smart enough to see that x definitely exists, it could
+        // return just Int. Either is acceptable.
+        lang_ty::OutputTy::Primitive(lang_ty::PrimitiveTy::Int) => {}
+        _ => panic!("expected union or int, got: {ty}"),
+    }
+}
+
+// Chained select — accessing a nested attrset.
+test_case!(
+    chained_select,
+    "let s = { a = { b = 1; }; }; in s.a.b",
+    Int
+);
+
+// ==============================================================================
+// `inherit (expr) name` — inherit from expression
+// ==============================================================================
+
+test_case!(
+    inherit_from_expr,
+    "let src = { x = 1; y = \"hi\"; }; in { inherit (src) x y; }",
+    { "x": Int, "y": String }
+);
+
+// ==============================================================================
+// Overload + Number interaction
+// ==============================================================================
+
+// Mixed arithmetic chain: `a * 2` constrains `a` to Number via `*`, then
+// `(a * 2) + a` defers the `+` overload. The param is Number but the result
+// of `+` is only bounded above by Number (not pinned), so it canonicalizes
+// to a free var with Number upper bound — which the positive-position heuristic
+// resolves to Number.
+test_case!(arithmetic_chain, "a: a * 2 + a", (Number -> (# 0)));
+
+// Negation of arithmetic result.
+test_case!(negate_arithmetic, "a: -(a * 2)", (Number -> Number));
+
+// ==============================================================================
+// Deep polymorphism
+// ==============================================================================
+
+// Nested extrusion: `apply` composed with `id` should produce `Int` when
+// applied to `id` and `5`.
+test_case!(
+    deep_polymorphism,
+    "let apply = f: x: f x; id = x: x; in apply id 5",
+    Int
+);
+
+// ==============================================================================
+// Dynamic attrset key — graceful fallback (no longer panics)
+// ==============================================================================
+
+// Dynamic select key should NOT panic — it now returns a fresh variable.
+#[test]
+fn dynamic_select_no_panic() {
+    let ty = get_inferred_root("let s = { x = 1; }; k = \"x\"; in s.${k}");
+    // The result type is unconstrained since we can't resolve the dynamic key.
+    // Just verify inference doesn't panic.
+    let _ = ty;
+}
+
+// ==============================================================================
+// `find_concrete` cycle safety (Review item #4)
+// ==============================================================================
+
+// Bidirectional constraint between two let bindings that reference each other.
+// Tests whether find_concrete hits infinite recursion.
+#[test]
+fn bidirectional_let_cycle() {
+    let ty = get_inferred_root("let a = b; b = a; in a");
+    // Both a and b are in the same SCC group with circular references.
+    // The type should be a free variable (no concrete info to discover).
+    assert!(
+        matches!(&ty, lang_ty::OutputTy::TyVar(_)),
+        "bidirectional let should produce a free type variable, got: {ty}"
+    );
+}
+
+// ==============================================================================
+// Additional edge cases
+// ==============================================================================
+
+// Boolean inversion — `!` operator.
+test_case!(bool_inversion, "!true", Bool);
+test_case!(bool_inversion_lambda, "a: !a", (Bool -> Bool));
+
+// List concatenation.
+test_case!(list_concat, "[1 2] ++ [3 4]", [Int]);
+
+// Has-attr operator.
+test_case!(has_attr, "{ x = 1; } ? \"x\"", Bool);
+
+// Assert expression — body type flows through.
+test_case!(assert_body, "assert true; 42", Int);
+
+// If-then-else with different branch types — produces a union.
+#[test]
+fn if_union_branches() {
+    let ty = get_inferred_root("if true then 1 else \"hi\"");
+    match &ty {
+        lang_ty::OutputTy::Union(members) => {
+            assert_eq!(members.len(), 2, "expected 2 union members, got: {ty}");
+        }
+        _ => panic!("expected union type from if branches, got: {ty}"),
+    }
+}
