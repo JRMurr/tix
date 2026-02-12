@@ -143,7 +143,6 @@ fn non_type_modifying_transform(text: NixTextStr) -> impl Strategy<Value = NixTe
 
 fn text_from_ty(ty: &ArcTy) -> impl Strategy<Value = NixTextStr> {
     let inner = match ty {
-        OutputTy::TyVar(_) => unreachable!("Nothing should be generating ty vars for now"),
         OutputTy::Primitive(primitive_ty) => prim_ty_to_string(*primitive_ty).boxed(),
         OutputTy::List(inner_ref) => {
             let inner = text_from_ty(&inner_ref.0);
@@ -151,12 +150,28 @@ fn text_from_ty(ty: &ArcTy) -> impl Strategy<Value = NixTextStr> {
         }
         OutputTy::Lambda { param, body } => {
             let body = text_from_ty(&body.0);
-            let param = text_from_ty(&param.0);
-            (param, body)
-                .prop_map(|(param, body)| {
-                    format!("(param: let tmp = ({body}); in if param == {param} then tmp else tmp)")
-                })
-                .boxed()
+            match &*param.0 {
+                // Primitive param: use assertion builtin to constrain the param type
+                // via application contravariance.
+                OutputTy::Primitive(prim) => {
+                    let builtin = prim_assert_builtin(*prim);
+                    body.prop_map(move |body| {
+                        format!(
+                            "(__pbt_p: let __pbt_chk = {builtin} __pbt_p; in ({body}))"
+                        )
+                    })
+                    .boxed()
+                }
+                // Generic (TyVar) param: unused parameter, body is independent.
+                OutputTy::TyVar(_) => {
+                    body.prop_map(|body| format!("(__pbt_p: {body})")).boxed()
+                }
+                // arb_nix_text_from_ty filters out non-primitive, non-TyVar lambda params
+                // via has_non_primitive_lambda_param().
+                _ => unreachable!(
+                    "non-primitive, non-TyVar lambda param should be filtered by arb_nix_text_from_ty"
+                ),
+            }
         }
         OutputTy::AttrSet(attr_set_ty) => {
             let fields: Vec<_> = attr_set_ty
@@ -177,6 +192,7 @@ fn text_from_ty(ty: &ArcTy) -> impl Strategy<Value = NixTextStr> {
                 })
                 .boxed()
         }
+        OutputTy::TyVar(_) => unreachable!("top-level TyVar should not appear in text_from_ty"),
         OutputTy::Union(_) | OutputTy::Intersection(_) => {
             // TODO: generating code that produces union/intersection types
             // is complex — for now skip in PBT
@@ -235,35 +251,45 @@ fn attr_strat(
     merged_attrs.prop_map(|(ty, text)| (OutputTy::AttrSet(ty), text))
 }
 
+fn prim_assert_builtin(prim: PrimitiveTy) -> &'static str {
+    match prim {
+        PrimitiveTy::Int => "__pbt_assert_int",
+        PrimitiveTy::Float => "__pbt_assert_float",
+        PrimitiveTy::Bool => "__pbt_assert_bool",
+        PrimitiveTy::String => "__pbt_assert_string",
+        PrimitiveTy::Null => "__pbt_assert_null",
+        PrimitiveTy::Path | PrimitiveTy::Uri => unreachable!("not in arb_prim"),
+    }
+}
+
 fn func_strat<S: Strategy<Value = (TyRef, NixTextStr)> + Clone>(
     inner: S,
 ) -> impl Strategy<Value = (ArcTy, NixTextStr)> {
-    // "fully_known" — param is a primitive so `if param == <value>` fully constrains
-    // it. Non-primitive params (lambdas, lists, etc.) can't be precisely constrained
-    // via equality in SimpleSub's polarity-aware system, so we only use primitives here.
-    let prim_param = any::<PrimitiveTy>()
-        .prop_flat_map(|prim| (Just(OutputTy::Primitive(prim)), prim_ty_to_string(prim)))
-        .prop_map(|(ty, text)| (TyRef::from(ty), text));
-
-    let fully_known = (prim_param, inner.clone()).prop_map(
-        |((param_ty, param_text), (body_ty, body_text))| {
+    // "fully_known" — param is a primitive, constrained via assertion builtin.
+    // Applying `__pbt_assert_<prim> __pbt_p` forces `__pbt_p <: prim` through
+    // application contravariance, reliably constraining the param type.
+    let fully_known = (any::<PrimitiveTy>(), inner.clone()).prop_map(
+        |(prim, (body_ty, body_text))| {
             let mut num_free_vars = 0;
 
-            let param_ty = param_ty.0.offset_free_vars(&mut num_free_vars).into();
-            let body_ty = body_ty.0.offset_free_vars(&mut num_free_vars).into();
+            let param_ty: TyRef = OutputTy::Primitive(prim).offset_free_vars(&mut num_free_vars).into();
+            let body_ty: TyRef = body_ty.0.offset_free_vars(&mut num_free_vars).into();
 
             let ty = OutputTy::Lambda {
                 param: param_ty,
                 body: body_ty,
             };
+
+            let builtin = prim_assert_builtin(prim);
             let text = format!(
-                "(param: let tmp = ({body_text}); in if param == {param_text} then tmp else tmp)"
+                "(__pbt_p: let __pbt_chk = {builtin} __pbt_p; in ({body_text}))"
             );
 
             (ty, text)
         },
     );
 
+    // "generic" — unused param becomes a fresh type variable.
     let generic = inner.clone().prop_map(|(body_ty, body_text)| {
         let num_free_vars = body_ty.0.free_type_vars().len();
 
@@ -273,7 +299,7 @@ fn func_strat<S: Strategy<Value = (TyRef, NixTextStr)> + Clone>(
             param: param_ty.into(),
             body: body_ty,
         };
-        let text = format!("(un_used_param: {body_text})");
+        let text = format!("(__pbt_p: {body_text})");
 
         (ty, text)
     });
@@ -320,7 +346,57 @@ fn arb_nix_text_from_ty() -> impl Strategy<Value = (ArcTy, NixTextStr)> {
         .prop_flat_map(|ty| (Just(ty.clone()), text_from_ty(&ty)))
 }
 
-fn arb_nix() -> impl Strategy<Value = (ArcTy, NixTextStr)> {
+// ==============================================================================
+// Focused strategy builders for split property tests
+// ==============================================================================
+
+/// Primitives with arithmetic/boolean operations, optionally wrapped in
+/// let-bindings or attrset field selection.
+fn arb_primitive() -> impl Strategy<Value = (ArcTy, NixTextStr)> {
+    any::<PrimitiveTy>()
+        .prop_flat_map(|prim| (Just(OutputTy::Primitive(prim)), prim_ty_to_string(prim)))
+        .prop_flat_map(|(ty, text)| (Just(ty), non_type_modifying_transform(text)))
+}
+
+/// Lists and attrsets of primitives, including `//` merging.
+fn arb_structural() -> impl Strategy<Value = (ArcTy, NixTextStr)> {
+    let leaf = any::<PrimitiveTy>()
+        .prop_flat_map(|prim| (Just(OutputTy::Primitive(prim)), prim_ty_to_string(prim)))
+        .prop_map(|(ty, text)| (TyRef::from(ty), text));
+
+    let list_strat = leaf
+        .clone()
+        .prop_map(|(ty, text)| (OutputTy::List(ty), format!("[({text})]")));
+
+    prop_oneof![list_strat, attr_strat(leaf)]
+        .prop_flat_map(|(ty, text)| (Just(ty), non_type_modifying_transform(text)))
+}
+
+/// Lambdas (assertion-constrained + generic) with primitive or structural
+/// bodies. Tests generalization, extrusion, and early canonicalization.
+fn arb_lambda() -> impl Strategy<Value = (ArcTy, NixTextStr)> {
+    let leaf = any::<PrimitiveTy>()
+        .prop_flat_map(|prim| (Just(OutputTy::Primitive(prim)), prim_ty_to_string(prim)))
+        .prop_map(|(ty, text)| (TyRef::from(ty), text));
+
+    // Bodies can be primitives, lists, or attrsets (one level deep).
+    let body = {
+        let prim_body = leaf.clone();
+        let list_body = leaf
+            .clone()
+            .prop_map(|(ty, text)| (TyRef::from(OutputTy::List(ty)), format!("[({text})]")));
+        let attr_body = attr_strat(leaf.clone())
+            .prop_map(|(ty, text)| (TyRef::from(ty), text));
+        prop_oneof![prim_body, list_body, attr_body]
+    };
+
+    func_strat(body)
+        .prop_flat_map(|(ty, text)| (Just(ty), non_type_modifying_transform(text)))
+}
+
+/// Combined strategy: full recursive generation + type-directed generation.
+/// Lower case count for breadth coverage across all type forms.
+fn arb_combined() -> impl Strategy<Value = (ArcTy, NixTextStr)> {
     prop_oneof![
         arb_nix_text(RecursiveParams {
             depth: 8,
@@ -332,14 +408,37 @@ fn arb_nix() -> impl Strategy<Value = (ArcTy, NixTextStr)> {
 }
 
 proptest! {
-    // default to a smallish value, use the `pbt.sh` script to do more
     #![proptest_config(ProptestConfig {
         cases: 256, .. ProptestConfig::default()
     })]
-    #[test]
-    fn test_type_check((ty, text) in arb_nix()) {
-        let root_ty = get_inferred_root(&text);
 
+    #[test]
+    fn test_primitive_typing((ty, text) in arb_primitive()) {
+        let root_ty = get_inferred_root(&text);
+        prop_assert_eq!(root_ty, ty.normalize_vars());
+    }
+
+    #[test]
+    fn test_structural_typing((ty, text) in arb_structural()) {
+        let root_ty = get_inferred_root(&text);
+        prop_assert_eq!(root_ty, ty.normalize_vars());
+    }
+
+    #[test]
+    fn test_lambda_typing((ty, text) in arb_lambda()) {
+        let root_ty = get_inferred_root(&text);
+        prop_assert_eq!(root_ty, ty.normalize_vars());
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: 64, .. ProptestConfig::default()
+    })]
+
+    #[test]
+    fn test_combined_typing((ty, text) in arb_combined()) {
+        let root_ty = get_inferred_root(&text);
         prop_assert_eq!(root_ty, ty.normalize_vars());
     }
 }

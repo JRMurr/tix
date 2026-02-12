@@ -387,3 +387,19 @@ fn apply_polymorphism() {
     let str_apply_ty = get_name_type(file, "strApply");
     assert_eq!(str_apply_ty, arc_ty!((# 0) -> (# 1)));
 }
+
+// PBT assertion builtins: applying `__pbt_assert_int` to a lambda param
+// constrains it to `int` via application contravariance. The param gets
+// `int` as an upper bound (negative position), while the body is independent.
+test_case!(
+    pbt_assert_builtin_constrains_param,
+    "(p: let __c = __pbt_assert_int p; in 42)",
+    (Int -> Int)
+);
+
+// The assertion builtin itself has type `prim -> prim`.
+test_case!(
+    pbt_assert_builtin_type,
+    "__pbt_assert_int",
+    (Int -> Int)
+);

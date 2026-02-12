@@ -1,18 +1,16 @@
 ## Known Issues & Future Work
 
-### PBT Generator Issues (deferred)
+### PBT Generator
 
-- PBT `func_strat` `fully_known` variant: `if param == <value>` doesn't fully
-  constrain the param type in SimpleSub when the value goes through variable
-  intermediaries (e.g. attrset select results of overloaded operations). The `==`
-  operator establishes bidirectional variable-to-variable links, and concrete types
-  flow correctly as lower bounds through the chain. However, in negative position,
-  canonicalization uses upper bounds, and the variable cycle has no concrete upper
-  bound — only lower bounds. Added explicit concrete propagation in the `==` case
-  (`find_concrete` + `alloc_concrete` + `constrain`) as a partial fix, but this only
-  helps when the concrete type is available at inference time (not for deferred
-  overloads). A proper fix likely requires type simplification or a different
-  canonicalization strategy.
+- PBT lambda param constraining now uses `__pbt_assert_<prim>` builtins (test-only
+  identity functions with known types, e.g. `__pbt_assert_int :: int -> int`) instead
+  of the old `if param == <value>` equality trick. Application contravariance reliably
+  constrains param types in all cases. The old approach was unreliable in SimpleSub
+  because `==` establishes bidirectional variable links without concrete upper bounds.
+
+- PBT tests are split into focused properties: `test_primitive_typing`,
+  `test_structural_typing`, `test_lambda_typing`, and `test_combined_typing` (lower
+  case count for breadth).
 
 ### Overload Resolution + Extrusion
 
@@ -34,10 +32,6 @@
   types for inherited names. The inherit creates a new NameId whose type comes from
   extruding the original, and that extruded reference picks up use-site bounds. A full
   fix would propagate early-canonical types through expression-level canonicalization.
-
-- PBT test (`pbt::test_type_check`) may need updating for early canonicalization — it
-  was designed before this change and may produce types that differ between early and
-  late canonicalization for certain generated patterns.
 
 ### Missing Features
 

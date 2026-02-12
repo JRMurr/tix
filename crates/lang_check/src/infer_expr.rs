@@ -250,6 +250,10 @@ impl CheckCtx<'_> {
                 match var_name.as_str() {
                     "true" | "false" => Ok(self.alloc_prim(PrimitiveTy::Bool)),
                     "null" => Ok(self.alloc_prim(PrimitiveTy::Null)),
+                    #[cfg(test)]
+                    name if name.starts_with("__pbt_assert_") => {
+                        self.infer_pbt_assert_builtin(name)
+                    }
                     _ => Ok(self.new_var()),
                 }
             }
@@ -422,6 +426,31 @@ impl CheckCtx<'_> {
             dyn_ty,
             open: false,
         })
+    }
+
+    // =========================================================================
+    // PBT assertion builtins (test-only)
+    // =========================================================================
+
+    /// Synthesize the type for a `__pbt_assert_<prim>` builtin reference.
+    ///
+    /// Each builtin acts as an identity function with a concrete type signature
+    /// (e.g. `__pbt_assert_int :: int -> int`). When PBT-generated code applies
+    /// the builtin to a lambda parameter, application contravariance constrains
+    /// the param to the expected primitive type — avoiding the unreliable
+    /// `if param == <value>` equality trick.
+    #[cfg(test)]
+    fn infer_pbt_assert_builtin(&mut self, name: &str) -> Result<TyId, InferenceError> {
+        let prim = match name {
+            "__pbt_assert_int" => PrimitiveTy::Int,
+            "__pbt_assert_float" => PrimitiveTy::Float,
+            "__pbt_assert_bool" => PrimitiveTy::Bool,
+            "__pbt_assert_string" => PrimitiveTy::String,
+            "__pbt_assert_null" => PrimitiveTy::Null,
+            _ => return Ok(self.new_var()),
+        };
+        let p = self.alloc_prim(prim);
+        Ok(self.alloc_concrete(Ty::Lambda { param: p, body: p }))
     }
 }
 
