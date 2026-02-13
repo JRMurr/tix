@@ -964,3 +964,270 @@ test_case!(
     "let s = { a.b.c = 42; }; in s.a.b.c",
     Int
 );
+
+// ==============================================================================
+// Multi-file import tests
+// ==============================================================================
+
+mod import_tests {
+    use lang_ast::tests::MultiFileTestDatabase;
+    use lang_ty::{arc_ty, OutputTy};
+    use std::collections::{HashMap, HashSet};
+
+    use crate::aliases::TypeAliasRegistry;
+    use crate::imports::resolve_imports;
+    use crate::check_file_with_imports;
+
+    /// Infer a multi-file project and return the root type of the entry file.
+    fn get_multifile_root(files: &[(&str, &str)]) -> OutputTy {
+        let (db, entry_file) = MultiFileTestDatabase::new(files);
+
+        let module = lang_ast::module(&db, entry_file);
+        let name_res = lang_ast::name_resolution(&db, entry_file);
+        let aliases = TypeAliasRegistry::default();
+
+        let mut in_progress = HashSet::new();
+        let mut cache = HashMap::new();
+        let resolution = resolve_imports(
+            &db,
+            entry_file,
+            &module,
+            &name_res,
+            &aliases,
+            &mut in_progress,
+            &mut cache,
+        );
+
+        let result = check_file_with_imports(&db, entry_file, &aliases, resolution.types)
+            .expect("inference should succeed");
+
+        result
+            .expr_ty_map
+            .get(&module.entry_expr)
+            .expect("root expr should have a type")
+            .clone()
+    }
+
+    /// Like get_multifile_root but also returns import errors.
+    fn get_multifile_result(
+        files: &[(&str, &str)],
+    ) -> (OutputTy, Vec<crate::imports::ImportError>) {
+        let (db, entry_file) = MultiFileTestDatabase::new(files);
+
+        let module = lang_ast::module(&db, entry_file);
+        let name_res = lang_ast::name_resolution(&db, entry_file);
+        let aliases = TypeAliasRegistry::default();
+
+        let mut in_progress = HashSet::new();
+        let mut cache = HashMap::new();
+        let resolution = resolve_imports(
+            &db,
+            entry_file,
+            &module,
+            &name_res,
+            &aliases,
+            &mut in_progress,
+            &mut cache,
+        );
+
+        let errors = resolution.errors;
+
+        let result = check_file_with_imports(&db, entry_file, &aliases, resolution.types)
+            .expect("inference should succeed");
+
+        let root_ty = result
+            .expr_ty_map
+            .get(&module.entry_expr)
+            .expect("root expr should have a type")
+            .clone();
+
+        (root_ty, errors)
+    }
+
+    // Import a file that evaluates to a literal int.
+    #[test]
+    fn import_literal_int() {
+        let ty = get_multifile_root(&[
+            ("/main.nix", "import /foo.nix"),
+            ("/foo.nix", "42"),
+        ]);
+        assert_eq!(ty, arc_ty!(Int));
+    }
+
+    // Import an attrset and select a field.
+    #[test]
+    fn import_attrset_select() {
+        let ty = get_multifile_root(&[
+            ("/main.nix", "let lib = import /lib.nix; in lib.x"),
+            ("/lib.nix", "{ x = 1; y = \"hello\"; }"),
+        ]);
+        assert_eq!(ty, arc_ty!(Int));
+    }
+
+    // Import a file exporting a polymorphic function, used at different types.
+    #[test]
+    fn import_polymorphic_function() {
+        let ty = get_multifile_root(&[
+            (
+                "/main.nix",
+                r#"
+                let id = import /id.nix;
+                in {
+                    a = id 1;
+                    b = id "hello";
+                }
+                "#,
+            ),
+            ("/id.nix", "x: x"),
+        ]);
+        match &ty {
+            OutputTy::AttrSet(attr) => {
+                let a = attr.fields.get("a").expect("field a");
+                let b = attr.fields.get("b").expect("field b");
+                assert_eq!(*a.0, arc_ty!(Int), "id 1 should be int");
+                assert_eq!(*b.0, arc_ty!(String), "id \"hello\" should be string");
+            }
+            _ => panic!("expected attrset, got: {ty}"),
+        }
+    }
+
+    // Transitive imports: A → B → C.
+    #[test]
+    fn import_transitive() {
+        let ty = get_multifile_root(&[
+            ("/a.nix", "import /b.nix"),
+            ("/b.nix", "import /c.nix"),
+            ("/c.nix", "42"),
+        ]);
+        assert_eq!(ty, arc_ty!(Int));
+    }
+
+    // Diamond imports: A imports B and C, both import D.
+    // D should be inferred only once (via cache).
+    #[test]
+    fn import_diamond() {
+        let ty = get_multifile_root(&[
+            (
+                "/a.nix",
+                r#"
+                let
+                    b = import /b.nix;
+                    c = import /c.nix;
+                in {
+                    fromB = b;
+                    fromC = c;
+                }
+                "#,
+            ),
+            ("/b.nix", "import /d.nix"),
+            ("/c.nix", "import /d.nix"),
+            ("/d.nix", "42"),
+        ]);
+        match &ty {
+            OutputTy::AttrSet(attr) => {
+                let from_b = attr.fields.get("fromB").expect("field fromB");
+                let from_c = attr.fields.get("fromC").expect("field fromC");
+                assert_eq!(*from_b.0, arc_ty!(Int));
+                assert_eq!(*from_c.0, arc_ty!(Int));
+            }
+            _ => panic!("expected attrset, got: {ty}"),
+        }
+    }
+
+    // Cyclic import: A → B → A should produce an error and degrade gracefully.
+    #[test]
+    fn import_cyclic() {
+        let (ty, errors) = get_multifile_result(&[
+            ("/a.nix", "import /b.nix"),
+            ("/b.nix", "import /a.nix"),
+        ]);
+        // At least one cyclic import error should be reported.
+        assert!(
+            errors.iter().any(|e| matches!(
+                &e.kind,
+                crate::imports::ImportErrorKind::CyclicImport(_)
+            )),
+            "expected cyclic import error, got: {:?}",
+            errors.iter().map(|e| &e.kind).collect::<Vec<_>>()
+        );
+        // The type degrades to a free variable since the cycle can't be resolved.
+        // As long as inference didn't panic, the test passes.
+        let _ = ty;
+    }
+
+    // Non-literal import argument (variable) — should stay unconstrained.
+    #[test]
+    fn import_non_literal() {
+        let ty = get_multifile_root(&[
+            ("/main.nix", "let p = /foo.nix; in import p"),
+        ]);
+        // `import p` where p is a variable — scanner can't resolve it,
+        // so it falls through to the generic `import :: a -> b` builtin.
+        assert!(
+            matches!(ty, OutputTy::TyVar(_)),
+            "non-literal import should produce a type variable, got: {ty}"
+        );
+    }
+
+    // File not found — degrades to unconstrained type variable.
+    #[test]
+    fn import_file_not_found() {
+        let (ty, errors) = get_multifile_result(&[
+            ("/main.nix", "import /nonexistent.nix"),
+        ]);
+        assert!(
+            errors.iter().any(|e| matches!(
+                &e.kind,
+                crate::imports::ImportErrorKind::FileNotFound(_)
+            )),
+            "expected file not found error, got: {:?}",
+            errors.iter().map(|e| &e.kind).collect::<Vec<_>>()
+        );
+        // Import without resolution falls through to the generic builtin.
+        assert!(
+            matches!(ty, OutputTy::TyVar(_)),
+            "unresolved import should produce a type variable, got: {ty}"
+        );
+    }
+
+    // Import a string.
+    #[test]
+    fn import_string() {
+        let ty = get_multifile_root(&[
+            ("/main.nix", "import /greeting.nix"),
+            ("/greeting.nix", "\"hello world\""),
+        ]);
+        assert_eq!(ty, arc_ty!(String));
+    }
+
+    // Import a lambda and apply it.
+    #[test]
+    fn import_lambda_apply() {
+        let ty = get_multifile_root(&[
+            ("/main.nix", "(import /add.nix) 1 2"),
+            ("/add.nix", "a: b: a - b"),
+        ]);
+        // Subtraction (not overloaded like +) constrains operands to Number,
+        // so the exported type is `number -> number -> number`.
+        // Applying to two ints gives number (not pinned to int since the
+        // imported OutputTy loses deferred overload context).
+        assert_eq!(ty, arc_ty!(Number));
+    }
+
+    // Import with overloaded + produces unconstrained vars since deferred
+    // overloads don't survive the OutputTy boundary between files.
+    #[test]
+    fn import_overloaded_add_limitation() {
+        let ty = get_multifile_root(&[
+            ("/main.nix", "(import /add.nix) 1 2"),
+            ("/add.nix", "a: b: a + b"),
+        ]);
+        // The + overload in add.nix can't be resolved without concrete types,
+        // and the deferred overload info is lost in the OutputTy export.
+        // The result is a free type variable.
+        assert!(
+            matches!(ty, OutputTy::TyVar(_)),
+            "overloaded + across files produces unconstrained var, got: {ty}"
+        );
+    }
+}

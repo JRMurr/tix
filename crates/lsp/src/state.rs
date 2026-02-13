@@ -7,13 +7,14 @@
 // rnix::Root is !Send + !Sync and all analysis must run on a single thread
 // (via spawn_blocking).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use lang_ast::{
     module_and_source_maps, Module, ModuleSourceMap, NameResolution, NixFile, RootDatabase,
 };
 use lang_check::aliases::TypeAliasRegistry;
+use lang_check::imports::resolve_imports;
 use lang_check::{CheckResult, InferenceResult};
 
 use crate::convert::LineIndex;
@@ -59,7 +60,27 @@ impl AnalysisState {
 
         let (module, source_map) = module_and_source_maps(&self.db, nix_file);
         let name_res = lang_ast::name_resolution(&self.db, nix_file);
-        let check_result = lang_check::check_file_collecting(&self.db, nix_file, &self.registry);
+
+        // Resolve literal imports before type-checking.
+        let mut in_progress = HashSet::new();
+        let mut cache = HashMap::new();
+        let import_resolution = resolve_imports(
+            &self.db,
+            nix_file,
+            &module,
+            &name_res,
+            &self.registry,
+            &mut in_progress,
+            &mut cache,
+        );
+        // TODO: surface import_resolution.errors as LSP diagnostics.
+
+        let check_result = lang_check::check_file_collecting(
+            &self.db,
+            nix_file,
+            &self.registry,
+            import_resolution.types,
+        );
 
         self.files.insert(
             path.clone(),
