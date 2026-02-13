@@ -1,8 +1,6 @@
 use std::path::PathBuf;
 
 use rnix::Root;
-use salsa::Event;
-
 use crate::{db::NixFile, AstDb};
 
 const DEFAULT_IMPORT_FILE: &str = "default.nix";
@@ -14,9 +12,7 @@ pub struct TestDatabase {
 }
 
 #[salsa::db]
-impl salsa::Database for TestDatabase {
-    fn salsa_event(&self, _event: &dyn Fn() -> Event) {}
-}
+impl salsa::Database for TestDatabase {}
 
 #[salsa::db]
 impl AstDb for TestDatabase {

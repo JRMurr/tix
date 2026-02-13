@@ -1,5 +1,5 @@
 [toolchain]
 # https://rust-lang.github.io/rustup-components-history/
 # channel = "nightly-2025-01-26"
-channel = "1.84.0"
+channel = "1.93.0"
 components = ["cargo", "clippy", "rustfmt"]

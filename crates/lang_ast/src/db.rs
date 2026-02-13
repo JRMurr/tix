@@ -2,12 +2,12 @@ use std::path::PathBuf;
 
 use dashmap::DashMap;
 use rnix::Root;
-use salsa::{self, Event, Setter};
+use salsa::{self, Setter};
 
 #[salsa::input]
 pub struct NixFile {
     path: PathBuf,
-    #[return_ref]
+    #[returns(ref)]
     pub contents: String,
 }
 
@@ -33,20 +33,7 @@ pub struct RootDatabase {
 }
 
 #[salsa::db]
-impl salsa::Database for RootDatabase {
-    fn salsa_event(&self, _event: &dyn Fn() -> Event) {
-        // if !tracing::enabled!(tracing::Level::TRACE) {
-        //     return;
-        // }
-
-        // let event = event();
-        // if matches!(event.kind, salsa::EventKind::WillCheckCancellation { .. }) {
-        //     return;
-        // }
-
-        // tracing::trace!("Salsa event: {event:?}");
-    }
-}
+impl salsa::Database for RootDatabase {}
 
 #[salsa::db]
 impl AstDb for RootDatabase {
