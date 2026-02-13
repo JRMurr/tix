@@ -27,6 +27,7 @@
         overlays = [ (import rust-overlay) ];
         pkgs = import nixpkgs { inherit system overlays; };
         rustAttrs = import ./rust.nix { inherit pkgs gitignore; };
+        tix-lsp-dev = import ./lsp-dev.nix { inherit pkgs; };
       in
       {
         formatter = pkgs.nixpkgs-fmt;
@@ -36,6 +37,7 @@
             buildInputs = with pkgs; [
               rustAttrs.rust-shell
               (pkgs.cargo-tarpaulin.override ({ rustPlatform = rustAttrs.rustPlatform; }))
+              tix-lsp-dev
 
               # common
               just
