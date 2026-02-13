@@ -61,8 +61,7 @@ pub fn goto_definition(
             // Select's base expression is bound to an import, jump to the field's
             // definition in the target file.
             if let Expr::Literal(Literal::String(field_name)) = &analysis.module[expr_id] {
-                if let Some(location) =
-                    try_resolve_select_field(state, analysis, &node, field_name)
+                if let Some(location) = try_resolve_select_field(state, analysis, &node, field_name)
                 {
                     return Some(location);
                 }
@@ -114,11 +113,6 @@ pub fn goto_definition(
 /// - Field name matching finds the first name with matching text in the target
 ///   module's top-level names. Nested scopes with the same name may cause
 ///   incorrect jumps.
-#[cfg(test)]
-fn find_offset(src: &str, pattern: &str) -> u32 {
-    src.find(pattern).expect("pattern not found in source") as u32
-}
-
 fn try_resolve_select_field(
     state: &AnalysisState,
     analysis: &FileAnalysis,
@@ -128,9 +122,7 @@ fn try_resolve_select_field(
     log::debug!("try_resolve_select_field: field_name={field_name:?}");
 
     // Walk up from the field node to find the enclosing Select syntax node.
-    let select_node = field_node
-        .ancestors()
-        .find_map(rnix::ast::Select::cast)?;
+    let select_node = field_node.ancestors().find_map(rnix::ast::Select::cast)?;
 
     // Get the Select's base expression (`x` in `x.child`).
     let base_syntax = select_node.expr()?;
@@ -146,7 +138,10 @@ fn try_resolve_select_field(
     // 1. Base is directly an import Apply: check import_targets.
     // 2. Base is a Reference resolving to a name bound to an import: check name_to_import.
     let target_path = if let Some(path) = analysis.import_targets.get(&base_expr_id) {
-        log::debug!("try_resolve_select_field: direct import target -> {}", path.display());
+        log::debug!(
+            "try_resolve_select_field: direct import target -> {}",
+            path.display()
+        );
         path
     } else if let Expr::Reference(ref_name) = &analysis.module[base_expr_id] {
         let res = analysis.name_res.get(base_expr_id)?;
@@ -197,14 +192,9 @@ fn try_resolve_select_field(
 mod tests {
     use super::*;
     use crate::state::AnalysisState;
+    use crate::test_util::{find_offset, temp_path};
     use lang_check::aliases::TypeAliasRegistry;
     use std::path::PathBuf;
-
-    use std::sync::atomic::{AtomicU32, Ordering};
-
-    /// Unique counter to give each test its own temp directory, avoiding
-    /// interference when tests run in parallel.
-    static COUNTER: AtomicU32 = AtomicU32::new(0);
 
     /// Create a temp directory with Nix files, returning the directory path.
     /// Files are written as `(relative_name, contents)` pairs.
@@ -214,11 +204,7 @@ mod tests {
 
     impl TempProject {
         fn new(files: &[(&str, &str)]) -> Self {
-            let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-            let dir = std::env::temp_dir().join(format!(
-                "tix_test_{}_{id}",
-                std::process::id()
-            ));
+            let dir = temp_path("project");
             std::fs::create_dir_all(&dir).expect("create temp dir");
             for (name, contents) in files {
                 let path = dir.join(name);
@@ -279,10 +265,7 @@ mod tests {
     // ------------------------------------------------------------------
     #[test]
     fn import_path_jumps_to_file() {
-        let project = TempProject::new(&[
-            ("main.nix", "import ./lib.nix"),
-            ("lib.nix", "42"),
-        ]);
+        let project = TempProject::new(&[("main.nix", "import ./lib.nix"), ("lib.nix", "42")]);
         let main_path = project.path("main.nix");
         let lib_path = project.path("lib.nix");
 
@@ -303,10 +286,7 @@ mod tests {
 
     #[test]
     fn import_path_literal_jumps_to_file() {
-        let project = TempProject::new(&[
-            ("main.nix", "import ./lib.nix"),
-            ("lib.nix", "42"),
-        ]);
+        let project = TempProject::new(&[("main.nix", "import ./lib.nix"), ("lib.nix", "42")]);
         let main_path = project.path("main.nix");
         let lib_path = project.path("lib.nix");
 

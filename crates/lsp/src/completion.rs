@@ -26,9 +26,7 @@ use lang_ast::{AstPtr, Expr, ExprId, NameKind};
 use lang_ty::{OutputTy, TyRef};
 use rowan::ast::AstNode;
 use smol_str::SmolStr;
-use tower_lsp::lsp_types::{
-    CompletionItem, CompletionItemKind, CompletionResponse, Position,
-};
+use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind, CompletionResponse, Position};
 
 use crate::state::FileAnalysis;
 
@@ -95,9 +93,7 @@ fn try_dot_completion(
 ) -> Option<Vec<CompletionItem>> {
     // Walk ancestors from the token's parent to find a Select node.
     let node = token.parent()?;
-    let select_node = node
-        .ancestors()
-        .find_map(rnix::ast::Select::cast)?;
+    let select_node = node.ancestors().find_map(rnix::ast::Select::cast)?;
 
     // Get the base expression of the Select (e.g. `lib` in `lib.strings.x`).
     let base_expr = select_node.expr()?;
@@ -118,16 +114,13 @@ fn try_dot_completion(
     // fall back to extracting the type from the enclosing lambda.
     let base_ty = resolve_base_type(analysis, inference, base_expr_id)?;
 
-    log::debug!(
-        "dot_completion: base_ty={base_ty}, typed_segments={typed_segments:?}"
-    );
+    log::debug!("dot_completion: base_ty={base_ty}, typed_segments={typed_segments:?}");
 
     // Walk through the typed segments to resolve the nested type.
     // If segment resolution fails (e.g. the type doesn't have the expected
     // field, or error-recovery injected a bogus segment), fall back to just
     // showing the base type's fields.
-    let resolved_ty = resolve_through_segments(&base_ty, &typed_segments)
-        .unwrap_or(base_ty);
+    let resolved_ty = resolve_through_segments(&base_ty, &typed_segments).unwrap_or(base_ty);
 
     // Extract fields from the resolved type and build completion items.
     let fields = collect_attrset_fields(&resolved_ty);
@@ -205,7 +198,10 @@ fn resolve_base_type(
 }
 
 /// Find the Lambda ExprId that owns the given parameter NameId.
-fn find_lambda_for_param(module: &lang_ast::Module, param_name: lang_ast::NameId) -> Option<ExprId> {
+fn find_lambda_for_param(
+    module: &lang_ast::Module,
+    param_name: lang_ast::NameId,
+) -> Option<ExprId> {
     for (expr_id, expr) in module.exprs() {
         if let Expr::Lambda { param, pat, .. } = expr {
             // Direct parameter: `pkgs: body`
@@ -303,9 +299,7 @@ fn try_callsite_completion(
     let node = token.parent()?;
 
     // Find the enclosing AttrSet syntax node.
-    let attrset_node = node
-        .ancestors()
-        .find_map(rnix::ast::AttrSet::cast)?;
+    let attrset_node = node.ancestors().find_map(rnix::ast::AttrSet::cast)?;
 
     // Check if the AttrSet's parent is an Apply node (i.e. it's a function argument).
     let apply_node = attrset_node
@@ -383,18 +377,14 @@ fn try_inherit_completion(
     let node = token.parent()?;
 
     // Walk ancestors to find an enclosing Inherit node.
-    let inherit_node = node
-        .ancestors()
-        .find_map(rnix::ast::Inherit::cast)?;
+    let inherit_node = node.ancestors().find_map(rnix::ast::Inherit::cast)?;
 
     // Collect names already present in this inherit clause so we can filter
     // them out. rnix models each inherited attr as an Ident inside the Inherit.
     let existing: Vec<SmolStr> = inherit_node
         .attrs()
         .filter_map(|attr| match attr {
-            rnix::ast::Attr::Ident(ident) => {
-                ident.ident_token().map(|t| SmolStr::from(t.text()))
-            }
+            rnix::ast::Attr::Ident(ident) => ident.ident_token().map(|t| SmolStr::from(t.text())),
             _ => None,
         })
         .collect();
@@ -427,20 +417,15 @@ fn try_inherit_completion(
         // nameres.rs, scope_by_expr records the PARENT scope for LetIn/AttrSet
         // (before bindings are introduced), which is exactly the scope that
         // `inherit` pulls names from.
-        let enclosing_expr_id = inherit_node
-            .syntax()
-            .ancestors()
-            .find_map(|n| {
-                // Try LetIn first, then AttrSet.
-                if rnix::ast::LetIn::can_cast(n.kind())
-                    || rnix::ast::AttrSet::can_cast(n.kind())
-                {
-                    let ptr = AstPtr::new(&n);
-                    analysis.source_map.expr_for_node(ptr)
-                } else {
-                    None
-                }
-            })?;
+        let enclosing_expr_id = inherit_node.syntax().ancestors().find_map(|n| {
+            // Try LetIn first, then AttrSet.
+            if rnix::ast::LetIn::can_cast(n.kind()) || rnix::ast::AttrSet::can_cast(n.kind()) {
+                let ptr = AstPtr::new(&n);
+                analysis.source_map.expr_for_node(ptr)
+            } else {
+                None
+            }
+        })?;
 
         let scope_id = analysis.scopes.scope_for_expr(enclosing_expr_id)?;
         let visible = collect_visible_names(analysis, inference, scope_id);
@@ -538,18 +523,18 @@ fn collect_visible_names(
     for scope_data in analysis.scopes.ancestors(scope_id) {
         if let Some(defs) = scope_data.as_definitions() {
             for (name, name_id) in defs {
-                result.entry(name.clone()).or_insert_with(|| {
-                    inference.name_ty_map.get(name_id).cloned()
-                });
+                result
+                    .entry(name.clone())
+                    .or_insert_with(|| inference.name_ty_map.get(name_id).cloned());
             }
         } else if let Some(with_expr_id) = scope_data.as_with() {
             // The With expression's env is the first child.
             if let Expr::With { env, .. } = &analysis.module[with_expr_id] {
                 if let Some(env_ty) = inference.expr_ty_map.get(env) {
                     for (field_name, field_ty) in collect_attrset_fields(env_ty) {
-                        result.entry(field_name).or_insert_with(|| {
-                            Some((*field_ty.0).clone())
-                        });
+                        result
+                            .entry(field_name)
+                            .or_insert_with(|| Some((*field_ty.0).clone()));
                     }
                 }
             }
@@ -559,10 +544,28 @@ fn collect_visible_names(
     // Append builtins at lowest priority. We use `builtins` itself as a name
     // (it's a Nix global), plus all global builtins from nameres.
     let builtin_names = [
-        "abort", "baseNameOf", "builtins", "derivation", "dirOf", "fetchGit",
-        "fetchMercurial", "fetchTarball", "fetchTree", "fetchurl", "fromTOML",
-        "import", "isNull", "map", "placeholder", "removeAttrs", "scopedImport",
-        "throw", "toString", "true", "false", "null",
+        "abort",
+        "baseNameOf",
+        "builtins",
+        "derivation",
+        "dirOf",
+        "fetchGit",
+        "fetchMercurial",
+        "fetchTarball",
+        "fetchTree",
+        "fetchurl",
+        "fromTOML",
+        "import",
+        "isNull",
+        "map",
+        "placeholder",
+        "removeAttrs",
+        "scopedImport",
+        "throw",
+        "toString",
+        "true",
+        "false",
+        "null",
     ];
     for name in builtin_names {
         result.entry(SmolStr::from(name)).or_insert(None);
@@ -681,19 +684,8 @@ fn fields_to_completion_items(fields: &BTreeMap<SmolStr, TyRef>) -> Vec<Completi
 mod tests {
     use super::*;
     use crate::state::AnalysisState;
+    use crate::test_util::{find_offset, temp_path};
     use lang_check::aliases::TypeAliasRegistry;
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU32, Ordering};
-
-    static COUNTER: AtomicU32 = AtomicU32::new(0);
-
-    fn temp_path(name: &str) -> PathBuf {
-        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!(
-            "tix_completion_test_{}_{id}_{name}",
-            std::process::id()
-        ))
-    }
 
     /// Analyze source and get completions at a given byte offset.
     fn complete_at(src: &str, offset: u32) -> Vec<CompletionItem> {
@@ -708,11 +700,6 @@ mod tests {
             Some(CompletionResponse::Array(items)) => items,
             _ => Vec::new(),
         }
-    }
-
-    /// Find the byte offset of a pattern in source, with an additional offset.
-    fn find_offset(src: &str, pattern: &str, extra: usize) -> u32 {
-        (src.find(pattern).expect("pattern not found") + extra) as u32
     }
 
     fn labels(items: &[CompletionItem]) -> Vec<&str> {
@@ -748,7 +735,10 @@ mod tests {
                 let after_caret = &line[abs_caret_pos + 1..];
 
                 // Parse the marker number immediately after `^`.
-                let num_str: String = after_caret.chars().take_while(|c| c.is_ascii_digit()).collect();
+                let num_str: String = after_caret
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect();
                 if num_str.is_empty() {
                     search_from = abs_caret_pos + 1;
                     continue;
@@ -802,21 +792,26 @@ mod tests {
 
     #[test]
     fn dot_completion_simple() {
-        // Place cursor right after the dot in `lib.`
-        let src = "let lib = { x = 1; y = \"hello\"; }; in lib.";
-        let offset = find_offset(src, "lib.", 4); // right after the dot
-        let items = complete_at(src, offset);
-        let names = labels(&items);
+        let src = r#"
+let lib = { x = 1; y = "hello"; };
+in lib.
+#      ^1
+"#;
+        let results = complete_at_markers(src);
+        let names = labels(&results[&1]);
         assert!(names.contains(&"x"), "should complete x, got: {names:?}");
         assert!(names.contains(&"y"), "should complete y, got: {names:?}");
     }
 
     #[test]
     fn dot_completion_nested() {
-        let src = "let lib = { strings = { concat = 1; sep = 2; }; }; in lib.strings.";
-        let offset = find_offset(src, "lib.strings.", 12);
-        let items = complete_at(src, offset);
-        let names = labels(&items);
+        let src = r#"
+let lib = { strings = { concat = 1; sep = 2; }; };
+in lib.strings.
+#              ^1
+"#;
+        let results = complete_at_markers(src);
+        let names = labels(&results[&1]);
         assert!(
             names.contains(&"concat"),
             "should complete concat, got: {names:?}"
@@ -833,11 +828,13 @@ mod tests {
 
     #[test]
     fn callsite_completion_basic() {
-        let src = "let f = { name, src, ... }: name; in f { }";
-        // Cursor inside the `{ }` — right after `{` and space.
-        let offset = find_offset(src, "f { }", 3);
-        let items = complete_at(src, offset);
-        let names = labels(&items);
+        let src = r#"
+let f = { name, src, ... }: name;
+in f { }
+#     ^1
+"#;
+        let results = complete_at_markers(src);
+        let names = labels(&results[&1]);
         assert!(
             names.contains(&"name"),
             "should complete name, got: {names:?}"
@@ -850,10 +847,13 @@ mod tests {
 
     #[test]
     fn dot_completion_inside_list() {
-        let src = "let pkgs = { hello = 1; gcc = 2; }; in [ pkgs. ]";
-        let offset = find_offset(src, "pkgs.", 5); // right after the dot
-        let items = complete_at(src, offset);
-        let names = labels(&items);
+        let src = r#"
+let pkgs = { hello = 1; gcc = 2; };
+in [ pkgs. ]
+#         ^1
+"#;
+        let results = complete_at_markers(src);
+        let names = labels(&results[&1]);
         assert!(
             names.contains(&"hello"),
             "should complete hello inside list, got: {names:?}"
@@ -870,10 +870,14 @@ mod tests {
         // site parses cleanly and its argument type constrains the lambda parameter.
         // The lambda param fallback extracts the param type from the Lambda's
         // canonicalized type.
-        let src = "let f = pkgs: pkgs; r = f { hello = 1; gcc = 2; }; in r.";
-        let offset = find_offset(src, "r.", 2);
-        let items = complete_at(src, offset);
-        let names = labels(&items);
+        let src = r#"
+let f = pkgs: pkgs;
+    r = f { hello = 1; gcc = 2; };
+in r.
+#    ^1
+"#;
+        let results = complete_at_markers(src);
+        let names = labels(&results[&1]);
         assert!(
             names.contains(&"hello"),
             "should complete hello from called lambda, got: {names:?}"
@@ -889,8 +893,8 @@ mod tests {
         // Inside a lambda body, the parameter's type comes from the Lambda's
         // own canonicalized type. When the lambda body already uses known
         // fields from the parameter, those fields appear in completions.
-        let src = "let f = pkgs: pkgs.name + pkgs.; in f { name = \"x\"; src = ./.; }";
-        let offset = find_offset(src, "pkgs.;", 5);
+        let src = r#"let f = pkgs: pkgs.name + pkgs.; in f { name = "x"; src = ./.; }"#;
+        let offset = find_offset(src, "pkgs.;") + 5;
         let items = complete_at(src, offset);
         let names = labels(&items);
         // The lambda param type captures within-body constraints: at minimum
@@ -908,8 +912,8 @@ mod tests {
         // Pattern parameter: `{ pkgs, ... }: body`. The patfield's type is
         // extracted from the Lambda param type's matching field.
         // When the patfield is used with known selectors, those appear.
-        let src = "let f = { pkgs, ... }: pkgs.name + pkgs.; in f { pkgs = { name = \"x\"; src = ./.; }; }";
-        let offset = find_offset(src, "pkgs.;", 5);
+        let src = r#"let f = { pkgs, ... }: pkgs.name + pkgs.; in f { pkgs = { name = "x"; src = ./.; }; }"#;
+        let offset = find_offset(src, "pkgs.;") + 5;
         let items = complete_at(src, offset);
         let names = labels(&items);
         eprintln!("pat_param completions: {names:?}");
@@ -921,11 +925,13 @@ mod tests {
 
     #[test]
     fn callsite_completion_filters_existing() {
-        let src = "let f = { name, src, ... }: name; in f { name = \"x\"; }";
-        // Cursor after `name = "x"; ` inside the braces.
-        let offset = find_offset(src, "\"x\"; }", 5);
-        let items = complete_at(src, offset);
-        let names = labels(&items);
+        let src = r#"
+let f = { name, src, ... }: name;
+in f { name = "x"; }
+#                  ^1
+"#;
+        let results = complete_at_markers(src);
+        let names = labels(&results[&1]);
         assert!(
             !names.contains(&"name"),
             "should NOT complete already-present name, got: {names:?}"
@@ -962,7 +968,10 @@ in [ pkgs ]
 "#;
         let results = complete_at_markers(src);
         let names = labels(&results[&1]);
-        assert!(names.contains(&"pkgs"), "should suggest pkgs, got: {names:?}");
+        assert!(
+            names.contains(&"pkgs"),
+            "should suggest pkgs, got: {names:?}"
+        );
     }
 
     #[test]
@@ -974,10 +983,19 @@ in x
 "#;
         let results = complete_at_markers(src);
         let names = labels(&results[&1]);
-        assert!(names.contains(&"import"), "should suggest import, got: {names:?}");
+        assert!(
+            names.contains(&"import"),
+            "should suggest import, got: {names:?}"
+        );
         assert!(names.contains(&"map"), "should suggest map, got: {names:?}");
-        assert!(names.contains(&"true"), "should suggest true, got: {names:?}");
-        assert!(names.contains(&"null"), "should suggest null, got: {names:?}");
+        assert!(
+            names.contains(&"true"),
+            "should suggest true, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"null"),
+            "should suggest null, got: {names:?}"
+        );
     }
 
     #[test]
@@ -988,7 +1006,10 @@ in f
 #  ^1
 "#;
         let results = complete_at_markers(src);
-        let f_item = results[&1].iter().find(|i| i.label == "f").expect("should have f");
+        let f_item = results[&1]
+            .iter()
+            .find(|i| i.label == "f")
+            .expect("should have f");
         assert_eq!(
             f_item.kind,
             Some(CompletionItemKind::FUNCTION),
@@ -1009,10 +1030,19 @@ in with pkgs; [ hello ]
 "#;
         let results = complete_at_markers(src);
         let names = labels(&results[&1]);
-        assert!(names.contains(&"hello"), "should suggest hello from with, got: {names:?}");
-        assert!(names.contains(&"gcc"), "should suggest gcc from with, got: {names:?}");
+        assert!(
+            names.contains(&"hello"),
+            "should suggest hello from with, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"gcc"),
+            "should suggest gcc from with, got: {names:?}"
+        );
         // Outer let-bindings should also be visible.
-        assert!(names.contains(&"pkgs"), "should suggest pkgs from outer let, got: {names:?}");
+        assert!(
+            names.contains(&"pkgs"),
+            "should suggest pkgs from outer let, got: {names:?}"
+        );
     }
 
     // ------------------------------------------------------------------
@@ -1029,7 +1059,10 @@ in { inherit x ; }
         let results = complete_at_markers(src);
         let names = labels(&results[&1]);
         // `x` is already inherited — filtered out; `y` is still available.
-        assert!(!names.contains(&"x"), "should NOT suggest x (already inherited), got: {names:?}");
+        assert!(
+            !names.contains(&"x"),
+            "should NOT suggest x (already inherited), got: {names:?}"
+        );
         assert!(names.contains(&"y"), "should suggest y, got: {names:?}");
     }
 
@@ -1043,7 +1076,10 @@ in { inherit (lib) id ; }
         let results = complete_at_markers(src);
         let names = labels(&results[&1]);
         // `id` is already inherited from lib — filtered out.
-        assert!(!names.contains(&"id"), "should NOT suggest id (already inherited), got: {names:?}");
+        assert!(
+            !names.contains(&"id"),
+            "should NOT suggest id (already inherited), got: {names:?}"
+        );
         assert!(names.contains(&"map"), "should suggest map, got: {names:?}");
     }
 
@@ -1057,8 +1093,14 @@ in { inherit (lib) id filter ; }
         let results = complete_at_markers(src);
         let names = labels(&results[&1]);
         // `id` and `filter` are already inherited — should be filtered out.
-        assert!(!names.contains(&"id"), "should NOT suggest id (already inherited), got: {names:?}");
-        assert!(!names.contains(&"filter"), "should NOT suggest filter (already inherited), got: {names:?}");
+        assert!(
+            !names.contains(&"id"),
+            "should NOT suggest id (already inherited), got: {names:?}"
+        );
+        assert!(
+            !names.contains(&"filter"),
+            "should NOT suggest filter (already inherited), got: {names:?}"
+        );
         assert!(names.contains(&"map"), "should suggest map, got: {names:?}");
     }
 }

@@ -5,6 +5,8 @@ mod goto_def;
 mod hover;
 mod server;
 mod state;
+#[cfg(test)]
+mod test_util;
 
 use std::path::PathBuf;
 

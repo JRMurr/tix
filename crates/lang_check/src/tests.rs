@@ -75,6 +75,48 @@ macro_rules! test_case {
     };
 }
 
+fn registry_from_tix(tix_src: &str) -> TypeAliasRegistry {
+    let file = comment_parser::parse_tix_file(tix_src).expect("parse tix");
+    let mut registry = TypeAliasRegistry::new();
+    registry.load_tix_file(&file);
+    registry
+}
+
+macro_rules! alias_test_case {
+    ($name:ident, tix: $tix:expr, nix: $nix:tt, $ty:tt) => {
+        #[test]
+        fn $name() {
+            let registry = registry_from_tix($tix);
+            let nix_src = indoc! { $nix };
+            let ty = get_inferred_root_with_aliases(nix_src, &registry);
+            let expected = arc_ty!($ty);
+            assert_eq!(ty, expected);
+        }
+    };
+}
+
+macro_rules! error_case {
+    ($name:ident, $file:tt, matches $pat:pat) => {
+        #[test]
+        fn $name() {
+            let file = indoc! { $file };
+            let error = get_check_error(file);
+            assert!(
+                matches!(error, $pat),
+                "expected {}, got: {error:?}",
+                stringify!($pat)
+            );
+        }
+    };
+    ($name:ident, $file:tt, $expected:expr) => {
+        #[test]
+        fn $name() {
+            let file = indoc! { $file };
+            expect_inference_error(file, $expected);
+        }
+    };
+}
+
 test_case!(
     simple_types,
     "{
@@ -326,9 +368,10 @@ test_case!(
     String
 );
 
-#[test]
-fn type_annotation_mis_match() {
-    let file = indoc! { "
+// With subtyping, this is a type mismatch between string and int.
+error_case!(
+    type_annotation_mis_match,
+    "
         let
             /**
                 type: foo :: string
@@ -336,14 +379,9 @@ fn type_annotation_mis_match() {
             foo = 1;
         in
         foo
-    " };
-
-    // With subtyping, this is a type mismatch between string and int.
-    let string_ty = PrimitiveTy::String.into();
-    let int_ty = PrimitiveTy::Int.into();
-
-    expect_inference_error(file, InferenceError::TypeMismatch(int_ty, string_ty))
-}
+    ",
+    InferenceError::TypeMismatch(PrimitiveTy::Int.into(), PrimitiveTy::String.into())
+);
 
 // ==============================================================================
 // Pattern field doc comment annotations
@@ -379,11 +417,11 @@ test_case!(
     Int
 );
 
-#[test]
-fn pat_field_annotation_mismatch() {
-    // The annotation constrains x to string inside the body, so using it
-    // in a numeric context (multiplication) produces a type mismatch.
-    let file = indoc! { "
+// The annotation constrains x to string inside the body, so using it
+// in a numeric context (multiplication) produces a type mismatch.
+error_case!(
+    pat_field_annotation_mismatch,
+    "
         let
             f = {
                 /** type: x :: string */
@@ -391,14 +429,9 @@ fn pat_field_annotation_mismatch() {
             }: x * 2;
         in
         f { x = \"hello\"; }
-    " };
-
-    let error = get_check_error(file);
-    assert!(
-        matches!(error, InferenceError::TypeMismatch(..)),
-        "expected TypeMismatch, got: {error:?}"
-    );
-}
+    ",
+    matches InferenceError::TypeMismatch(..)
+);
 
 test_case!(
     pat_field_annotation_with_default,
@@ -466,28 +499,23 @@ fn pat_field_annotation_root_lambda_constrains_body() {
     );
 }
 
-#[test]
-fn pat_field_annotation_root_lambda_mismatch() {
-    // The annotation constrains x to string, but the body uses it as a number.
-    let file = indoc! { "
+// The annotation constrains x to string, but the body uses it as a number.
+error_case!(
+    pat_field_annotation_root_lambda_mismatch,
+    "
         {
             /** type: x :: string */
             x
         }: x * 2
-    " };
+    ",
+    matches InferenceError::TypeMismatch(..)
+);
 
-    let error = get_check_error(file);
-    assert!(
-        matches!(error, InferenceError::TypeMismatch(..)),
-        "expected TypeMismatch, got: {error:?}"
-    );
-}
-
-/// Look up the type of a named binding by its text name.
+/// Look up the type of a named binding by text name, with aliases loaded.
 /// When the same name has multiple NameIds (e.g. definition + inherit reference),
 /// prefer the version without unions/intersections (the clean early-canonicalized form).
-fn get_name_type(src: &str, name: &str) -> OutputTy {
-    let (module, inference) = check_str(src);
+fn get_name_type_with_aliases(src: &str, name: &str, aliases: &TypeAliasRegistry) -> OutputTy {
+    let (module, inference) = check_str_with_aliases(src, aliases);
     let inference = inference.expect("No type error");
 
     let mut best: Option<OutputTy> = None;
@@ -508,6 +536,10 @@ fn get_name_type(src: &str, name: &str) -> OutputTy {
         }
     }
     best.unwrap_or_else(|| panic!("Name '{name}' not found in module"))
+}
+
+fn get_name_type(src: &str, name: &str) -> OutputTy {
+    get_name_type_with_aliases(src, name, &TypeAliasRegistry::default())
 }
 
 /// Early canonicalization captures the polymorphic type of `apply` before
@@ -648,24 +680,18 @@ test_case!(
 );
 
 // Type error: can't negate a string.
-#[test]
-fn negate_string_error() {
-    let error = get_check_error("-\"hello\"");
-    assert_eq!(
-        error,
-        InferenceError::TypeMismatch(PrimitiveTy::String.into(), PrimitiveTy::Number.into(),)
-    );
-}
+error_case!(
+    negate_string_error,
+    r#"-"hello""#,
+    InferenceError::TypeMismatch(PrimitiveTy::String.into(), PrimitiveTy::Number.into())
+);
 
 // Type error: can't subtract with a string.
-#[test]
-fn sub_string_error() {
-    let error = get_check_error("\"hello\" - 1");
-    assert_eq!(
-        error,
-        InferenceError::TypeMismatch(PrimitiveTy::String.into(), PrimitiveTy::Number.into(),)
-    );
-}
+error_case!(
+    sub_string_error,
+    r#""hello" - 1"#,
+    InferenceError::TypeMismatch(PrimitiveTy::String.into(), PrimitiveTy::Number.into())
+);
 
 // ==============================================================================
 // String / Path interpolation
@@ -722,12 +748,11 @@ test_case!(
 // Nested `with` with disjoint envs: only the innermost is constrained,
 // so names from the outer `with` that aren't in the inner one produce errors.
 // TODO: multi-`with` fallthrough would resolve `x` from the outer env.
-#[test]
-fn with_nested_disjoint_errors() {
-    let error = get_check_error("with { x = 1; }; with { y = \"hi\"; }; { a = x; b = y; }");
-    // `x` is constrained against the inner env `{ y = "hi"; }`, which lacks `x`.
-    assert!(matches!(error, InferenceError::MissingField(_)));
-}
+error_case!(
+    with_nested_disjoint_errors,
+    r#"with { x = 1; }; with { y = "hi"; }; { a = x; b = y; }"#,
+    matches InferenceError::MissingField(_)
+);
 
 // ==============================================================================
 // Recursive / self-referential types
@@ -954,13 +979,10 @@ fn if_union_branches() {
 // Type alias resolution (.tix stubs)
 // ==============================================================================
 
-/// A doc comment annotation referencing a type alias resolves to the alias body.
+// A doc comment annotation referencing a type alias resolves to the alias body.
 #[test]
 fn alias_resolution_in_annotation() {
-    let tix_src = "type MyRecord = { name: string, age: int };";
-    let file = comment_parser::parse_tix_file(tix_src).expect("parse tix");
-    let mut registry = TypeAliasRegistry::new();
-    registry.load_tix_file(&file);
+    let registry = registry_from_tix("type MyRecord = { name: string, age: int };");
 
     // The annotation `foo :: MyRecord` should resolve to `{ name: string, age: int }`.
     let nix_src = indoc! { r#"
@@ -992,13 +1014,11 @@ fn alias_resolution_in_annotation() {
     }
 }
 
-/// Global val declarations provide types for unresolved names.
+// Global val declarations provide types for unresolved names.
 #[test]
 fn global_val_for_unresolved_name() {
-    let tix_src = "val mkDerivation :: { name: string, ... } -> { name: string };";
-    let file = comment_parser::parse_tix_file(tix_src).expect("parse tix");
-    let mut registry = TypeAliasRegistry::new();
-    registry.load_tix_file(&file);
+    let registry =
+        registry_from_tix("val mkDerivation :: { name: string, ... } -> { name: string };");
 
     let nix_src = indoc! { r#"
         mkDerivation { name = "hello"; }
@@ -1013,13 +1033,10 @@ fn global_val_for_unresolved_name() {
     }
 }
 
-/// Global vals are polymorphic — each reference gets fresh type variables.
+// Global vals are polymorphic — each reference gets fresh type variables.
 #[test]
 fn global_val_polymorphism() {
-    let tix_src = "val id :: a -> a;";
-    let file = comment_parser::parse_tix_file(tix_src).expect("parse tix");
-    let mut registry = TypeAliasRegistry::new();
-    registry.load_tix_file(&file);
+    let registry = registry_from_tix("val id :: a -> a;");
 
     let nix_src = indoc! { r#"
         {
@@ -1040,19 +1057,15 @@ fn global_val_polymorphism() {
     }
 }
 
-/// Module-to-attrset alias: `module lib { ... }` creates alias "Lib".
-#[test]
-fn module_alias_in_annotation() {
-    let tix_src = r#"
+// Module-to-attrset alias: `module lib { ... }` creates alias "Lib".
+alias_test_case!(
+    module_alias_in_annotation,
+    tix: r#"
         module lib {
             val id :: a -> a;
         }
-    "#;
-    let file = comment_parser::parse_tix_file(tix_src).expect("parse tix");
-    let mut registry = TypeAliasRegistry::new();
-    registry.load_tix_file(&file);
-
-    let nix_src = indoc! { r#"
+    "#,
+    nix: r#"
         let
             /**
                 type: lib :: Lib
@@ -1060,11 +1073,9 @@ fn module_alias_in_annotation() {
             lib = { id = x: x; };
         in
         lib.id 42
-    "# };
-
-    let ty = get_inferred_root_with_aliases(nix_src, &registry);
-    assert_eq!(ty, arc_ty!(Int));
-}
+    "#,
+    Int
+);
 
 // ==============================================================================
 // Nested attribute paths (implicit attrset desugaring)
@@ -1125,40 +1136,8 @@ mod import_tests {
     use crate::check_file_with_imports;
     use crate::imports::resolve_imports;
 
-    /// Infer a multi-file project and return the root type of the entry file.
-    fn get_multifile_root(files: &[(&str, &str)]) -> OutputTy {
-        let (db, entry_file) = MultiFileTestDatabase::new(files);
-
-        let module = lang_ast::module(&db, entry_file);
-        let name_res = lang_ast::name_resolution(&db, entry_file);
-        let aliases = TypeAliasRegistry::default();
-
-        let mut in_progress = HashSet::new();
-        let mut cache = HashMap::new();
-        let resolution = resolve_imports(
-            &db,
-            entry_file,
-            &module,
-            &name_res,
-            &aliases,
-            &mut in_progress,
-            &mut cache,
-        );
-
-        let result = check_file_with_imports(&db, entry_file, &aliases, resolution.types)
-            .expect("inference should succeed");
-
-        result
-            .expr_ty_map
-            .get(&module.entry_expr)
-            .expect("root expr should have a type")
-            .clone()
-    }
-
-    /// Like get_multifile_root but also returns import errors.
-    fn get_multifile_result(
-        files: &[(&str, &str)],
-    ) -> (OutputTy, Vec<crate::imports::ImportError>) {
+    /// Infer a multi-file project, returning the root type and any import errors.
+    fn check_multifile(files: &[(&str, &str)]) -> (OutputTy, Vec<crate::imports::ImportError>) {
         let (db, entry_file) = MultiFileTestDatabase::new(files);
 
         let module = lang_ast::module(&db, entry_file);
@@ -1189,6 +1168,16 @@ mod import_tests {
             .clone();
 
         (root_ty, errors)
+    }
+
+    fn get_multifile_root(files: &[(&str, &str)]) -> OutputTy {
+        check_multifile(files).0
+    }
+
+    fn get_multifile_result(
+        files: &[(&str, &str)],
+    ) -> (OutputTy, Vec<crate::imports::ImportError>) {
+        check_multifile(files)
     }
 
     // Import a file that evaluates to a literal int.
@@ -1429,43 +1418,17 @@ mod import_tests {
 // Named type alias preservation in hover display
 // ==============================================================================
 
-/// Look up the type of a named binding by text name, with aliases loaded.
-fn get_name_type_with_aliases(src: &str, name: &str, aliases: &TypeAliasRegistry) -> OutputTy {
-    let (module, inference) = check_str_with_aliases(src, aliases);
-    let inference = inference.expect("No type error");
-
-    let mut best: Option<OutputTy> = None;
-    for (name_id, name_data) in module.names() {
-        if name_data.text == name {
-            if let Some(ty) = inference.name_ty_map.get(&name_id) {
-                let is_better = match &best {
-                    None => true,
-                    Some(prev) => {
-                        !ty.contains_union_or_intersection()
-                            && prev.contains_union_or_intersection()
-                    }
-                };
-                if is_better {
-                    best = Some(ty.clone());
-                }
-            }
-        }
-    }
-    best.unwrap_or_else(|| panic!("Name '{name}' not found in module"))
-}
-
-/// A doc comment annotation referencing a type alias produces OutputTy::Named
-/// wrapping the expanded type, so hover display shows the alias name.
+// A doc comment annotation referencing a type alias produces OutputTy::Named
+// wrapping the expanded type, so hover display shows the alias name.
 #[test]
 fn alias_named_in_annotation() {
-    let tix_src = r#"
+    let registry = registry_from_tix(
+        r#"
         module lib {
             val id :: a -> a;
         }
-    "#;
-    let file = comment_parser::parse_tix_file(tix_src).expect("parse tix");
-    let mut registry = TypeAliasRegistry::new();
-    registry.load_tix_file(&file);
+    "#,
+    );
 
     let nix_src = indoc! { r#"
         let
@@ -1487,22 +1450,21 @@ fn alias_named_in_annotation() {
     assert_eq!(format!("{ty}"), "Lib");
 }
 
-/// When a let-binding's type flows from an annotated lambda parameter, the
-/// binding site should show the inferred type, not a bare free variable.
-/// Regression: `early_canonical` captured a bare TyVar before the lambda
-/// parameter annotation had propagated.
+// When a let-binding's type flows from an annotated lambda parameter, the
+// binding site should show the inferred type, not a bare free variable.
+// Regression: `early_canonical` captured a bare TyVar before the lambda
+// parameter annotation had propagated.
 #[test]
 fn binding_type_with_annotated_lambda_param() {
-    let tix_src = r#"
+    let registry = registry_from_tix(
+        r#"
         module lib {
             module strings {
                 val concatStringsSep :: string -> [string] -> string;
             }
         }
-    "#;
-    let file = comment_parser::parse_tix_file(tix_src).expect("parse tix");
-    let mut registry = TypeAliasRegistry::new();
-    registry.load_tix_file(&file);
+    "#,
+    );
 
     let nix_src = indoc! { r#"
         {
@@ -1525,16 +1487,15 @@ fn binding_type_with_annotated_lambda_param() {
     );
 }
 
-/// A global val returning a type alias wraps the return type in Named.
+// A global val returning a type alias wraps the return type in Named.
 #[test]
 fn alias_named_from_global_val_return() {
-    let tix_src = r#"
+    let registry = registry_from_tix(
+        r#"
         type Derivation = { name: string, system: string, ... };
         val mkDerivation :: { name: string, ... } -> Derivation;
-    "#;
-    let file = comment_parser::parse_tix_file(tix_src).expect("parse tix");
-    let mut registry = TypeAliasRegistry::new();
-    registry.load_tix_file(&file);
+    "#,
+    );
 
     let nix_src = indoc! { r#"
         mkDerivation { name = "hello"; }
@@ -1548,16 +1509,15 @@ fn alias_named_from_global_val_return() {
     assert_eq!(format!("{ty}"), "Derivation");
 }
 
-/// Let-binding flow: `let drv = mkDerivation { ... }; in drv` preserves the alias.
+// Let-binding flow: `let drv = mkDerivation { ... }; in drv` preserves the alias.
 #[test]
 fn alias_named_flows_through_let() {
-    let tix_src = r#"
+    let registry = registry_from_tix(
+        r#"
         type Derivation = { name: string, system: string, ... };
         val mkDerivation :: { name: string, ... } -> Derivation;
-    "#;
-    let file = comment_parser::parse_tix_file(tix_src).expect("parse tix");
-    let mut registry = TypeAliasRegistry::new();
-    registry.load_tix_file(&file);
+    "#,
+    );
 
     let nix_src = indoc! { r#"
         let

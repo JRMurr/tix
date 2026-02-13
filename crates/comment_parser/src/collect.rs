@@ -190,6 +190,22 @@ mod tests {
     use super::*;
     use crate::{known_ty, parse_comment_text};
 
+    macro_rules! comment_decl_case {
+        ($name:ident, $comment:expr, $ident:literal => $ty:tt) => {
+            #[test]
+            fn $name() {
+                let pairs = parse_comment_text($comment).expect("No parse error");
+                let decs = collect_type_decls(pairs);
+                let expected = vec![TypeDecl {
+                    identifier: $ident.into(),
+                    type_expr: known_ty! $ty,
+                }];
+                assert_eq!(decs, expected)
+            }
+        };
+    }
+
+    // big_doc_comment has 4 expected decls — kept manual.
     #[test]
     fn big_doc_comment() {
         let example_comment = r#"
@@ -204,7 +220,6 @@ mod tests {
         Some more doc lines
     "#;
         let pairs = parse_comment_text(example_comment).expect("No parse error");
-
         let decs = collect_type_decls(pairs);
 
         let expected = vec![
@@ -222,226 +237,73 @@ mod tests {
             },
             TypeDecl {
                 identifier: "const_var".into(),
-                type_expr: known_ty! {
-                    int
-                },
+                type_expr: known_ty! { int },
             },
             TypeDecl {
                 identifier: "const_lst".into(),
-                type_expr: known_ty! {
-                    [string]
-                },
+                type_expr: known_ty! { [string] },
             },
         ];
 
         assert_eq!(decs, expected)
     }
 
-    #[test]
-    fn simple() {
-        let example_comment = r#"
-            type: foo :: int -> int
-        "#;
-        let pairs = parse_comment_text(example_comment).expect("No parse error");
+    comment_decl_case!(simple,
+        r#" type: foo :: int -> int "#,
+        "foo" => { int -> int }
+    );
 
-        let decs = collect_type_decls(pairs);
+    comment_decl_case!(union_type,
+        r#" type: flexible :: int | string | null "#,
+        "flexible" => { union!(int, string, null) }
+    );
 
-        let expected = vec![TypeDecl {
-            identifier: "foo".into(),
-            type_expr: known_ty! {
-                int -> int
-            },
-        }];
+    comment_decl_case!(intersection_type,
+        r#" type: combined :: a & b "#,
+        "combined" => { isect!((# "a"), (# "b")) }
+    );
 
-        assert_eq!(decs, expected)
-    }
+    // `int | string -> bool` parses as `(int | string) -> bool`
+    // because `|` binds tighter than `->`.
+    comment_decl_case!(union_in_arrow,
+        r#" type: process :: int | string -> bool "#,
+        "process" => { (union!(int, string)) -> bool }
+    );
 
-    #[test]
-    fn union_type() {
-        let example_comment = r#"
-            type: flexible :: int | string | null
-        "#;
-        let pairs = parse_comment_text(example_comment).expect("No parse error");
+    // `int & bool | string` parses as `(int & bool) | string`
+    // because `&` binds tighter than `|`.
+    comment_decl_case!(intersection_binds_tighter_than_union,
+        r#" type: mixed :: int & bool | string "#,
+        "mixed" => { union!((isect!(int, bool)), string) }
+    );
 
-        let decs = collect_type_decls(pairs);
+    comment_decl_case!(attrset_closed,
+        r#" type: opts :: { name: string, age: int } "#,
+        "opts" => { { "name": string, "age": int } }
+    );
 
-        let expected = vec![TypeDecl {
-            identifier: "flexible".into(),
-            type_expr: known_ty! {
-                union!(int, string, null)
-            },
-        }];
+    comment_decl_case!(attrset_open,
+        r#" type: opts :: { name: string, ... } "#,
+        "opts" => { { "name": string; ... } }
+    );
 
-        assert_eq!(decs, expected)
-    }
+    comment_decl_case!(attrset_dyn_field,
+        r#" type: dict :: { _: string } "#,
+        "dict" => { dyn_attrset!(string) }
+    );
 
-    #[test]
-    fn intersection_type() {
-        let example_comment = r#"
-            type: combined :: a & b
-        "#;
-        let pairs = parse_comment_text(example_comment).expect("No parse error");
+    comment_decl_case!(attrset_in_arrow,
+        r#" type: mkUser :: { name: string } -> int "#,
+        "mkUser" => { ({ "name": string }) -> int }
+    );
 
-        let decs = collect_type_decls(pairs);
+    comment_decl_case!(attrset_only_open,
+        r#" type: any :: { ... } "#,
+        "any" => { { ; ... } }
+    );
 
-        let expected = vec![TypeDecl {
-            identifier: "combined".into(),
-            type_expr: known_ty! {
-                isect!((# "a"), (# "b"))
-            },
-        }];
-
-        assert_eq!(decs, expected)
-    }
-
-    #[test]
-    fn union_in_arrow() {
-        let example_comment = r#"
-            type: process :: int | string -> bool
-        "#;
-        let pairs = parse_comment_text(example_comment).expect("No parse error");
-
-        let decs = collect_type_decls(pairs);
-
-        // `int | string -> bool` should parse as `(int | string) -> bool`
-        // because `|` binds tighter than `->`.
-        let expected = vec![TypeDecl {
-            identifier: "process".into(),
-            type_expr: known_ty! {
-                (union!(int, string)) -> bool
-            },
-        }];
-
-        assert_eq!(decs, expected)
-    }
-
-    #[test]
-    fn intersection_binds_tighter_than_union() {
-        let example_comment = r#"
-            type: mixed :: int & bool | string
-        "#;
-        let pairs = parse_comment_text(example_comment).expect("No parse error");
-
-        let decs = collect_type_decls(pairs);
-
-        // `int & bool | string` should parse as `(int & bool) | string`
-        // because `&` binds tighter than `|`.
-        let expected = vec![TypeDecl {
-            identifier: "mixed".into(),
-            type_expr: known_ty! {
-                union!((isect!(int, bool)), string)
-            },
-        }];
-
-        assert_eq!(decs, expected)
-    }
-
-    #[test]
-    fn attrset_closed() {
-        let example_comment = r#"
-            type: opts :: { name: string, age: int }
-        "#;
-        let pairs = parse_comment_text(example_comment).expect("No parse error");
-        let decs = collect_type_decls(pairs);
-
-        let expected = vec![TypeDecl {
-            identifier: "opts".into(),
-            type_expr: known_ty! {
-                { "name": string, "age": int }
-            },
-        }];
-
-        assert_eq!(decs, expected)
-    }
-
-    #[test]
-    fn attrset_open() {
-        let example_comment = r#"
-            type: opts :: { name: string, ... }
-        "#;
-        let pairs = parse_comment_text(example_comment).expect("No parse error");
-        let decs = collect_type_decls(pairs);
-
-        let expected = vec![TypeDecl {
-            identifier: "opts".into(),
-            type_expr: known_ty! {
-                { "name": string; ... }
-            },
-        }];
-
-        assert_eq!(decs, expected)
-    }
-
-    #[test]
-    fn attrset_dyn_field() {
-        let example_comment = r#"
-            type: dict :: { _: string }
-        "#;
-        let pairs = parse_comment_text(example_comment).expect("No parse error");
-        let decs = collect_type_decls(pairs);
-
-        let expected = vec![TypeDecl {
-            identifier: "dict".into(),
-            type_expr: known_ty! {
-                dyn_attrset!(string)
-            },
-        }];
-
-        assert_eq!(decs, expected)
-    }
-
-    #[test]
-    fn attrset_in_arrow() {
-        let example_comment = r#"
-            type: mkUser :: { name: string } -> int
-        "#;
-        let pairs = parse_comment_text(example_comment).expect("No parse error");
-        let decs = collect_type_decls(pairs);
-
-        let expected = vec![TypeDecl {
-            identifier: "mkUser".into(),
-            type_expr: known_ty! {
-                ({ "name": string }) -> int
-            },
-        }];
-
-        assert_eq!(decs, expected)
-    }
-
-    #[test]
-    fn attrset_only_open() {
-        let example_comment = r#"
-            type: any :: { ... }
-        "#;
-        let pairs = parse_comment_text(example_comment).expect("No parse error");
-        let decs = collect_type_decls(pairs);
-
-        let expected = vec![TypeDecl {
-            identifier: "any".into(),
-            type_expr: known_ty! {
-                { ; ... }
-            },
-        }];
-
-        assert_eq!(decs, expected)
-    }
-
-    #[test]
-    fn parenthesized_union_in_lambda() {
-        let example_comment = r#"
-            type: f :: (int -> int) | (string -> string)
-        "#;
-        let pairs = parse_comment_text(example_comment).expect("No parse error");
-
-        let decs = collect_type_decls(pairs);
-
-        let expected = vec![TypeDecl {
-            identifier: "f".into(),
-            type_expr: known_ty! {
-                union!((int -> int), (string -> string))
-            },
-        }];
-
-        assert_eq!(decs, expected)
-    }
+    comment_decl_case!(parenthesized_union_in_lambda,
+        r#" type: f :: (int -> int) | (string -> string) "#,
+        "f" => { union!((int -> int), (string -> string)) }
+    );
 }
