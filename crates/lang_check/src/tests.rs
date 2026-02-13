@@ -918,3 +918,49 @@ fn module_alias_in_annotation() {
     let ty = get_inferred_root_with_aliases(nix_src, &registry);
     assert_eq!(ty, arc_ty!(Int));
 }
+
+// ==============================================================================
+// Nested attribute paths (implicit attrset desugaring)
+// ==============================================================================
+
+// `a.b = 1` desugars to `a = { b = 1; }`.
+test_case!(
+    nested_attr_simple,
+    "{ a.b = 1; }",
+    { "a": { "b": Int } }
+);
+
+// Multiple nested paths under the same prefix merge into one attrset.
+test_case!(
+    nested_attr_merge_siblings,
+    "{ a.b = 1; a.c = \"hi\"; }",
+    { "a": { "b": Int, "c": String } }
+);
+
+// Deep nesting: `a.b.c = 1` creates two levels of implicit attrsets.
+test_case!(
+    nested_attr_deep,
+    "{ x.y.z = true; }",
+    { "x": { "y": { "z": Bool } } }
+);
+
+// Explicit set merged with implicit nested path: `a.b = 1; a = { c = 2; };`
+test_case!(
+    nested_attr_merge_explicit,
+    "{ a.b = 1; a = { c = 2; }; }",
+    { "a": { "b": Int, "c": Int } }
+);
+
+// Nested paths inside a let-in binding.
+test_case!(
+    nested_attr_let,
+    "let cfg.host = \"localhost\"; cfg.port = 8080; in cfg.host",
+    String
+);
+
+// Selecting through an implicitly nested attrset.
+test_case!(
+    nested_attr_select,
+    "let s = { a.b.c = 42; }; in s.a.b.c",
+    Int
+);
