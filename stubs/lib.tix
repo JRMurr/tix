@@ -18,6 +18,10 @@ type Derivation = {
   ...
 };
 
+# Opaque type representing a set of local files.
+# Paths are implicitly coerced to file sets by fileset functions.
+type FileSet = { ... };
+
 # ---------------------------------------------------------------------------
 # pkgs module — creates the "Pkgs" type alias
 # ---------------------------------------------------------------------------
@@ -203,4 +207,53 @@ module lib {
   val getBin :: Derivation -> Derivation;
   val getLib :: Derivation -> Derivation;
   val getDev :: Derivation -> Derivation;
+
+  # File sets — source filtering for reproducible builds
+  module fileset {
+
+    # The empty file set containing no files.
+    val empty :: FileSet;
+
+    # Create a file set from a path that may or may not exist.
+    val maybeMissing :: path -> FileSet;
+
+    # Trace a file set for debugging, returning the second argument.
+    val trace :: path | FileSet -> a -> a;
+
+    # Trace a file set for debugging, returning that file set.
+    val traceVal :: path | FileSet -> FileSet;
+
+    # Add files in a file set to the Nix store as a single store path.
+    val toSource :: { root: path, fileset: path | FileSet } -> string;
+
+    # Return the list of file paths contained in the file set.
+    val toList :: path | FileSet -> [path];
+
+    # File set containing all files in either of two file sets.
+    val union :: path | FileSet -> path | FileSet -> FileSet;
+
+    # File set containing all files in any of the given file sets.
+    val unions :: [path | FileSet] -> FileSet;
+
+    # File set containing all files in both of two file sets.
+    val intersection :: path | FileSet -> path | FileSet -> FileSet;
+
+    # File set containing files in the first set but not the second.
+    val difference :: path | FileSet -> path | FileSet -> FileSet;
+
+    # Filter files in a directory by a predicate on file metadata.
+    val fileFilter :: ({ name: string, type: string, hasExt: string -> bool, ... } -> bool) -> path -> FileSet;
+
+    # Create a file set from a lib.sources-based value.
+    val fromSource :: { ... } -> FileSet;
+
+    # File set of all Git-tracked files in a repository.
+    val gitTracked :: path -> FileSet;
+
+    # Like gitTracked, with options (e.g. recurseSubmodules).
+    val gitTrackedWith :: { recurseSubmodules: bool, ... } -> path -> FileSet;
+
+    # Test whether a value is a file set.
+    val isFileset :: a -> bool;
+  }
 }
