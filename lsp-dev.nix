@@ -1,4 +1,10 @@
-{ pkgs }:
+{
+  # TODO: still seems sad and not picking up the type comment
+  /**
+    type: pkgs :: Pkgs
+  */
+  pkgs
+}:
 
 # Wrapper script that launches the debug build of tix-lsp with stubs.
 # Assumes CWD is the project root (the default with direnv).

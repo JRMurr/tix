@@ -345,6 +345,92 @@ fn type_annotation_mis_match() {
     expect_inference_error(file, InferenceError::TypeMismatch(int_ty, string_ty))
 }
 
+// ==============================================================================
+// Pattern field doc comment annotations
+// ==============================================================================
+
+test_case!(
+    pat_field_annotation,
+    "
+    let
+        f = {
+            /** type: x :: int */
+            x,
+            /** type: y :: string */
+            y
+        }: { inherit x y; };
+    in
+    f { x = 1; y = \"hello\"; }
+    ",
+    { "x": (Int), "y": (String) }
+);
+
+test_case!(
+    pat_field_annotation_constrains_body,
+    "
+    let
+        f = {
+            /** type: x :: int */
+            x
+        }: x + 1;
+    in
+    f { x = 42; }
+    ",
+    Int
+);
+
+#[test]
+fn pat_field_annotation_mismatch() {
+    // The annotation constrains x to string inside the body, so using it
+    // in a numeric context (multiplication) produces a type mismatch.
+    let file = indoc! { "
+        let
+            f = {
+                /** type: x :: string */
+                x
+            }: x * 2;
+        in
+        f { x = \"hello\"; }
+    " };
+
+    let error = get_check_error(file);
+    assert!(
+        matches!(error, InferenceError::TypeMismatch(..)),
+        "expected TypeMismatch, got: {error:?}"
+    );
+}
+
+test_case!(
+    pat_field_annotation_with_default,
+    "
+    let
+        f = {
+            /** type: x :: int */
+            x ? 0
+        }: x;
+    in
+    f { x = 42; }
+    ",
+    Int
+);
+
+test_case!(
+    pat_field_annotation_top_level_lambda_called,
+    "
+    let
+        f = {
+            /** type: name :: string */
+            name,
+            /** type: age :: int */
+            age
+        }:
+        { inherit name age; };
+    in
+    f { name = ''alice''; age = 30; }
+    ",
+    { "name": (String), "age": (Int) }
+);
+
 /// Look up the type of a named binding by its text name.
 /// When the same name has multiple NameIds (e.g. definition + inherit reference),
 /// prefer the version without unions/intersections (the clean early-canonicalized form).

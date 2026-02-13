@@ -71,6 +71,7 @@ pub fn gather_doc_comments(root: &Root) -> DocCommentCtx {
                     match node {
                         ast::Expr(e) => Some(AstPtr::new(e.syntax())),
                         ast::AttrpathValue(e) => Some(AstPtr::new(e.syntax())),
+                        ast::PatEntry(e) => Some(AstPtr::new(e.syntax())),
                         // TODO: probably should handle inherit here as well
                         _ => None,
                     }

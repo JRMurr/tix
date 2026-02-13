@@ -259,9 +259,15 @@ impl LowerCtx {
                 let fields = pattern
                     .pat_entries()
                     .map(|entry| {
-                        let name = entry
-                            .ident()
-                            .map(|i| lower_name(self, i, NameKind::PatField));
+                        let docs = self
+                            .doc_comments
+                            .get_docs_for_syntax(entry.syntax())
+                            .cloned();
+                        let name = entry.ident().map(|i| {
+                            let ptr = AstPtr::new(i.syntax());
+                            let text = name_of_ident(&i).expect("Should have name");
+                            self.alloc_name(text, NameKind::PatField, ptr, docs)
+                        });
                         let default_expr = entry.default().map(|e| self.lower_expr(e));
 
                         (name, default_expr)
