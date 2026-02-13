@@ -72,6 +72,81 @@ Nix source → [lang_ast::lower] Parse with rnix → Tix AST
 - `lang_check/src/storage.rs` — bounds-based type variable storage
 - `lang_check/src/builtins.rs` — Nix builtin type synthesis (uses `synth_ty!` macro)
 
+## `.tix` Declaration Files (Stubs)
+
+`.tix` files declare types for external Nix code (like TypeScript's `.d.ts`). They provide type information for things like nixpkgs lib functions that Tix can't infer on its own.
+
+### Usage
+
+```bash
+cargo run --bin tix-cli -- test/stubs_test.nix --stubs stubs/
+```
+
+`--stubs` accepts file paths or directories (recursive `.tix` glob for dirs). Multiple `--stubs` flags can be passed.
+
+### Syntax
+
+```tix
+# Line comments
+
+# Type aliases (lowercase free vars are implicitly generic)
+type Derivation = { name: string, system: string, ... };
+type Nullable = a | null;
+
+# Value declarations
+val mkDerivation :: { name: string, src: path, ... } -> Derivation;
+
+# Module nesting (auto-generates type alias from capitalized name)
+module lib {
+  val id :: a -> a;
+  module strings {
+    val concatStringsSep :: string -> [string] -> string;
+  }
+}
+# ^ creates type alias "Lib" = { id: a -> a, strings: { ... }, ... }
+```
+
+### Integration with Nix files
+
+Type aliases from stubs are referenced in doc comment annotations:
+
+```nix
+let
+    /** type: lib :: Lib */
+    lib = import ./lib.nix;
+in
+    lib.id 42  # inferred as int
+```
+
+Top-level `val` declarations (e.g. `val mkDerivation`) provide types for unresolved names automatically — no annotation needed:
+
+```nix
+mkDerivation { name = "my-package"; src = ./.; }
+# ^ inferred as Derivation (i.e. { name: string, system: string, ... })
+```
+
+### Key files
+
+- `stubs/lib.tix` — shipped nixpkgs lib stubs
+- `comment_parser/src/tix_decl.pest` — `.tix` file grammar
+- `comment_parser/src/tix_parser.rs` / `tix_collect.rs` — parser and collection
+- `lang_check/src/aliases.rs` — `TypeAliasRegistry` (loads stubs, resolves aliases)
+
+### Type expression syntax (shared by doc comments and `.tix` files)
+
+| Syntax | Meaning |
+|--------|---------|
+| `int`, `string`, `bool`, `float`, `path`, `null` | Primitives |
+| `a`, `b` (lowercase) | Implicit generic type variables |
+| `Foo` (uppercase) | Reference to a type alias |
+| `[a]` | List type |
+| `a -> b` | Function type (right-associative) |
+| `a \| b` | Union type |
+| `a & b` | Intersection type |
+| `{ name: string, age: int }` | Closed attrset |
+| `{ name: string, ... }` | Open attrset |
+| `{ _: int }` | Dynamic field type |
+
 ## Testing
 
 - **Unit tests**: inline in each crate (`tests.rs`, `#[cfg(test)]` modules)

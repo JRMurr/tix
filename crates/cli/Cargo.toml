@@ -12,6 +12,7 @@ thiserror = { workspace = true }
 lang_ast = { path = "../lang_ast" }
 lang_check = { path = "../lang_check" }
 lang_ty = { path = "../lang_ty" }
+comment_parser = { path = "../comment_parser" }
 
 
 [[bin]]

@@ -1,0 +1,79 @@
+// =============================================================================
+// .tix declaration file grammar
+// =============================================================================
+//
+// Separate grammar from comment.pest because .tix files need newlines as
+// whitespace (multi-line type bodies), whereas doc comment parsing needs
+// newlines as terminators.
+
+WHITESPACE = _{ " " | "\t" | "\r\n" | "\n" }
+COMMENT    = _{ "#" ~ (!"\n" ~ ANY)* }
+
+// Entry point
+tix_file = { SOI ~ tix_declaration* ~ EOI }
+
+tix_declaration = _{ type_alias_decl | val_decl | module_decl }
+
+type_alias_decl = { "type" ~ user_type ~ "=" ~ type_expr ~ ";" }
+val_decl        = { "val" ~ identifier ~ "::" ~ type_expr ~ ";" }
+module_decl     = { "module" ~ identifier ~ "{" ~ tix_declaration* ~ "}" }
+
+// -------------------------------------------------------------------------
+// Type expressions (duplicated from comment.pest to keep grammars decoupled)
+// -------------------------------------------------------------------------
+
+type_expr     = { arrow_segment ~ ("->" ~ arrow_segment)* }
+arrow_segment = { union_type }
+union_type    = { isect_type ~ ("|" ~ isect_type)* }
+isect_type    = { atom_type ~ ("&" ~ atom_type)* }
+atom_type     = { paren_type | list_type | attrset_type | type_ref }
+
+paren_type = { "(" ~ type_expr ~ ")" }
+list_type  = { "[" ~ type_expr ~ "]" }
+
+// Attrset types — same rules as comment.pest Phase 1.
+attrset_type = { "{" ~ attrset_inner ~ "}" }
+attrset_inner = _{
+    open_marker
+  | dyn_field ~ ("," ~ open_marker)? ~ ","?
+  | named_field ~ ("," ~ named_field)* ~ ("," ~ (dyn_field ~ ("," ~ open_marker)? | open_marker))? ~ ","?
+}
+named_field = { identifier ~ ":" ~ type_expr }
+dyn_field   = { "_" ~ ":" ~ type_expr }
+open_marker = { "..." }
+
+// Type references
+type_ref = {
+    primitive_ref
+  | user_type
+  | generic_ident
+}
+
+generic_ident = @{
+    ASCII_ALPHA_LOWER ~ (ASCII_ALPHA_LOWER | ASCII_DIGIT | "_")*
+}
+
+user_type = @{
+    ASCII_ALPHA_UPPER ~ (ASCII_ALPHANUMERIC | "_")*
+}
+
+// Allow trailing apostrophes to match Nix identifiers like `getExe'`.
+identifier = @{
+    ASCII_ALPHA ~ (ASCII_ALPHANUMERIC | "_" | "'")*
+}
+
+primitive_ref = {
+    string_ref
+  | int_ref
+  | bool_ref
+  | float_ref
+  | path_ref
+  | null_ref
+}
+
+string_ref = @{ "string" }
+int_ref    = @{ "int" }
+bool_ref   = @{ "bool" }
+float_ref  = @{ "float" }
+path_ref   = @{ "path" }
+null_ref   = @{ "null" }

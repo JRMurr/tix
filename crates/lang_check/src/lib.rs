@@ -1,3 +1,4 @@
+pub mod aliases;
 mod builtins;
 pub(crate) mod collect;
 mod constrain;
@@ -11,6 +12,7 @@ mod tests;
 #[cfg(test)]
 mod pbt;
 
+use aliases::TypeAliasRegistry;
 use comment_parser::{ParsedTy, TypeVarValue};
 use derive_more::Debug;
 use infer_expr::{PendingMerge, PendingOverload};
@@ -22,14 +24,20 @@ use thiserror::Error;
 
 #[salsa::tracked]
 pub fn check_file(db: &dyn AstDb, file: NixFile) -> Result<InferenceResult, InferenceError> {
+    check_file_with_aliases(db, file, &TypeAliasRegistry::default())
+}
+
+/// Type-check a file with a pre-loaded type alias registry from .tix stubs.
+/// Not a Salsa tracked function because `TypeAliasRegistry` is not Salsa-managed.
+pub fn check_file_with_aliases(
+    db: &dyn AstDb,
+    file: NixFile,
+    aliases: &TypeAliasRegistry,
+) -> Result<InferenceResult, InferenceError> {
     let module = lang_ast::module(db, file);
-
     let name_res = lang_ast::name_resolution(db, file);
-
     let grouped_defs = lang_ast::group_def(db, file);
-
-    let check = CheckCtx::new(&module, &name_res);
-
+    let check = CheckCtx::new(&module, &name_res, aliases.clone());
     check.infer_prog(grouped_defs)
 }
 
@@ -133,10 +141,17 @@ pub struct CheckCtx<'db> {
     /// before use-site extrusions contaminate polymorphic variables with
     /// concrete bounds.
     early_canonical: HashMap<NameId, OutputTy>,
+
+    /// Type alias registry loaded from .tix declaration files.
+    type_aliases: TypeAliasRegistry,
 }
 
 impl<'db> CheckCtx<'db> {
-    pub fn new(module: &'db Module, name_res: &'db NameResolution) -> Self {
+    pub fn new(
+        module: &'db Module,
+        name_res: &'db NameResolution,
+        type_aliases: TypeAliasRegistry,
+    ) -> Self {
         Self {
             module,
             name_res,
@@ -148,6 +163,7 @@ impl<'db> CheckCtx<'db> {
             pending_merges: Vec::new(),
             deferred_overloads: Vec::new(),
             early_canonical: HashMap::new(),
+            type_aliases,
         }
     }
 
@@ -200,6 +216,13 @@ impl<'db> CheckCtx<'db> {
     // ==========================================================================
 
     fn intern_known_ty(&mut self, _name: NameId, ty: ParsedTy) -> TyId {
+        self.intern_fresh_ty(ty)
+    }
+
+    /// Intern a ParsedTy with fresh type variables for each free generic var
+    /// and alias resolution for Reference vars. Each call produces an independent
+    /// "instance" — analogous to polymorphic instantiation.
+    fn intern_fresh_ty(&mut self, ty: ParsedTy) -> TyId {
         let free_vars = ty.free_vars();
 
         let subs: HashMap<TypeVarValue, TyId> = free_vars
@@ -207,15 +230,17 @@ impl<'db> CheckCtx<'db> {
             .map(|var| {
                 let ty_id = match var {
                     TypeVarValue::Generic(_) => self.new_var(),
-                    // TODO: resolve reference type vars by looking up the
-                    // referenced name in the type environment. A proper
-                    // implementation would search poly_type_env for `name`,
-                    // extrude the found TyId to get a fresh instance, and
-                    // use that — giving annotations like `/** @type Foo */`
-                    // the ability to refer to previously-defined type aliases.
-                    // For now, degrade to a fresh variable so annotations
-                    // with references don't panic.
-                    TypeVarValue::Reference(_name) => self.new_var(),
+                    TypeVarValue::Reference(ref_name) => {
+                        // Resolve against loaded type aliases. If found,
+                        // recursively intern the alias body (with its own
+                        // fresh vars) to get a polymorphic instance.
+                        if let Some(alias_body) = self.type_aliases.get(ref_name).cloned() {
+                            self.intern_fresh_ty(alias_body)
+                        } else {
+                            // Unknown reference — degrade to fresh variable.
+                            self.new_var()
+                        }
+                    }
                 };
                 (var.clone(), ty_id)
             })

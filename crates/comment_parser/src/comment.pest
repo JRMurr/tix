@@ -49,8 +49,20 @@ union_type = { isect_type ~ ("|" ~ isect_type)* }
 // Intersection type: `{ foo: int } & { bar: string }`
 isect_type = { atom_type ~ ("&" ~ atom_type)* }
 
-// Atoms: parenthesized, list, or a simple/base type reference.
-atom_type = { paren_type | list_type | type_ref }
+// Atoms: parenthesized, list, attrset, or a simple/base type reference.
+atom_type = { paren_type | list_type | attrset_type | type_ref }
+
+// Attrset type: `{ name: string, age: int }` or `{ name: string, ... }` or `{ _: int }`.
+// Bodies must be single-line since WHITESPACE only covers " " | "\t" in this grammar.
+attrset_type = { "{" ~ attrset_inner ~ "}" }
+attrset_inner = _{
+    open_marker
+  | dyn_field ~ ("," ~ open_marker)? ~ ","?
+  | named_field ~ ("," ~ named_field)* ~ ("," ~ (dyn_field ~ ("," ~ open_marker)? | open_marker))? ~ ","?
+}
+named_field = { identifier ~ ":" ~ type_expr }
+dyn_field = { "_" ~ ":" ~ type_expr }
+open_marker = { "..." }
 
 paren_type = {
     "(" ~ type_expr ~ ")"

@@ -1,5 +1,7 @@
-use lang_ty::PrimitiveTy;
+use lang_ty::{AttrSetTy, PrimitiveTy};
 use pest::iterators::Pairs;
+use smol_str::SmolStr;
+use std::collections::BTreeMap;
 
 use crate::{ParsedTy, ParsedTyRef, Rule, TypeDecl, TypeVarValue};
 
@@ -57,6 +59,7 @@ pub fn collect_type_expr(mut pairs: Pairs<Rule>) -> Option<ParsedTy> {
         // Intersection type: `atom_type ("&" atom_type)*`
         Rule::isect_type => collect_intersection(curr.into_inner()),
 
+        Rule::attrset_type => collect_attrset(curr.into_inner()),
         Rule::list_type => ParsedTy::List(collect_type_expr(curr.into_inner()).unwrap().into()),
         Rule::string_ref => ParsedTy::Primitive(PrimitiveTy::String),
         Rule::int_ref => ParsedTy::Primitive(PrimitiveTy::Int),
@@ -97,6 +100,7 @@ fn collect_one(pair: pest::iterators::Pair<Rule>) -> ParsedTy {
         | Rule::arrow_segment
         | Rule::union_type
         | Rule::type_expr => collect_type_expr(pair.into_inner()).unwrap(),
+        Rule::attrset_type => collect_attrset(pair.into_inner()),
         Rule::list_type => ParsedTy::List(collect_type_expr(pair.into_inner()).unwrap().into()),
         Rule::string_ref => ParsedTy::Primitive(PrimitiveTy::String),
         Rule::int_ref => ParsedTy::Primitive(PrimitiveTy::Int),
@@ -138,6 +142,42 @@ fn collect_intersection(pairs: Pairs<Rule>) -> ParsedTy {
         }
         _ => ParsedTy::Intersection(members),
     }
+}
+
+/// Collect an attrset type from its children: `named_field*`, optional `dyn_field`,
+/// optional `open_marker`.
+fn collect_attrset(pairs: Pairs<Rule>) -> ParsedTy {
+    let mut fields: BTreeMap<SmolStr, ParsedTyRef> = BTreeMap::new();
+    let mut dyn_ty: Option<ParsedTyRef> = None;
+    let mut open = false;
+
+    for pair in pairs {
+        match pair.as_rule() {
+            Rule::named_field => {
+                let mut inner = pair.into_inner();
+                let name: SmolStr = inner.next().unwrap().as_str().into();
+                let ty = collect_type_expr(inner).unwrap();
+                fields.insert(name, ty.into());
+            }
+            Rule::dyn_field => {
+                let inner = pair.into_inner();
+                // The "_" token is consumed by the grammar rule; the inner
+                // pairs contain only the type_expr.
+                let ty = collect_type_expr(inner).unwrap();
+                dyn_ty = Some(ty.into());
+            }
+            Rule::open_marker => {
+                open = true;
+            }
+            _ => unreachable!("collect_attrset: unexpected rule {:?}", pair.as_rule()),
+        }
+    }
+
+    ParsedTy::AttrSet(AttrSetTy {
+        fields,
+        dyn_ty,
+        open,
+    })
 }
 
 #[cfg(test)]
@@ -285,6 +325,96 @@ mod tests {
             identifier: "mixed".into(),
             type_expr: known_ty! {
                 union!((isect!(int, bool)), string)
+            },
+        }];
+
+        assert_eq!(decs, expected)
+    }
+
+    #[test]
+    fn attrset_closed() {
+        let example_comment = r#"
+            type: opts :: { name: string, age: int }
+        "#;
+        let pairs = parse_comment_text(example_comment).expect("No parse error");
+        let decs = collect_type_decls(pairs);
+
+        let expected = vec![TypeDecl {
+            identifier: "opts".into(),
+            type_expr: known_ty! {
+                { "name": string, "age": int }
+            },
+        }];
+
+        assert_eq!(decs, expected)
+    }
+
+    #[test]
+    fn attrset_open() {
+        let example_comment = r#"
+            type: opts :: { name: string, ... }
+        "#;
+        let pairs = parse_comment_text(example_comment).expect("No parse error");
+        let decs = collect_type_decls(pairs);
+
+        let expected = vec![TypeDecl {
+            identifier: "opts".into(),
+            type_expr: known_ty! {
+                { "name": string; ... }
+            },
+        }];
+
+        assert_eq!(decs, expected)
+    }
+
+    #[test]
+    fn attrset_dyn_field() {
+        let example_comment = r#"
+            type: dict :: { _: string }
+        "#;
+        let pairs = parse_comment_text(example_comment).expect("No parse error");
+        let decs = collect_type_decls(pairs);
+
+        let expected = vec![TypeDecl {
+            identifier: "dict".into(),
+            type_expr: known_ty! {
+                dyn_attrset!(string)
+            },
+        }];
+
+        assert_eq!(decs, expected)
+    }
+
+    #[test]
+    fn attrset_in_arrow() {
+        let example_comment = r#"
+            type: mkUser :: { name: string } -> int
+        "#;
+        let pairs = parse_comment_text(example_comment).expect("No parse error");
+        let decs = collect_type_decls(pairs);
+
+        let expected = vec![TypeDecl {
+            identifier: "mkUser".into(),
+            type_expr: known_ty! {
+                ({ "name": string }) -> int
+            },
+        }];
+
+        assert_eq!(decs, expected)
+    }
+
+    #[test]
+    fn attrset_only_open() {
+        let example_comment = r#"
+            type: any :: { ... }
+        "#;
+        let pairs = parse_comment_text(example_comment).expect("No parse error");
+        let decs = collect_type_decls(pairs);
+
+        let expected = vec![TypeDecl {
+            identifier: "any".into(),
+            type_expr: known_ty! {
+                { ; ... }
             },
         }];
 

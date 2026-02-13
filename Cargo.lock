@@ -222,6 +222,7 @@ name = "cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "comment_parser",
  "lang_ast",
  "lang_check",
  "lang_ty",

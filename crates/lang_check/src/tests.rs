@@ -2,7 +2,8 @@ use indoc::indoc;
 use lang_ast::{module, tests::TestDatabase, Module};
 use lang_ty::{arc_ty, OutputTy, PrimitiveTy};
 
-use crate::{InferenceError, InferenceResult};
+use crate::aliases::TypeAliasRegistry;
+use crate::{check_file_with_aliases, InferenceError, InferenceResult};
 
 use super::check_file;
 
@@ -10,6 +11,25 @@ pub fn check_str(src: &str) -> (Module, Result<InferenceResult, InferenceError>)
     let (db, file) = TestDatabase::single_file(src).unwrap();
     let module = module(&db, file);
     (module, check_file(&db, file))
+}
+
+pub fn check_str_with_aliases(
+    src: &str,
+    aliases: &TypeAliasRegistry,
+) -> (Module, Result<InferenceResult, InferenceError>) {
+    let (db, file) = TestDatabase::single_file(src).unwrap();
+    let module = module(&db, file);
+    (module, check_file_with_aliases(&db, file, aliases))
+}
+
+pub fn get_inferred_root_with_aliases(src: &str, aliases: &TypeAliasRegistry) -> OutputTy {
+    let (module, inference) = check_str_with_aliases(src, aliases);
+    let inference = inference.expect("No type error");
+    inference
+        .expr_ty_map
+        .get(&module.entry_expr)
+        .expect("No type for root module entry")
+        .clone()
 }
 
 pub fn get_inferred_root(src: &str) -> OutputTy {
@@ -784,4 +804,111 @@ fn if_union_branches() {
         }
         _ => panic!("expected union type from if branches, got: {ty}"),
     }
+}
+
+// ==============================================================================
+// Type alias resolution (.tix stubs)
+// ==============================================================================
+
+/// A doc comment annotation referencing a type alias resolves to the alias body.
+#[test]
+fn alias_resolution_in_annotation() {
+    let tix_src = "type MyRecord = { name: string, age: int };";
+    let file = comment_parser::parse_tix_file(tix_src).expect("parse tix");
+    let mut registry = TypeAliasRegistry::new();
+    registry.load_tix_file(&file);
+
+    // The annotation `foo :: MyRecord` should resolve to `{ name: string, age: int }`.
+    let nix_src = indoc! { r#"
+        let
+            /**
+                type: foo :: MyRecord
+            */
+            foo = { name = "alice"; age = 30; };
+        in
+        foo
+    "# };
+
+    let ty = get_inferred_root_with_aliases(nix_src, &registry);
+    match &ty {
+        lang_ty::OutputTy::AttrSet(attr) => {
+            assert!(attr.fields.contains_key("name"), "should have field name");
+            assert!(attr.fields.contains_key("age"), "should have field age");
+        }
+        _ => panic!("expected attrset type, got: {ty}"),
+    }
+}
+
+/// Global val declarations provide types for unresolved names.
+#[test]
+fn global_val_for_unresolved_name() {
+    let tix_src = "val mkDerivation :: { name: string, ... } -> { name: string };";
+    let file = comment_parser::parse_tix_file(tix_src).expect("parse tix");
+    let mut registry = TypeAliasRegistry::new();
+    registry.load_tix_file(&file);
+
+    let nix_src = indoc! { r#"
+        mkDerivation { name = "hello"; }
+    "# };
+
+    let ty = get_inferred_root_with_aliases(nix_src, &registry);
+    match &ty {
+        lang_ty::OutputTy::AttrSet(attr) => {
+            assert!(attr.fields.contains_key("name"), "should have field name");
+        }
+        _ => panic!("expected attrset type from mkDerivation return, got: {ty}"),
+    }
+}
+
+/// Global vals are polymorphic — each reference gets fresh type variables.
+#[test]
+fn global_val_polymorphism() {
+    let tix_src = "val id :: a -> a;";
+    let file = comment_parser::parse_tix_file(tix_src).expect("parse tix");
+    let mut registry = TypeAliasRegistry::new();
+    registry.load_tix_file(&file);
+
+    let nix_src = indoc! { r#"
+        {
+            int_result = id 42;
+            str_result = id "hello";
+        }
+    "# };
+
+    let ty = get_inferred_root_with_aliases(nix_src, &registry);
+    match &ty {
+        lang_ty::OutputTy::AttrSet(attr) => {
+            let int_ty = attr.fields.get("int_result").expect("int_result field");
+            let str_ty = attr.fields.get("str_result").expect("str_result field");
+            assert_eq!(*int_ty.0, arc_ty!(Int), "id 42 should be int");
+            assert_eq!(*str_ty.0, arc_ty!(String), "id \"hello\" should be string");
+        }
+        _ => panic!("expected attrset type, got: {ty}"),
+    }
+}
+
+/// Module-to-attrset alias: `module lib { ... }` creates alias "Lib".
+#[test]
+fn module_alias_in_annotation() {
+    let tix_src = r#"
+        module lib {
+            val id :: a -> a;
+        }
+    "#;
+    let file = comment_parser::parse_tix_file(tix_src).expect("parse tix");
+    let mut registry = TypeAliasRegistry::new();
+    registry.load_tix_file(&file);
+
+    let nix_src = indoc! { r#"
+        let
+            /**
+                type: lib :: Lib
+            */
+            lib = { id = x: x; };
+        in
+        lib.id 42
+    "# };
+
+    let ty = get_inferred_root_with_aliases(nix_src, &registry);
+    assert_eq!(ty, arc_ty!(Int));
 }

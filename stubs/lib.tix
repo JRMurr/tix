@@ -1,0 +1,204 @@
+# =============================================================================
+# nixpkgs lib stubs for Tix
+# =============================================================================
+#
+# Type declarations for commonly-used nixpkgs library functions.
+# Load with: tix-cli --stubs stubs/ <file.nix>
+
+# ---------------------------------------------------------------------------
+# Top-level types
+# ---------------------------------------------------------------------------
+
+type Derivation = {
+  name: string,
+  system: string,
+  builder: path | string,
+  args: [string],
+  outputs: [string],
+  ...
+};
+
+# ---------------------------------------------------------------------------
+# pkgs module — creates the "Pkgs" type alias
+# ---------------------------------------------------------------------------
+
+module pkgs {
+
+  val mkDerivation :: { name: string, ... } -> Derivation;
+
+  module stdenv {
+    val mkDerivation :: { name: string, ... } -> Derivation;
+    val cc :: Derivation;
+    val shell :: path;
+    val isLinux :: bool;
+    val isDarwin :: bool;
+    val hostPlatform :: { system: string, isLinux: bool, isDarwin: bool, isx86_64: bool, isAarch64: bool, ... };
+  }
+
+  # Fetchers
+  val fetchurl :: { url: string, sha256: string, ... } -> Derivation;
+  val fetchFromGitHub :: { owner: string, repo: string, rev: string, sha256: string, ... } -> Derivation;
+  val fetchgit :: { url: string, rev: string, sha256: string, ... } -> Derivation;
+
+  # Common build tools available in scope
+  val runCommand :: string -> { ... } -> string -> Derivation;
+  val writeText :: string -> string -> Derivation;
+  val writeShellScriptBin :: string -> string -> Derivation;
+  val symlinkJoin :: { name: string, paths: [Derivation], ... } -> Derivation;
+  val callPackage :: (a -> Derivation) -> { ... } -> Derivation;
+}
+
+# ---------------------------------------------------------------------------
+# lib module — creates the "Lib" type alias
+# ---------------------------------------------------------------------------
+
+module lib {
+
+  # General-purpose combinators
+  val id :: a -> a;
+  val const :: a -> b -> a;
+  val flip :: (a -> b -> c) -> b -> a -> c;
+  val pipe :: a -> [a -> b] -> b;
+
+  # String functions
+  module strings {
+    val concatStringsSep :: string -> [string] -> string;
+    val hasPrefix :: string -> string -> bool;
+    val hasSuffix :: string -> string -> bool;
+    val removePrefix :: string -> string -> string;
+    val removeSuffix :: string -> string -> string;
+    val optionalString :: bool -> string -> string;
+    val toLower :: string -> string;
+    val toUpper :: string -> string;
+    val splitString :: string -> string -> [string];
+    val replaceStrings :: [string] -> [string] -> string -> string;
+    val fileContents :: path -> string;
+    val escapeShellArg :: string -> string;
+    val escapeShellArgs :: [string] -> string;
+    val toShellVar :: string -> string -> string;
+  }
+
+  # Attrset functions
+  module attrsets {
+    val mapAttrs :: (string -> a -> b) -> { _: a, ... } -> { _: b, ... };
+    val filterAttrs :: (string -> a -> bool) -> { _: a, ... } -> { _: a, ... };
+    val genAttrs :: [string] -> (string -> a) -> { _: a, ... };
+    val attrValues :: { _: a, ... } -> [a];
+    val attrNames :: { _: a, ... } -> [string];
+    val hasAttr :: string -> { ... } -> bool;
+    val getAttr :: string -> { _: a, ... } -> a;
+    val mapAttrsToList :: (string -> a -> b) -> { _: a, ... } -> [b];
+    val recursiveUpdate :: { ... } -> { ... } -> { ... };
+    val optionalAttrs :: bool -> { ... } -> { ... };
+    val listToAttrs :: [{ name: string, value: a }] -> { _: a, ... };
+    val nameValuePair :: string -> a -> { name: string, value: a };
+    val isAttrs :: a -> bool;
+    val catAttrs :: string -> [{ ... }] -> [a];
+    val zipAttrsWith :: (string -> [a] -> b) -> [{ _: a, ... }] -> { _: b, ... };
+    val foldAttrs :: (a -> b -> b) -> b -> { _: a, ... } -> { _: b, ... };
+  }
+
+  # List functions
+  module lists {
+    val map :: (a -> b) -> [a] -> [b];
+    val filter :: (a -> bool) -> [a] -> [a];
+    val foldl :: (b -> a -> b) -> b -> [a] -> b;
+    val foldr :: (a -> b -> b) -> b -> [a] -> b;
+    val head :: [a] -> a;
+    val tail :: [a] -> [a];
+    val last :: [a] -> a;
+    val init :: [a] -> [a];
+    val length :: [a] -> int;
+    val elem :: a -> [a] -> bool;
+    val concatMap :: (a -> [b]) -> [a] -> [b];
+    val flatten :: [a] -> [a];
+    val unique :: [a] -> [a];
+    val sort :: (a -> a -> bool) -> [a] -> [a];
+    val reverseList :: [a] -> [a];
+    val range :: int -> int -> [int];
+    val imap0 :: (int -> a -> b) -> [a] -> [b];
+    val imap1 :: (int -> a -> b) -> [a] -> [b];
+    val partition :: (a -> bool) -> [a] -> { right: [a], wrong: [a] };
+    val groupBy :: (a -> string) -> [a] -> { _: [a], ... };
+    val zipListsWith :: (a -> b -> c) -> [a] -> [b] -> [c];
+    val take :: int -> [a] -> [a];
+    val drop :: int -> [a] -> [a];
+    val sublist :: int -> int -> [a] -> [a];
+    val any :: (a -> bool) -> [a] -> bool;
+    val all :: (a -> bool) -> [a] -> bool;
+    val concatLists :: [[a]] -> [a];
+    val optional :: bool -> a -> [a];
+    val optionals :: bool -> [a] -> [a];
+    val findFirst :: (a -> bool) -> a -> [a] -> a;
+    val findSingle :: (a -> bool) -> a -> a -> [a] -> a;
+    val forEach :: [a] -> (a -> b) -> [b];
+    val naturalSort :: [string] -> [string];
+    val compareLists :: (a -> a -> int) -> [a] -> [a] -> int;
+    val count :: (a -> bool) -> [a] -> int;
+    val remove :: a -> [a] -> [a];
+    val subtractLists :: [a] -> [a] -> [a];
+    val intersectLists :: [a] -> [a] -> [a];
+    val mutuallyExclusive :: [a] -> [a] -> bool;
+    val crossLists :: (a -> b -> c) -> [a] -> [b] -> [c];
+  }
+
+  # Type checking
+  module types {
+    val isFunction :: a -> bool;
+    val isList :: a -> bool;
+    val isAttrs :: a -> bool;
+    val isInt :: a -> bool;
+    val isFloat :: a -> bool;
+    val isString :: a -> bool;
+    val isBool :: a -> bool;
+    val isPath :: a -> bool;
+    val isDerivation :: a -> bool;
+  }
+
+  # Debugging
+  module debug {
+    val traceVal :: a -> a;
+    val traceValFn :: (a -> b) -> a -> a;
+    val traceSeq :: a -> b -> b;
+    val traceValSeq :: a -> a;
+  }
+
+  # Trivial
+  module trivial {
+    val toFunction :: a -> a;
+    val functionArgs :: (a -> b) -> { ... };
+    val setFunctionArgs :: (a -> b) -> { ... } -> (a -> b);
+    val isFunction :: a -> bool;
+    val warn :: string -> a -> a;
+    val throwIfNot :: bool -> string -> a -> a;
+  }
+
+  # Versions
+  module versions {
+    val splitVersion :: string -> [string];
+    val majorMinor :: string -> string;
+  }
+
+  # Fixed-point
+  val fix :: (a -> a) -> a;
+  val extends :: (a -> a -> a) -> (a -> a) -> (a -> a);
+  val makeOverridable :: (a -> b) -> a -> b;
+
+  # Misc top-level lib functions
+  val mkOption :: { ... } -> { ... };
+  val mkEnableOption :: string -> { ... };
+  val mkIf :: bool -> a -> { ... };
+  val mkMerge :: [a] -> a;
+  val mkForce :: a -> a;
+  val mkDefault :: a -> a;
+  val mkOverride :: int -> a -> a;
+  val literalExpression :: string -> { ... };
+  val mdDoc :: string -> string;
+  val getExe :: Derivation -> string;
+  val getExe' :: Derivation -> string -> string;
+  val makeBinPath :: [Derivation] -> string;
+  val makeLibraryPath :: [Derivation] -> string;
+  val getBin :: Derivation -> Derivation;
+  val getLib :: Derivation -> Derivation;
+  val getDev :: Derivation -> Derivation;
+}

@@ -2,18 +2,33 @@ use std::{error::Error, path::PathBuf};
 
 use clap::Parser;
 use lang_ast::{module_and_source_maps, RootDatabase};
-use lang_check::check_file;
+use lang_check::aliases::TypeAliasRegistry;
+use lang_check::check_file_with_aliases;
 use lang_ty::OutputTy;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
-    /// Path to the file to read
+    /// Path to the Nix file to type-check
     file_path: PathBuf,
+
+    /// Paths to .tix stub files or directories (recursive)
+    #[arg(long = "stubs", value_name = "PATH")]
+    stub_paths: Vec<PathBuf>,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args = Cli::parse();
+
+    // Load .tix stub files into the type alias registry.
+    let mut registry = TypeAliasRegistry::new();
+    for stub_path in &args.stub_paths {
+        load_stubs(&mut registry, stub_path)?;
+    }
+    if let Err(cycles) = registry.validate() {
+        eprintln!("Error: cyclic type aliases detected: {:?}", cycles);
+        std::process::exit(1);
+    }
 
     let db: RootDatabase = Default::default();
 
@@ -21,7 +36,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let (module, _source_map) = module_and_source_maps(&db, file);
 
-    let inference = check_file(&db, file)?;
+    let inference = check_file_with_aliases(&db, file, &registry)?;
 
     // Print per-name types (the let-bindings, function params, etc.).
     // Deduplicate by (name_text, type_string) since the same name can appear
@@ -63,5 +78,32 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     println!("\nRoot type:\n  {root_ty}");
 
+    Ok(())
+}
+
+/// Load .tix files from a path. If the path is a file, load it directly.
+/// If it's a directory, recursively find all .tix files and load them.
+fn load_stubs(registry: &mut TypeAliasRegistry, path: &PathBuf) -> Result<(), Box<dyn Error>> {
+    if path.is_dir() {
+        for entry in std::fs::read_dir(path)? {
+            let entry = entry?;
+            let entry_path = entry.path();
+            if entry_path.is_dir() {
+                load_stubs(registry, &entry_path)?;
+            } else if entry_path.extension().is_some_and(|ext| ext == "tix") {
+                load_single_stub(registry, &entry_path)?;
+            }
+        }
+    } else {
+        load_single_stub(registry, path)?;
+    }
+    Ok(())
+}
+
+fn load_single_stub(registry: &mut TypeAliasRegistry, path: &PathBuf) -> Result<(), Box<dyn Error>> {
+    let source = std::fs::read_to_string(path)?;
+    let file = comment_parser::parse_tix_file(&source)
+        .map_err(|e| format!("Error parsing {}: {}", path.display(), e))?;
+    registry.load_tix_file(&file);
     Ok(())
 }
