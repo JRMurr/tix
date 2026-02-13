@@ -82,6 +82,10 @@ impl LanguageServer for TixLanguageServer {
                 )),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
+                completion_provider: Some(CompletionOptions {
+                    trigger_characters: Some(vec![".".to_string()]),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             ..Default::default()
@@ -166,6 +170,30 @@ impl LanguageServer for TixLanguageServer {
 
         let location = crate::goto_def::goto_definition(&state, analysis, pos, &uri, &root);
         Ok(location.map(GotoDefinitionResponse::Scalar))
+    }
+
+    async fn completion(
+        &self,
+        params: CompletionParams,
+    ) -> Result<Option<CompletionResponse>> {
+        let uri = params.text_document_position.text_document.uri;
+        let pos = params.text_document_position.position;
+
+        let path = match uri_to_path(&uri) {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+
+        let state = self.state.lock().unwrap();
+        let analysis = match state.get_file(&path) {
+            Some(a) => a,
+            None => return Ok(None),
+        };
+
+        let contents = analysis.nix_file.contents(&state.db);
+        let root = rnix::Root::parse(contents).tree();
+
+        Ok(crate::completion::completion(analysis, pos, &root))
     }
 }
 

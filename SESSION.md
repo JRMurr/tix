@@ -71,6 +71,20 @@
   but don't support cross-file mutual recursion. A future extension could merge
   cyclic file modules into a combined module for joint SCC inference.
 
+### LSP Auto-Completion
+
+- Lambda parameter completion is limited: when typing `pkgs.` inside a lambda
+  body, the parameter's type is only known from within-body constraints (other
+  field accesses on the same variable). Call-site argument types don't flow back
+  to the original parameter variable due to SimpleSub's extrusion-based
+  generalization. Full call-site analysis or type annotations/stubs are needed
+  for comprehensive completion on function parameters.
+
+- rnix error recovery on incomplete code (e.g. `pkgs.` with no field name) can
+  cascade: the missing field causes surrounding tokens to be consumed as part of
+  the Select's attrpath, mangling subsequent expressions. This can destroy call
+  sites that would otherwise constrain lambda parameters.
+
 ### Future Enhancements
 
 - Full intersection-type-based operator overloading (replace pragmatic deferred
