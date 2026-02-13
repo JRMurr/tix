@@ -6,7 +6,7 @@ use salsa::{self, Setter};
 
 #[salsa::input]
 pub struct NixFile {
-    path: PathBuf,
+    pub path: PathBuf,
     #[returns(ref)]
     pub contents: String,
 }
@@ -20,9 +20,11 @@ pub struct NixFile {
 
 #[salsa::db]
 pub trait AstDb: salsa::Database {
-    // fn read_file(&self, path: PathBuf) -> Result<NixFile, std::io::Error>;
-
     fn parse_file(&self, file: NixFile) -> Root;
+
+    /// Load a file from disk by path. Returns None if the file doesn't exist
+    /// or can't be read. Used by multi-file import resolution.
+    fn load_file(&self, path: &std::path::Path) -> Option<NixFile>;
 }
 
 #[derive(Default, Clone)]
@@ -43,6 +45,10 @@ impl AstDb for RootDatabase {
     fn parse_file(&self, file: NixFile) -> Root {
         let src = file.contents(self);
         rnix::Root::parse(src).tree()
+    }
+
+    fn load_file(&self, path: &std::path::Path) -> Option<NixFile> {
+        self.read_file(path.to_path_buf()).ok()
     }
 }
 

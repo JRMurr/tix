@@ -2,6 +2,7 @@ pub mod aliases;
 mod builtins;
 pub(crate) mod collect;
 mod constrain;
+pub mod imports;
 mod infer;
 pub(crate) mod infer_expr;
 pub(crate) mod storage;
@@ -34,10 +35,20 @@ pub fn check_file_with_aliases(
     file: NixFile,
     aliases: &TypeAliasRegistry,
 ) -> Result<InferenceResult, InferenceError> {
+    check_file_with_imports(db, file, aliases, HashMap::new())
+}
+
+/// Type-check a file with pre-loaded aliases and pre-resolved import types.
+pub fn check_file_with_imports(
+    db: &dyn AstDb,
+    file: NixFile,
+    aliases: &TypeAliasRegistry,
+    import_types: HashMap<ExprId, OutputTy>,
+) -> Result<InferenceResult, InferenceError> {
     let module = lang_ast::module(db, file);
     let name_res = lang_ast::name_resolution(db, file);
     let grouped_defs = lang_ast::group_def(db, file);
-    let check = CheckCtx::new(&module, &name_res, aliases.clone());
+    let check = CheckCtx::new(&module, &name_res, aliases.clone(), import_types);
     check.infer_prog(grouped_defs)
 }
 
@@ -129,9 +140,10 @@ pub fn check_file_collecting(
     db: &dyn AstDb,
     file: NixFile,
     aliases: &TypeAliasRegistry,
+    import_types: HashMap<ExprId, OutputTy>,
 ) -> CheckResult {
     let module = lang_ast::module(db, file);
-    match check_file_with_aliases(db, file, aliases) {
+    match check_file_with_imports(db, file, aliases, import_types) {
         Ok(inference) => CheckResult {
             inference: Some(inference),
             errors: Vec::new(),
@@ -188,6 +200,11 @@ pub struct CheckCtx<'db> {
 
     /// Type alias registry loaded from .tix declaration files.
     type_aliases: TypeAliasRegistry,
+
+    /// Pre-computed types for resolved import expressions. When an Apply ExprId
+    /// is in this map, its type comes from the imported file's root expression
+    /// rather than from the generic `import :: a -> b` builtin signature.
+    import_types: HashMap<ExprId, OutputTy>,
 }
 
 impl<'db> CheckCtx<'db> {
@@ -195,6 +212,7 @@ impl<'db> CheckCtx<'db> {
         module: &'db Module,
         name_res: &'db NameResolution,
         type_aliases: TypeAliasRegistry,
+        import_types: HashMap<ExprId, OutputTy>,
     ) -> Self {
         Self {
             module,
@@ -208,6 +226,7 @@ impl<'db> CheckCtx<'db> {
             deferred_overloads: Vec::new(),
             early_canonical: HashMap::new(),
             type_aliases,
+            import_types,
         }
     }
 
@@ -258,6 +277,79 @@ impl<'db> CheckCtx<'db> {
     // ==========================================================================
     // Type annotation interning (doc comment → internal types)
     // ==========================================================================
+
+    // ==========================================================================
+    // OutputTy interning (import results → internal types)
+    // ==========================================================================
+
+    /// Intern an OutputTy into this file's TypeStorage, creating fresh TyIds.
+    ///
+    /// Each TyVar(n) in the OutputTy maps to a fresh variable (via a local
+    /// HashMap). This ensures imported types are fully isolated from the
+    /// source file's TypeStorage — constraints applied in this file cannot
+    /// propagate back to the imported file.
+    fn intern_output_ty(&mut self, ty: &OutputTy) -> TyId {
+        let mut var_map: HashMap<u32, TyId> = HashMap::new();
+        self.intern_output_ty_inner(ty, &mut var_map)
+    }
+
+    fn intern_output_ty_inner(
+        &mut self,
+        ty: &OutputTy,
+        var_map: &mut HashMap<u32, TyId>,
+    ) -> TyId {
+        match ty {
+            OutputTy::TyVar(n) => {
+                *var_map.entry(*n).or_insert_with(|| self.new_var())
+            }
+            OutputTy::Primitive(prim) => self.alloc_prim(*prim),
+            OutputTy::List(inner) => {
+                let elem = self.intern_output_ty_inner(&inner.0, var_map);
+                self.alloc_concrete(Ty::List(elem))
+            }
+            OutputTy::Lambda { param, body } => {
+                let p = self.intern_output_ty_inner(&param.0, var_map);
+                let b = self.intern_output_ty_inner(&body.0, var_map);
+                self.alloc_concrete(Ty::Lambda { param: p, body: b })
+            }
+            OutputTy::AttrSet(attr) => {
+                let mut fields = std::collections::BTreeMap::new();
+                for (k, v) in &attr.fields {
+                    let field_ty = self.intern_output_ty_inner(&v.0, var_map);
+                    fields.insert(k.clone(), field_ty);
+                }
+                let dyn_ty = attr
+                    .dyn_ty
+                    .as_ref()
+                    .map(|d| self.intern_output_ty_inner(&d.0, var_map));
+                self.alloc_concrete(Ty::AttrSet(lang_ty::AttrSetTy {
+                    fields,
+                    dyn_ty,
+                    open: attr.open,
+                }))
+            }
+            // Union: create a fresh variable with each member as a lower bound.
+            OutputTy::Union(members) => {
+                let var = self.new_var();
+                for m in members {
+                    let member_ty = self.intern_output_ty_inner(&m.0, var_map);
+                    self.constrain(member_ty, var)
+                        .expect("union import constraint should not fail");
+                }
+                var
+            }
+            // Intersection: create a fresh variable with each member as an upper bound.
+            OutputTy::Intersection(members) => {
+                let var = self.new_var();
+                for m in members {
+                    let member_ty = self.intern_output_ty_inner(&m.0, var_map);
+                    self.constrain(var, member_ty)
+                        .expect("intersection import constraint should not fail");
+                }
+                var
+            }
+        }
+    }
 
     fn intern_known_ty(&mut self, _name: NameId, ty: ParsedTy) -> TyId {
         self.intern_fresh_ty(ty)

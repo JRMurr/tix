@@ -57,6 +57,20 @@
 - Reference substitution in type annotations (`TypeVarValue::Reference`)
 - AttrSet type annotations in comment parser
 
+### Multi-File Imports
+
+- Deferred overloads (e.g. `+` in `a: b: a + b`) don't survive the OutputTy
+  boundary between files. When file A imports file B that exports an overloaded
+  function, the overload context is lost — the exported type has free type vars
+  instead of concrete types. Subtraction/multiplication/division work because
+  they constrain operands to Number immediately, but `+` (valid for strings/paths
+  too) remains fully polymorphic. A fix would require either carrying overload
+  metadata in OutputTy or resolving all overloads before export.
+
+- Cyclic imports degrade gracefully (unconstrained type variable + diagnostic)
+  but don't support cross-file mutual recursion. A future extension could merge
+  cyclic file modules into a combined module for joint SCC inference.
+
 ### Future Enhancements
 
 - Full intersection-type-based operator overloading (replace pragmatic deferred

@@ -42,6 +42,16 @@ impl CheckCtx<'_> {
             Expr::Reference(var_name) => self.infer_reference(e, &var_name),
 
             Expr::Apply { fun, arg } => {
+                // If this Apply is a resolved import, use the pre-computed type
+                // from the imported file instead of the generic `import :: a -> b`.
+                if let Some(import_ty) = self.import_types.get(&e).cloned() {
+                    // Still infer fun and arg so their expr→type slots are populated
+                    // (needed for LSP hover/goto-def on the `import` keyword and path).
+                    self.infer_expr(fun)?;
+                    self.infer_expr(arg)?;
+                    return Ok(self.intern_output_ty(&import_ty));
+                }
+
                 let fun_ty = self.infer_expr(fun)?;
                 let arg_ty = self.infer_expr(arg)?;
                 let ret_ty = self.new_var();

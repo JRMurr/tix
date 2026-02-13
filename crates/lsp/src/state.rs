@@ -7,13 +7,15 @@
 // rnix::Root is !Send + !Sync and all analysis must run on a single thread
 // (via spawn_blocking).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use lang_ast::{
-    module_and_source_maps, Module, ModuleSourceMap, NameResolution, NixFile, RootDatabase,
+    module_and_source_maps, Expr, ExprId, Module, ModuleSourceMap, NameId, NameResolution, NixFile,
+    RootDatabase,
 };
 use lang_check::aliases::TypeAliasRegistry;
+use lang_check::imports::resolve_imports;
 use lang_check::{CheckResult, InferenceResult};
 
 use crate::convert::LineIndex;
@@ -26,6 +28,12 @@ pub struct FileAnalysis {
     pub source_map: ModuleSourceMap,
     pub name_res: NameResolution,
     pub check_result: CheckResult,
+    /// Maps ExprIds of import sub-expressions (Apply, Reference, Literal)
+    /// to the resolved target path. For jumping from `import ./foo.nix` to the file.
+    pub import_targets: HashMap<ExprId, PathBuf>,
+    /// Maps NameIds bound to import expressions to the target path.
+    /// For jumping through Selects: `x.child` where `x = import ./foo.nix`.
+    pub name_to_import: HashMap<NameId, PathBuf>,
 }
 
 impl FileAnalysis {
@@ -59,7 +67,54 @@ impl AnalysisState {
 
         let (module, source_map) = module_and_source_maps(&self.db, nix_file);
         let name_res = lang_ast::name_resolution(&self.db, nix_file);
-        let check_result = lang_check::check_file_collecting(&self.db, nix_file, &self.registry);
+
+        // Resolve literal imports before type-checking.
+        let mut in_progress = HashSet::new();
+        let mut cache = HashMap::new();
+        let import_resolution = resolve_imports(
+            &self.db,
+            nix_file,
+            &module,
+            &name_res,
+            &self.registry,
+            &mut in_progress,
+            &mut cache,
+        );
+        // TODO: surface import_resolution.errors as LSP diagnostics.
+
+        let import_targets = import_resolution.targets;
+
+        // Build name→import mapping: for each let-binding or attrset field
+        // whose value expression is a resolved import, record the name→path link.
+        // This powers Select-through-import navigation (e.g. `x.child` where
+        // `x = import ./foo.nix` jumps to `child` in foo.nix).
+        //
+        // We chase through Apply chains because `import ./foo.nix { ... }` desugars
+        // to Apply(Apply(import, ./foo.nix), { ... }) — the outer Apply isn't in
+        // import_targets, but its inner function is.
+        let grouped = lang_ast::group_def(&self.db, nix_file);
+        let mut name_to_import = HashMap::new();
+        for group in grouped.iter() {
+            for typedef in group {
+                if let Some(path) =
+                    chase_import_target(&module, &import_targets, typedef.expr())
+                {
+                    log::debug!(
+                        "name_to_import: {} -> {}",
+                        module[typedef.name()].text,
+                        path.display()
+                    );
+                    name_to_import.insert(typedef.name(), path);
+                }
+            }
+        }
+
+        let check_result = lang_check::check_file_collecting(
+            &self.db,
+            nix_file,
+            &self.registry,
+            import_resolution.types,
+        );
 
         self.files.insert(
             path.clone(),
@@ -70,6 +125,8 @@ impl AnalysisState {
                 source_map,
                 name_res,
                 check_result,
+                import_targets,
+                name_to_import,
             },
         );
 
@@ -79,4 +136,24 @@ impl AnalysisState {
     pub fn get_file(&self, path: &PathBuf) -> Option<&FileAnalysis> {
         self.files.get(path)
     }
+}
+
+/// Chase through Apply chains to find an import target.
+///
+/// `import ./foo.nix { args }` desugars to `Apply(Apply(import, ./foo.nix), { args })`.
+/// The inner `Apply(import, ./foo.nix)` is in `import_targets`, but the outer Apply
+/// (the expression actually bound to the name) isn't. This function walks the `fun`
+/// chain of nested Applies until it finds a match in `import_targets`.
+fn chase_import_target(
+    module: &Module,
+    import_targets: &HashMap<ExprId, PathBuf>,
+    expr_id: ExprId,
+) -> Option<PathBuf> {
+    if let Some(path) = import_targets.get(&expr_id) {
+        return Some(path.clone());
+    }
+    if let Expr::Apply { fun, .. } = &module[expr_id] {
+        return chase_import_target(module, import_targets, *fun);
+    }
+    None
 }

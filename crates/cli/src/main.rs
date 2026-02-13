@@ -1,9 +1,11 @@
+use std::collections::{HashMap, HashSet};
 use std::{error::Error, path::PathBuf};
 
 use clap::Parser;
-use lang_ast::{module_and_source_maps, RootDatabase};
+use lang_ast::{module_and_source_maps, name_resolution, RootDatabase};
 use lang_check::aliases::TypeAliasRegistry;
-use lang_check::check_file_with_aliases;
+use lang_check::check_file_with_imports;
+use lang_check::imports::resolve_imports;
 use lang_ty::OutputTy;
 
 #[derive(Parser, Debug)]
@@ -35,8 +37,19 @@ fn main() -> Result<(), Box<dyn Error>> {
     let file = db.read_file(args.file_path)?;
 
     let (module, _source_map) = module_and_source_maps(&db, file);
+    let name_res = name_resolution(&db, file);
 
-    let inference = check_file_with_aliases(&db, file, &registry)?;
+    // Resolve literal imports recursively before type-checking.
+    let mut in_progress = HashSet::new();
+    let mut cache = HashMap::new();
+    let import_resolution = resolve_imports(
+        &db, file, &module, &name_res, &registry, &mut in_progress, &mut cache,
+    );
+    for err in &import_resolution.errors {
+        eprintln!("Import warning: {:?}", err.kind);
+    }
+
+    let inference = check_file_with_imports(&db, file, &registry, import_resolution.types)?;
 
     // Print per-name types (the let-bindings, function params, etc.).
     // Deduplicate by (name_text, type_string) since the same name can appear
