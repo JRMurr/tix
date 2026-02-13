@@ -1230,4 +1230,63 @@ mod import_tests {
             "overloaded + across files produces unconstrained var, got: {ty}"
         );
     }
+
+    /// Verify that `ImportResolution.targets` maps Apply, fun (Reference), and
+    /// arg (Literal) ExprIds to the resolved target path for each import.
+    #[test]
+    fn import_targets_populated() {
+        use lang_ast::{Expr, Literal};
+        use std::path::PathBuf;
+
+        let (db, entry_file) = MultiFileTestDatabase::new(&[
+            ("/main.nix", "import /lib.nix"),
+            ("/lib.nix", "42"),
+        ]);
+
+        let module = lang_ast::module(&db, entry_file);
+        let name_res = lang_ast::name_resolution(&db, entry_file);
+        let aliases = TypeAliasRegistry::default();
+
+        let mut in_progress = HashSet::new();
+        let mut cache = HashMap::new();
+        let resolution = resolve_imports(
+            &db,
+            entry_file,
+            &module,
+            &name_res,
+            &aliases,
+            &mut in_progress,
+            &mut cache,
+        );
+
+        // There should be exactly 3 target entries: Apply, fun (Reference), arg (Literal).
+        assert_eq!(
+            resolution.targets.len(),
+            3,
+            "expected 3 target entries (Apply + fun + arg), got {:?}",
+            resolution.targets
+        );
+
+        // All three should point to the same target path.
+        let target = PathBuf::from("/lib.nix");
+        for path in resolution.targets.values() {
+            assert_eq!(*path, target, "all targets should resolve to /lib.nix");
+        }
+
+        // Verify we have the right expression kinds mapped.
+        let mut has_apply = false;
+        let mut has_reference = false;
+        let mut has_path_literal = false;
+        for expr_id in resolution.targets.keys() {
+            match &module[*expr_id] {
+                Expr::Apply { .. } => has_apply = true,
+                Expr::Reference(name) if name == "import" => has_reference = true,
+                Expr::Literal(Literal::Path(_)) => has_path_literal = true,
+                _ => {}
+            }
+        }
+        assert!(has_apply, "targets should include the Apply expression");
+        assert!(has_reference, "targets should include the import Reference");
+        assert!(has_path_literal, "targets should include the path Literal");
+    }
 }

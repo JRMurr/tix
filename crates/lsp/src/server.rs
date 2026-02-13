@@ -157,7 +157,7 @@ impl LanguageServer for TixLanguageServer {
         let contents = analysis.nix_file.contents(&state.db);
         let root = rnix::Root::parse(contents).tree();
 
-        let location = crate::goto_def::goto_definition(analysis, pos, &uri, &root);
+        let location = crate::goto_def::goto_definition(&state, analysis, pos, &uri, &root);
         Ok(location.map(GotoDefinitionResponse::Scalar))
     }
 }

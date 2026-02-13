@@ -11,7 +11,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use lang_ast::{
-    module_and_source_maps, Module, ModuleSourceMap, NameResolution, NixFile, RootDatabase,
+    module_and_source_maps, ExprId, Module, ModuleSourceMap, NameId, NameResolution, NixFile,
+    RootDatabase,
 };
 use lang_check::aliases::TypeAliasRegistry;
 use lang_check::imports::resolve_imports;
@@ -27,6 +28,12 @@ pub struct FileAnalysis {
     pub source_map: ModuleSourceMap,
     pub name_res: NameResolution,
     pub check_result: CheckResult,
+    /// Maps ExprIds of import sub-expressions (Apply, Reference, Literal)
+    /// to the resolved target path. For jumping from `import ./foo.nix` to the file.
+    pub import_targets: HashMap<ExprId, PathBuf>,
+    /// Maps NameIds bound to import expressions to the target path.
+    /// For jumping through Selects: `x.child` where `x = import ./foo.nix`.
+    pub name_to_import: HashMap<NameId, PathBuf>,
 }
 
 impl FileAnalysis {
@@ -75,6 +82,22 @@ impl AnalysisState {
         );
         // TODO: surface import_resolution.errors as LSP diagnostics.
 
+        let import_targets = import_resolution.targets;
+
+        // Build name→import mapping: for each let-binding or attrset field
+        // whose value expression is a resolved import, record the name→path link.
+        // This powers Select-through-import navigation (e.g. `x.child` where
+        // `x = import ./foo.nix` jumps to `child` in foo.nix).
+        let grouped = lang_ast::group_def(&self.db, nix_file);
+        let mut name_to_import = HashMap::new();
+        for group in grouped.iter() {
+            for typedef in group {
+                if let Some(path) = import_targets.get(&typedef.expr()) {
+                    name_to_import.insert(typedef.name(), path.clone());
+                }
+            }
+        }
+
         let check_result = lang_check::check_file_collecting(
             &self.db,
             nix_file,
@@ -91,6 +114,8 @@ impl AnalysisState {
                 source_map,
                 name_res,
                 check_result,
+                import_targets,
+                name_to_import,
             },
         );
 

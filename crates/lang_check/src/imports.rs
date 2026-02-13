@@ -105,6 +105,10 @@ pub struct ImportResolution {
     pub types: HashMap<ExprId, OutputTy>,
     /// Errors encountered during import resolution.
     pub errors: Vec<ImportError>,
+    /// Maps ExprIds of import sub-expressions (Apply, Reference, Literal)
+    /// to the resolved target path. Used by the LSP for jump-to-definition
+    /// on `import ./foo.nix` expressions.
+    pub targets: HashMap<ExprId, PathBuf>,
 }
 
 /// Recursively resolve all literal imports in a file.
@@ -134,6 +138,7 @@ pub fn resolve_imports(
 
     let mut types = HashMap::new();
     let mut errors = Vec::new();
+    let mut targets = HashMap::new();
 
     for (apply_expr_id, target_path) in literal_imports {
         // Canonicalize the path so cycle detection and caching work correctly
@@ -141,6 +146,14 @@ pub fn resolve_imports(
         // when canonicalization fails (e.g. in-memory test databases where
         // the path doesn't exist on disk).
         let target_path = target_path.canonicalize().unwrap_or(target_path);
+
+        // Record navigation targets for the LSP before any cycle/cache/load
+        // checks, so even failed imports get jump-to-definition support.
+        if let Expr::Apply { fun, arg } = &module[apply_expr_id] {
+            targets.insert(*fun, target_path.clone());
+            targets.insert(*arg, target_path.clone());
+        }
+        targets.insert(apply_expr_id, target_path.clone());
 
         // Check for cycles.
         if in_progress.contains(&target_path) {
@@ -217,5 +230,5 @@ pub fn resolve_imports(
         }
     }
 
-    ImportResolution { types, errors }
+    ImportResolution { types, errors, targets }
 }
