@@ -1,4 +1,6 @@
 mod collect;
+pub mod tix_collect;
+pub mod tix_parser;
 
 use std::sync::Arc;
 
@@ -26,6 +28,28 @@ pub fn parse_and_collect(source: &str) -> Result<Vec<TypeDecl>, ParseError> {
     let pairs = parse_comment_text(source)?;
 
     Ok(collect_type_decls(pairs))
+}
+
+// =============================================================================
+// .tix declaration file types and parsing
+// =============================================================================
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TixDeclFile {
+    pub declarations: Vec<TixDeclaration>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TixDeclaration {
+    TypeAlias { name: SmolStr, body: ParsedTy },
+    ValDecl { name: SmolStr, ty: ParsedTy },
+    Module { name: SmolStr, declarations: Vec<TixDeclaration> },
+}
+
+pub fn parse_tix_file(source: &str) -> Result<TixDeclFile, Box<dyn std::error::Error>> {
+    use pest::Parser;
+    let pairs = tix_parser::TixDeclParser::parse(tix_parser::Rule::tix_file, source)?;
+    Ok(tix_collect::collect_tix_file(pairs))
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -161,6 +185,37 @@ macro_rules! known_ty {
         $crate::ParsedTy::Intersection(vec![
             $($crate::ParsedTyRef::from($crate::known_ty!($member)),)+
         ])
+    }};
+
+    // -- Closed attrset: { "key": ty, ... } ---------------------------------
+    ({ $($key:literal : $ty:tt),* $(,)? }) => {{
+        $crate::ParsedTy::AttrSet(::lang_ty::AttrSetTy {
+            fields: [
+                $((::smol_str::SmolStr::from($key), $crate::ParsedTyRef::from($crate::known_ty!($ty))),)*
+            ].into_iter().collect(),
+            dyn_ty: None,
+            open: false,
+        })
+    }};
+
+    // -- Open attrset: { "key": ty, ... ; ... } ----------------------------
+    ({ $($key:literal : $ty:tt),* $(,)?; ... }) => {{
+        $crate::ParsedTy::AttrSet(::lang_ty::AttrSetTy {
+            fields: [
+                $((::smol_str::SmolStr::from($key), $crate::ParsedTyRef::from($crate::known_ty!($ty))),)*
+            ].into_iter().collect(),
+            dyn_ty: None,
+            open: true,
+        })
+    }};
+
+    // -- Dyn attrset: dyn_attrset!(dyn_ty) --------------------------------
+    (dyn_attrset!($dyn_ty:tt)) => {{
+        $crate::ParsedTy::AttrSet(::lang_ty::AttrSetTy {
+            fields: std::collections::BTreeMap::new(),
+            dyn_ty: Some($crate::ParsedTyRef::from($crate::known_ty!($dyn_ty))),
+            open: false,
+        })
     }};
 
     // -- Lambda: arg -> ret ------------------------------------------------

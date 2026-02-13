@@ -276,7 +276,14 @@ impl CheckCtx<'_> {
                     name if name.starts_with("__pbt_assert_") => {
                         self.infer_pbt_assert_builtin(name)
                     }
-                    _ => Ok(self.new_var()),
+                    _ => {
+                        // Check .tix global val declarations for this name.
+                        if let Some(parsed_ty) = self.type_aliases.global_vals().get(var_name).cloned() {
+                            Ok(self.intern_fresh_ty(parsed_ty))
+                        } else {
+                            Ok(self.new_var())
+                        }
+                    }
                 }
             }
             Some(res) => match res {
