@@ -246,6 +246,14 @@ pub struct CheckCtx<'db> {
     /// is in this map, its type comes from the imported file's root expression
     /// rather than from the generic `import :: a -> b` builtin signature.
     import_types: HashMap<ExprId, OutputTy>,
+
+    /// Tracks which TyIds originated from type alias resolution. When a
+    /// TypeVarValue::Reference is resolved to an alias body in intern_fresh_ty,
+    /// or a Named OutputTy is interned, the resulting TyId is recorded here
+    /// with the alias name. Used during canonicalization to wrap the result in
+    /// OutputTy::Named so hover display shows the alias name instead of the
+    /// fully expanded structural type.
+    alias_provenance: HashMap<TyId, smol_str::SmolStr>,
 }
 
 impl<'db> CheckCtx<'db> {
@@ -270,6 +278,7 @@ impl<'db> CheckCtx<'db> {
             early_canonical: HashMap::new(),
             type_aliases,
             import_types,
+            alias_provenance: HashMap::new(),
         }
     }
 
@@ -391,6 +400,13 @@ impl<'db> CheckCtx<'db> {
                 }
                 var
             }
+            // Named: intern the inner type and record the alias provenance on
+            // the resulting TyId so canonicalization can re-wrap it.
+            OutputTy::Named(name, inner) => {
+                let ty_id = self.intern_output_ty_inner(&inner.0, var_map);
+                self.alias_provenance.insert(ty_id, name.clone());
+                ty_id
+            }
         }
     }
 
@@ -423,6 +439,14 @@ impl<'db> CheckCtx<'db> {
                 .map_err(|err| self.locate_err(err))?;
             self.constrain(annotation_ty, ty)
                 .map_err(|err| self.locate_err(err))?;
+
+            // Transfer alias provenance from the annotation to the expression
+            // TyId so that early canonicalization wraps the name's type in
+            // Named. Without this, the provenance lives only on annotation_ty
+            // which early canonicalization never sees directly.
+            if let Some(name) = self.alias_provenance.get(&annotation_ty).cloned() {
+                self.alias_provenance.insert(ty, name);
+            }
         }
 
         Ok(())
@@ -444,7 +468,10 @@ impl<'db> CheckCtx<'db> {
                         // recursively intern the alias body (with its own
                         // fresh vars) to get a polymorphic instance.
                         if let Some(alias_body) = self.type_aliases.get(ref_name).cloned() {
-                            self.intern_fresh_ty(alias_body)
+                            let ty_id = self.intern_fresh_ty(alias_body);
+                            self.alias_provenance
+                                .insert(ty_id, smol_str::SmolStr::from(ref_name.as_str()));
+                            ty_id
                         } else {
                             // Unknown reference — degrade to fresh variable.
                             self.new_var()

@@ -10,6 +10,8 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use smol_str::SmolStr;
+
 use super::{CheckCtx, InferenceResult, TyId};
 use crate::storage::{TypeEntry, TypeStorage};
 use lang_ty::{AttrSetTy, OutputTy, Ty, TyRef};
@@ -25,14 +27,16 @@ use lang_ty::{AttrSetTy, OutputTy, Ty, TyRef};
 
 struct Canonicalizer<'a> {
     table: &'a TypeStorage,
+    alias_provenance: &'a HashMap<TyId, SmolStr>,
     cache: HashMap<(TyId, bool), OutputTy>,
     in_progress: HashSet<(TyId, bool)>,
 }
 
 impl<'a> Canonicalizer<'a> {
-    fn new(table: &'a TypeStorage) -> Self {
+    fn new(table: &'a TypeStorage, alias_provenance: &'a HashMap<TyId, SmolStr>) -> Self {
         Self {
             table,
+            alias_provenance,
             cache: HashMap::new(),
             in_progress: HashSet::new(),
         }
@@ -59,8 +63,9 @@ impl<'a> Canonicalizer<'a> {
 
     fn canonicalize_inner(&mut self, ty_id: TyId, positive: bool) -> OutputTy {
         let entry = self.table.get(ty_id).clone();
+        let alias_name = self.alias_provenance.get(&ty_id).cloned();
 
-        match entry {
+        let result = match entry {
             TypeEntry::Variable(v) => {
                 if positive {
                     self.expand_bounds_as_union(&v.lower_bounds, ty_id)
@@ -69,6 +74,14 @@ impl<'a> Canonicalizer<'a> {
                 }
             }
             TypeEntry::Concrete(ty) => self.canonicalize_concrete(&ty, positive),
+        };
+
+        // If this TyId originated from a type alias, wrap the canonical form
+        // in Named so display shows the alias name instead of the expansion.
+        if let Some(name) = alias_name {
+            OutputTy::Named(name, TyRef::from(result))
+        } else {
+            result
         }
     }
 
@@ -183,8 +196,13 @@ impl<'a> Canonicalizer<'a> {
 /// Canonicalize a TyId into an OutputTy using only a TypeStorage reference.
 /// This captures the type's canonical form at the current moment — before
 /// use-site extrusions add concrete bounds back onto polymorphic variables.
-pub fn canonicalize_standalone(table: &TypeStorage, ty_id: TyId, positive: bool) -> OutputTy {
-    let mut canon = Canonicalizer::new(table);
+pub fn canonicalize_standalone(
+    table: &TypeStorage,
+    alias_provenance: &HashMap<TyId, SmolStr>,
+    ty_id: TyId,
+    positive: bool,
+) -> OutputTy {
+    let mut canon = Canonicalizer::new(table, alias_provenance);
     canon.canonicalize(ty_id, positive)
 }
 
@@ -351,7 +369,7 @@ impl<'db> Collector<'db> {
         let mut expr_ty_map = HashMap::with_capacity(expr_cnt);
 
         // Create a Canonicalizer that borrows the type storage for this pass.
-        let mut canon = Canonicalizer::new(&self.ctx.table);
+        let mut canon = Canonicalizer::new(&self.ctx.table, &self.ctx.alias_provenance);
 
         for (name, ty) in name_tys {
             // Prefer the early-canonicalized type (captured before use-site

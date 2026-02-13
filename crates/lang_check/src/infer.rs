@@ -106,7 +106,7 @@ impl CheckCtx<'_> {
         // cross-group constraint additions would require invalidation.
         for &(name_id, ty) in &inferred {
             let poly_ty = self.resolve_to_concrete_id(ty).unwrap_or(ty);
-            let output = canonicalize_standalone(&self.table, poly_ty, true);
+            let output = canonicalize_standalone(&self.table, &self.alias_provenance, poly_ty, true);
             let simplified = simplify(&output);
             self.early_canonical.insert(name_id, simplified);
         }
@@ -280,7 +280,7 @@ impl CheckCtx<'_> {
                 ty_id
             }
             TypeEntry::Concrete(ty) => {
-                match ty {
+                let result = match ty {
                     Ty::Lambda { param, body } => {
                         // Insert a placeholder to handle recursive types.
                         let placeholder = self.new_var();
@@ -315,7 +315,15 @@ impl CheckCtx<'_> {
                     }
                     Ty::Primitive(_) => ty_id,
                     Ty::TyVar(_) => ty_id,
+                };
+
+                // Propagate alias provenance through extrusion so that
+                // references to aliased types preserve the alias name.
+                if let Some(name) = self.alias_provenance.get(&ty_id).cloned() {
+                    self.alias_provenance.insert(result, name);
                 }
+
+                result
             }
         }
     }

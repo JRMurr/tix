@@ -971,12 +971,21 @@ fn alias_resolution_in_annotation() {
     "# };
 
     let ty = get_inferred_root_with_aliases(nix_src, &registry);
-    match &ty {
+    // With alias provenance tracking, the annotation wraps the type in Named.
+    // Unwrap it to check the inner structural type.
+    let inner = match &ty {
+        lang_ty::OutputTy::Named(name, inner) => {
+            assert_eq!(name.as_str(), "MyRecord");
+            &*inner.0
+        }
+        other => other,
+    };
+    match inner {
         lang_ty::OutputTy::AttrSet(attr) => {
             assert!(attr.fields.contains_key("name"), "should have field name");
             assert!(attr.fields.contains_key("age"), "should have field age");
         }
-        _ => panic!("expected attrset type, got: {ty}"),
+        _ => panic!("expected attrset type (possibly wrapped in Named), got: {ty:?}"),
     }
 }
 
@@ -1424,4 +1433,115 @@ mod import_tests {
         assert!(has_reference, "targets should include the import Reference");
         assert!(has_path_literal, "targets should include the path Literal");
     }
+}
+
+// ==============================================================================
+// Named type alias preservation in hover display
+// ==============================================================================
+
+/// Look up the type of a named binding by text name, with aliases loaded.
+fn get_name_type_with_aliases(src: &str, name: &str, aliases: &TypeAliasRegistry) -> OutputTy {
+    let (module, inference) = check_str_with_aliases(src, aliases);
+    let inference = inference.expect("No type error");
+
+    let mut best: Option<OutputTy> = None;
+    for (name_id, name_data) in module.names() {
+        if name_data.text == name {
+            if let Some(ty) = inference.name_ty_map.get(&name_id) {
+                let is_better = match &best {
+                    None => true,
+                    Some(prev) => {
+                        !ty.contains_union_or_intersection()
+                            && prev.contains_union_or_intersection()
+                    }
+                };
+                if is_better {
+                    best = Some(ty.clone());
+                }
+            }
+        }
+    }
+    best.unwrap_or_else(|| panic!("Name '{name}' not found in module"))
+}
+
+/// A doc comment annotation referencing a type alias produces OutputTy::Named
+/// wrapping the expanded type, so hover display shows the alias name.
+#[test]
+fn alias_named_in_annotation() {
+    let tix_src = r#"
+        module lib {
+            val id :: a -> a;
+        }
+    "#;
+    let file = comment_parser::parse_tix_file(tix_src).expect("parse tix");
+    let mut registry = TypeAliasRegistry::new();
+    registry.load_tix_file(&file);
+
+    let nix_src = indoc! { r#"
+        let
+            /**
+                type: lib :: Lib
+            */
+            lib = { id = x: x; };
+        in
+        lib
+    "# };
+
+    let ty = get_name_type_with_aliases(nix_src, "lib", &registry);
+    // The type should be Named("Lib", ...) wrapping the structural attrset.
+    assert!(
+        matches!(&ty, OutputTy::Named(name, _) if name == "Lib"),
+        "annotated name should produce Named(\"Lib\", ...), got: {ty:?}"
+    );
+    // Display should show just the alias name.
+    assert_eq!(format!("{ty}"), "Lib");
+}
+
+/// A global val returning a type alias wraps the return type in Named.
+#[test]
+fn alias_named_from_global_val_return() {
+    let tix_src = r#"
+        type Derivation = { name: string, system: string, ... };
+        val mkDerivation :: { name: string, ... } -> Derivation;
+    "#;
+    let file = comment_parser::parse_tix_file(tix_src).expect("parse tix");
+    let mut registry = TypeAliasRegistry::new();
+    registry.load_tix_file(&file);
+
+    let nix_src = indoc! { r#"
+        mkDerivation { name = "hello"; }
+    "# };
+
+    let ty = get_inferred_root_with_aliases(nix_src, &registry);
+    assert!(
+        matches!(&ty, OutputTy::Named(name, _) if name == "Derivation"),
+        "mkDerivation return should produce Named(\"Derivation\", ...), got: {ty:?}"
+    );
+    assert_eq!(format!("{ty}"), "Derivation");
+}
+
+/// Let-binding flow: `let drv = mkDerivation { ... }; in drv` preserves the alias.
+#[test]
+fn alias_named_flows_through_let() {
+    let tix_src = r#"
+        type Derivation = { name: string, system: string, ... };
+        val mkDerivation :: { name: string, ... } -> Derivation;
+    "#;
+    let file = comment_parser::parse_tix_file(tix_src).expect("parse tix");
+    let mut registry = TypeAliasRegistry::new();
+    registry.load_tix_file(&file);
+
+    let nix_src = indoc! { r#"
+        let
+            drv = mkDerivation { name = "my-package"; };
+        in
+        drv
+    "# };
+
+    let ty = get_inferred_root_with_aliases(nix_src, &registry);
+    assert!(
+        matches!(&ty, OutputTy::Named(name, _) if name == "Derivation"),
+        "let-bound drv should preserve Named(\"Derivation\", ...), got: {ty:?}"
+    );
+    assert_eq!(format!("{ty}"), "Derivation");
 }

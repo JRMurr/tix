@@ -218,6 +218,8 @@ fn text_from_ty(ty: &OutputTy) -> impl Strategy<Value = NixTextStr> {
             // is complex — for now skip in PBT
             unreachable!("Union/Intersection should not appear in PBT type generation yet")
         }
+        // Named is just a display wrapper — delegate to the inner type.
+        OutputTy::Named(_, inner) => text_from_ty(&inner.0).boxed(),
     };
 
     inner.prop_flat_map(non_type_modifying_transform)

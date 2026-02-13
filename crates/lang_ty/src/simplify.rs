@@ -141,6 +141,9 @@ fn analyze(
                 path.pop();
             }
         }
+        OutputTy::Named(_, inner) => {
+            analyze(&inner.0, positive, path, vars);
+        }
     }
 }
 
@@ -280,6 +283,10 @@ fn apply_simplification(
                 1 => (*simplified.into_iter().next().unwrap().0).clone(),
                 _ => OutputTy::Intersection(simplified),
             }
+        }
+        OutputTy::Named(name, inner) => {
+            let simplified_inner = apply_simplification(&inner.0, substitution, removable);
+            OutputTy::Named(name.clone(), TyRef::from(simplified_inner))
         }
     }
 }

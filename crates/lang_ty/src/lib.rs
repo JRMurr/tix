@@ -117,6 +117,14 @@ macro_rules! arc_ty {
         ])
     }};
 
+    // -- Named alias: named!("AliasName", inner_ty)
+    (named!($name:expr, $inner:tt)) => {{
+        $crate::OutputTy::Named(
+            smol_str::SmolStr::new($name),
+            $crate::TyRef::from($crate::arc_ty!($inner)),
+        )
+    }};
+
     ($arg:tt -> $($ret:tt)*) => {
         $crate::OutputTy::Lambda {
             param: $crate::TyRef::from($crate::arc_ty!($arg)),

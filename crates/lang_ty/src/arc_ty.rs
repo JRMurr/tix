@@ -4,6 +4,8 @@ use std::sync::Arc;
 use derive_more::Debug;
 use rustc_hash::FxHashMap;
 
+use smol_str::SmolStr;
+
 use crate::{AttrSetTy, PrimitiveTy};
 
 // ==============================================================================
@@ -40,6 +42,12 @@ pub enum OutputTy {
     /// Produced in negative/input positions when a variable has multiple upper bounds.
     #[debug("Intersection({_0:?})")]
     Intersection(Vec<TyRef>),
+
+    /// A type alias name wrapping the fully expanded inner type.
+    /// Display shows just the alias name; the inner type is preserved for
+    /// structural transparency (e.g. field access on a Named attrset).
+    #[debug("Named({_0:?}, {_1:?})")]
+    Named(SmolStr, TyRef),
 }
 
 /// Arc-wrapped OutputTy for recursive type structures.
@@ -99,6 +107,9 @@ impl OutputTy {
                     .map(|m| m.0.normalize_inner(free).into())
                     .collect(),
             ),
+            OutputTy::Named(name, inner) => {
+                OutputTy::Named(name.clone(), inner.0.normalize_inner(free).into())
+            }
         }
     }
 
@@ -127,6 +138,7 @@ impl OutputTy {
                 members.iter().any(|m| m.0.has_non_primitive_lambda_param())
             }
             OutputTy::TyVar(_) | OutputTy::Primitive(_) => false,
+            OutputTy::Named(_, inner) => inner.0.has_non_primitive_lambda_param(),
         }
     }
 
@@ -148,6 +160,7 @@ impl OutputTy {
                         .as_ref()
                         .is_some_and(|d| d.0.contains_union_or_intersection())
             }
+            OutputTy::Named(_, inner) => inner.0.contains_union_or_intersection(),
         }
     }
 
@@ -185,6 +198,7 @@ impl OutputTy {
                     m.0.collect_free_type_vars(result, seen);
                 }
             }
+            OutputTy::Named(_, inner) => inner.0.collect_free_type_vars(result, seen),
         }
     }
 }
@@ -262,6 +276,7 @@ impl fmt::Display for OutputTy {
                 }
                 Ok(())
             }
+            OutputTy::Named(name, _) => write!(f, "{name}"),
         }
     }
 }
