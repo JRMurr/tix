@@ -44,6 +44,11 @@ pub fn collect_type_expr(mut pairs: Pairs<Rule>) -> Option<ParsedTy> {
     let curr = pairs.next()?;
 
     let curr = match curr.as_rule() {
+        // EOI can appear as a child of type_line when the doc comment text
+        // ends without a trailing newline (the grammar's `(NEWLINE | EOI)`
+        // terminator). It's not a type expression — return None.
+        Rule::EOI => return None,
+
         // Transparent wrappers — descend into their single child.
         Rule::type_expr
         | Rule::arrow_segment
@@ -69,7 +74,7 @@ pub fn collect_type_expr(mut pairs: Pairs<Rule>) -> Option<ParsedTy> {
         Rule::null_ref => ParsedTy::Primitive(PrimitiveTy::Null),
         Rule::generic_ident => ParsedTy::TyVar(TypeVarValue::Generic(curr.as_str().into())),
         Rule::user_type => ParsedTy::TyVar(TypeVarValue::Reference(curr.as_str().into())),
-        Rule::other_text | Rule::EOI | Rule::WHITESPACE | Rule::NEWLINE | Rule::ANY_WHITESPACE => {
+        Rule::other_text | Rule::WHITESPACE | Rule::NEWLINE | Rule::ANY_WHITESPACE => {
             unreachable!("should not be seen whitespace...")
         }
         _ => unreachable!("collect_type_expr should not be seen: {:?}", curr.as_rule()),

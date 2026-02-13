@@ -8,8 +8,6 @@
 
 use std::collections::{HashMap, HashSet};
 
-use comment_parser::parse_and_collect;
-
 use super::{CheckCtx, InferenceError, InferenceResult, LocatedError, TyId};
 use crate::collect::{canonicalize_standalone, Collector};
 use crate::infer_expr::{PendingMerge, PendingOverload};
@@ -83,30 +81,7 @@ impl CheckCtx<'_> {
             self.constrain(name_slot, ty).map_err(|err| self.locate_err(err))?;
 
             // Check for type annotations in doc comments.
-            let type_annotation =
-                self.module
-                    .type_dec_map
-                    .docs_for_name(name_id)
-                    .and_then(|docs| {
-                        let parsed: Vec<_> = docs
-                            .iter()
-                            .flat_map(|doc| parse_and_collect(doc).unwrap_or_default())
-                            .collect();
-                        let name_str = &self.module[name_id].text;
-                        parsed.into_iter().find_map(|decl| {
-                            if decl.identifier == *name_str {
-                                Some(decl.type_expr)
-                            } else {
-                                None
-                            }
-                        })
-                    });
-
-            if let Some(known_ty) = type_annotation {
-                let annotation_ty = self.intern_fresh_ty(known_ty);
-                self.constrain(ty, annotation_ty).map_err(|err| self.locate_err(err))?;
-                self.constrain(annotation_ty, ty).map_err(|err| self.locate_err(err))?;
-            }
+            self.apply_type_annotation(name_id, ty)?;
 
             inferred.push((name_id, ty));
         }

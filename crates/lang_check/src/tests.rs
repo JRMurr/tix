@@ -431,6 +431,55 @@ test_case!(
     { "name": (String), "age": (Int) }
 );
 
+// The previous tests wrap lambdas in let-bindings; annotations there work
+// because the let binding goes through SCC group inference. These tests verify
+// that annotations also work on the root-level lambda (the pattern in lsp-dev.nix).
+test_case!(
+    pat_field_annotation_root_lambda,
+    "
+    {
+        /** type: x :: int */
+        x,
+        /** type: y :: string */
+        y
+    }: { inherit x y; }
+    ",
+    ({ "x": (Int), "y": (String) } -> { "x": (Int), "y": (String) })
+);
+
+#[test]
+fn pat_field_annotation_root_lambda_constrains_body() {
+    // The annotation constrains x to int inside the body, so x + 1
+    // should infer as int (not a polymorphic variable).
+    let file = indoc! { "
+        {
+            /** type: x :: int */
+            x
+        }: x + 1
+    " };
+
+    let root_ty = get_inferred_root(file);
+    let expected = arc_ty!({ "x": (Int) } -> Int);
+    assert_eq!(root_ty, expected, "annotated root lambda body should be int");
+}
+
+#[test]
+fn pat_field_annotation_root_lambda_mismatch() {
+    // The annotation constrains x to string, but the body uses it as a number.
+    let file = indoc! { "
+        {
+            /** type: x :: string */
+            x
+        }: x * 2
+    " };
+
+    let error = get_check_error(file);
+    assert!(
+        matches!(error, InferenceError::TypeMismatch(..)),
+        "expected TypeMismatch, got: {error:?}"
+    );
+}
+
 /// Look up the type of a named binding by its text name.
 /// When the same name has multiple NameIds (e.g. definition + inherit reference),
 /// prefer the version without unions/intersections (the clean early-canonicalized form).

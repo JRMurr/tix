@@ -1,5 +1,4 @@
 {
-  # TODO: still seems sad and not picking up the type comment
   /**
     type: pkgs :: Pkgs
   */

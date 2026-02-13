@@ -96,6 +96,10 @@ impl CheckCtx<'_> {
                         if let Some(default_ty) = default_ty {
                             self.constrain(default_ty, name_ty).map_err(|err| self.locate_err(err))?;
                         }
+                        // Apply doc comment type annotations (e.g. /** type: x :: int */)
+                        // to pattern fields. Without this, annotations on fields of
+                        // top-level lambdas (not wrapped in a let binding) would be ignored.
+                        self.apply_type_annotation(name, name_ty)?;
                         let field_text = self.module[name].text.clone();
                         fields.insert(field_text, name_ty);
                     }
