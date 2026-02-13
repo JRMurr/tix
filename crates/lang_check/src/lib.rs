@@ -167,29 +167,25 @@ pub struct CheckResult {
 }
 
 /// Type-check a file, collecting errors instead of aborting on the first one.
-/// Returns partial results when possible.
+/// Always returns partial inference results — even when errors occur, bindings
+/// that were successfully inferred before the error will have types available
+/// (e.g. for LSP hover).
 pub fn check_file_collecting(
     db: &dyn AstDb,
     file: NixFile,
     aliases: &TypeAliasRegistry,
     import_types: HashMap<ExprId, OutputTy>,
 ) -> CheckResult {
-    match check_file_with_imports(db, file, aliases, import_types) {
-        Ok(inference) => {
-            let warnings = inference.warnings.clone();
-            CheckResult {
-                inference: Some(inference),
-                errors: Vec::new(),
-                warnings,
-            }
-        }
-        Err(located) => CheckResult {
-            inference: None,
-            errors: vec![located],
-            // Warnings accumulated before the error are lost. Acceptable
-            // until error recovery is added.
-            warnings: Vec::new(),
-        },
+    let module = lang_ast::module(db, file);
+    let name_res = lang_ast::name_resolution(db, file);
+    let grouped_defs = lang_ast::group_def(db, file);
+    let check = CheckCtx::new(&module, &name_res, aliases.clone(), import_types);
+    let (inference, errors) = check.infer_prog_partial(grouped_defs);
+    let warnings = inference.warnings.clone();
+    CheckResult {
+        inference: Some(inference),
+        errors,
+        warnings,
     }
 }
 

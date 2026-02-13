@@ -29,7 +29,23 @@ enum OverloadProgress {
 }
 
 impl CheckCtx<'_> {
-    pub fn infer_prog(mut self, groups: GroupedDefs) -> Result<InferenceResult, LocatedError> {
+    pub fn infer_prog(self, groups: GroupedDefs) -> Result<InferenceResult, LocatedError> {
+        let (result, errors) = self.infer_prog_partial(groups);
+        if let Some(err) = errors.into_iter().next() {
+            Err(err)
+        } else {
+            Ok(result)
+        }
+    }
+
+    /// Inference entry point that always produces an InferenceResult, even when
+    /// errors occur. Errors are collected rather than short-circuiting — SCC
+    /// groups after a failed one still get inferred, so the LSP can show types
+    /// for successfully-inferred bindings alongside error diagnostics.
+    pub fn infer_prog_partial(
+        mut self,
+        groups: GroupedDefs,
+    ) -> (InferenceResult, Vec<LocatedError>) {
         // Pre-allocate TyIds for all names and expressions so they can be
         // referenced before they are inferred (needed for recursive definitions).
         let len = self.module.names().len() + self.module.exprs().len();
@@ -37,18 +53,24 @@ impl CheckCtx<'_> {
             self.new_var();
         }
 
+        let mut errors = Vec::new();
+
         for group in groups {
-            self.infer_scc_group(group)?;
+            if let Some(err) = self.infer_scc_group(group) {
+                errors.push(err);
+            }
         }
 
-        self.infer_root()?;
+        if let Err(err) = self.infer_root() {
+            errors.push(err);
+        }
 
         // Extract warnings before Collector consumes self.
         let warnings = std::mem::take(&mut self.warnings);
         let mut collector = Collector::new(self);
         let mut result = collector.finalize_inference();
         result.warnings = warnings;
-        Ok(result)
+        (result, errors)
     }
 
     fn infer_root(&mut self) -> Result<(), LocatedError> {
@@ -57,7 +79,12 @@ impl CheckCtx<'_> {
         Ok(())
     }
 
-    fn infer_scc_group(&mut self, group: DependentGroup) -> Result<(), LocatedError> {
+    /// Infer an SCC group, returning any error that occurred. Cleanup (level
+    /// exit, deferred overload bookkeeping, poly_type_env updates) always runs
+    /// regardless of whether inference succeeded — this prevents level counter
+    /// imbalance and ensures successfully-inferred names within the group are
+    /// still recorded.
+    fn infer_scc_group(&mut self, group: DependentGroup) -> Option<LocatedError> {
         self.table.enter_level();
 
         // Lift pre-allocated name vars to the current (inner) level so that
@@ -68,42 +95,17 @@ impl CheckCtx<'_> {
             self.table.set_var_level(name_ty, self.table.current_level);
         }
 
-        // Collect (name_id, inferred_ty) pairs for all definitions in the group.
-        let mut inferred: Vec<(lang_ast::NameId, TyId)> = Vec::new();
+        let (inferred, error) = self.infer_scc_group_inner(&group);
 
-        for def in &group {
-            let ty = self.infer_expr(def.expr())?;
-            let name_id = def.name();
-
-            // Link the pre-allocated name slot to the inferred type.
-            let name_slot = self.ty_for_name_direct(name_id);
-            self.constrain(ty, name_slot).map_err(|err| self.locate_err(err))?;
-            self.constrain(name_slot, ty).map_err(|err| self.locate_err(err))?;
-
-            // Check for type annotations in doc comments.
-            self.apply_type_annotation(name_id, ty)?;
-
-            inferred.push((name_id, ty));
-        }
-
-        // Resolve pending overload and merge constraints now that we have
-        // type information from the entire SCC group.
-        self.resolve_pending()?;
+        // --- Cleanup always runs, even on error ---
 
         // Move unresolved overloads to deferred list — they'll be re-instantiated
         // per call-site during extrusion.
         let remaining = std::mem::take(&mut self.pending_overloads);
         self.deferred_overloads.extend(remaining);
 
-        // Snapshot each name's canonical type NOW, before exit_level and before
-        // use-site extrusions add concrete bounds (int, string, etc.) back onto
-        // polymorphic variables via constrain(). This preserves the clean
-        // polymorphic form (e.g. `(a -> b) -> a -> b` for `apply`).
-        //
-        // Caveat: if a later SCC group adds cross-group constraints that further
-        // refine a name's type, this snapshot will be stale. Currently annotations
-        // are processed within the same SCC group so this doesn't happen, but
-        // cross-group constraint additions would require invalidation.
+        // Snapshot each successfully-inferred name's canonical type NOW, before
+        // exit_level and before use-site extrusions add concrete bounds.
         for &(name_id, ty) in &inferred {
             let poly_ty = self.resolve_to_concrete_id(ty).unwrap_or(ty);
             let output = canonicalize_standalone(&self.table, &self.alias_provenance, poly_ty, true);
@@ -113,12 +115,8 @@ impl CheckCtx<'_> {
 
         self.table.exit_level();
 
-        // Record the inferred type in poly_type_env, resolving Variables to
-        // their concrete type where possible. This ensures extrude can traverse
-        // the full type structure (e.g. for partial applications like `add 1`
-        // whose inferred type is a Variable pointing to a Lambda via lower bounds).
-        // Without this, deferred overloads referencing internal vars of the
-        // Lambda won't be found in the extrude cache.
+        // Record the inferred type in poly_type_env for successfully-inferred
+        // names, resolving Variables to their concrete type where possible.
         for (name_id, ty) in inferred {
             if self.poly_type_env.contains_key(&name_id) {
                 continue;
@@ -127,7 +125,50 @@ impl CheckCtx<'_> {
             self.poly_type_env.insert(name_id, poly_ty);
         }
 
-        Ok(())
+        error
+    }
+
+    /// Fallible inner logic for SCC group inference. Returns the successfully-
+    /// inferred (name, ty) pairs and an optional error. Inference stops at the
+    /// first error within the group, but names inferred before that point are
+    /// still returned.
+    fn infer_scc_group_inner(
+        &mut self,
+        group: &DependentGroup,
+    ) -> (Vec<(lang_ast::NameId, TyId)>, Option<LocatedError>) {
+        let mut inferred: Vec<(lang_ast::NameId, TyId)> = Vec::new();
+
+        for def in group {
+            let ty = match self.infer_expr(def.expr()) {
+                Ok(ty) => ty,
+                Err(err) => return (inferred, Some(err)),
+            };
+            let name_id = def.name();
+
+            // Link the pre-allocated name slot to the inferred type.
+            let name_slot = self.ty_for_name_direct(name_id);
+            if let Err(err) = self.constrain(ty, name_slot).map_err(|e| self.locate_err(e)) {
+                return (inferred, Some(err));
+            }
+            if let Err(err) = self.constrain(name_slot, ty).map_err(|e| self.locate_err(e)) {
+                return (inferred, Some(err));
+            }
+
+            // Check for type annotations in doc comments.
+            if let Err(err) = self.apply_type_annotation(name_id, ty) {
+                return (inferred, Some(err));
+            }
+
+            inferred.push((name_id, ty));
+        }
+
+        // Resolve pending overload and merge constraints now that we have
+        // type information from the entire SCC group.
+        if let Err(err) = self.resolve_pending() {
+            return (inferred, Some(err));
+        }
+
+        (inferred, None)
     }
 
     // ==========================================================================
