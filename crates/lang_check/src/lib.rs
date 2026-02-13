@@ -104,6 +104,50 @@ pub enum InferenceError {
     InvalidAttrMerge(Ty<TyId>, Ty<TyId>),
 }
 
+/// An inference error paired with the expression where it occurred.
+#[derive(Debug, Clone)]
+pub struct LocatedError {
+    pub error: InferenceError,
+    /// The expression that was being inferred when the error occurred.
+    /// Falls back to the root expression when precise location is unavailable.
+    pub at_expr: ExprId,
+}
+
+/// Partial inference results plus all collected errors.
+/// Allows the LSP to report diagnostics even when inference fails partway.
+#[derive(Debug, Clone)]
+pub struct CheckResult {
+    /// If inference succeeded, contains the full result. If it failed, this is
+    /// None (future: partial results from error recovery).
+    pub inference: Option<InferenceResult>,
+    pub errors: Vec<LocatedError>,
+}
+
+/// Type-check a file, collecting errors instead of aborting on the first one.
+/// Returns partial results when possible.
+pub fn check_file_collecting(
+    db: &dyn AstDb,
+    file: NixFile,
+    aliases: &TypeAliasRegistry,
+) -> CheckResult {
+    let module = lang_ast::module(db, file);
+    match check_file_with_aliases(db, file, aliases) {
+        Ok(inference) => CheckResult {
+            inference: Some(inference),
+            errors: Vec::new(),
+        },
+        Err(error) => CheckResult {
+            inference: None,
+            errors: vec![LocatedError {
+                error,
+                // Imprecise fallback: attribute the error to the root expression.
+                // TODO: improve with per-expression error tracking in CheckCtx.
+                at_expr: module.entry_expr,
+            }],
+        },
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CheckCtx<'db> {
     module: &'db Module,

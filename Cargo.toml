@@ -5,6 +5,7 @@ members = [
     "crates/lang_check",
     "crates/lang_ast",
     "crates/lang_ty",
+    "crates/lsp",
 ]
 resolver = "2"
 
@@ -24,6 +25,8 @@ rnix = "0.11.0"
 # TODO: same as rnix, not sure if we need copying from nixdoc for now
 rowan = "0.15"
 rustc-hash = "2.1.0"
+tower-lsp = "0.20"
+tokio = { version = "1", features = ["full"] }
 
 [profile.test.package.proptest]
 opt-level = 3
