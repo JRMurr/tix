@@ -278,7 +278,9 @@ impl CheckCtx<'_> {
                     }
                     _ => {
                         // Check .tix global val declarations for this name.
-                        if let Some(parsed_ty) = self.type_aliases.global_vals().get(var_name).cloned() {
+                        if let Some(parsed_ty) =
+                            self.type_aliases.global_vals().get(var_name).cloned()
+                        {
                             Ok(self.intern_fresh_ty(parsed_ty))
                         } else {
                             Ok(self.new_var())

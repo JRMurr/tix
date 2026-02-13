@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 
-use comment_parser::{ParsedTy, ParsedTyRef, TixDeclaration, TixDeclFile};
+use comment_parser::{ParsedTy, ParsedTyRef, TixDeclFile, TixDeclaration};
 use lang_ty::AttrSetTy;
 use smol_str::SmolStr;
 
@@ -45,10 +45,7 @@ impl TypeAliasRegistry {
                         self.global_vals.insert(name.clone(), ty.clone());
                     }
                 }
-                TixDeclaration::Module {
-                    name,
-                    declarations,
-                } => {
+                TixDeclaration::Module { name, declarations } => {
                     // Convert the module into an attrset type and register it
                     // as a type alias with the capitalized module name.
                     // e.g. `module lib { val id :: a -> a; }` -> alias "Lib" = { id: a -> a, ... }
@@ -90,11 +87,7 @@ impl TypeAliasRegistry {
     }
 
     /// DFS cycle detection for alias references.
-    fn has_cycle(
-        &self,
-        name: &SmolStr,
-        visited: &mut HashMap<SmolStr, VisitState>,
-    ) -> bool {
+    fn has_cycle(&self, name: &SmolStr, visited: &mut HashMap<SmolStr, VisitState>) -> bool {
         match visited.get(name) {
             Some(VisitState::InProgress) => return true,
             Some(VisitState::Done) => return false,
@@ -131,8 +124,7 @@ fn capitalize(s: &str) -> SmolStr {
     match chars.next() {
         None => SmolStr::default(),
         Some(first) => {
-            let capitalized: String =
-                first.to_uppercase().chain(chars).collect();
+            let capitalized: String = first.to_uppercase().chain(chars).collect();
             SmolStr::from(capitalized)
         }
     }
@@ -209,8 +201,7 @@ mod tests {
 
     #[test]
     fn load_type_alias() {
-        let file = parse_tix_file("type Derivation = { name: string };")
-            .expect("parse error");
+        let file = parse_tix_file("type Derivation = { name: string };").expect("parse error");
         let mut registry = TypeAliasRegistry::new();
         registry.load_tix_file(&file);
 

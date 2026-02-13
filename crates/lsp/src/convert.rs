@@ -31,8 +31,8 @@ impl LineIndex {
     pub fn position(&self, offset: u32) -> Position {
         // Binary search for the line containing this offset.
         let line = match self.line_starts.binary_search(&offset) {
-            Ok(line) => line,       // Exact match: offset is at a line start.
-            Err(next) => next - 1,  // Between two line starts: use the preceding line.
+            Ok(line) => line,      // Exact match: offset is at a line start.
+            Err(next) => next - 1, // Between two line starts: use the preceding line.
         };
         let col = offset - self.line_starts[line];
         Position::new(line as u32, col)

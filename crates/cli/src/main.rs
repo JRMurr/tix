@@ -100,7 +100,10 @@ fn load_stubs(registry: &mut TypeAliasRegistry, path: &PathBuf) -> Result<(), Bo
     Ok(())
 }
 
-fn load_single_stub(registry: &mut TypeAliasRegistry, path: &PathBuf) -> Result<(), Box<dyn Error>> {
+fn load_single_stub(
+    registry: &mut TypeAliasRegistry,
+    path: &PathBuf,
+) -> Result<(), Box<dyn Error>> {
     let source = std::fs::read_to_string(path)?;
     let file = comment_parser::parse_tix_file(&source)
         .map_err(|e| format!("Error parsing {}: {}", path.display(), e))?;

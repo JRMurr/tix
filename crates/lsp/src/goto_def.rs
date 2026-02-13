@@ -39,7 +39,9 @@ pub fn goto_definition(
                     match res {
                         ResolveResult::Definition(name_id) => {
                             // Find the source location of the definition.
-                            if let Some(def_ptr) = analysis.source_map.nodes_for_name(*name_id).next() {
+                            if let Some(def_ptr) =
+                                analysis.source_map.nodes_for_name(*name_id).next()
+                            {
                                 let def_node = def_ptr.to_node(root.syntax());
                                 let range = analysis.line_index.range(def_node.text_range());
                                 return Some(Location::new(uri.clone(), range));

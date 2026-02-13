@@ -29,7 +29,10 @@ async fn main() {
     let mut registry = TypeAliasRegistry::new();
     for stub_path in &args.stub_paths {
         if let Err(e) = load_stubs(&mut registry, stub_path) {
-            eprintln!("Warning: failed to load stubs from {}: {e}", stub_path.display());
+            eprintln!(
+                "Warning: failed to load stubs from {}: {e}",
+                stub_path.display()
+            );
         }
     }
     if let Err(cycles) = registry.validate() {
@@ -39,9 +42,8 @@ async fn main() {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
 
-    let (service, socket) = LspService::new(|client| {
-        server::TixLanguageServer::new(client, registry)
-    });
+    let (service, socket) =
+        LspService::new(|client| server::TixLanguageServer::new(client, registry));
 
     Server::new(stdin, stdout, socket).serve(service).await;
 }

@@ -12,7 +12,7 @@ use smol_str::SmolStr;
 use std::collections::BTreeMap;
 
 use crate::tix_parser::Rule;
-use crate::{ParsedTy, ParsedTyRef, TixDeclaration, TixDeclFile, TypeVarValue};
+use crate::{ParsedTy, ParsedTyRef, TixDeclFile, TixDeclaration, TypeVarValue};
 
 pub fn collect_tix_file(pairs: Pairs<Rule>) -> TixDeclFile {
     let mut declarations = Vec::new();
@@ -197,10 +197,7 @@ mod tests {
         match &file.declarations[0] {
             crate::TixDeclaration::TypeAlias { name, body } => {
                 assert_eq!(name.as_str(), "Derivation");
-                assert_eq!(
-                    *body,
-                    known_ty!({ "name": string, "system": string })
-                );
+                assert_eq!(*body, known_ty!({ "name": string, "system": string }));
             }
             other => panic!("expected TypeAlias, got: {other:?}"),
         }
@@ -238,10 +235,7 @@ mod tests {
 
         assert_eq!(file.declarations.len(), 1);
         match &file.declarations[0] {
-            crate::TixDeclaration::Module {
-                name,
-                declarations,
-            } => {
+            crate::TixDeclaration::Module { name, declarations } => {
                 assert_eq!(name.as_str(), "lib");
                 assert_eq!(declarations.len(), 2);
 
@@ -256,10 +250,7 @@ mod tests {
 
                 // Second: nested module
                 match &declarations[1] {
-                    crate::TixDeclaration::Module {
-                        name,
-                        declarations,
-                    } => {
+                    crate::TixDeclaration::Module { name, declarations } => {
                         assert_eq!(name.as_str(), "strings");
                         assert_eq!(declarations.len(), 1);
                     }
@@ -290,8 +281,7 @@ mod tests {
 
     #[test]
     fn generic_type_alias() {
-        let file =
-            parse_tix_file("type Nullable = a | null;").expect("parse error");
+        let file = parse_tix_file("type Nullable = a | null;").expect("parse error");
 
         assert_eq!(file.declarations.len(), 1);
         match &file.declarations[0] {

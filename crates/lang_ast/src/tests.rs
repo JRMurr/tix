@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
-use rnix::Root;
 use crate::{db::NixFile, AstDb};
+use rnix::Root;
 
 const DEFAULT_IMPORT_FILE: &str = "default.nix";
 

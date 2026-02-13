@@ -41,9 +41,18 @@ pub struct TixDeclFile {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TixDeclaration {
-    TypeAlias { name: SmolStr, body: ParsedTy },
-    ValDecl { name: SmolStr, ty: ParsedTy },
-    Module { name: SmolStr, declarations: Vec<TixDeclaration> },
+    TypeAlias {
+        name: SmolStr,
+        body: ParsedTy,
+    },
+    ValDecl {
+        name: SmolStr,
+        ty: ParsedTy,
+    },
+    Module {
+        name: SmolStr,
+        declarations: Vec<TixDeclaration>,
+    },
 }
 
 pub fn parse_tix_file(source: &str) -> Result<TixDeclFile, Box<dyn std::error::Error>> {

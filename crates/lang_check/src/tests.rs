@@ -533,12 +533,20 @@ fn sub_string_error() {
 // String / Path interpolation
 // ==============================================================================
 
-test_case!(interpolation_simple, "let name = \"world\"; in \"hello ${name}\"", String);
+test_case!(
+    interpolation_simple,
+    "let name = \"world\"; in \"hello ${name}\"",
+    String
+);
 
 // Sub-expressions are inferred independently; the overall expression is always string.
 test_case!(interpolation_non_string_expr, "\"count: ${1 + 2}\"", String);
 
-test_case!(interpolation_nested, "let c = \"!\"; in \"a ${\"b ${c}\"}\"", String);
+test_case!(
+    interpolation_nested,
+    "let c = \"!\"; in \"a ${\"b ${c}\"}\"",
+    String
+);
 
 test_case!(
     interpolation_let_binding,
@@ -546,7 +554,11 @@ test_case!(
     String
 );
 
-test_case!(interpolation_multiline, "let name = \"world\"; in ''hello ${name}''", String);
+test_case!(
+    interpolation_multiline,
+    "let name = \"world\"; in ''hello ${name}''",
+    String
+);
 
 // ==============================================================================
 // `with` expression
@@ -560,11 +572,7 @@ test_case!(
     String
 );
 
-test_case!(
-    with_function,
-    "with { f = x: x + 1; }; f 5",
-    Int
-);
+test_case!(with_function, "with { f = x: x + 1; }; f 5", Int);
 
 // Nested `with` where both envs are the same: variables resolve through the innermost.
 test_case!(
@@ -578,9 +586,7 @@ test_case!(
 // TODO: multi-`with` fallthrough would resolve `x` from the outer env.
 #[test]
 fn with_nested_disjoint_errors() {
-    let error = get_check_error(
-        "with { x = 1; }; with { y = \"hi\"; }; { a = x; b = y; }",
-    );
+    let error = get_check_error("with { x = 1; }; with { y = \"hi\"; }; { a = x; b = y; }");
     // `x` is constrained against the inner env `{ y = "hi"; }`, which lacks `x`.
     assert!(matches!(error, InferenceError::MissingField(_)));
 }
@@ -658,7 +664,11 @@ test_case!(
 // ==============================================================================
 
 // Local let binding should shadow the `with` environment.
-test_case!(let_shadows_with, "let x = 1; in with { x = \"hi\"; }; x", Int);
+test_case!(
+    let_shadows_with,
+    "let x = 1; in with { x = \"hi\"; }; x",
+    Int
+);
 
 // Lambda parameter should shadow the `with` environment.
 test_case!(
@@ -689,11 +699,7 @@ fn select_default() {
 }
 
 // Chained select — accessing a nested attrset.
-test_case!(
-    chained_select,
-    "let s = { a = { b = 1; }; }; in s.a.b",
-    Int
-);
+test_case!(chained_select, "let s = { a = { b = 1; }; }; in s.a.b", Int);
 
 // ==============================================================================
 // `inherit (expr) name` — inherit from expression

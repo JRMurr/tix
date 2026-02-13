@@ -10,7 +10,9 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use lang_ast::{module_and_source_maps, Module, ModuleSourceMap, NameResolution, NixFile, RootDatabase};
+use lang_ast::{
+    module_and_source_maps, Module, ModuleSourceMap, NameResolution, NixFile, RootDatabase,
+};
 use lang_check::aliases::TypeAliasRegistry;
 use lang_check::{CheckResult, InferenceResult};
 
