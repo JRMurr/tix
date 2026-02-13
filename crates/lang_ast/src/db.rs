@@ -2,12 +2,12 @@ use std::path::PathBuf;
 
 use dashmap::DashMap;
 use rnix::Root;
-use salsa::{self, Event};
+use salsa::{self, Setter};
 
 #[salsa::input]
 pub struct NixFile {
     path: PathBuf,
-    #[return_ref]
+    #[returns(ref)]
     pub contents: String,
 }
 
@@ -33,20 +33,7 @@ pub struct RootDatabase {
 }
 
 #[salsa::db]
-impl salsa::Database for RootDatabase {
-    fn salsa_event(&self, _event: &dyn Fn() -> Event) {
-        // if !tracing::enabled!(tracing::Level::TRACE) {
-        //     return;
-        // }
-
-        // let event = event();
-        // if matches!(event.kind, salsa::EventKind::WillCheckCancellation { .. }) {
-        //     return;
-        // }
-
-        // tracing::trace!("Salsa event: {event:?}");
-    }
-}
+impl salsa::Database for RootDatabase {}
 
 #[salsa::db]
 impl AstDb for RootDatabase {
@@ -73,5 +60,24 @@ impl RootDatabase {
         };
 
         Ok(file)
+    }
+}
+
+impl RootDatabase {
+    /// Create or update a NixFile from editor-provided contents (for LSP).
+    /// Uses Salsa input mutation to invalidate downstream queries.
+    pub fn set_file_contents(&mut self, path: PathBuf, contents: String) -> NixFile {
+        // Check if we already have this file — copy the NixFile handle out
+        // before releasing the DashMap borrow so we can mutate self.
+        let existing = self.files.get(&path).map(|entry| *entry.value());
+
+        if let Some(file) = existing {
+            file.set_contents(self).to(contents);
+            file
+        } else {
+            let file = NixFile::new(self, path.clone(), contents);
+            self.files.insert(path, file);
+            file
+        }
     }
 }

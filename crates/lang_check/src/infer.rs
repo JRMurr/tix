@@ -568,11 +568,7 @@ impl CheckCtx<'_> {
         self.find_concrete_inner(ty_id, &mut visited)
     }
 
-    fn find_concrete_inner(
-        &self,
-        ty_id: TyId,
-        visited: &mut HashSet<TyId>,
-    ) -> Option<Ty<TyId>> {
+    fn find_concrete_inner(&self, ty_id: TyId, visited: &mut HashSet<TyId>) -> Option<Ty<TyId>> {
         if !visited.insert(ty_id) {
             return None; // Cycle detected — stop recursing.
         }

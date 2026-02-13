@@ -5,6 +5,7 @@ members = [
     "crates/lang_check",
     "crates/lang_ast",
     "crates/lang_ty",
+    "crates/lsp",
 ]
 resolver = "2"
 
@@ -17,13 +18,15 @@ la-arena = "0.3.1"
 derive_more = { version = "1.0.0" }
 log = "0.4.25"
 proptest = "1.6.0"
-salsa = { git = "https://github.com/salsa-rs/salsa", rev = "88a1d7774d78f048fbd77d40abca9ebd729fd1f0" }
+salsa = "0.26.0"
 petgraph = "0.7.0"
 # TODO: 11.1 is on github as of 12-19-24 but not released. Only added pipe operators
 rnix = "0.11.0"
 # TODO: same as rnix, not sure if we need copying from nixdoc for now
 rowan = "0.15"
 rustc-hash = "2.1.0"
+tower-lsp = "0.20"
+tokio = { version = "1", features = ["full"] }
 
 [profile.test.package.proptest]
 opt-level = 3

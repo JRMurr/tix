@@ -43,6 +43,11 @@
 
 ### Missing Features
 
+- Dynamic bindings in name resolution: `nameres.rs:390` has a `todo!()` for
+  traversing dynamic attrset bindings (`${expr} = value`). Files using dynamic
+  keys will panic during name resolution.
+- Dynamic intermediate keys in nested attr paths (`${expr}.b = 1`) are not
+  desugared yet — a `todo!()` remains in `merge_nested_attr_value`.
 - Multi-`with` fallthrough: only the innermost `with` env is constrained for
   unresolved names. Nix semantics would check outer `with` scopes when the inner
   one lacks the attribute, but that requires runtime-like dynamic dispatch.

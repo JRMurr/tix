@@ -12,5 +12,7 @@
     "smol",
     "snapshotable",
     "strat"
-  ]
+  ],
+  "nix.enableLanguageServer": true,
+  "nix.serverPath": "tix-lsp-dev"
 }

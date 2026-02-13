@@ -159,11 +159,7 @@ impl OutputTy {
         result
     }
 
-    fn collect_free_type_vars(
-        &self,
-        result: &mut Vec<u32>,
-        seen: &mut rustc_hash::FxHashSet<u32>,
-    ) {
+    fn collect_free_type_vars(&self, result: &mut Vec<u32>, seen: &mut rustc_hash::FxHashSet<u32>) {
         match self {
             OutputTy::TyVar(x) => {
                 if seen.insert(*x) {

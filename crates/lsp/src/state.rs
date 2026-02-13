@@ -1,0 +1,82 @@
+// ==============================================================================
+// AnalysisState: Salsa database + open file tracking
+// ==============================================================================
+//
+// Wraps the Salsa RootDatabase and TypeAliasRegistry together with per-file
+// cached analysis results. The LSP server holds this behind a Mutex because
+// rnix::Root is !Send + !Sync and all analysis must run on a single thread
+// (via spawn_blocking).
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+
+use lang_ast::{
+    module_and_source_maps, Module, ModuleSourceMap, NameResolution, NixFile, RootDatabase,
+};
+use lang_check::aliases::TypeAliasRegistry;
+use lang_check::{CheckResult, InferenceResult};
+
+use crate::convert::LineIndex;
+
+/// Cached analysis output for a single open file.
+pub struct FileAnalysis {
+    pub nix_file: NixFile,
+    pub line_index: LineIndex,
+    pub module: Module,
+    pub source_map: ModuleSourceMap,
+    pub name_res: NameResolution,
+    pub check_result: CheckResult,
+}
+
+impl FileAnalysis {
+    pub fn inference(&self) -> Option<&InferenceResult> {
+        self.check_result.inference.as_ref()
+    }
+}
+
+/// All mutable state for the LSP's analysis pipeline.
+pub struct AnalysisState {
+    pub db: RootDatabase,
+    pub registry: TypeAliasRegistry,
+    /// Cached per-file analysis, keyed by the canonical path we give to Salsa.
+    pub files: HashMap<PathBuf, FileAnalysis>,
+}
+
+impl AnalysisState {
+    pub fn new(registry: TypeAliasRegistry) -> Self {
+        Self {
+            db: RootDatabase::default(),
+            registry,
+            files: HashMap::new(),
+        }
+    }
+
+    /// Update file contents and re-run analysis. Returns the path key used
+    /// for cache lookup (the same PathBuf passed in).
+    pub fn update_file(&mut self, path: PathBuf, contents: String) -> &FileAnalysis {
+        let line_index = LineIndex::new(&contents);
+        let nix_file = self.db.set_file_contents(path.clone(), contents);
+
+        let (module, source_map) = module_and_source_maps(&self.db, nix_file);
+        let name_res = lang_ast::name_resolution(&self.db, nix_file);
+        let check_result = lang_check::check_file_collecting(&self.db, nix_file, &self.registry);
+
+        self.files.insert(
+            path.clone(),
+            FileAnalysis {
+                nix_file,
+                line_index,
+                module,
+                source_map,
+                name_res,
+                check_result,
+            },
+        );
+
+        self.files.get(&path).unwrap()
+    }
+
+    pub fn get_file(&self, path: &PathBuf) -> Option<&FileAnalysis> {
+        self.files.get(path)
+    }
+}

@@ -25,27 +25,32 @@
       system:
       let
         overlays = [ (import rust-overlay) ];
+        /**
+          type: pkgs :: Pkgs
+        */
         pkgs = import nixpkgs { inherit system overlays; };
         rustAttrs = import ./rust.nix { inherit pkgs gitignore; };
+        tix-lsp-dev = import ./lsp-dev.nix { inherit pkgs; };
       in
       {
         formatter = pkgs.nixpkgs-fmt;
 
         devShells = {
           default = pkgs.mkShell {
-            buildInputs = with pkgs; [
+            buildInputs = [
               rustAttrs.rust-shell
               (pkgs.cargo-tarpaulin.override ({ rustPlatform = rustAttrs.rustPlatform; }))
+              tix-lsp-dev
 
               # common
-              just
+              pkgs.just
             ];
           };
         };
         packages = {
-          default = pkgs.hello;
+          # default = pkgs.hello;
           rust-bin = rustAttrs.binary;
-          rust-docker = rustAttrs.docker;
+          # rust-docker = rustAttrs.docker;
         };
       }
     );

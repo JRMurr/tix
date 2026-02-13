@@ -351,18 +351,70 @@ impl MergingSet {
             return self.push_dynamic(ctx, None, value);
         };
 
-        let mut attrs = attr_path.attrs();
+        let attrs: Vec<ast::Attr> = attr_path.attrs().collect();
 
-        let attr = attrs
-            .next()
-            .expect("Should have at least one part of the attr key");
-
-        if attrs.next().is_some() {
-            // supporting this will require more merging logic i don't want to do yet
-            todo!("Implicit attrs not support yet")
+        if attrs.is_empty() {
+            return self.push_dynamic(ctx, None, value);
         }
 
-        self.merge_attr_value(ctx, attr, value, doc_comments);
+        self.merge_nested_attr_value(ctx, &attrs, value, doc_comments);
+    }
+
+    /// Recursively walk a multi-segment attribute path like `a.b.c = val`,
+    /// creating implicit nested attrsets for intermediate segments.
+    fn merge_nested_attr_value(
+        &mut self,
+        ctx: &mut LowerCtx,
+        attrs: &[ast::Attr],
+        value: BindingValueKind,
+        doc_comments: Option<DocComments>,
+    ) {
+        let (first, rest) = attrs.split_first().expect("attrs must be non-empty");
+
+        // Base case: single attribute — use the normal merge path.
+        if rest.is_empty() {
+            return self.merge_attr_value(ctx, first.clone(), value, doc_comments);
+        }
+
+        // Intermediate segment: create or reuse an implicit nested set.
+        let attr_ptr = AstPtr::new(first.syntax());
+        match AttrKind::of(first.clone()) {
+            AttrKind::Static(key) => {
+                let key = key.unwrap_or_default();
+                let nested = self.get_or_create_nested_static(ctx, key, attr_ptr);
+                nested.merge_nested_attr_value(ctx, rest, value, doc_comments);
+            }
+            AttrKind::Dynamic(_) => {
+                // Dynamic intermediate keys like `${expr}.b = 1` are rare in practice.
+                // TODO: desugar dynamic intermediate keys into nested dynamic entries
+                todo!("dynamic intermediate attr keys not supported yet")
+            }
+        }
+    }
+
+    /// Look up or create an implicit nested `MergingSet` for a static key.
+    fn get_or_create_nested_static(
+        &mut self,
+        ctx: &mut LowerCtx,
+        key: SmolStr,
+        attr_ptr: AstPtr,
+    ) -> &mut MergingSet {
+        let name_kind = self.name_kind;
+        let entry = self
+            .statics
+            .entry(key.clone())
+            .or_insert_with(|| MergingEntry {
+                name: ctx.alloc_name(key, name_kind, attr_ptr, None),
+                set: Some(MergingSet::new(NameKind::PlainAttrset, attr_ptr)),
+                value: None,
+            });
+
+        // If the entry exists but has no nested set yet, create one.
+        if entry.set.is_none() {
+            entry.set = Some(MergingSet::new(NameKind::PlainAttrset, attr_ptr));
+        }
+
+        entry.set.as_mut().unwrap()
     }
 
     fn merge_inherit(&mut self, ctx: &mut LowerCtx, inherit: ast::Inherit) {
@@ -428,29 +480,20 @@ impl MergingSet {
         value: BindingValue,
         doc_comments: Option<DocComments>,
     ) {
-        self.statics
-            .entry(key.clone())
-            // Set-value or value-value collision.
-            .and_modify(|ent| {
-                todo!("Name collision! key: {key} ent: {:?}", ent)
-                // Append this location to the existing name.
-                // ctx.source_map.name_map.insert(attr_ptr, ent.name);
-                // ctx.source_map.name_map_rev[ent.name].push(attr_ptr);
-
-                // let prev_ptr = ctx.source_map.nodes_for_name(ent.name).next().unwrap();
-                // ctx.diagnostic(
-                //     Diagnostic::new(attr_ptr.text_range(), DiagnosticKind::DuplicatedKey)
-                //         .with_note(
-                //             FileRange::new(ctx.file_id, prev_ptr.text_range()),
-                //             "Previously defined here",
-                //         ),
-                // );
-            })
-            .or_insert_with(|| MergingEntry {
-                name: ctx.alloc_name(key, self.name_kind, attr_ptr, doc_comments),
-                set: None,
-                value: Some((attr_ptr, value)),
-            });
+        use std::collections::hash_map::Entry;
+        match self.statics.entry(key.clone()) {
+            Entry::Occupied(mut ent) => {
+                // TODO: emit a proper duplicate-key diagnostic instead of silently overwriting
+                ent.get_mut().value = Some((attr_ptr, value));
+            }
+            Entry::Vacant(ent) => {
+                ent.insert(MergingEntry {
+                    name: ctx.alloc_name(key, self.name_kind, attr_ptr, doc_comments),
+                    set: None,
+                    value: Some((attr_ptr, value)),
+                });
+            }
+        }
     }
 
     fn merge_attr_value(
@@ -467,6 +510,18 @@ impl MergingSet {
                 let key = key.unwrap_or_default();
                 match value {
                     BindingValueKind::Expr(e) => {
+                        // If the key already has an implicit nested set (from `a.b = 1`)
+                        // and the expression is an explicit attrset (`a = { c = 2; }`),
+                        // merge the explicit set's bindings into the implicit one.
+                        if let Some(ast::Expr::AttrSet(attr_set)) = &e {
+                            if let Some(entry) = self.statics.get_mut(&key) {
+                                if let Some(nested) = &mut entry.set {
+                                    nested.merge_bindings(ctx, attr_set);
+                                    return;
+                                }
+                            }
+                        }
+
                         let e = ctx.lower_expr_opt(e);
                         self.merge_static_value(
                             ctx,
@@ -499,15 +554,23 @@ impl MergingSet {
         self.dynamics.push((key_expr, value_expr));
     }
 
-    fn finish(self, _ctx: &mut LowerCtx) -> Bindings {
+    fn finish(self, ctx: &mut LowerCtx) -> Bindings {
         Bindings {
             statics: self
                 .statics
                 .into_values()
                 .map(|entry| {
-                    let value = match entry.set {
-                        Some(_set) => todo!(), //BindingValue::Expr(set.finish_expr(ctx)),
-                        None => entry.value.unwrap().1,
+                    let value = match (entry.set, entry.value) {
+                        // Implicit nested set (possibly merged with explicit bindings).
+                        (Some(set), _) => {
+                            // TODO: if both set and value are present, emit a diagnostic
+                            // about conflicting definitions. For now the set wins.
+                            BindingValue::Expr(set.finish_expr(ctx))
+                        }
+                        // Plain value, no nested set.
+                        (None, Some((_ptr, val))) => val,
+                        // Should not happen: an entry with neither set nor value.
+                        (None, None) => BindingValue::Expr(ctx.exprs.alloc(Expr::Missing)),
                     };
                     (entry.name, value)
                 })
@@ -517,19 +580,15 @@ impl MergingSet {
         }
     }
 
-    // fn finish_expr(mut self, ctx: &mut LowerCtx) -> ExprId {
-    //     let ctor = match self.name_kind {
-    //         // Implicit Attrsets can only be one of these two.
-    //         NameKind::PlainAttrset => Expr::Attrset,
-    //         NameKind::RecAttrset => Expr::RecAttrset,
-    //         _ => unreachable!(),
-    //     };
-    //     let ptr = self.ptr.take();
-    //     let e = ctor(self.finish(ctx));
-    //     match ptr {
-    //         Some(ptr) => ctx.alloc_expr(e, ptr),
-    //         // For implicit Attrset produced by merging, there's no "source" for it.
-    //         None => ctx.module.exprs.alloc(e),
-    //     }
-    // }
+    /// Convert this `MergingSet` into a single `ExprId` representing an attrset.
+    /// Used for implicit nested attrsets created by multi-segment attribute paths.
+    fn finish_expr(self, ctx: &mut LowerCtx) -> ExprId {
+        let ptr = self.ptr;
+        let bindings = self.finish(ctx);
+        let expr = Expr::AttrSet {
+            is_rec: false,
+            bindings,
+        };
+        ctx.alloc_expr(expr, ptr)
+    }
 }
