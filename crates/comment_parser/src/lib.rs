@@ -19,7 +19,7 @@ pub struct CommentParser;
 // TODO: is this normal for pest or is my grammar bad...
 type ParseError = Box<pest::error::Error<Rule>>;
 
-pub fn parse_comment_text(source: &str) -> Result<Pairs<Rule>, ParseError> {
+pub fn parse_comment_text(source: &str) -> Result<Pairs<'_, Rule>, ParseError> {
     Ok(CommentParser::parse(Rule::comment_content, source)?)
 }
 
