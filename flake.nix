@@ -6,10 +6,6 @@
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    gitignore = {
-      url = "github:hercules-ci/gitignore.nix";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
   };
 
   outputs =
@@ -18,7 +14,6 @@
       nixpkgs,
       flake-utils,
       rust-overlay,
-      gitignore,
       ...
     }:
     flake-utils.lib.eachDefaultSystem (
@@ -29,11 +24,11 @@
           type: pkgs :: Pkgs
         */
         pkgs = import nixpkgs { inherit system overlays; };
-        rustAttrs = import ./rust.nix { inherit pkgs gitignore; };
+        rustAttrs = import ./rust.nix { inherit pkgs; };
         tix-lsp-dev = import ./lsp-dev.nix { inherit pkgs; };
       in
       {
-        formatter = pkgs.nixpkgs-fmt;
+        formatter = pkgs.nixfmt;
 
         devShells = {
           default = pkgs.mkShell {
@@ -48,7 +43,7 @@
           };
         };
         packages = {
-          # default = pkgs.hello;
+          default = rustAttrs.binary;
           rust-bin = rustAttrs.binary;
           # rust-docker = rustAttrs.docker;
         };
