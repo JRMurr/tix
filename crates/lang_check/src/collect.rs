@@ -375,7 +375,15 @@ impl<'db> Collector<'db> {
             // Prefer the early-canonicalized type (captured before use-site
             // extrusion contaminated the bounds) over late canonicalization.
             let output = if let Some(early) = self.ctx.early_canonical.get(&name) {
-                early.clone()
+                if matches!(early, OutputTy::TyVar(_)) {
+                    // The early snapshot captured no type information (bare variable),
+                    // likely because enclosing lambda parameter annotations hadn't
+                    // propagated yet. Fall back to late canonicalization which sees
+                    // the fully-constrained bounds.
+                    canon.canonicalize(ty, true)
+                } else {
+                    early.clone()
+                }
             } else {
                 canon.canonicalize(ty, true)
             };

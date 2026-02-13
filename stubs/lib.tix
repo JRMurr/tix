@@ -26,6 +26,8 @@ module pkgs {
 
   val mkDerivation :: { name: string, ... } -> Derivation;
 
+  val lib :: Lib;
+
   module stdenv {
     val mkDerivation :: { name: string, ... } -> Derivation;
     val cc :: Derivation;

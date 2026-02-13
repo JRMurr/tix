@@ -460,7 +460,10 @@ fn pat_field_annotation_root_lambda_constrains_body() {
 
     let root_ty = get_inferred_root(file);
     let expected = arc_ty!({ "x": (Int) } -> Int);
-    assert_eq!(root_ty, expected, "annotated root lambda body should be int");
+    assert_eq!(
+        root_ty, expected,
+        "annotated root lambda body should be int"
+    );
 }
 
 #[test]
@@ -1119,8 +1122,8 @@ mod import_tests {
     use std::collections::{HashMap, HashSet};
 
     use crate::aliases::TypeAliasRegistry;
-    use crate::imports::resolve_imports;
     use crate::check_file_with_imports;
+    use crate::imports::resolve_imports;
 
     /// Infer a multi-file project and return the root type of the entry file.
     fn get_multifile_root(files: &[(&str, &str)]) -> OutputTy {
@@ -1191,10 +1194,7 @@ mod import_tests {
     // Import a file that evaluates to a literal int.
     #[test]
     fn import_literal_int() {
-        let ty = get_multifile_root(&[
-            ("/main.nix", "import /foo.nix"),
-            ("/foo.nix", "42"),
-        ]);
+        let ty = get_multifile_root(&[("/main.nix", "import /foo.nix"), ("/foo.nix", "42")]);
         assert_eq!(ty, arc_ty!(Int));
     }
 
@@ -1281,16 +1281,13 @@ mod import_tests {
     // Cyclic import: A → B → A should produce an error and degrade gracefully.
     #[test]
     fn import_cyclic() {
-        let (ty, errors) = get_multifile_result(&[
-            ("/a.nix", "import /b.nix"),
-            ("/b.nix", "import /a.nix"),
-        ]);
+        let (ty, errors) =
+            get_multifile_result(&[("/a.nix", "import /b.nix"), ("/b.nix", "import /a.nix")]);
         // At least one cyclic import error should be reported.
         assert!(
-            errors.iter().any(|e| matches!(
-                &e.kind,
-                crate::imports::ImportErrorKind::CyclicImport(_)
-            )),
+            errors
+                .iter()
+                .any(|e| matches!(&e.kind, crate::imports::ImportErrorKind::CyclicImport(_))),
             "expected cyclic import error, got: {:?}",
             errors.iter().map(|e| &e.kind).collect::<Vec<_>>()
         );
@@ -1302,9 +1299,7 @@ mod import_tests {
     // Non-literal import argument (variable) — should stay unconstrained.
     #[test]
     fn import_non_literal() {
-        let ty = get_multifile_root(&[
-            ("/main.nix", "let p = /foo.nix; in import p"),
-        ]);
+        let ty = get_multifile_root(&[("/main.nix", "let p = /foo.nix; in import p")]);
         // `import p` where p is a variable — scanner can't resolve it,
         // so it falls through to the generic `import :: a -> b` builtin.
         assert!(
@@ -1316,14 +1311,11 @@ mod import_tests {
     // File not found — degrades to unconstrained type variable.
     #[test]
     fn import_file_not_found() {
-        let (ty, errors) = get_multifile_result(&[
-            ("/main.nix", "import /nonexistent.nix"),
-        ]);
+        let (ty, errors) = get_multifile_result(&[("/main.nix", "import /nonexistent.nix")]);
         assert!(
-            errors.iter().any(|e| matches!(
-                &e.kind,
-                crate::imports::ImportErrorKind::FileNotFound(_)
-            )),
+            errors
+                .iter()
+                .any(|e| matches!(&e.kind, crate::imports::ImportErrorKind::FileNotFound(_))),
             "expected file not found error, got: {:?}",
             errors.iter().map(|e| &e.kind).collect::<Vec<_>>()
         );
@@ -1382,10 +1374,8 @@ mod import_tests {
         use lang_ast::{Expr, Literal};
         use std::path::PathBuf;
 
-        let (db, entry_file) = MultiFileTestDatabase::new(&[
-            ("/main.nix", "import /lib.nix"),
-            ("/lib.nix", "42"),
-        ]);
+        let (db, entry_file) =
+            MultiFileTestDatabase::new(&[("/main.nix", "import /lib.nix"), ("/lib.nix", "42")]);
 
         let module = lang_ast::module(&db, entry_file);
         let name_res = lang_ast::name_resolution(&db, entry_file);
@@ -1495,6 +1485,44 @@ fn alias_named_in_annotation() {
     );
     // Display should show just the alias name.
     assert_eq!(format!("{ty}"), "Lib");
+}
+
+/// When a let-binding's type flows from an annotated lambda parameter, the
+/// binding site should show the inferred type, not a bare free variable.
+/// Regression: `early_canonical` captured a bare TyVar before the lambda
+/// parameter annotation had propagated.
+#[test]
+fn binding_type_with_annotated_lambda_param() {
+    let tix_src = r#"
+        module lib {
+            module strings {
+                val concatStringsSep :: string -> [string] -> string;
+            }
+        }
+    "#;
+    let file = comment_parser::parse_tix_file(tix_src).expect("parse tix");
+    let mut registry = TypeAliasRegistry::new();
+    registry.load_tix_file(&file);
+
+    let nix_src = indoc! { r#"
+        {
+          /**
+            type: lib :: Lib
+          */
+          lib,
+        }:
+        let
+          foo = lib.strings.concatStringsSep " ";
+        in
+        foo []
+    "# };
+
+    let ty = get_name_type_with_aliases(nix_src, "foo", &registry);
+    // foo is a partial application of concatStringsSep: [string] -> string
+    assert!(
+        matches!(&ty, OutputTy::Lambda { .. }),
+        "foo binding should be a lambda, got: {ty:?}"
+    );
 }
 
 /// A global val returning a type alias wraps the return type in Named.
