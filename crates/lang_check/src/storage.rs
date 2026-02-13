@@ -1,109 +1,119 @@
-use union_find::{QuickFindUf, UnionByRank, UnionFind};
-
-// use ena::unify::{InPlaceUnificationTable, UnifyKey};
-use rustc_hash::FxHashMap;
-// use union_find::{QuickFindUf, UnionByRank};
-
-use crate::Ty;
+// ==============================================================================
+// Bounds-based Type Storage for SimpleSub
+// ==============================================================================
+//
+// Replaces the old union-find storage with directional bounds tracking.
+// Each type variable tracks lower bounds (types that flow into it) and
+// upper bounds (types it flows into). Concrete types are stored directly.
 
 use super::TyId;
+use lang_ty::Ty;
 
-// #[derive(Clone, Debug)]
-// pub enum TypeVariableValue {
-//     Known(Ty<TyId>),
-//     Unknown,
-// }
+/// A type variable with directional bounds and a level for let-polymorphism.
+#[derive(Debug, Clone)]
+pub struct TypeVariable {
+    /// Types that flow INTO this variable (produces union in positive position).
+    pub lower_bounds: Vec<TyId>,
+    /// Types this variable flows INTO (produces intersection in negative position).
+    pub upper_bounds: Vec<TyId>,
+    /// The binding level — used to determine which variables are polymorphic.
+    /// Variables created at a deeper level than the current scope are generalizable.
+    pub level: u32,
+}
 
-// impl TypeVariableValue {
-//     /// If this value is known, returns the type it is known to be.
-//     /// Otherwise, `None`.
-//     pub(crate) fn known(&self) -> Option<Ty<TyId>> {
-//         match self {
-//             TypeVariableValue::Unknown => None,
-//             TypeVariableValue::Known(value) => Some(value.clone()),
-//         }
-//     }
-
-//     #[allow(dead_code)]
-//     pub(crate) fn is_unknown(&self) -> bool {
-//         match *self {
-//             TypeVariableValue::Unknown => true,
-//             TypeVariableValue::Known { .. } => false,
-//         }
-//     }
-// }
-
-// impl UnifyKey for TyId {
-//     type Value = ();
-
-//     fn index(&self) -> u32 {
-//         self.0
-//     }
-
-//     fn from_index(u: u32) -> Self {
-//         TyId(u)
-//     }
-
-//     fn tag() -> &'static str {
-//         "TyId"
-//     }
-// }
+/// Each slot in the type storage is either a variable (with bounds) or a concrete type.
+#[derive(Debug, Clone)]
+pub enum TypeEntry {
+    Variable(TypeVariable),
+    Concrete(Ty<TyId>),
+}
 
 #[derive(Debug, Clone)]
 pub struct TypeStorage {
-    pub(crate) uf: QuickFindUf<UnionByRank>,
-    pub(crate) types: FxHashMap<TyId, Ty<TyId>>,
+    entries: Vec<TypeEntry>,
+    pub(crate) current_level: u32,
 }
 
 impl TypeStorage {
     pub fn new() -> Self {
         Self {
-            uf: QuickFindUf::new(0), //InPlaceUnificationTable::new(), // QuickFindUf::new(0),
-            types: FxHashMap::default(),
+            entries: Vec::new(),
+            current_level: 0,
         }
     }
 
-    pub fn find(&mut self, id: TyId) -> TyId {
-        self.uf.find(id.into()).into()
+    /// Allocate a fresh type variable at the current level.
+    pub fn new_var(&mut self) -> TyId {
+        let id = TyId(self.entries.len() as u32);
+        self.entries.push(TypeEntry::Variable(TypeVariable {
+            lower_bounds: Vec::new(),
+            upper_bounds: Vec::new(),
+            level: self.current_level,
+        }));
+        id
     }
 
-    pub fn new_ty(&mut self) -> TyId {
-        self.uf.insert(UnionByRank::default()).into()
-        // self.uf.new_key(())
+    /// Store a concrete (non-variable) type and return its TyId.
+    pub fn new_concrete(&mut self, ty: Ty<TyId>) -> TyId {
+        let id = TyId(self.entries.len() as u32);
+        self.entries.push(TypeEntry::Concrete(ty));
+        id
     }
 
-    pub fn insert(&mut self, val: Ty<TyId>) -> TyId {
-        let key = self.new_ty();
-
-        self.types.insert(key, val);
-
-        key
+    /// Get the entry for a TyId.
+    pub fn get(&self, id: TyId) -> &TypeEntry {
+        &self.entries[id.0 as usize]
     }
 
-    pub fn get(&mut self, id: TyId) -> Option<Ty<TyId>> {
-        let root = self.find(id);
-
-        self.types.get(&root).cloned()
+    /// Get a mutable reference to the entry. Used internally.
+    fn get_mut(&mut self, id: TyId) -> &mut TypeEntry {
+        &mut self.entries[id.0 as usize]
     }
 
-    pub fn unify(&mut self, lhs: TyId, rhs: TyId, new_val: Ty<TyId>) {
-        let lhs = self.find(lhs);
-        let rhs = self.find(rhs);
-
-        let root = if lhs == rhs {
-            lhs
-        } else {
-            // self.uf.union(lhs, rhs);
-            self.uf.union(lhs.into(), rhs.into());
-            self.types.remove(&lhs);
-            self.types.remove(&rhs);
-            self.find(lhs)
-        };
-
-        let is_ty_var = matches!(new_val, Ty::TyVar(_));
-
-        if !is_ty_var {
-            self.types.insert(root, new_val);
+    /// If `id` is a variable, return a reference to its TypeVariable.
+    pub fn get_var(&self, id: TyId) -> Option<&TypeVariable> {
+        match self.get(id) {
+            TypeEntry::Variable(v) => Some(v),
+            TypeEntry::Concrete(_) => None,
         }
+    }
+
+    /// Record that `bound` is a lower bound of variable `var` (bound <: var).
+    pub fn add_lower_bound(&mut self, var: TyId, bound: TyId) {
+        match self.get_mut(var) {
+            TypeEntry::Variable(v) => v.lower_bounds.push(bound),
+            TypeEntry::Concrete(_) => panic!("add_lower_bound called on concrete type {var:?}"),
+        }
+    }
+
+    /// Record that `bound` is an upper bound of variable `var` (var <: bound).
+    pub fn add_upper_bound(&mut self, var: TyId, bound: TyId) {
+        match self.get_mut(var) {
+            TypeEntry::Variable(v) => v.upper_bounds.push(bound),
+            TypeEntry::Concrete(_) => panic!("add_upper_bound called on concrete type {var:?}"),
+        }
+    }
+
+    /// Update the level of a variable. Used to lift pre-allocated vars
+    /// to the SCC group level so they are correctly generalizable.
+    pub fn set_var_level(&mut self, id: TyId, level: u32) {
+        match self.get_mut(id) {
+            TypeEntry::Variable(v) => v.level = level,
+            TypeEntry::Concrete(_) => panic!("set_var_level called on concrete type {id:?}"),
+        }
+    }
+
+    pub fn enter_level(&mut self) {
+        self.current_level += 1;
+    }
+
+    pub fn exit_level(&mut self) {
+        assert!(self.current_level > 0, "exit_level called at level 0");
+        self.current_level -= 1;
+    }
+
+    /// Number of entries (variables + concrete types) in the storage.
+    pub fn len(&self) -> usize {
+        self.entries.len()
     }
 }

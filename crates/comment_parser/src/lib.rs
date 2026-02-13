@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use collect::collect_type_decls;
 use derive_more::Debug;
-use lang_ty::Ty;
+use lang_ty::{AttrSetTy, PrimitiveTy};
 use pest::{iterators::Pairs, Parser};
 use pest_derive::Parser;
 use smol_str::SmolStr;
@@ -31,11 +31,41 @@ pub fn parse_and_collect(source: &str) -> Result<Vec<TypeDecl>, ParseError> {
 #[derive(Debug, PartialEq, Eq)]
 pub struct TypeDecl {
     pub identifier: SmolStr,
-    pub type_expr: KnownTy,
+    pub type_expr: ParsedTy,
 }
 
+// =============================================================================
+// Parsed type representation
+// =============================================================================
+//
+// Standalone enum for types parsed from doc comment annotations. Includes all
+// seven variants (the five from Ty<R> plus Union and Intersection) so that
+// comment annotations can express the full type language. This mirrors OutputTy
+// conceptually but uses TypeVarValue for type variables (named generics and
+// references) instead of numeric IDs.
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct KnownTyRef(pub Arc<Ty<KnownTyRef, TypeVarValue>>);
+pub struct ParsedTyRef(pub Arc<ParsedTy>);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ParsedTy {
+    TyVar(TypeVarValue),
+    #[debug("{_0:?}")]
+    Primitive(PrimitiveTy),
+    #[debug("List({_0:?})")]
+    List(ParsedTyRef),
+    #[debug("Lambda({param:?} -> {body:?})")]
+    Lambda {
+        param: ParsedTyRef,
+        body: ParsedTyRef,
+    },
+    #[debug("{_0:?}")]
+    AttrSet(AttrSetTy<ParsedTyRef>),
+    #[debug("Union({_0:?})")]
+    Union(Vec<ParsedTyRef>),
+    #[debug("Intersection({_0:?})")]
+    Intersection(Vec<ParsedTyRef>),
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TypeVarValue {
@@ -43,79 +73,101 @@ pub enum TypeVarValue {
     Reference(SmolStr), // A reference to a different Type, should be resolved during checking
 }
 
-pub type KnownTy = Ty<KnownTyRef, TypeVarValue>;
-
-impl From<KnownTy> for KnownTyRef {
-    fn from(value: KnownTy) -> Self {
-        KnownTyRef(Arc::new(value))
+impl From<ParsedTy> for ParsedTyRef {
+    fn from(value: ParsedTy) -> Self {
+        ParsedTyRef(Arc::new(value))
     }
 }
 
-// TODO: mostly copy pasted from the lang crate. Would be nice to generalize this macro to work for either type
+impl ParsedTy {
+    /// Collect all free type variables in this type.
+    pub fn free_vars(&self) -> std::collections::HashSet<TypeVarValue> {
+        let mut set = std::collections::HashSet::new();
+        self.collect_free_vars(&mut set);
+        set
+    }
+
+    fn collect_free_vars(&self, set: &mut std::collections::HashSet<TypeVarValue>) {
+        match self {
+            ParsedTy::TyVar(var) => {
+                set.insert(var.clone());
+            }
+            ParsedTy::Primitive(_) => {}
+            ParsedTy::List(inner) => inner.0.collect_free_vars(set),
+            ParsedTy::Lambda { param, body } => {
+                param.0.collect_free_vars(set);
+                body.0.collect_free_vars(set);
+            }
+            ParsedTy::AttrSet(attr) => {
+                for v in attr.fields.values() {
+                    v.0.collect_free_vars(set);
+                }
+                if let Some(dyn_ty) = &attr.dyn_ty {
+                    dyn_ty.0.collect_free_vars(set);
+                }
+            }
+            ParsedTy::Union(members) | ParsedTy::Intersection(members) => {
+                for m in members {
+                    m.0.collect_free_vars(set);
+                }
+            }
+        }
+    }
+}
+
+// TODO: Structurally duplicated from `arc_ty!` in `lang_ty`. If more variants
+// are added, consider extracting a shared `impl_ty_macro!` helper.
 #[macro_export]
 macro_rules! known_ty {
     // -- Match on known primitives -----------------------------------------
     (null) => {
-        $crate::KnownTy::Primitive(::lang_ty::PrimitiveTy::Null)
+        $crate::ParsedTy::Primitive(::lang_ty::PrimitiveTy::Null)
     };
     (bool) => {
-        $crate::KnownTy::Primitive(::lang_ty::PrimitiveTy::Bool)
+        $crate::ParsedTy::Primitive(::lang_ty::PrimitiveTy::Bool)
     };
     (int) => {
-        $crate::KnownTy::Primitive(::lang_ty::PrimitiveTy::Int)
+        $crate::ParsedTy::Primitive(::lang_ty::PrimitiveTy::Int)
     };
     (float) => {
-        $crate::KnownTy::Primitive(::lang_ty::PrimitiveTy::Float)
+        $crate::ParsedTy::Primitive(::lang_ty::PrimitiveTy::Float)
     };
     (string) => {
-        $crate::KnownTy::Primitive(::lang_ty::PrimitiveTy::String)
+        $crate::ParsedTy::Primitive(::lang_ty::PrimitiveTy::String)
     };
     (path) => {
-        $crate::KnownTy::Primitive(::lang_ty::PrimitiveTy::Path)
+        $crate::ParsedTy::Primitive(::lang_ty::PrimitiveTy::Path)
     };
     (uri) => {
-        $crate::KnownTy::Primitive(::lang_ty::PrimitiveTy::Uri)
+        $crate::ParsedTy::Primitive(::lang_ty::PrimitiveTy::Uri)
     };
-    // -- TyVar syntax: TyVar(N) --------------------------------------------
-    // (TyVar($n:expr)) => {
-    //     $crate::KnownTy::TyVar(($n).into())
-    // };
+    // -- TyVar syntax: (# "a") for generic type variables ------------------
     (# $e:expr) => {
-        $crate::KnownTy::TyVar($crate::TypeVarValue::Generic(($e).into()))
+        $crate::ParsedTy::TyVar($crate::TypeVarValue::Generic(($e).into()))
     };
 
-    // // -- List syntax: List(T) ---------------------------------------------
-    // (List($elem:tt)) => {
-    //     $crate::KnownTy::List($crate::ty::TyRef::from($crate::arc_ty!($elem)))
-    // };
     (($($inner:tt)*)) => { $crate::known_ty!($($inner)*) };
-    ([$($inner:tt)*]) => { $crate::KnownTy::List($crate::KnownTyRef::from($crate::known_ty!($($inner)*)))};
+    ([$($inner:tt)*]) => { $crate::ParsedTy::List($crate::ParsedTyRef::from($crate::known_ty!($($inner)*)))};
 
-    ({ $($key:literal : $ty:tt),* $(,)? }) => {{
-        $crate::KnownTy::AttrSet($crate::ty::AttrSetTy::<$crate::ty::TyRef>::from_internal(
-            [
-                $(($key, $crate::known_ty!($ty)),)*
-            ],
-            None,
-        ))
+    // -- Union: union!(ty1, ty2, ...) --------------------------------------
+    (union!($($member:tt),+ $(,)?)) => {{
+        $crate::ParsedTy::Union(vec![
+            $($crate::ParsedTyRef::from($crate::known_ty!($member)),)+
+        ])
     }};
 
-    // ({ $($key:literal : $ty:tt),* $(,)? }) => {{
-    //     $crate::ty::Ty::Attrset($crate::ty::Attrset::from_internal(
-    //         [
-    //             $(($key, ty!($ty), $crate::ty::AttrSource::Unknown),)*
-    //         ],
-    //         None,
-    //     ))
-    // }};
+    // -- Intersection: isect!(ty1, ty2, ...) --------------------------------
+    (isect!($($member:tt),+ $(,)?)) => {{
+        $crate::ParsedTy::Intersection(vec![
+            $($crate::ParsedTyRef::from($crate::known_ty!($member)),)+
+        ])
+    }};
 
+    // -- Lambda: arg -> ret ------------------------------------------------
     ($arg:tt -> $($ret:tt)*) => {
-        $crate::KnownTy::Lambda {
-            param: $crate::KnownTyRef::from($crate::known_ty!($arg)),
-            body: $crate::KnownTyRef::from($crate::known_ty!($($ret)*)),
+        $crate::ParsedTy::Lambda {
+            param: $crate::ParsedTyRef::from($crate::known_ty!($arg)),
+            body: $crate::ParsedTyRef::from($crate::known_ty!($($ret)*)),
         }
     };
-
-
-
 }

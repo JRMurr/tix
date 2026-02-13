@@ -33,6 +33,8 @@ let
 
   addTwo = apply add 2;
 
+  strApply = apply (x: x + "hi") "foo";
+
   addOne = add 1;
 
   two = addOne 1;
@@ -59,5 +61,6 @@ in
     three
     apply
     addTwo
+    strApply
     ;
 }

@@ -1,13 +1,12 @@
 pub mod arc_ty;
 mod attrset;
 mod primitive;
+pub mod simplify;
 
 #[cfg(any(test, feature = "proptest_support"))]
 pub mod arbitrary;
 
-use std::collections::HashSet;
-
-pub use arc_ty::{ArcTy, Substitutions, TyRef};
+pub use arc_ty::{OutputTy, Substitutions, TyRef};
 pub use attrset::AttrSetTy;
 use derive_more::Debug;
 pub use primitive::PrimitiveTy;
@@ -16,7 +15,7 @@ pub use primitive::PrimitiveTy;
 pub trait RefType: Eq + std::hash::Hash {}
 impl<T> RefType for T where T: Eq + std::hash::Hash {}
 
-// the mono type
+// the mono type — used during inference (no Union/Intersection)
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Ty<R, VarType = u32>
 where
@@ -40,117 +39,86 @@ where
     AttrSet(AttrSetTy<R>),
 }
 
-impl<R, VarType> Ty<R, VarType>
-where
-    R: RefType,
-    VarType: Eq + std::hash::Hash + Clone,
-{
-    pub fn free_vars_by_ref(ty_id: R, get_ty: &mut impl FnMut(&R) -> Self) -> HashSet<VarType> {
-        let ty = get_ty(&ty_id);
-
-        ty.free_vars(get_ty)
-    }
-
-    pub fn free_vars(&self, get_ty: &mut impl FnMut(&R) -> Self) -> HashSet<VarType> {
-        let mut set = HashSet::new();
-
-        match self {
-            Ty::TyVar(var) => {
-                set.insert(var.clone());
-            }
-            Ty::Primitive(_) => {}
-            Ty::List(inner) => set.extend(get_ty(inner).free_vars(get_ty)),
-            Ty::Lambda { param, body } => {
-                set.extend(get_ty(param).free_vars(get_ty));
-                set.extend(get_ty(body).free_vars(get_ty))
-            }
-            Ty::AttrSet(attr_set_ty) => {
-                attr_set_ty.fields.values().for_each(|v| {
-                    set.extend(get_ty(v).free_vars(get_ty));
-                });
-
-                if let Some(dyn_ty) = &attr_set_ty.dyn_ty {
-                    set.extend(get_ty(dyn_ty).free_vars(get_ty))
-                }
-
-                if let Some(rest_ty) = &attr_set_ty.rest {
-                    set.extend(get_ty(rest_ty).free_vars(get_ty))
-                }
-            }
-        }
-
-        set
-    }
-}
-
+/// Macro for constructing `OutputTy` values conveniently in tests.
+///
+/// Supports primitives, type variables, lists, lambdas, attrsets, unions, and intersections.
+///
+/// NOTE: This macro is structurally duplicated as `known_ty!` in `comment_parser`.
+/// If more variants are added, consider extracting a shared `impl_ty_macro!` helper.
 #[macro_export]
 macro_rules! arc_ty {
     // -- Match on known primitives -----------------------------------------
     (Null) => {
-        $crate::Ty::<$crate::TyRef>::Primitive($crate::PrimitiveTy::Null)
+        $crate::OutputTy::Primitive($crate::PrimitiveTy::Null)
     };
     (Bool) => {
-        $crate::Ty::<$crate::TyRef>::Primitive($crate::PrimitiveTy::Bool)
+        $crate::OutputTy::Primitive($crate::PrimitiveTy::Bool)
     };
     (Int) => {
-        $crate::Ty::<$crate::TyRef>::Primitive($crate::PrimitiveTy::Int)
+        $crate::OutputTy::Primitive($crate::PrimitiveTy::Int)
     };
     (Float) => {
-        $crate::Ty::<$crate::TyRef>::Primitive($crate::PrimitiveTy::Float)
+        $crate::OutputTy::Primitive($crate::PrimitiveTy::Float)
     };
     (String) => {
-        $crate::Ty::<$crate::TyRef>::Primitive($crate::PrimitiveTy::String)
+        $crate::OutputTy::Primitive($crate::PrimitiveTy::String)
     };
     (Path) => {
-        $crate::Ty::<$crate::TyRef>::Primitive($crate::PrimitiveTy::Path)
+        $crate::OutputTy::Primitive($crate::PrimitiveTy::Path)
     };
     (Uri) => {
-        $crate::Ty::<$crate::TyRef>::Primitive($crate::PrimitiveTy::Uri)
+        $crate::OutputTy::Primitive($crate::PrimitiveTy::Uri)
+    };
+    (Number) => {
+        $crate::OutputTy::Primitive($crate::PrimitiveTy::Number)
     };
     // -- TyVar syntax: TyVar(N) --------------------------------------------
     (# $n:expr) => {
-        $crate::Ty::<$crate::TyRef>::TyVar($n)
+        $crate::OutputTy::TyVar($n)
     };
     (TyVar($n:expr)) => {
-        $crate::Ty::<$crate::TyRef>::TyVar($n)
+        $crate::OutputTy::TyVar($n)
     };
 
-    // // -- List syntax: List(T) ---------------------------------------------
-    // (List($elem:tt)) => {
-    //     $crate::Ty::<$crate::TyRef>::List($crate::TyRef::from($crate::arc_ty!($elem)))
-    // };
     (($($inner:tt)*)) => { $crate::arc_ty!($($inner)*) };
-    ([$($inner:tt)*]) => { $crate::Ty::<$crate::TyRef>::List($crate::TyRef::from($crate::arc_ty!($($inner)*)))};
+    ([$($inner:tt)*]) => { $crate::OutputTy::List($crate::TyRef::from($crate::arc_ty!($($inner)*)))};
 
+    // -- Closed attrset: { "key": ty, ... }
     ({ $($key:literal : $ty:tt),* $(,)? }) => {{
-        $crate::Ty::<$crate::TyRef>::AttrSet($crate::AttrSetTy::<$crate::TyRef>::from_internal(
+        $crate::OutputTy::AttrSet($crate::AttrSetTy::<$crate::TyRef>::from_internal(
             [
                 $(($key, $crate::arc_ty!($ty)),)*
             ],
-            None,
+            false,
         ))
     }};
 
-    ({ $($key:literal : $ty:tt),* $(,)?;  $rest:tt }) => {{
-        $crate::Ty::<$crate::TyRef>::AttrSet($crate::AttrSetTy::<$crate::TyRef>::from_internal(
+    // -- Open attrset: { "key": ty, ... ; ... }
+    ({ $($key:literal : $ty:tt),* $(,)?; ... }) => {{
+        $crate::OutputTy::AttrSet($crate::AttrSetTy::<$crate::TyRef>::from_internal(
             [
                 $(($key, $crate::arc_ty!($ty)),)*
             ],
-            Some($crate::arc_ty!($rest).into()),
+            true,
         ))
     }};
 
-    // ({ $($key:literal : $ty:tt),* $(,)? }) => {{
-    //     $crate::Ty::Attrset($crate::Attrset::from_internal(
-    //         [
-    //             $(($key, ty!($ty), $crate::AttrSource::Unknown),)*
-    //         ],
-    //         None,
-    //     ))
-    // }};
+    // -- Union: union!(ty1, ty2, ...)
+    (union!($($member:tt),+ $(,)?)) => {{
+        $crate::OutputTy::Union(vec![
+            $($crate::TyRef::from($crate::arc_ty!($member)),)+
+        ])
+    }};
+
+    // -- Intersection: isect!(ty1, ty2, ...)
+    (isect!($($member:tt),+ $(,)?)) => {{
+        $crate::OutputTy::Intersection(vec![
+            $($crate::TyRef::from($crate::arc_ty!($member)),)+
+        ])
+    }};
 
     ($arg:tt -> $($ret:tt)*) => {
-        $crate::Ty::Lambda::<$crate::TyRef> {
+        $crate::OutputTy::Lambda {
             param: $crate::TyRef::from($crate::arc_ty!($arg)),
             body: $crate::TyRef::from($crate::arc_ty!($($ret)*)),
         }

@@ -5,20 +5,19 @@ use smol_str::SmolStr;
 
 use crate::arc_ty::TyRef;
 
-use super::Ty;
-
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
 pub struct AttrSetTy<RefType> {
-    // TODO: i think the value here needs to be a TyId or Schema
     pub fields: BTreeMap<SmolStr, RefType>,
 
     // TODO: this only allows for one dynamic field
     // once type level literals work we should support a map of these
     pub dyn_ty: Option<RefType>,
 
-    // TODO: only really used in type inference
-    // https://bernsteinbear.com/blog/row-poly/
-    pub rest: Option<RefType>,
+    /// Whether this attrset accepts additional fields beyond those listed.
+    /// `true` means "open" (e.g. a pattern with `...`), `false` means "exactly these fields".
+    /// Replaces the old row-polymorphism `rest` field — with structural subtyping,
+    /// width subtyping handles the cases that row variables used to cover.
+    pub open: bool,
 }
 
 impl<RefType> AttrSetTy<RefType> {
@@ -26,7 +25,7 @@ impl<RefType> AttrSetTy<RefType> {
         Self {
             fields: Default::default(),
             dyn_ty: None,
-            rest: None,
+            open: false,
         }
     }
 
@@ -34,15 +33,7 @@ impl<RefType> AttrSetTy<RefType> {
         Self {
             fields,
             dyn_ty: None,
-            rest: None,
-        }
-    }
-
-    pub fn from_rest(rest: RefType) -> Self {
-        Self {
-            fields: Default::default(),
-            dyn_ty: None,
-            rest: Some(rest),
+            open: false,
         }
     }
 
@@ -56,20 +47,8 @@ impl<RefType> AttrSetTy<RefType> {
 }
 
 impl<RefType: Clone + Debug> AttrSetTy<RefType> {
+    /// Merge two attrsets. Fields from `other` override fields from `self` (right-biased).
     pub fn merge(self, other: Self) -> Self {
-        // TODO: handle dyn_ty
-        // TODO: not sure if this will always be the case but for now it is
-        // assert!(
-        //     self.rest.is_some(),
-        //     "tried to merge but we don't have a rest type"
-        // );
-        // assert!(
-        //     other.rest.is_none(),
-        //     "tried to merge but other has a rest field still"
-        // );
-
-        // TODO: not sure if this should error if other has fields with the same key as self
-
         let mut fields: BTreeMap<SmolStr, RefType> = BTreeMap::new();
 
         for (k, v) in self.fields.iter().chain(other.fields.iter()) {
@@ -79,7 +58,7 @@ impl<RefType: Clone + Debug> AttrSetTy<RefType> {
         Self {
             fields,
             dyn_ty: None, // TODO: handle
-            rest: other.rest,
+            open: self.open || other.open,
         }
     }
 
@@ -95,30 +74,23 @@ impl<RefType: Clone + Debug> AttrSetTy<RefType> {
         Self {
             fields,
             dyn_ty: self.dyn_ty.clone(),
-            rest: self.rest.clone(),
+            open: self.open,
         }
     }
 }
 
 impl AttrSetTy<TyRef> {
     pub fn from_internal<'a>(
-        iter: impl IntoIterator<Item = (&'a str, Ty<TyRef>)>,
-        rest: Option<TyRef>,
+        iter: impl IntoIterator<Item = (&'a str, crate::OutputTy)>,
+        open: bool,
     ) -> Self {
         let fields: BTreeMap<SmolStr, TyRef> = iter
             .into_iter()
             .map(|(name, ty)| (SmolStr::from(name), ty.into()))
             .collect();
-        // Arc::get_mut(&mut fields)
-        //     .unwrap()
-        //     .sort_by(|(lhs, ..), (rhs, ..)| lhs.cmp(rhs));
-        // assert!(
-        //     fields.windows(2).all(|w| w[0].0 != w[1].0),
-        //     "Duplicated fields",
-        // );
         Self {
             fields,
-            rest,
+            open,
             dyn_ty: None,
         }
     }

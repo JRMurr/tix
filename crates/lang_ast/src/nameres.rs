@@ -50,11 +50,40 @@ pub enum ResolveResult {
     /// Reference to a Name.
     Definition(NameId),
     /// Reference to a builtin value.
-    #[allow(dead_code)]
     Builtin(&'static str),
     /// Attr of one of some `with` expressions, from innermost to outermost.
     /// It must not be empty.
     WithExprs(Vec<ExprId>),
+}
+
+// ==============================================================================
+// Builtin Metadata
+// ==============================================================================
+
+/// Returns the static name string if `name` is a known global builtin
+/// (i.e. available without the `builtins.` prefix in Nix).
+pub fn lookup_global_builtin(name: &str) -> Option<&'static str> {
+    match name {
+        "abort" => Some("abort"),
+        "baseNameOf" => Some("baseNameOf"),
+        "derivation" => Some("derivation"),
+        "dirOf" => Some("dirOf"),
+        "fetchGit" => Some("fetchGit"),
+        "fetchMercurial" => Some("fetchMercurial"),
+        "fetchTarball" => Some("fetchTarball"),
+        "fetchTree" => Some("fetchTree"),
+        "fetchurl" => Some("fetchurl"),
+        "fromTOML" => Some("fromTOML"),
+        "import" => Some("import"),
+        "isNull" => Some("isNull"),
+        "map" => Some("map"),
+        "placeholder" => Some("placeholder"),
+        "removeAttrs" => Some("removeAttrs"),
+        "scopedImport" => Some("scopedImport"),
+        "throw" => Some("throw"),
+        "toString" => Some("toString"),
+        _ => None,
+    }
 }
 
 #[salsa::tracked]
@@ -103,11 +132,9 @@ impl ModuleScopes {
             return Some(ResolveResult::Definition(*name));
         }
         // 2. Global builtin names.
-        // if let Some((name, b)) = ALL_BUILTINS.get_entry(name) {
-        //     if b.is_global {
-        //         return Some(ResolveResult::Builtin(name));
-        //     }
-        // }
+        if let Some(static_name) = lookup_global_builtin(name) {
+            return Some(ResolveResult::Builtin(static_name));
+        }
         // 3. "with" exprs.
         let withs = self
             .ancestors(scope)
@@ -227,11 +254,8 @@ impl ModuleScopes {
 /// Name resolution of all references.
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct NameResolution {
-    // `None` value for unresolved names.
+    /// `None` value for unresolved names.
     resolve_map: HashMap<ExprId, Option<ResolveResult>>,
-    // // All names from the common pattern `inherit (builtins) ...`.
-    // // This is used for tracking builtins names even through aliasing.
-    // inherited_builtins: HashSet<NameId>,
 }
 
 #[salsa::tracked]
@@ -271,30 +295,17 @@ impl NameResolution {
 
 #[derive(Debug)]
 struct NameDependencies {
-    edges: Vec<(NameId, NameId)>, // (from, to)
-    // dep_graph: DepGraph,
+    edges: Vec<(NameId, NameId)>,
     name_to_expr: HashMap<NameId, ExprId>,
-    // name_to_node_id: HashMap<NameId, NodeIndex<DefaultIx>>,
 }
 
 impl NameDependencies {
     pub fn new(module: &Module, name_res: &NameResolution) -> Self {
-        // let num_names = module.names.len(); // number of nodes
-        let num_refs = name_res.resolve_map.len(); // upper bound on the number of edges
-
-        // let mut dep_graph = DepGraph::with_capacity(num_names, num_refs);
-        // let mut name_to_node_id = HashMap::new();
-
-        // for (name_id, _) in module.names() {
-        //     let node_id = dep_graph.add_node(());
-        //     name_to_node_id.insert(name_id, node_id);
-        // }
+        let num_refs = name_res.resolve_map.len();
 
         let mut name_deps = Self {
             edges: Vec::with_capacity(num_refs),
-            // dep_graph,
             name_to_expr: HashMap::new(),
-            // name_to_node_id,
         };
 
         name_deps.traverse_expr(module, name_res, module.entry_expr, None);
@@ -327,8 +338,14 @@ impl NameDependencies {
                         // scc but would be nice to do from the beginning
                         self.edges.push((curr_binding, *id));
                     }
-                    ResolveResult::Builtin(_) => todo!(),
-                    ResolveResult::WithExprs(_vec) => todo!(),
+                    ResolveResult::Builtin(_) => {
+                        // Builtins don't depend on user-defined names; nothing to record.
+                    }
+                    ResolveResult::WithExprs(_) => {
+                        // No dependency edge needed: the env expression's own
+                        // dependencies are already captured via walk_child_exprs
+                        // in the Expr::With fallthrough arm.
+                    }
                 }
             }
             Expr::LetIn { bindings, body } => {
