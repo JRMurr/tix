@@ -1,24 +1,6 @@
 ## Known Issues & Future Work
 
-### PBT Generator
-
-- PBT lambda param constraining now uses `__pbt_assert_<prim>` builtins (test-only
-  identity functions with known types, e.g. `__pbt_assert_int :: int -> int`) instead
-  of the old `if param == <value>` equality trick. Application contravariance reliably
-  constrains param types in all cases. The old approach was unreliable in SimpleSub
-  because `==` establishes bidirectional variable links without concrete upper bounds.
-
-- PBT tests are split into focused properties: `test_primitive_typing`,
-  `test_structural_typing`, `test_lambda_typing`, and `test_combined_typing` (lower
-  case count for breadth).
-
 ### Number Primitive + Partial Resolution
-
-- Within the same SCC group, multiple uses of a polymorphic function (like `apply`)
-  share the same type variables. This means partial resolution constraints from one
-  use site (e.g. `apply add 2` adds Number bounds) contaminate other use sites
-  (e.g. `apply (x: x + "hi") "foo"` also shows `number -> number` instead of `string`).
-  Per-use instantiation within SCC groups would fix this but isn't currently implemented.
 
 - The `Number` primitive is synthetic — it doesn't correspond to a real Nix type.
   The comment parser doesn't recognize `number` in type annotations yet (deferred).
@@ -65,9 +47,8 @@
   unresolved names. Nix semantics would check outer `with` scopes when the inner
   one lacks the attribute, but that requires runtime-like dynamic dispatch.
 - Dynamic attrset fields in Select expressions
-- Proper intersection of field types in `merge_attrset_intersection` (currently
-  takes the non-TyVar one)
-- `dyn_ty` merging in attrset intersection
+- `merge_attrset_intersection` field overlap: when one field is a TyVar, the other
+  is preferred unconditionally rather than producing a proper intersection.
 - Reference substitution in type annotations (`TypeVarValue::Reference`)
 - AttrSet type annotations in comment parser
 
@@ -77,8 +58,7 @@
   overload list with proper intersection types for overloaded functions)
 - Type narrowing / flow-sensitive typing (TypeScript-style discriminated unions)
 - Literal / singleton types (`"circle"` as a type, not just `string`)
-- Co-occurrence simplification (`lang_ty::simplify`) currently handles polar-only
-  variable removal and has scaffolding for co-occurrence merging, but the path-based
-  co-occurrence grouping is strict — variables that appear at structurally different
-  positions (e.g. different attrset fields) won't be merged. This could be relaxed
-  to use "occurrence signature" based grouping per the SimpleSub paper §4.2.
+- Co-occurrence simplification: path-based co-occurrence grouping is strict —
+  variables that appear at structurally different positions (e.g. different attrset
+  fields) won't be merged. This could be relaxed to use "occurrence signature"
+  based grouping per the SimpleSub paper §4.2.

@@ -265,15 +265,34 @@ impl CheckCtx<'_> {
                 }
 
                 // Truly polymorphic — create a fresh variable at the current level.
+                //
+                // Per the SimpleSub paper, we link fresh vars to originals via
+                // direct bounds manipulation rather than constrain(). Using
+                // constrain() would propagate bounds bidirectionally, allowing
+                // use-site constraints on the fresh var to leak back to the
+                // original polymorphic variable and contaminate subsequent
+                // extrusions.
                 let fresh = self.new_var();
                 cache.insert(ty_id, fresh);
 
                 if polarity {
-                    // Positive position: fresh ≥ original (lower bound).
-                    self.constrain(ty_id, fresh).expect("extrude constrain");
+                    // Positive position: original <: fresh (one-way link).
+                    // Copy original's lower bounds (extruded) into fresh.
+                    self.table.add_upper_bound(ty_id, fresh);
+                    let lower_bounds = v.lower_bounds.clone();
+                    for lb in lower_bounds {
+                        let extruded_lb = self.extrude_inner(lb, polarity, cache);
+                        self.table.add_lower_bound(fresh, extruded_lb);
+                    }
                 } else {
-                    // Negative position: fresh ≤ original (upper bound).
-                    self.constrain(fresh, ty_id).expect("extrude constrain");
+                    // Negative position: fresh <: original (one-way link).
+                    // Copy original's upper bounds (extruded) into fresh.
+                    self.table.add_lower_bound(ty_id, fresh);
+                    let upper_bounds = v.upper_bounds.clone();
+                    for ub in upper_bounds {
+                        let extruded_ub = self.extrude_inner(ub, polarity, cache);
+                        self.table.add_upper_bound(fresh, extruded_ub);
+                    }
                 }
                 fresh
             }
