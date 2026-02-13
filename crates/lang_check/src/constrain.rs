@@ -127,16 +127,17 @@ impl CheckCtx<'_> {
             match sub_attr.fields.get(key) {
                 Some(sub_field) => self.constrain(*sub_field, *sup_field)?,
                 None => {
-                    // sub is missing a field that sup requires.
-                    // If sub is open, that's still an error at the constraint level —
-                    // it means the field is simply not known to exist.
-                    // (The caller ensures open attrsets are used appropriately.)
                     if !sub_attr.open {
                         return Err(InferenceError::MissingField(key.clone()));
                     }
-                    // If sub is open, we can't prove the field exists yet.
-                    // For now we allow it — the field may come from the unknown rest.
-                    // TODO: track this more precisely with "has-field" constraints.
+                    // Open attrsets intentionally pass here: the unknown "rest"
+                    // portion may contain the required field. This is sound for
+                    // pattern-match destructuring (`{ x, ... }: x`) where extra
+                    // fields are expected, but it means we can't catch a missing
+                    // field at constraint time when the attrset is open.
+                    // A more precise approach would emit "has-field" constraints
+                    // that are checked when the attrset becomes closed, but that
+                    // is not yet implemented.
                 }
             }
         }

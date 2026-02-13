@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 
-use super::{CheckCtx, InferenceError, TyId};
+use super::{CheckCtx, LocatedError, TyId};
 use lang_ast::{
     nameres::ResolveResult, BinOP, BindingValue, Bindings, Expr, ExprId, InterpolPart, Literal,
     NormalBinOp, OverloadBinOp,
@@ -18,18 +18,22 @@ use smol_str::SmolStr;
 
 impl CheckCtx<'_> {
     /// Infer the type of an expression and record it in the expr→type map.
-    pub(super) fn infer_expr(&mut self, e: ExprId) -> Result<TyId, InferenceError> {
+    pub(super) fn infer_expr(&mut self, e: ExprId) -> Result<TyId, LocatedError> {
+        // Track the current expression so errors from constrain() and
+        // sub-calls are attributed to the correct source location.
+        self.current_expr = e;
+
         let ty = self.infer_expr_inner(e)?;
 
         // Record the inferred type for this expression.
         let expr_slot = self.ty_for_expr(e);
-        self.constrain(ty, expr_slot)?;
-        self.constrain(expr_slot, ty)?;
+        self.constrain(ty, expr_slot).map_err(|err| self.locate_err(err))?;
+        self.constrain(expr_slot, ty).map_err(|err| self.locate_err(err))?;
 
         Ok(ty)
     }
 
-    fn infer_expr_inner(&mut self, e: ExprId) -> Result<TyId, InferenceError> {
+    fn infer_expr_inner(&mut self, e: ExprId) -> Result<TyId, LocatedError> {
         let expr = &self.module[e];
         match expr.clone() {
             Expr::Missing => Ok(self.new_var()),
@@ -61,7 +65,7 @@ impl CheckCtx<'_> {
                     param: arg_ty,
                     body: ret_ty,
                 });
-                self.constrain(fun_ty, lambda_ty)?;
+                self.constrain(fun_ty, lambda_ty).map_err(|err| self.locate_err(err))?;
 
                 Ok(ret_ty)
             }
@@ -90,7 +94,7 @@ impl CheckCtx<'_> {
                         // Lift pattern field names to current level for generalization.
                         self.table.set_var_level(name_ty, self.table.current_level);
                         if let Some(default_ty) = default_ty {
-                            self.constrain(default_ty, name_ty)?;
+                            self.constrain(default_ty, name_ty).map_err(|err| self.locate_err(err))?;
                         }
                         let field_text = self.module[name].text.clone();
                         fields.insert(field_text, name_ty);
@@ -102,8 +106,8 @@ impl CheckCtx<'_> {
                         open: pat.ellipsis,
                     }));
 
-                    self.constrain(param_ty, attr)?;
-                    self.constrain(attr, param_ty)?;
+                    self.constrain(param_ty, attr).map_err(|err| self.locate_err(err))?;
+                    self.constrain(attr, param_ty).map_err(|err| self.locate_err(err))?;
                 }
 
                 let body_ty = self.infer_expr(body)?;
@@ -122,7 +126,7 @@ impl CheckCtx<'_> {
             } => {
                 let cond_ty = self.infer_expr(cond)?;
                 let bool_ty = self.alloc_prim(PrimitiveTy::Bool);
-                self.constrain(cond_ty, bool_ty)?;
+                self.constrain(cond_ty, bool_ty).map_err(|err| self.locate_err(err))?;
 
                 let then_ty = self.infer_expr(then_body)?;
                 let else_ty = self.infer_expr(else_body)?;
@@ -130,8 +134,8 @@ impl CheckCtx<'_> {
                 // Both branches flow into a result variable — this is where
                 // union types naturally arise when branches have different types.
                 let result = self.new_var();
-                self.constrain(then_ty, result)?;
-                self.constrain(else_ty, result)?;
+                self.constrain(then_ty, result).map_err(|err| self.locate_err(err))?;
+                self.constrain(else_ty, result).map_err(|err| self.locate_err(err))?;
 
                 Ok(result)
             }
@@ -159,7 +163,7 @@ impl CheckCtx<'_> {
                 let ret_ty = attrpath.iter().try_fold(set_ty, |set_ty, &attr| {
                     let attr_ty = self.infer_expr(attr)?;
                     let str_ty = self.alloc_prim(PrimitiveTy::String);
-                    self.constrain(attr_ty, str_ty)?;
+                    self.constrain(attr_ty, str_ty).map_err(|err| self.locate_err(err))?;
 
                     let opt_key = match &self.module[attr] {
                         Expr::Literal(Literal::String(key)) => key.clone(),
@@ -182,17 +186,17 @@ impl CheckCtx<'_> {
                         dyn_ty: None,
                         open: true, // there may be more fields
                     }));
-                    self.constrain(set_ty, field_attr)?;
+                    self.constrain(set_ty, field_attr).map_err(|err| self.locate_err(err))?;
 
-                    Ok::<TyId, InferenceError>(value_ty)
+                    Ok::<TyId, LocatedError>(value_ty)
                 })?;
 
                 if let Some(default_expr) = default_expr {
                     let default_ty = self.infer_expr(default_expr)?;
                     // The result is the union of the field type and the default type.
                     let union_var = self.new_var();
-                    self.constrain(ret_ty, union_var)?;
-                    self.constrain(default_ty, union_var)?;
+                    self.constrain(ret_ty, union_var).map_err(|err| self.locate_err(err))?;
+                    self.constrain(default_ty, union_var).map_err(|err| self.locate_err(err))?;
                     Ok(union_var)
                 } else {
                     Ok(ret_ty)
@@ -205,7 +209,7 @@ impl CheckCtx<'_> {
                 let elem_ty = self.new_var();
                 for elem_expr in &inner {
                     let et = self.infer_expr(*elem_expr)?;
-                    self.constrain(et, elem_ty)?;
+                    self.constrain(et, elem_ty).map_err(|err| self.locate_err(err))?;
                 }
                 Ok(self.alloc_concrete(Ty::List(elem_ty)))
             }
@@ -215,8 +219,8 @@ impl CheckCtx<'_> {
                 match op {
                     rnix::ast::UnaryOpKind::Invert => {
                         let bool_ty = self.alloc_prim(PrimitiveTy::Bool);
-                        self.constrain(ty, bool_ty)?;
-                        self.constrain(bool_ty, ty)?;
+                        self.constrain(ty, bool_ty).map_err(|err| self.locate_err(err))?;
+                        self.constrain(bool_ty, ty).map_err(|err| self.locate_err(err))?;
                         Ok(ty)
                     }
                     rnix::ast::UnaryOpKind::Negate => {
@@ -224,7 +228,7 @@ impl CheckCtx<'_> {
                         // This catches errors like `-"hello"` at inference time and
                         // gives `a: -a` the type `number -> number`.
                         let number = self.alloc_prim(PrimitiveTy::Number);
-                        self.constrain(ty, number)?;
+                        self.constrain(ty, number).map_err(|err| self.locate_err(err))?;
                         Ok(ty)
                     }
                 }
@@ -239,7 +243,7 @@ impl CheckCtx<'_> {
                     dyn_ty: None,
                     open: true,
                 }));
-                self.constrain(set_ty, any_attr)?;
+                self.constrain(set_ty, any_attr).map_err(|err| self.locate_err(err))?;
 
                 Ok(self.alloc_prim(PrimitiveTy::Bool))
             }
@@ -247,7 +251,7 @@ impl CheckCtx<'_> {
             Expr::Assert { cond, body } => {
                 let cond_ty = self.infer_expr(cond)?;
                 let bool_ty = self.alloc_prim(PrimitiveTy::Bool);
-                self.constrain(cond_ty, bool_ty)?;
+                self.constrain(cond_ty, bool_ty).map_err(|err| self.locate_err(err))?;
 
                 self.infer_expr(body)
             }
@@ -274,14 +278,14 @@ impl CheckCtx<'_> {
         }
     }
 
-    fn infer_reference(&mut self, e: ExprId, var_name: &SmolStr) -> Result<TyId, InferenceError> {
+    fn infer_reference(&mut self, e: ExprId, var_name: &SmolStr) -> Result<TyId, LocatedError> {
         match self.name_res.get(e) {
             None => {
                 // true, false, and null can be shadowed...
                 match var_name.as_str() {
                     "true" | "false" => Ok(self.alloc_prim(PrimitiveTy::Bool)),
                     "null" => Ok(self.alloc_prim(PrimitiveTy::Null)),
-                    "builtins" => self.synth_builtins_attrset(),
+                    "builtins" => self.synth_builtins_attrset().map_err(|err| self.locate_err(err)),
                     #[cfg(test)]
                     name if name.starts_with("__pbt_assert_") => {
                         self.infer_pbt_assert_builtin(name)
@@ -293,6 +297,7 @@ impl CheckCtx<'_> {
                         {
                             Ok(self.intern_fresh_ty(parsed_ty))
                         } else {
+                            self.emit_warning(super::Warning::UnresolvedName(var_name.clone()));
                             Ok(self.new_var())
                         }
                     }
@@ -326,10 +331,12 @@ impl CheckCtx<'_> {
                         dyn_ty: None,
                         open: true,
                     }));
-                    self.constrain(env_ty, field_attr)?;
+                    self.constrain(env_ty, field_attr).map_err(|err| self.locate_err(err))?;
                     Ok(value_ty)
                 }
-                ResolveResult::Builtin(name) => self.synthesize_builtin(name),
+                ResolveResult::Builtin(name) => {
+                    self.synthesize_builtin(name).map_err(|err| self.locate_err(err))
+                }
             },
         }
     }
@@ -339,7 +346,7 @@ impl CheckCtx<'_> {
         lhs: ExprId,
         rhs: ExprId,
         op: &BinOP,
-    ) -> Result<TyId, InferenceError> {
+    ) -> Result<TyId, LocatedError> {
         let lhs_ty = self.infer_expr(lhs)?;
         let rhs_ty = self.infer_expr(rhs)?;
 
@@ -354,9 +361,9 @@ impl CheckCtx<'_> {
                 // + is excluded because it's also valid for strings and paths.
                 if !overload_op.is_add() {
                     let number = self.alloc_prim(PrimitiveTy::Number);
-                    self.constrain(lhs_ty, number)?;
-                    self.constrain(rhs_ty, number)?;
-                    self.constrain(ret_ty, number)?;
+                    self.constrain(lhs_ty, number).map_err(|err| self.locate_err(err))?;
+                    self.constrain(rhs_ty, number).map_err(|err| self.locate_err(err))?;
+                    self.constrain(ret_ty, number).map_err(|err| self.locate_err(err))?;
                 }
 
                 // Still push the overload for deferred full resolution, which
@@ -373,15 +380,15 @@ impl CheckCtx<'_> {
 
             BinOP::Normal(NormalBinOp::Bool(_)) => {
                 let bool_ty = self.alloc_prim(PrimitiveTy::Bool);
-                self.constrain(lhs_ty, bool_ty)?;
-                self.constrain(rhs_ty, bool_ty)?;
+                self.constrain(lhs_ty, bool_ty).map_err(|err| self.locate_err(err))?;
+                self.constrain(rhs_ty, bool_ty).map_err(|err| self.locate_err(err))?;
                 Ok(bool_ty)
             }
 
             BinOP::Normal(NormalBinOp::Expr(_)) => {
                 // Comparison/equality — both sides should be same type, returns Bool.
-                self.constrain(lhs_ty, rhs_ty)?;
-                self.constrain(rhs_ty, lhs_ty)?;
+                self.constrain(lhs_ty, rhs_ty).map_err(|err| self.locate_err(err))?;
+                self.constrain(rhs_ty, lhs_ty).map_err(|err| self.locate_err(err))?;
 
                 // After equality, explicitly propagate concrete types as upper bounds.
                 // The bidirectional constraint creates variable-to-variable links, but
@@ -391,11 +398,11 @@ impl CheckCtx<'_> {
                 // discovered concrete type as an upper bound of the other operand.
                 if let Some(concrete) = self.find_concrete(rhs_ty) {
                     let c_id = self.alloc_concrete(concrete);
-                    self.constrain(lhs_ty, c_id)?;
+                    self.constrain(lhs_ty, c_id).map_err(|err| self.locate_err(err))?;
                 }
                 if let Some(concrete) = self.find_concrete(lhs_ty) {
                     let c_id = self.alloc_concrete(concrete);
-                    self.constrain(rhs_ty, c_id)?;
+                    self.constrain(rhs_ty, c_id).map_err(|err| self.locate_err(err))?;
                 }
 
                 Ok(self.alloc_prim(PrimitiveTy::Bool))
@@ -413,12 +420,12 @@ impl CheckCtx<'_> {
                 let rhs_list = self.alloc_concrete(Ty::List(rhs_elem));
 
                 // Constrain operands to be lists.
-                self.constrain(lhs_ty, lhs_list)?;
-                self.constrain(rhs_ty, rhs_list)?;
+                self.constrain(lhs_ty, lhs_list).map_err(|err| self.locate_err(err))?;
+                self.constrain(rhs_ty, rhs_list).map_err(|err| self.locate_err(err))?;
 
                 // Each side's elements flow into the result (directional, not bidirectional).
-                self.constrain(lhs_elem, result_elem)?;
-                self.constrain(rhs_elem, result_elem)?;
+                self.constrain(lhs_elem, result_elem).map_err(|err| self.locate_err(err))?;
+                self.constrain(rhs_elem, result_elem).map_err(|err| self.locate_err(err))?;
 
                 Ok(self.alloc_concrete(Ty::List(result_elem)))
             }
@@ -438,7 +445,7 @@ impl CheckCtx<'_> {
 
     /// Infer bindings (for let-in or attrset bodies). Returns nothing for let-in,
     /// returns the AttrSetTy for attrsets.
-    fn infer_bindings(&mut self, bindings: &Bindings) -> Result<(), InferenceError> {
+    fn infer_bindings(&mut self, bindings: &Bindings) -> Result<(), LocatedError> {
         // Infer inherit-from expressions.
         for &from_expr in bindings.inherit_froms.iter() {
             self.infer_expr(from_expr)?;
@@ -457,8 +464,8 @@ impl CheckCtx<'_> {
                 }
             };
             // Value type flows into the name slot.
-            self.constrain(value_ty, name_ty)?;
-            self.constrain(name_ty, value_ty)?;
+            self.constrain(value_ty, name_ty).map_err(|err| self.locate_err(err))?;
+            self.constrain(name_ty, value_ty).map_err(|err| self.locate_err(err))?;
         }
 
         Ok(())
@@ -468,7 +475,7 @@ impl CheckCtx<'_> {
     fn infer_bindings_to_attrset(
         &mut self,
         bindings: &Bindings,
-    ) -> Result<AttrSetTy<TyId>, InferenceError> {
+    ) -> Result<AttrSetTy<TyId>, LocatedError> {
         for &from_expr in bindings.inherit_froms.iter() {
             self.infer_expr(from_expr)?;
         }
@@ -489,8 +496,8 @@ impl CheckCtx<'_> {
                     self.infer_expr(e)?
                 }
             };
-            self.constrain(value_ty, name_ty)?;
-            self.constrain(name_ty, value_ty)?;
+            self.constrain(value_ty, name_ty).map_err(|err| self.locate_err(err))?;
+            self.constrain(name_ty, value_ty).map_err(|err| self.locate_err(err))?;
             fields.insert(name_text, value_ty);
         }
 
@@ -531,7 +538,7 @@ impl CheckCtx<'_> {
     /// the param to the expected primitive type — avoiding the unreliable
     /// `if param == <value>` equality trick.
     #[cfg(test)]
-    fn infer_pbt_assert_builtin(&mut self, name: &str) -> Result<TyId, InferenceError> {
+    fn infer_pbt_assert_builtin(&mut self, name: &str) -> Result<TyId, LocatedError> {
         let prim = match name {
             "__pbt_assert_int" => PrimitiveTy::Int,
             "__pbt_assert_float" => PrimitiveTy::Float,

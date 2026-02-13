@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 
 use comment_parser::parse_and_collect;
 
-use super::{CheckCtx, InferenceError, InferenceResult, TyId};
+use super::{CheckCtx, InferenceError, InferenceResult, LocatedError, TyId};
 use crate::collect::{canonicalize_standalone, Collector};
 use crate::infer_expr::{PendingMerge, PendingOverload};
 use crate::storage::TypeEntry;
@@ -31,7 +31,7 @@ enum OverloadProgress {
 }
 
 impl CheckCtx<'_> {
-    pub fn infer_prog(mut self, groups: GroupedDefs) -> Result<InferenceResult, InferenceError> {
+    pub fn infer_prog(mut self, groups: GroupedDefs) -> Result<InferenceResult, LocatedError> {
         // Pre-allocate TyIds for all names and expressions so they can be
         // referenced before they are inferred (needed for recursive definitions).
         let len = self.module.names().len() + self.module.exprs().len();
@@ -45,17 +45,21 @@ impl CheckCtx<'_> {
 
         self.infer_root()?;
 
+        // Extract warnings before Collector consumes self.
+        let warnings = std::mem::take(&mut self.warnings);
         let mut collector = Collector::new(self);
-        Ok(collector.finalize_inference())
+        let mut result = collector.finalize_inference();
+        result.warnings = warnings;
+        Ok(result)
     }
 
-    fn infer_root(&mut self) -> Result<(), InferenceError> {
+    fn infer_root(&mut self) -> Result<(), LocatedError> {
         self.infer_expr(self.module.entry_expr)?;
         self.resolve_pending()?;
         Ok(())
     }
 
-    fn infer_scc_group(&mut self, group: DependentGroup) -> Result<(), InferenceError> {
+    fn infer_scc_group(&mut self, group: DependentGroup) -> Result<(), LocatedError> {
         self.table.enter_level();
 
         // Lift pre-allocated name vars to the current (inner) level so that
@@ -75,8 +79,8 @@ impl CheckCtx<'_> {
 
             // Link the pre-allocated name slot to the inferred type.
             let name_slot = self.ty_for_name_direct(name_id);
-            self.constrain(ty, name_slot)?;
-            self.constrain(name_slot, ty)?;
+            self.constrain(ty, name_slot).map_err(|err| self.locate_err(err))?;
+            self.constrain(name_slot, ty).map_err(|err| self.locate_err(err))?;
 
             // Check for type annotations in doc comments.
             let type_annotation =
@@ -99,9 +103,9 @@ impl CheckCtx<'_> {
                     });
 
             if let Some(known_ty) = type_annotation {
-                let annotation_ty = self.intern_known_ty(name_id, known_ty);
-                self.constrain(ty, annotation_ty)?;
-                self.constrain(annotation_ty, ty)?;
+                let annotation_ty = self.intern_fresh_ty(known_ty);
+                self.constrain(ty, annotation_ty).map_err(|err| self.locate_err(err))?;
+                self.constrain(annotation_ty, ty).map_err(|err| self.locate_err(err))?;
             }
 
             inferred.push((name_id, ty));
@@ -349,7 +353,7 @@ impl CheckCtx<'_> {
     // and merge constraints. These are deferred because they need both operand
     // types to be at least partially known.
 
-    fn resolve_pending(&mut self) -> Result<(), InferenceError> {
+    fn resolve_pending(&mut self) -> Result<(), LocatedError> {
         // Fixed-point loop: keep trying until no more progress.
         loop {
             let mut made_progress = false;
@@ -358,7 +362,7 @@ impl CheckCtx<'_> {
             let overloads = std::mem::take(&mut self.pending_overloads);
             let mut remaining_overloads = Vec::new();
             for ov in overloads {
-                match self.try_resolve_overload(&ov)? {
+                match self.try_resolve_overload(&ov).map_err(|err| self.locate_err(err))? {
                     OverloadProgress::FullyResolved => made_progress = true,
                     OverloadProgress::PartialProgress => {
                         // Partial work was done (constraints added) but the
@@ -376,7 +380,7 @@ impl CheckCtx<'_> {
             let merges = std::mem::take(&mut self.pending_merges);
             let mut remaining_merges = Vec::new();
             for mg in merges {
-                match self.try_resolve_merge(&mg)? {
+                match self.try_resolve_merge(&mg).map_err(|err| self.locate_err(err))? {
                     true => made_progress = true,
                     false => remaining_merges.push(mg),
                 }

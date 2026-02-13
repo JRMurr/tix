@@ -186,7 +186,9 @@ impl LowerCtx {
             ast::Expr::Root(root) => {
                 return self.lower_expr_opt(root.expr());
             }
-            ast::Expr::LegacyLet(_legacy_let) => todo!(),
+            // `let { body = ...; }` is deprecated Nix syntax. Treat as missing
+            // rather than crashing the tool.
+            ast::Expr::LegacyLet(_legacy_let) => Expr::Missing,
         };
 
         self.alloc_expr(expr, ptr)
@@ -432,7 +434,7 @@ impl MergingSet {
         });
 
         if inherit.attrs().next().is_none() {
-            eprintln!("TODO: No attrs on the inherit");
+            // `inherit (expr);` with no attrs is valid but useless Nix syntax.
             return;
         }
 
@@ -514,30 +516,29 @@ impl MergingSet {
         match AttrKind::of(attr) {
             AttrKind::Static(key) => {
                 let key = key.unwrap_or_default();
-                match value {
-                    BindingValueKind::Expr(e) => {
-                        // If the key already has an implicit nested set (from `a.b = 1`)
-                        // and the expression is an explicit attrset (`a = { c = 2; }`),
-                        // merge the explicit set's bindings into the implicit one.
-                        if let Some(ast::Expr::AttrSet(attr_set)) = &e {
-                            if let Some(entry) = self.statics.get_mut(&key) {
-                                if let Some(nested) = &mut entry.set {
-                                    nested.merge_bindings(ctx, attr_set);
-                                    return;
-                                }
+                // ImplicitSet/ExplicitSet are never constructed (all call sites
+                // use BindingValueKind::Expr), so only the Expr arm matters.
+                if let BindingValueKind::Expr(e) = value {
+                    // If the key already has an implicit nested set (from `a.b = 1`)
+                    // and the expression is an explicit attrset (`a = { c = 2; }`),
+                    // merge the explicit set's bindings into the implicit one.
+                    if let Some(ast::Expr::AttrSet(attr_set)) = &e {
+                        if let Some(entry) = self.statics.get_mut(&key) {
+                            if let Some(nested) = &mut entry.set {
+                                nested.merge_bindings(ctx, attr_set);
+                                return;
                             }
                         }
-
-                        let e = ctx.lower_expr_opt(e);
-                        self.merge_static_value(
-                            ctx,
-                            key,
-                            attr_ptr,
-                            BindingValue::Expr(e),
-                            doc_comments,
-                        );
                     }
-                    _ => todo!("handle other binding values"),
+
+                    let e = ctx.lower_expr_opt(e);
+                    self.merge_static_value(
+                        ctx,
+                        key,
+                        attr_ptr,
+                        BindingValue::Expr(e),
+                        doc_comments,
+                    );
                 }
             }
             AttrKind::Dynamic(key_expr) => {
@@ -555,7 +556,8 @@ impl MergingSet {
         let key_expr = ctx.lower_expr_opt(key_expr);
         let value_expr = match value {
             BindingValueKind::Expr(e) => ctx.lower_expr_opt(e),
-            _ => todo!("handle other binding values"),
+            // ImplicitSet/ExplicitSet are never constructed; degrade gracefully.
+            _ => ctx.lower_expr_opt(None),
         };
         self.dynamics.push((key_expr, value_expr));
     }

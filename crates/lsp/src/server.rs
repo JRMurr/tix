@@ -49,12 +49,19 @@ impl TixLanguageServer {
             // for single files.
             let root = rnix::Root::parse(&text).tree();
 
-            crate::diagnostics::to_diagnostics(
+            let mut diags = crate::diagnostics::to_diagnostics(
                 &analysis.check_result.errors,
                 &analysis.source_map,
                 &analysis.line_index,
                 &root,
-            )
+            );
+            diags.extend(crate::diagnostics::warnings_to_diagnostics(
+                &analysis.check_result.warnings,
+                &analysis.source_map,
+                &analysis.line_index,
+                &root,
+            ));
+            diags
         };
 
         self.client

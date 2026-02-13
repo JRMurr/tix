@@ -3,11 +3,11 @@ use lang_ast::{module, tests::TestDatabase, Module};
 use lang_ty::{arc_ty, OutputTy, PrimitiveTy};
 
 use crate::aliases::TypeAliasRegistry;
-use crate::{check_file_with_aliases, InferenceError, InferenceResult};
+use crate::{check_file_with_aliases, InferenceError, InferenceResult, LocatedError};
 
 use super::check_file;
 
-pub fn check_str(src: &str) -> (Module, Result<InferenceResult, InferenceError>) {
+pub fn check_str(src: &str) -> (Module, Result<InferenceResult, LocatedError>) {
     let (db, file) = TestDatabase::single_file(src).unwrap();
     let module = module(&db, file);
     (module, check_file(&db, file))
@@ -16,7 +16,7 @@ pub fn check_str(src: &str) -> (Module, Result<InferenceResult, InferenceError>)
 pub fn check_str_with_aliases(
     src: &str,
     aliases: &TypeAliasRegistry,
-) -> (Module, Result<InferenceResult, InferenceError>) {
+) -> (Module, Result<InferenceResult, LocatedError>) {
     let (db, file) = TestDatabase::single_file(src).unwrap();
     let module = module(&db, file);
     (module, check_file_with_aliases(&db, file, aliases))
@@ -47,7 +47,7 @@ pub fn get_inferred_root(src: &str) -> OutputTy {
 pub fn get_check_error(src: &str) -> InferenceError {
     let (_, inference) = check_str(src);
 
-    inference.expect_err("Expected an inference error")
+    inference.expect_err("Expected an inference error").error
 }
 
 #[track_caller]

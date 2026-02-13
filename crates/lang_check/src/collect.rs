@@ -375,6 +375,8 @@ impl<'db> Collector<'db> {
         InferenceResult {
             name_ty_map,
             expr_ty_map,
+            // Populated by infer_prog after finalize_inference returns.
+            warnings: Vec::new(),
         }
     }
 }

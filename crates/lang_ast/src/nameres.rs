@@ -219,7 +219,9 @@ impl ModuleScopes {
             }
         }
 
-        // TODO: If this is a non-rec attr i don't think this scope should be used below?
+        // This is correct for non-rec attrsets: PlainAttrset.is_definition()
+        // returns false, so `defs` is empty and we reuse the parent scope.
+        // Only rec-attrsets and let-in bindings populate `defs`.
         let scope = if defs.is_empty() {
             scope
         } else {
@@ -386,8 +388,12 @@ impl NameDependencies {
             self.name_to_expr.insert(*name, expr);
             self.traverse_expr(module, name_res, expr, Some(*name));
         }
-        for (_name_expr, _value_expr) in bindings.dynamics.iter() {
-            todo!()
+        for &(name_expr, value_expr) in bindings.dynamics.iter() {
+            // Dynamic bindings have runtime-computed keys — no static NameId
+            // to record dependency edges for. Traverse sub-expressions so
+            // any references they contain are still captured.
+            self.traverse_expr(module, name_res, name_expr, None);
+            self.traverse_expr(module, name_res, value_expr, None);
         }
     }
 }
@@ -425,27 +431,16 @@ pub fn group_def(db: &dyn crate::AstDb, file: NixFile) -> GroupedDefs {
     let num_refs = name_deps.edges.len();
 
     let mut dep_graph = DepGraph::with_capacity(num_names, num_refs);
-    // TODO: there is def a better way to do this but don't care right now
     let mut name_to_node_id = HashMap::new();
-    // let mut node_id_to_name = HashMap::new();
-
-    // let tmp: Vec<_> = module.names().collect();
-    // dbg!(tmp);
 
     for (name_id, _) in module.names() {
         let node_id = dep_graph.add_node(name_id);
         name_to_node_id.insert(name_id, node_id);
 
-        // make sure every name shows up
+        // Self-edge ensures every name appears in at least one SCC group,
+        // even if it has no dependencies on other names.
         dep_graph.add_edge(node_id, node_id, ());
     }
-
-    // for name_id in name_deps.name_to_expr.keys() {
-    //     // dbg!((name_id, name));
-    //     let node_id = dep_graph.add_node(*name_id);
-    //     name_to_node_id.insert(name_id, node_id);
-    //     // node_id_to_name.insert(node_id, name_id);
-    // }
 
     for (from, to) in name_deps.edges {
         let from = name_to_node_id.get(&from).unwrap();

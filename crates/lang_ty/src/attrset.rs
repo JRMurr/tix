@@ -57,7 +57,10 @@ impl<RefType: Clone + Debug> AttrSetTy<RefType> {
 
         Self {
             fields,
-            dyn_ty: None, // TODO: handle
+            // Right-biased merge: Nix `//` gives priority to the right-hand side.
+            // We can't unify both dyn_ty values here (no constraint allocator),
+            // so right-biased is the correct approximation.
+            dyn_ty: other.dyn_ty.or(self.dyn_ty),
             open: self.open || other.open,
         }
     }

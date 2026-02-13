@@ -51,6 +51,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let inference = check_file_with_imports(&db, file, &registry, import_resolution.types)?;
 
+    for w in &inference.warnings {
+        eprintln!("Warning: {}", w.warning);
+    }
+
     // Print per-name types (the let-bindings, function params, etc.).
     // Deduplicate by (name_text, type_string) since the same name can appear
     // multiple times (e.g. a let-binding and an inherit reference).

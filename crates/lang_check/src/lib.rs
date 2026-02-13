@@ -24,7 +24,7 @@ use storage::TypeStorage;
 use thiserror::Error;
 
 #[salsa::tracked]
-pub fn check_file(db: &dyn AstDb, file: NixFile) -> Result<InferenceResult, InferenceError> {
+pub fn check_file(db: &dyn AstDb, file: NixFile) -> Result<InferenceResult, LocatedError> {
     check_file_with_aliases(db, file, &TypeAliasRegistry::default())
 }
 
@@ -34,7 +34,7 @@ pub fn check_file_with_aliases(
     db: &dyn AstDb,
     file: NixFile,
     aliases: &TypeAliasRegistry,
-) -> Result<InferenceResult, InferenceError> {
+) -> Result<InferenceResult, LocatedError> {
     check_file_with_imports(db, file, aliases, HashMap::new())
 }
 
@@ -44,7 +44,7 @@ pub fn check_file_with_imports(
     file: NixFile,
     aliases: &TypeAliasRegistry,
     import_types: HashMap<ExprId, OutputTy>,
-) -> Result<InferenceResult, InferenceError> {
+) -> Result<InferenceResult, LocatedError> {
     let module = lang_ast::module(db, file);
     let name_res = lang_ast::name_resolution(db, file);
     let grouped_defs = lang_ast::group_def(db, file);
@@ -88,6 +88,7 @@ impl From<TyId> for usize {
 pub struct InferenceResult {
     pub name_ty_map: HashMap<NameId, OutputTy>,
     pub expr_ty_map: HashMap<ExprId, OutputTy>,
+    pub warnings: Vec<LocatedWarning>,
 }
 
 impl InferenceResult {
@@ -116,11 +117,41 @@ pub enum InferenceError {
 }
 
 /// An inference error paired with the expression where it occurred.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocatedError {
     pub error: InferenceError,
     /// The expression that was being inferred when the error occurred.
-    /// Falls back to the root expression when precise location is unavailable.
+    pub at_expr: ExprId,
+}
+
+impl std::fmt::Display for LocatedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.error)
+    }
+}
+
+impl std::error::Error for LocatedError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Warning {
+    UnresolvedName(smol_str::SmolStr),
+}
+
+impl std::fmt::Display for Warning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Warning::UnresolvedName(name) => write!(f, "Unresolved name: {name}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocatedWarning {
+    pub warning: Warning,
     pub at_expr: ExprId,
 }
 
@@ -132,6 +163,7 @@ pub struct CheckResult {
     /// None (future: partial results from error recovery).
     pub inference: Option<InferenceResult>,
     pub errors: Vec<LocatedError>,
+    pub warnings: Vec<LocatedWarning>,
 }
 
 /// Type-check a file, collecting errors instead of aborting on the first one.
@@ -142,20 +174,21 @@ pub fn check_file_collecting(
     aliases: &TypeAliasRegistry,
     import_types: HashMap<ExprId, OutputTy>,
 ) -> CheckResult {
-    let module = lang_ast::module(db, file);
     match check_file_with_imports(db, file, aliases, import_types) {
-        Ok(inference) => CheckResult {
-            inference: Some(inference),
-            errors: Vec::new(),
-        },
-        Err(error) => CheckResult {
+        Ok(inference) => {
+            let warnings = inference.warnings.clone();
+            CheckResult {
+                inference: Some(inference),
+                errors: Vec::new(),
+                warnings,
+            }
+        }
+        Err(located) => CheckResult {
             inference: None,
-            errors: vec![LocatedError {
-                error,
-                // Imprecise fallback: attribute the error to the root expression.
-                // TODO: improve with per-expression error tracking in CheckCtx.
-                at_expr: module.entry_expr,
-            }],
+            errors: vec![located],
+            // Warnings accumulated before the error are lost. Acceptable
+            // until error recovery is added.
+            warnings: Vec::new(),
         },
     }
 }
@@ -164,6 +197,14 @@ pub fn check_file_collecting(
 pub struct CheckCtx<'db> {
     module: &'db Module,
     name_res: &'db NameResolution,
+
+    /// The expression currently being inferred. Updated at the top of
+    /// `infer_expr` so that errors from `constrain()` or sub-calls are
+    /// attributed to the correct source location.
+    current_expr: ExprId,
+
+    /// Warnings accumulated during inference (e.g. unresolved names).
+    warnings: Vec<LocatedWarning>,
 
     table: TypeStorage,
 
@@ -174,9 +215,9 @@ pub struct CheckCtx<'db> {
     /// Cache (sub, sup) pairs already processed by constrain() to avoid cycles.
     /// Intentionally never cleared between SCC groups: extrusion creates fresh
     /// vars linked to old ones via constrain(), and re-processing those pairs
-    /// would cause infinite loops across extrusion boundaries. The tradeoff is
-    /// monotonic memory growth — for an LSP, consider scoping or clearing the
-    /// cache per SCC group with careful cycle-safety analysis.
+    /// would cause infinite loops across extrusion boundaries. The cache is
+    /// scoped to the lifetime of this CheckCtx (one per file), so it doesn't
+    /// grow across files.
     constrain_cache: HashSet<(TyId, TyId)>,
 
     /// Primitive type cache for deduplication.
@@ -217,6 +258,8 @@ impl<'db> CheckCtx<'db> {
         Self {
             module,
             name_res,
+            current_expr: module.entry_expr,
+            warnings: Vec::new(),
             table: TypeStorage::new(),
             poly_type_env: HashMap::new(),
             constrain_cache: HashSet::new(),
@@ -351,10 +394,6 @@ impl<'db> CheckCtx<'db> {
         }
     }
 
-    fn intern_known_ty(&mut self, _name: NameId, ty: ParsedTy) -> TyId {
-        self.intern_fresh_ty(ty)
-    }
-
     /// Intern a ParsedTy with fresh type variables for each free generic var
     /// and alias resolution for Reference vars. Each call produces an independent
     /// "instance" — analogous to polymorphic instantiation.
@@ -449,5 +488,21 @@ impl<'db> CheckCtx<'db> {
                 var
             }
         }
+    }
+
+    /// Wrap a bare `InferenceError` with the current expression location.
+    fn locate_err(&self, err: InferenceError) -> LocatedError {
+        LocatedError {
+            error: err,
+            at_expr: self.current_expr,
+        }
+    }
+
+    /// Record a warning at the current expression.
+    fn emit_warning(&mut self, warning: Warning) {
+        self.warnings.push(LocatedWarning {
+            warning,
+            at_expr: self.current_expr,
+        });
     }
 }

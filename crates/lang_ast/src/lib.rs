@@ -83,16 +83,6 @@ impl Module {
     }
 }
 
-// impl Module {
-//     pub fn walk_module(&self, mut f: impl FnMut(&Expr)) {
-//         let expr = &self.exprs[self.entry_expr];
-//         expr.walk_child_exprs(|child| {
-//             let child_expr = &self.exprs[child];
-//             child_expr.walk_child_exprs(f);
-//         });
-//     }
-// }
-
 impl ops::Index<ExprId> for Module {
     type Output = Expr;
     fn index(&self, index: ExprId) -> &Self::Output {
@@ -183,17 +173,6 @@ impl ModuleSourceMap {
         self.name_map_rev.insert(name, ptr);
     }
 }
-
-// fn module_with_source_map(
-//     db: &dyn crate::Db,
-//     file_id: FileId,
-// ) -> (Arc<Module>, Arc<ModuleSourceMap>) {
-//     let parse = db.parse(file_id);
-//     let (mut module, mut source_map) = lower::lower(db, file_id, parse);
-//     module.shrink_to_fit();
-//     source_map.shrink_to_fit();
-//     (Arc::new(module), Arc::new(source_map))
-// }
 
 type NixPath = String; // TODO: real type
 
