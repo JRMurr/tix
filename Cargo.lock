@@ -1705,6 +1705,7 @@ dependencies = [
  "clap",
  "comment_parser",
  "env_logger",
+ "indoc",
  "lang_ast",
  "lang_check",
  "lang_ty",

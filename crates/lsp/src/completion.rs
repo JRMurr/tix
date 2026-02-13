@@ -685,6 +685,7 @@ mod tests {
     use super::*;
     use crate::state::AnalysisState;
     use crate::test_util::{find_offset, temp_path};
+    use indoc::indoc;
     use lang_check::aliases::TypeAliasRegistry;
 
     /// Analyze source and get completions at a given byte offset.
@@ -792,11 +793,11 @@ mod tests {
 
     #[test]
     fn dot_completion_simple() {
-        let src = r#"
-let lib = { x = 1; y = "hello"; };
-in lib.
-#      ^1
-"#;
+        let src = indoc! {r#"
+            let lib = { x = 1; y = "hello"; };
+            in lib.
+            #      ^1
+        "#};
         let results = complete_at_markers(src);
         let names = labels(&results[&1]);
         assert!(names.contains(&"x"), "should complete x, got: {names:?}");
@@ -805,11 +806,11 @@ in lib.
 
     #[test]
     fn dot_completion_nested() {
-        let src = r#"
-let lib = { strings = { concat = 1; sep = 2; }; };
-in lib.strings.
-#              ^1
-"#;
+        let src = indoc! {r#"
+            let lib = { strings = { concat = 1; sep = 2; }; };
+            in lib.strings.
+            #              ^1
+        "#};
         let results = complete_at_markers(src);
         let names = labels(&results[&1]);
         assert!(
@@ -828,11 +829,11 @@ in lib.strings.
 
     #[test]
     fn callsite_completion_basic() {
-        let src = r#"
-let f = { name, src, ... }: name;
-in f { }
-#     ^1
-"#;
+        let src = indoc! {r#"
+            let f = { name, src, ... }: name;
+            in f { }
+            #     ^1
+        "#};
         let results = complete_at_markers(src);
         let names = labels(&results[&1]);
         assert!(
@@ -847,11 +848,11 @@ in f { }
 
     #[test]
     fn dot_completion_inside_list() {
-        let src = r#"
-let pkgs = { hello = 1; gcc = 2; };
-in [ pkgs. ]
-#         ^1
-"#;
+        let src = indoc! {r#"
+            let pkgs = { hello = 1; gcc = 2; };
+            in [ pkgs. ]
+            #         ^1
+        "#};
         let results = complete_at_markers(src);
         let names = labels(&results[&1]);
         assert!(
@@ -870,12 +871,12 @@ in [ pkgs. ]
         // site parses cleanly and its argument type constrains the lambda parameter.
         // The lambda param fallback extracts the param type from the Lambda's
         // canonicalized type.
-        let src = r#"
-let f = pkgs: pkgs;
-    r = f { hello = 1; gcc = 2; };
-in r.
-#    ^1
-"#;
+        let src = indoc! {r#"
+            let f = pkgs: pkgs;
+                r = f { hello = 1; gcc = 2; };
+            in r.
+            #    ^1
+        "#};
         let results = complete_at_markers(src);
         let names = labels(&results[&1]);
         assert!(
@@ -925,11 +926,11 @@ in r.
 
     #[test]
     fn callsite_completion_filters_existing() {
-        let src = r#"
-let f = { name, src, ... }: name;
-in f { name = "x"; }
-#                  ^1
-"#;
+        let src = indoc! {r#"
+            let f = { name, src, ... }: name;
+            in f { name = "x"; }
+            #                  ^1
+        "#};
         let results = complete_at_markers(src);
         let names = labels(&results[&1]);
         assert!(
@@ -948,11 +949,11 @@ in f { name = "x"; }
 
     #[test]
     fn identifier_in_let_body() {
-        let src = r#"
-let x = 1; y = "hello";
-in x
-#  ^1
-"#;
+        let src = indoc! {r#"
+            let x = 1; y = "hello";
+            in x
+            #  ^1
+        "#};
         let results = complete_at_markers(src);
         let names = labels(&results[&1]);
         assert!(names.contains(&"x"), "should suggest x, got: {names:?}");
@@ -961,11 +962,11 @@ in x
 
     #[test]
     fn identifier_in_list() {
-        let src = r#"
-let pkgs = 1;
-in [ pkgs ]
-#    ^1
-"#;
+        let src = indoc! {r#"
+            let pkgs = 1;
+            in [ pkgs ]
+            #    ^1
+        "#};
         let results = complete_at_markers(src);
         let names = labels(&results[&1]);
         assert!(
@@ -976,11 +977,11 @@ in [ pkgs ]
 
     #[test]
     fn identifier_includes_builtins() {
-        let src = r#"
-let x = 1;
-in x
-#  ^1
-"#;
+        let src = indoc! {r#"
+            let x = 1;
+            in x
+            #  ^1
+        "#};
         let results = complete_at_markers(src);
         let names = labels(&results[&1]);
         assert!(
@@ -1000,11 +1001,11 @@ in x
 
     #[test]
     fn identifier_function_kind() {
-        let src = r#"
-let f = x: x;
-in f
-#  ^1
-"#;
+        let src = indoc! {r#"
+            let f = x: x;
+            in f
+            #  ^1
+        "#};
         let results = complete_at_markers(src);
         let f_item = results[&1]
             .iter()
@@ -1023,11 +1024,11 @@ in f
 
     #[test]
     fn with_scope_completion() {
-        let src = r#"
-let pkgs = { hello = 1; gcc = 2; };
-in with pkgs; [ hello ]
-#               ^1
-"#;
+        let src = indoc! {r#"
+            let pkgs = { hello = 1; gcc = 2; };
+            in with pkgs; [ hello ]
+            #               ^1
+        "#};
         let results = complete_at_markers(src);
         let names = labels(&results[&1]);
         assert!(
@@ -1051,11 +1052,11 @@ in with pkgs; [ hello ]
 
     #[test]
     fn inherit_plain() {
-        let src = r#"
-let x = 1; y = 2;
-in { inherit x ; }
-#            ^1
-"#;
+        let src = indoc! {r#"
+            let x = 1; y = 2;
+            in { inherit x ; }
+            #            ^1
+        "#};
         let results = complete_at_markers(src);
         let names = labels(&results[&1]);
         // `x` is already inherited — filtered out; `y` is still available.
@@ -1068,11 +1069,11 @@ in { inherit x ; }
 
     #[test]
     fn inherit_from_expr() {
-        let src = r#"
-let lib = { id = 1; map = 2; };
-in { inherit (lib) id ; }
-#                  ^1
-"#;
+        let src = indoc! {r#"
+            let lib = { id = 1; map = 2; };
+            in { inherit (lib) id ; }
+            #                  ^1
+        "#};
         let results = complete_at_markers(src);
         let names = labels(&results[&1]);
         // `id` is already inherited from lib — filtered out.
@@ -1085,11 +1086,11 @@ in { inherit (lib) id ; }
 
     #[test]
     fn inherit_from_filters_existing() {
-        let src = r#"
-let lib = { id = 1; map = 2; filter = 3; };
-in { inherit (lib) id filter ; }
-#                      ^1
-"#;
+        let src = indoc! {r#"
+            let lib = { id = 1; map = 2; filter = 3; };
+            in { inherit (lib) id filter ; }
+            #                      ^1
+        "#};
         let results = complete_at_markers(src);
         let names = labels(&results[&1]);
         // `id` and `filter` are already inherited — should be filtered out.
