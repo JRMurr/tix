@@ -31,12 +31,23 @@ pub fn goto_definition(
         .token_at_offset(rowan::TextSize::from(offset))
         .right_biased()?;
 
+    log::debug!(
+        "goto_definition: pos={pos:?}, token={:?} {:?}",
+        token.kind(),
+        token.text()
+    );
+
     // Walk up from the token to find a node that maps to an expression.
     let mut node = token.parent()?;
     loop {
         let ptr = AstPtr::new(&node);
 
         if let Some(expr_id) = analysis.source_map.expr_for_node(ptr) {
+            log::debug!(
+                "goto_definition: matched expr_id={expr_id:?}, expr={:?}",
+                &analysis.module[expr_id]
+            );
+
             // Cross-file: if this expression is part of `import <path>`, jump to the file.
             if let Some(target_path) = analysis.import_targets.get(&expr_id) {
                 let target_uri = Url::from_file_path(target_path).ok()?;
@@ -114,6 +125,8 @@ fn try_resolve_select_field(
     field_node: &rowan::SyntaxNode<rnix::NixLanguage>,
     field_name: &str,
 ) -> Option<Location> {
+    log::debug!("try_resolve_select_field: field_name={field_name:?}");
+
     // Walk up from the field node to find the enclosing Select syntax node.
     let select_node = field_node
         .ancestors()
@@ -124,19 +137,35 @@ fn try_resolve_select_field(
     let base_ptr = AstPtr::new(base_syntax.syntax());
     let base_expr_id = analysis.source_map.expr_for_node(base_ptr)?;
 
+    log::debug!(
+        "try_resolve_select_field: base_expr={:?}",
+        &analysis.module[base_expr_id]
+    );
+
     // Resolve the base to an import target path. Two cases:
     // 1. Base is directly an import Apply: check import_targets.
     // 2. Base is a Reference resolving to a name bound to an import: check name_to_import.
     let target_path = if let Some(path) = analysis.import_targets.get(&base_expr_id) {
+        log::debug!("try_resolve_select_field: direct import target -> {}", path.display());
         path
-    } else if let Expr::Reference(_) = &analysis.module[base_expr_id] {
+    } else if let Expr::Reference(ref_name) = &analysis.module[base_expr_id] {
         let res = analysis.name_res.get(base_expr_id)?;
+        log::debug!(
+            "try_resolve_select_field: base is Reference({ref_name:?}), resolves to {res:?}"
+        );
         if let ResolveResult::Definition(name_id) = res {
-            analysis.name_to_import.get(name_id)?
+            let result = analysis.name_to_import.get(name_id);
+            log::debug!(
+                "try_resolve_select_field: name_to_import lookup for {:?} -> {:?}",
+                analysis.module[*name_id].text,
+                result
+            );
+            result?
         } else {
             return None;
         }
     } else {
+        log::debug!("try_resolve_select_field: base is not a reference or import target");
         return None;
     };
 
@@ -326,6 +355,44 @@ mod tests {
         let lib_contents = std::fs::read_to_string(&lib_path).unwrap();
         let lib_line_index = crate::convert::LineIndex::new(&lib_contents);
         let expected_offset = find_offset(&lib_contents, "x = 1");
+        let expected_pos = lib_line_index.position(expected_offset);
+        assert_eq!(loc.range.start, expected_pos);
+    }
+
+    // ------------------------------------------------------------------
+    // Select through applied import: rustAttrs.rust-shell
+    // where rustAttrs = import ./rust.nix { inherit pkgs; }
+    // ------------------------------------------------------------------
+    #[test]
+    fn select_through_applied_import() {
+        let project = TempProject::new(&[
+            (
+                "main.nix",
+                "let attrs = import ./lib.nix { x = 1; }; in attrs.name",
+            ),
+            ("lib.nix", "{ x }: { name = x; value = 2; }"),
+        ]);
+        let main_path = project.path("main.nix");
+        let lib_path = project.path("lib.nix");
+
+        let mut state = AnalysisState::new(TypeAliasRegistry::default());
+        let (uri, contents) = analyze(&mut state, &main_path);
+        let analysis = state.get_file(&main_path).unwrap();
+        let root = rnix::Root::parse(&contents).tree();
+
+        // Cursor on `name` in `attrs.name`.
+        let select_offset = find_offset(&contents, "attrs.name") + 6; // the `n` in `name`
+        let pos = analysis.line_index.position(select_offset);
+        let loc = goto_definition(&state, analysis, pos, &uri, &root);
+        let loc = loc.expect("should resolve select field through applied import");
+
+        let lib_uri = Url::from_file_path(&lib_path).unwrap();
+        assert_eq!(loc.uri, lib_uri, "should jump to lib.nix");
+
+        // Verify the target position points to the `name` definition in lib.nix.
+        let lib_contents = std::fs::read_to_string(&lib_path).unwrap();
+        let lib_line_index = crate::convert::LineIndex::new(&lib_contents);
+        let expected_offset = find_offset(&lib_contents, "name = x");
         let expected_pos = lib_line_index.position(expected_offset);
         assert_eq!(loc.range.start, expected_pos);
     }

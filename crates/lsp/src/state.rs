@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use lang_ast::{
-    module_and_source_maps, ExprId, Module, ModuleSourceMap, NameId, NameResolution, NixFile,
+    module_and_source_maps, Expr, ExprId, Module, ModuleSourceMap, NameId, NameResolution, NixFile,
     RootDatabase,
 };
 use lang_check::aliases::TypeAliasRegistry;
@@ -88,12 +88,23 @@ impl AnalysisState {
         // whose value expression is a resolved import, record the name→path link.
         // This powers Select-through-import navigation (e.g. `x.child` where
         // `x = import ./foo.nix` jumps to `child` in foo.nix).
+        //
+        // We chase through Apply chains because `import ./foo.nix { ... }` desugars
+        // to Apply(Apply(import, ./foo.nix), { ... }) — the outer Apply isn't in
+        // import_targets, but its inner function is.
         let grouped = lang_ast::group_def(&self.db, nix_file);
         let mut name_to_import = HashMap::new();
         for group in grouped.iter() {
             for typedef in group {
-                if let Some(path) = import_targets.get(&typedef.expr()) {
-                    name_to_import.insert(typedef.name(), path.clone());
+                if let Some(path) =
+                    chase_import_target(&module, &import_targets, typedef.expr())
+                {
+                    log::debug!(
+                        "name_to_import: {} -> {}",
+                        module[typedef.name()].text,
+                        path.display()
+                    );
+                    name_to_import.insert(typedef.name(), path);
                 }
             }
         }
@@ -125,4 +136,24 @@ impl AnalysisState {
     pub fn get_file(&self, path: &PathBuf) -> Option<&FileAnalysis> {
         self.files.get(path)
     }
+}
+
+/// Chase through Apply chains to find an import target.
+///
+/// `import ./foo.nix { args }` desugars to `Apply(Apply(import, ./foo.nix), { args })`.
+/// The inner `Apply(import, ./foo.nix)` is in `import_targets`, but the outer Apply
+/// (the expression actually bound to the name) isn't. This function walks the `fun`
+/// chain of nested Applies until it finds a match in `import_targets`.
+fn chase_import_target(
+    module: &Module,
+    import_targets: &HashMap<ExprId, PathBuf>,
+    expr_id: ExprId,
+) -> Option<PathBuf> {
+    if let Some(path) = import_targets.get(&expr_id) {
+        return Some(path.clone());
+    }
+    if let Expr::Apply { fun, .. } = &module[expr_id] {
+        return chase_import_target(module, import_targets, *fun);
+    }
+    None
 }
