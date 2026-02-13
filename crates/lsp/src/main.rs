@@ -1,3 +1,4 @@
+mod completion;
 mod convert;
 mod diagnostics;
 mod goto_def;
