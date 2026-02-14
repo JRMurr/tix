@@ -203,7 +203,7 @@ fn classify_ident(
                             let kind = analysis.module[*name_id].kind;
                             (name_kind_to_token_type(kind), 0)
                         }
-                        ResolveResult::WithExprs(_) => (0, 0), // VARIABLE
+                        ResolveResult::WithExprs(..) => (0, 0), // VARIABLE
                     });
                 }
             }

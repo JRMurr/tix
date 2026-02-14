@@ -51,9 +51,9 @@ pub enum ResolveResult {
     Definition(NameId),
     /// Reference to a builtin value.
     Builtin(&'static str),
-    /// Attr of one of some `with` expressions, from innermost to outermost.
-    /// It must not be empty.
-    WithExprs(Vec<ExprId>),
+    /// Attr of one or more `with` expressions, from innermost to outermost.
+    /// The first element is the innermost; the rest are outer fallbacks.
+    WithExprs(ExprId, Vec<ExprId>),
 }
 
 // ==============================================================================
@@ -136,12 +136,9 @@ impl ModuleScopes {
             return Some(ResolveResult::Builtin(static_name));
         }
         // 3. "with" exprs.
-        let withs = self
-            .ancestors(scope)
-            .filter_map(|data| data.as_with())
-            .collect::<Vec<_>>();
-        if !withs.is_empty() {
-            return Some(ResolveResult::WithExprs(withs));
+        let mut withs = self.ancestors(scope).filter_map(|data| data.as_with());
+        if let Some(innermost) = withs.next() {
+            return Some(ResolveResult::WithExprs(innermost, withs.collect()));
         }
         None
     }
@@ -343,7 +340,7 @@ impl NameDependencies {
                     ResolveResult::Builtin(_) => {
                         // Builtins don't depend on user-defined names; nothing to record.
                     }
-                    ResolveResult::WithExprs(_) => {
+                    ResolveResult::WithExprs(..) => {
                         // No dependency edge needed: the env expression's own
                         // dependencies are already captured via walk_child_exprs
                         // in the Expr::With fallthrough arm.

@@ -83,7 +83,7 @@ pub fn goto_definition(
                         }
                         // Builtins and `with` expressions don't have a source
                         // definition we can jump to within this file.
-                        ResolveResult::Builtin(_) | ResolveResult::WithExprs(_) => {}
+                        ResolveResult::Builtin(_) | ResolveResult::WithExprs(..) => {}
                     }
                 }
             }

@@ -317,12 +317,12 @@ impl CheckCtx<'_> {
                         Ok(self.ty_for_name_direct(name))
                     }
                 }
-                ResolveResult::WithExprs(with_exprs) => {
+                ResolveResult::WithExprs(innermost, _rest) => {
                     // Use the innermost `with` scope. Nix checks inner-to-outer at
                     // runtime, but statically we can only constrain one env. The
                     // innermost is the right choice for the common single-`with` case.
                     // TODO: multi-`with` fallthrough (outer env when inner lacks the field)
-                    let with_expr_id = with_exprs[0];
+                    let with_expr_id = *innermost;
                     let env_id = match &self.module[with_expr_id] {
                         Expr::With { env, .. } => *env,
                         _ => unreachable!("WithExprs should reference With nodes"),
