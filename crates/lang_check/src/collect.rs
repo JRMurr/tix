@@ -210,57 +210,44 @@ pub fn canonicalize_standalone(
 // Shared helpers
 // ==============================================================================
 
-/// Flatten nested unions and deduplicate members.
+/// Flatten a nested composite type (union or intersection) and deduplicate members.
+/// `extract_nested` returns the inner members if the OutputTy is the matching
+/// composite variant (Union or Intersection), or None for other variants.
 /// Uses structural equality (not normalize_vars) so that distinct type variables
-/// are preserved even if they'd normalize to the same index. This is slightly
-/// more verbose but avoids incorrectly merging structurally different types that
-/// happen to share the same shape after variable renumbering.
-fn flatten_union(members: Vec<OutputTy>) -> Vec<OutputTy> {
+/// are preserved even if they'd normalize to the same index.
+fn flatten_composite(
+    members: Vec<OutputTy>,
+    extract_nested: fn(&OutputTy) -> Option<&Vec<TyRef>>,
+) -> Vec<OutputTy> {
     let mut result = Vec::new();
     let mut seen = HashSet::new();
     for m in members {
-        match m {
-            OutputTy::Union(inner) => {
-                for sub in inner {
-                    let sub_ty = (*sub.0).clone();
-                    if seen.insert(sub_ty.clone()) {
-                        result.push(sub_ty);
-                    }
+        if let Some(inner) = extract_nested(&m) {
+            for sub in inner {
+                let sub_ty = (*sub.0).clone();
+                if seen.insert(sub_ty.clone()) {
+                    result.push(sub_ty);
                 }
             }
-            other => {
-                if seen.insert(other.clone()) {
-                    result.push(other);
-                }
-            }
+        } else if seen.insert(m.clone()) {
+            result.push(m);
         }
     }
     result
 }
 
-/// Flatten nested intersections and deduplicate members.
-/// Uses structural equality (not normalize_vars) to avoid merging distinct types.
+fn flatten_union(members: Vec<OutputTy>) -> Vec<OutputTy> {
+    flatten_composite(members, |ty| match ty {
+        OutputTy::Union(inner) => Some(inner),
+        _ => None,
+    })
+}
+
 fn flatten_intersection(members: Vec<OutputTy>) -> Vec<OutputTy> {
-    let mut result = Vec::new();
-    let mut seen = HashSet::new();
-    for m in members {
-        match m {
-            OutputTy::Intersection(inner) => {
-                for sub in inner {
-                    let sub_ty = (*sub.0).clone();
-                    if seen.insert(sub_ty.clone()) {
-                        result.push(sub_ty);
-                    }
-                }
-            }
-            other => {
-                if seen.insert(other.clone()) {
-                    result.push(other);
-                }
-            }
-        }
-    }
-    result
+    flatten_composite(members, |ty| match ty {
+        OutputTy::Intersection(inner) => Some(inner),
+        _ => None,
+    })
 }
 
 /// Merge multiple attrsets in an intersection into a single attrset.
