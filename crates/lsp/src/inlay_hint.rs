@@ -26,11 +26,10 @@ pub fn inlay_hints(
     let mut hints = Vec::new();
 
     for (name_id, name) in analysis.module.names() {
-        // Only show hints for definitions, not plain attrset keys.
-        match name.kind {
-            NameKind::LetIn | NameKind::Param | NameKind::PatField | NameKind::RecAttrset => {}
-            NameKind::PlainAttrset => continue,
-        }
+        // Skip inherit-style attrset keys where there's no binding value to
+        // examine (the type comes from the inherited name, not this site).
+        // All other name kinds — LetIn, Param, PatField, RecAttrset, and
+        // PlainAttrset with a non-trivial value — are candidates for hints.
 
         // Get the name's source position.
         let ptr = match analysis.source_map.nodes_for_name(name_id).next() {
@@ -53,12 +52,19 @@ pub fn inlay_hints(
             None => continue,
         };
 
-        // For LetIn and RecAttrset bindings, skip trivial types where the value
-        // is a simple literal — the type is obvious from syntax.
-        if matches!(name.kind, NameKind::LetIn | NameKind::RecAttrset)
-            && is_trivial_binding(analysis, name_id)
-        {
-            continue;
+        // For bindings (let, attrset fields), skip trivial types where the value
+        // is a simple literal — the type is obvious from syntax. Also skip
+        // inherit-style bindings (no value expression) since the type is shown
+        // at the original definition.
+        if matches!(
+            name.kind,
+            NameKind::LetIn | NameKind::RecAttrset | NameKind::PlainAttrset
+        ) {
+            match find_binding_expr(analysis, name_id) {
+                Some(_) if is_trivial_binding(analysis, name_id) => continue,
+                None => continue, // inherit — no value expression at this site
+                _ => {}
+            }
         }
 
         // Position the hint after the name.
@@ -199,6 +205,38 @@ mod tests {
             "should show hints for pattern fields, got {}: {:?}",
             hints.len(),
             hint_labels(&hints)
+        );
+    }
+
+    #[test]
+    fn shows_hints_for_plain_attrset_fields() {
+        // Top-level attrsets (like simple.nix) have PlainAttrset names.
+        // Non-trivial bindings should still get hints.
+        let src = "{ add = a: b: a + b; addOne = add 1; x = 42; }";
+        let hints = get_hints(src);
+        let labels = hint_labels(&hints);
+        // `add` (lambda) and `addOne` (non-trivial) should get hints.
+        // `x = 42` is trivial and should be skipped.
+        // `a` and `b` are params and should get hints.
+        assert!(
+            labels.len() >= 2,
+            "should show hints for non-trivial attrset fields: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn skips_inherit_in_attrset() {
+        // `inherit` attrset fields have no value expression at this site,
+        // so they shouldn't get hints (the type is on the original binding).
+        let src = "let f = x: x; in { inherit f; }";
+        let hints = get_hints(src);
+        let labels = hint_labels(&hints);
+        // `f` in the let should get a hint, but `f` in `inherit f` should not.
+        let f_hints: Vec<_> = labels.iter().filter(|l| l.contains("->")).collect();
+        assert_eq!(
+            f_hints.len(),
+            1,
+            "should show hint only for the let binding, not the inherit: {labels:?}"
         );
     }
 

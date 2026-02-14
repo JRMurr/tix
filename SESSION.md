@@ -85,6 +85,16 @@
   the Select's attrpath, mangling subsequent expressions. This can destroy call
   sites that would otherwise constrain lambda parameters.
 
+### LSP Inlay Hints & NameKind Classification
+
+- Files wrapped in a top-level lambda with `{ pkgs ? <nixpkgs> }:` produce
+  `PlainAttrset` NameKind for the inner let-binding names (because the result
+  is an attrset `{ inherit add ...; }`). The actual LetIn-scoped NameIds are
+  separate but get the wrong kind. Inlay hints now handle `PlainAttrset` names
+  with non-trivial bindings, but the underlying `lang_ast` lowering could be
+  investigated to ensure NameKind classification is correct for let bindings
+  inside top-level lambda bodies.
+
 ### Future Enhancements
 
 - Full intersection-type-based operator overloading (replace pragmatic deferred

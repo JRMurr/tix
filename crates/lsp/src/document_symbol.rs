@@ -177,8 +177,8 @@ mod tests {
     fn nested_attrset_has_children() {
         let symbols = get_symbols("{ a = 1; b = { c = 2; }; }");
         assert_eq!(symbols.len(), 2);
-        let b = &symbols[1];
-        assert_eq!(b.name, "b");
+        assert_eq!(names(&symbols), vec!["a", "b"]);
+        let b = symbols.iter().find(|s| s.name == "b").unwrap();
         let children = b.children.as_ref().expect("b should have children");
         assert_eq!(children.len(), 1);
         assert_eq!(children[0].name, "c");
