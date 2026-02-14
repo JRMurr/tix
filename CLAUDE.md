@@ -152,3 +152,19 @@ mkDerivation { name = "my-package"; src = ./.; }
 - **Unit tests**: inline in each crate (`tests.rs`, `#[cfg(test)]` modules)
 - **Property-based tests**: `lang_check/src/pbt/mod.rs` — generates arbitrary ASTs and types via proptest
 - **Test fixtures**: Nix files in `test/` directory (e.g., `test/basic.nix`)
+
+### LSP test conventions
+
+LSP feature tests that need a cursor position should use **marker-based positioning** via `parse_markers()` from `test_util.rs`. Embed `# ^<num>` comments in the Nix source where `^` points to the column on the previous line:
+
+```rust
+let src = indoc! {"
+    let x = 1; in x + x
+    #   ^1         ^2
+"};
+let markers = parse_markers(src);
+// markers[&1] = byte offset of the `x` definition
+// markers[&2] = byte offset of the first `x` reference after `in`
+```
+
+Since `#` is a valid Nix comment, markers don't affect parsing. Prefer markers over `find_offset` + arithmetic (e.g. `find_offset(src, "in x") + 3`) — markers make the cursor position visually obvious and avoid fragile offset math. Plain `find_offset` is fine when it unambiguously lands on the right token (e.g. `find_offset(src, "1")` in `let x = 1`).
