@@ -373,7 +373,7 @@ impl CheckCtx<'_> {
                 // Still push the overload for deferred full resolution, which
                 // will pin to the precise type (int vs float) when both
                 // operands become concrete.
-                self.pending_overloads.push(PendingOverload {
+                self.deferred.overloads.push(PendingOverload {
                     op: *overload_op,
                     constraint: BinConstraint {
                         lhs: lhs_ty,
@@ -439,7 +439,7 @@ impl CheckCtx<'_> {
             BinOP::Normal(NormalBinOp::AttrUpdate) => {
                 // attr merge: we'll handle this as a pending constraint
                 let ret_ty = self.new_var();
-                self.pending_merges.push(BinConstraint {
+                self.deferred.merges.push(BinConstraint {
                     lhs: lhs_ty,
                     rhs: rhs_ty,
                     ret: ret_ty,

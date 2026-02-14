@@ -101,8 +101,8 @@ impl CheckCtx<'_> {
 
         // Move unresolved overloads to deferred list — they'll be re-instantiated
         // per call-site during extrusion.
-        let remaining = std::mem::take(&mut self.pending_overloads);
-        self.deferred_overloads.extend(remaining);
+        let remaining = std::mem::take(&mut self.deferred.overloads);
+        self.deferred.deferred_overloads.extend(remaining);
 
         // Snapshot each successfully-inferred name's canonical type NOW, before
         // exit_level and before use-site extrusions add concrete bounds.
@@ -205,7 +205,7 @@ impl CheckCtx<'_> {
         // may add new entries to the cache, which then makes other overloads
         // eligible for re-instantiation (e.g. when overload chains share
         // intermediate result vars like `(a + b) + (c + d)`).
-        let deferred = self.deferred_overloads.clone();
+        let deferred = self.deferred.deferred_overloads.clone();
         let mut processed = vec![false; deferred.len()];
         loop {
             let mut made_progress = false;
@@ -235,7 +235,7 @@ impl CheckCtx<'_> {
                     let new_rhs = get_or_extrude(ov.constraint.rhs, self, &mut cache);
                     let new_ret = get_or_extrude(ov.constraint.ret, self, &mut cache);
 
-                    self.pending_overloads.push(PendingOverload {
+                    self.deferred.overloads.push(PendingOverload {
                         op: ov.op,
                         constraint: BinConstraint {
                             lhs: new_lhs,
@@ -385,7 +385,7 @@ impl CheckCtx<'_> {
             let mut made_progress = false;
 
             // Resolve overloads.
-            let overloads = std::mem::take(&mut self.pending_overloads);
+            let overloads = std::mem::take(&mut self.deferred.overloads);
             let mut remaining_overloads = Vec::new();
             for ov in overloads {
                 match self.try_resolve_overload(&ov).map_err(|err| self.locate_err(err))? {
@@ -400,10 +400,10 @@ impl CheckCtx<'_> {
                     OverloadProgress::NoProgress => remaining_overloads.push(ov),
                 }
             }
-            self.pending_overloads = remaining_overloads;
+            self.deferred.overloads = remaining_overloads;
 
             // Resolve merges.
-            let merges = std::mem::take(&mut self.pending_merges);
+            let merges = std::mem::take(&mut self.deferred.merges);
             let mut remaining_merges = Vec::new();
             for mg in merges {
                 match self.try_resolve_merge(&mg).map_err(|err| self.locate_err(err))? {
@@ -411,7 +411,7 @@ impl CheckCtx<'_> {
                     false => remaining_merges.push(mg),
                 }
             }
-            self.pending_merges = remaining_merges;
+            self.deferred.merges = remaining_merges;
 
             if !made_progress {
                 break;

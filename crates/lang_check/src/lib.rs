@@ -188,6 +188,18 @@ pub fn check_file_collecting(
     }
 }
 
+/// Constraints whose resolution is deferred until operand types are known.
+#[derive(Debug, Clone, Default)]
+pub struct DeferredConstraints {
+    /// Pending overloaded binary op constraints to resolve later.
+    pub overloads: Vec<PendingOverload>,
+    /// Pending attrset merge constraints to resolve later.
+    pub merges: Vec<PendingMerge>,
+    /// Overloads that couldn't be resolved in their SCC group and should be
+    /// re-instantiated per call-site during extrusion.
+    pub deferred_overloads: Vec<PendingOverload>,
+}
+
 #[derive(Debug, Clone)]
 pub struct CheckCtx<'db> {
     module: &'db Module,
@@ -218,16 +230,8 @@ pub struct CheckCtx<'db> {
     /// Primitive type cache for deduplication.
     prim_cache: HashMap<PrimitiveTy, TyId>,
 
-    /// Pending overloaded binary op constraints to resolve later.
-    pending_overloads: Vec<PendingOverload>,
-
-    /// Pending attrset merge constraints to resolve later.
-    pending_merges: Vec<PendingMerge>,
-
-    /// Overloads that couldn't be resolved in their SCC group and should be
-    /// re-instantiated per call-site during extrusion.
-    /// Maps from operand TyId → list of deferred overloads referencing that var.
-    deferred_overloads: Vec<PendingOverload>,
+    /// Constraints whose resolution is deferred until operand types are known.
+    deferred: DeferredConstraints,
 
     /// Early-canonicalized types for names, captured at generalization time
     /// before use-site extrusions contaminate polymorphic variables with
@@ -267,9 +271,7 @@ impl<'db> CheckCtx<'db> {
             poly_type_env: ArenaMap::new(),
             constrain_cache: HashSet::new(),
             prim_cache: HashMap::new(),
-            pending_overloads: Vec::new(),
-            pending_merges: Vec::new(),
-            deferred_overloads: Vec::new(),
+            deferred: DeferredConstraints::default(),
             early_canonical: ArenaMap::new(),
             type_aliases,
             import_types,
