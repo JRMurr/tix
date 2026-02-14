@@ -62,11 +62,19 @@ pub fn semantic_tokens(analysis: &FileAnalysis, root: &rnix::Root) -> Vec<Semant
 
         let range = analysis.line_index.range(token.text_range());
 
+        // For multi-line tokens the end character can be less than the start
+        // character (it's on a different line), so use saturating subtraction
+        // and fall back to the raw text length.
+        let length = range
+            .end
+            .character
+            .checked_sub(range.start.character)
+            .unwrap_or(token.text_range().len().into());
+
         raw_tokens.push(RawToken {
             line: range.start.line,
             start: range.start.character,
-            length: (range.end.character - range.start.character)
-                .max(token.text_range().len().into()),
+            length,
             token_type,
             token_modifiers,
         });
@@ -362,6 +370,20 @@ mod tests {
         assert!(
             lines.iter().any(|&l| l > 0),
             "should have tokens on multiple lines: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn multiline_string_no_overflow() {
+        // Multi-line strings produce a token where end.character < start.character
+        // (the end is on a later line with a smaller column). This must not panic
+        // with a subtraction overflow.
+        let src = "''\n  hello\n  world\n''";
+        let tokens = get_tokens(src);
+        // Should produce at least one STRING token (5) without panicking.
+        assert!(
+            tokens.iter().any(|t| t.3 == 5),
+            "multiline string should produce STRING tokens: {tokens:?}"
         );
     }
 
