@@ -30,6 +30,10 @@ struct Cli {
     /// Paths to .tix stub files or directories (recursive)
     #[arg(long = "stubs", value_name = "PATH")]
     stub_paths: Vec<PathBuf>,
+
+    /// Do not load the built-in nixpkgs stubs
+    #[arg(long)]
+    no_default_stubs: bool,
 }
 
 #[tokio::main]
@@ -39,7 +43,12 @@ async fn main() {
     let args = Cli::parse();
 
     // Load .tix stub files once at startup.
-    let mut registry = TypeAliasRegistry::new();
+    // Built-in nixpkgs stubs are included by default unless --no-default-stubs is passed.
+    let mut registry = if args.no_default_stubs {
+        TypeAliasRegistry::new()
+    } else {
+        TypeAliasRegistry::with_builtins()
+    };
     for stub_path in &args.stub_paths {
         if let Err(e) = load_stubs(&mut registry, stub_path) {
             eprintln!(
@@ -56,9 +65,10 @@ async fn main() {
     let stdout = tokio::io::stdout();
 
     let cli_stub_paths = args.stub_paths;
+    let no_default_stubs = args.no_default_stubs;
 
     let (service, socket) = LspService::new(|client| {
-        server::TixLanguageServer::new(client, registry, cli_stub_paths)
+        server::TixLanguageServer::new(client, registry, cli_stub_paths, no_default_stubs)
     });
 
     Server::new(stdin, stdout, socket).serve(service).await;

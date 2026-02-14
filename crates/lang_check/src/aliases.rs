@@ -13,6 +13,8 @@ use comment_parser::{ParsedTy, ParsedTyRef, TixDeclFile, TixDeclaration};
 use lang_ty::AttrSetTy;
 use smol_str::SmolStr;
 
+const BUILTIN_STUBS: &str = include_str!("../../../stubs/lib.tix");
+
 #[derive(Debug, Clone, Default)]
 pub struct TypeAliasRegistry {
     /// Type alias name -> body (e.g. `Derivation` -> `{ name: string, ... }`)
@@ -25,6 +27,16 @@ pub struct TypeAliasRegistry {
 impl TypeAliasRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Create a registry pre-loaded with the shipped nixpkgs stubs.
+    pub fn with_builtins() -> Self {
+        let mut registry = Self::new();
+        match comment_parser::parse_tix_file(BUILTIN_STUBS) {
+            Ok(file) => registry.load_tix_file(&file),
+            Err(e) => log::warn!("Failed to parse builtin stubs: {e}"),
+        }
+        registry
     }
 
     /// Load declarations from a parsed .tix file into the registry.

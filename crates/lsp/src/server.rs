@@ -24,15 +24,23 @@ pub struct TixLanguageServer {
     /// CLI-provided stub paths, kept so they can be re-loaded when
     /// the config changes at runtime.
     cli_stub_paths: Vec<PathBuf>,
+    /// When true, skip loading built-in nixpkgs stubs.
+    no_default_stubs: bool,
 }
 
 impl TixLanguageServer {
-    pub fn new(client: Client, registry: TypeAliasRegistry, cli_stub_paths: Vec<PathBuf>) -> Self {
+    pub fn new(
+        client: Client,
+        registry: TypeAliasRegistry,
+        cli_stub_paths: Vec<PathBuf>,
+        no_default_stubs: bool,
+    ) -> Self {
         Self {
             client,
             state: Mutex::new(AnalysisState::new(registry)),
             config: Mutex::new(TixConfig::default()),
             cli_stub_paths,
+            no_default_stubs,
         }
     }
 
@@ -82,7 +90,11 @@ impl TixLanguageServer {
 
     /// Build a fresh TypeAliasRegistry from CLI stubs and config stubs.
     fn build_registry(&self, config: &TixConfig) -> TypeAliasRegistry {
-        let mut registry = TypeAliasRegistry::new();
+        let mut registry = if self.no_default_stubs {
+            TypeAliasRegistry::new()
+        } else {
+            TypeAliasRegistry::with_builtins()
+        };
 
         // CLI stubs are always loaded first.
         for stub_path in &self.cli_stub_paths {

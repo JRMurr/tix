@@ -17,13 +17,22 @@ struct Cli {
     /// Paths to .tix stub files or directories (recursive)
     #[arg(long = "stubs", value_name = "PATH")]
     stub_paths: Vec<PathBuf>,
+
+    /// Do not load the built-in nixpkgs stubs
+    #[arg(long)]
+    no_default_stubs: bool,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args = Cli::parse();
 
     // Load .tix stub files into the type alias registry.
-    let mut registry = TypeAliasRegistry::new();
+    // Built-in nixpkgs stubs are included by default unless --no-default-stubs is passed.
+    let mut registry = if args.no_default_stubs {
+        TypeAliasRegistry::new()
+    } else {
+        TypeAliasRegistry::with_builtins()
+    };
     for stub_path in &args.stub_paths {
         load_stubs(&mut registry, stub_path)?;
     }
