@@ -10,6 +10,8 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use la_arena::ArenaMap;
+
 use smol_str::SmolStr;
 
 use super::{CheckCtx, InferenceResult, TyId};
@@ -352,8 +354,8 @@ impl<'db> Collector<'db> {
 
         let name_cnt = self.ctx.module.names().len();
         let expr_cnt = self.ctx.module.exprs().len();
-        let mut name_ty_map = HashMap::with_capacity(name_cnt);
-        let mut expr_ty_map = HashMap::with_capacity(expr_cnt);
+        let mut name_ty_map = ArenaMap::with_capacity(name_cnt);
+        let mut expr_ty_map = ArenaMap::with_capacity(expr_cnt);
 
         // Create a Canonicalizer that borrows the type storage for this pass.
         let mut canon = Canonicalizer::new(&self.ctx.table, &self.ctx.alias_provenance);
@@ -361,7 +363,7 @@ impl<'db> Collector<'db> {
         for (name, ty) in name_tys {
             // Prefer the early-canonicalized type (captured before use-site
             // extrusion contaminated the bounds) over late canonicalization.
-            let output = if let Some(early) = self.ctx.early_canonical.get(&name) {
+            let output = if let Some(early) = self.ctx.early_canonical.get(name) {
                 if matches!(early, OutputTy::TyVar(_)) {
                     // The early snapshot captured no type information (bare variable),
                     // likely because enclosing lambda parameter annotations hadn't

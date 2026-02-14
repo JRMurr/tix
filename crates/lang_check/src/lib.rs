@@ -17,6 +17,7 @@ use aliases::TypeAliasRegistry;
 use comment_parser::{parse_and_collect, ParsedTy, TypeVarValue};
 use derive_more::Debug;
 use infer_expr::{PendingMerge, PendingOverload};
+use la_arena::ArenaMap;
 use lang_ast::{AstDb, ExprId, Module, NameId, NameResolution, NixFile, OverloadBinOp};
 use lang_ty::{OutputTy, PrimitiveTy, Ty};
 use std::collections::{HashMap, HashSet};
@@ -86,18 +87,18 @@ impl From<TyId> for usize {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InferenceResult {
-    pub name_ty_map: HashMap<NameId, OutputTy>,
-    pub expr_ty_map: HashMap<ExprId, OutputTy>,
+    pub name_ty_map: ArenaMap<NameId, OutputTy>,
+    pub expr_ty_map: ArenaMap<ExprId, OutputTy>,
     pub warnings: Vec<LocatedWarning>,
 }
 
 impl InferenceResult {
     pub fn ty_for_name(&self, name: NameId) -> Option<OutputTy> {
-        self.name_ty_map.get(&name).cloned()
+        self.name_ty_map.get(name).cloned()
     }
 
     pub fn ty_for_expr(&self, expr: ExprId) -> Option<OutputTy> {
-        self.expr_ty_map.get(&expr).cloned()
+        self.expr_ty_map.get(expr).cloned()
     }
 }
 
@@ -204,7 +205,7 @@ pub struct CheckCtx<'db> {
 
     /// Maps generalized names to their polymorphic TyId.
     /// The TyId + variable levels encode the polymorphic scheme.
-    poly_type_env: HashMap<NameId, TyId>,
+    poly_type_env: ArenaMap<NameId, TyId>,
 
     /// Cache (sub, sup) pairs already processed by constrain() to avoid cycles.
     /// Intentionally never cleared between SCC groups: extrusion creates fresh
@@ -231,7 +232,7 @@ pub struct CheckCtx<'db> {
     /// Early-canonicalized types for names, captured at generalization time
     /// before use-site extrusions contaminate polymorphic variables with
     /// concrete bounds.
-    early_canonical: HashMap<NameId, OutputTy>,
+    early_canonical: ArenaMap<NameId, OutputTy>,
 
     /// Type alias registry loaded from .tix declaration files.
     type_aliases: TypeAliasRegistry,
@@ -263,13 +264,13 @@ impl<'db> CheckCtx<'db> {
             current_expr: module.entry_expr,
             warnings: Vec::new(),
             table: TypeStorage::new(),
-            poly_type_env: HashMap::new(),
+            poly_type_env: ArenaMap::new(),
             constrain_cache: HashSet::new(),
             prim_cache: HashMap::new(),
             pending_overloads: Vec::new(),
             pending_merges: Vec::new(),
             deferred_overloads: Vec::new(),
-            early_canonical: HashMap::new(),
+            early_canonical: ArenaMap::new(),
             type_aliases,
             import_types,
             alias_provenance: HashMap::new(),

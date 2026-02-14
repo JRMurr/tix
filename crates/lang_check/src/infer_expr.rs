@@ -310,7 +310,7 @@ impl CheckCtx<'_> {
             Some(res) => match res {
                 &ResolveResult::Definition(name) => {
                     // If the name is in poly_type_env, instantiate via extrude.
-                    if let Some(&poly_ty) = self.poly_type_env.get(&name) {
+                    if let Some(&poly_ty) = self.poly_type_env.get(name) {
                         Ok(self.extrude(poly_ty, true))
                     } else {
                         // Not yet generalized — return the pre-allocated TyId directly.
@@ -458,7 +458,7 @@ impl CheckCtx<'_> {
         }
 
         for &(name, value) in bindings.statics.iter() {
-            if self.poly_type_env.contains_key(&name) {
+            if self.poly_type_env.contains_idx(name) {
                 // Already inferred in a previous SCC group.
                 continue;
             }
@@ -490,7 +490,7 @@ impl CheckCtx<'_> {
         for &(name, value) in bindings.statics.iter() {
             let name_text = self.module[name].text.clone();
 
-            if let Some(&poly_ty) = self.poly_type_env.get(&name) {
+            if let Some(&poly_ty) = self.poly_type_env.get(name) {
                 let instantiated = self.extrude(poly_ty, true);
                 fields.insert(name_text, instantiated);
                 continue;

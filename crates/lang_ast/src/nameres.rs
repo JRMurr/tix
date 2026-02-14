@@ -1,6 +1,6 @@
 use std::{collections::HashMap, iter, ops};
 
-use la_arena::{Arena, Idx as Id};
+use la_arena::{Arena, ArenaMap, Idx as Id};
 use petgraph::graph::DiGraph;
 use smol_str::SmolStr;
 
@@ -95,14 +95,14 @@ pub fn scopes(db: &dyn crate::AstDb, file: NixFile) -> ModuleScopes {
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct ModuleScopes {
     pub scopes: Arena<ScopeData>,
-    pub scope_by_expr: HashMap<ExprId, ScopeId>,
+    pub scope_by_expr: ArenaMap<ExprId, ScopeId>,
 }
 
 impl ModuleScopes {
     pub fn new(module: Module) -> Self {
         let mut ms = ModuleScopes {
             scopes: Arena::new(),
-            scope_by_expr: HashMap::with_capacity(module.exprs.len()),
+            scope_by_expr: ArenaMap::with_capacity(module.exprs.len()),
         };
         let root_scope = ms.scopes.alloc(ScopeData {
             parent: None,
@@ -114,7 +114,7 @@ impl ModuleScopes {
     }
 
     pub fn scope_for_expr(&self, expr_id: ExprId) -> Option<ScopeId> {
-        self.scope_by_expr.get(&expr_id).copied()
+        self.scope_by_expr.get(expr_id).copied()
     }
 
     pub fn ancestors(&self, scope_id: ScopeId) -> impl Iterator<Item = &'_ ScopeData> + '_ {
@@ -254,7 +254,7 @@ impl ModuleScopes {
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct NameResolution {
     /// `None` value for unresolved names.
-    resolve_map: HashMap<ExprId, Option<ResolveResult>>,
+    resolve_map: ArenaMap<ExprId, Option<ResolveResult>>,
 }
 
 #[salsa::tracked]
@@ -270,21 +270,21 @@ pub fn name_resolution(db: &dyn crate::AstDb, file: NixFile) -> NameResolution {
                 _ => None,
             }
         })
-        .collect::<HashMap<_, _>>();
+        .collect::<ArenaMap<_, _>>();
 
     NameResolution { resolve_map }
 }
 
 impl NameResolution {
     pub fn get(&self, expr: ExprId) -> Option<&ResolveResult> {
-        self.resolve_map.get(&expr)?.as_ref()
+        self.resolve_map.get(expr)?.as_ref()
     }
 
     #[allow(dead_code)]
     pub fn iter(&self) -> impl Iterator<Item = (ExprId, &'_ ResolveResult)> + '_ {
         self.resolve_map
             .iter()
-            .filter_map(|(e, res)| Some((*e, res.as_ref()?)))
+            .filter_map(|(e, res)| Some((e, res.as_ref()?)))
     }
 }
 
@@ -300,10 +300,8 @@ struct NameDependencies {
 
 impl NameDependencies {
     pub fn new(module: &Module, name_res: &NameResolution) -> Self {
-        let num_refs = name_res.resolve_map.len();
-
         let mut name_deps = Self {
-            edges: Vec::with_capacity(num_refs),
+            edges: Vec::with_capacity(module.exprs.len()),
             name_to_expr: HashMap::new(),
         };
 

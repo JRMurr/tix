@@ -142,7 +142,7 @@ fn resolve_base_type(
     base_expr_id: ExprId,
 ) -> Option<OutputTy> {
     // Primary: direct expr_ty_map lookup.
-    if let Some(ty) = inference.expr_ty_map.get(&base_expr_id) {
+    if let Some(ty) = inference.expr_ty_map.get(base_expr_id) {
         if !collect_attrset_fields(ty).is_empty() {
             return Some(ty.clone());
         }
@@ -155,12 +155,12 @@ fn resolve_base_type(
         _ => {
             // For `with` expressions, try the expr_ty_map type even if it
             // has no attrset fields (it may still be useful after segment resolution).
-            return inference.expr_ty_map.get(&base_expr_id).cloned();
+            return inference.expr_ty_map.get(base_expr_id).cloned();
         }
     };
 
     // Check name_ty_map for a concrete type.
-    if let Some(name_ty) = inference.name_ty_map.get(&name_id) {
+    if let Some(name_ty) = inference.name_ty_map.get(name_id) {
         if !collect_attrset_fields(name_ty).is_empty() {
             return Some(name_ty.clone());
         }
@@ -171,7 +171,7 @@ fn resolve_base_type(
     let name = &analysis.module[name_id];
     if matches!(name.kind, NameKind::Param | NameKind::PatField) {
         if let Some(lambda_expr_id) = find_lambda_for_param(&analysis.module, name_id) {
-            if let Some(lambda_ty) = inference.expr_ty_map.get(&lambda_expr_id) {
+            if let Some(lambda_ty) = inference.expr_ty_map.get(lambda_expr_id) {
                 log::debug!(
                     "dot_completion fallback: lambda ty={lambda_ty} for param {:?}",
                     name.text
@@ -194,7 +194,7 @@ fn resolve_base_type(
     }
 
     // Last resort: return whatever expr_ty_map has, even if it's a TyVar.
-    inference.expr_ty_map.get(&base_expr_id).cloned()
+    inference.expr_ty_map.get(base_expr_id).cloned()
 }
 
 /// Find the Lambda ExprId that owns the given parameter NameId.
@@ -313,7 +313,7 @@ fn try_callsite_completion(
     let fun_expr_id = analysis.source_map.expr_for_node(fun_ptr)?;
 
     // Look up the function's type.
-    let fun_ty = inference.expr_ty_map.get(&fun_expr_id)?;
+    let fun_ty = inference.expr_ty_map.get(fun_expr_id)?;
 
     log::debug!("callsite_completion: fun_ty={fun_ty}");
 
@@ -394,7 +394,7 @@ fn try_inherit_completion(
         let expr_node = from.expr()?;
         let expr_ptr = AstPtr::new(expr_node.syntax());
         let expr_id = analysis.source_map.expr_for_node(expr_ptr)?;
-        let ty = inference.expr_ty_map.get(&expr_id)?;
+        let ty = inference.expr_ty_map.get(expr_id)?;
         let fields = collect_attrset_fields(ty);
 
         let items = fields
@@ -525,12 +525,12 @@ fn collect_visible_names(
             for (name, name_id) in defs {
                 result
                     .entry(name.clone())
-                    .or_insert_with(|| inference.name_ty_map.get(name_id).cloned());
+                    .or_insert_with(|| inference.name_ty_map.get(*name_id).cloned());
             }
         } else if let Some(with_expr_id) = scope_data.as_with() {
             // The With expression's env is the first child.
             if let Expr::With { env, .. } = &analysis.module[with_expr_id] {
-                if let Some(env_ty) = inference.expr_ty_map.get(env) {
+                if let Some(env_ty) = inference.expr_ty_map.get(*env) {
                     for (field_name, field_ty) in collect_attrset_fields(env_ty) {
                         result
                             .entry(field_name)

@@ -69,7 +69,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // multiple times (e.g. a let-binding and an inherit reference).
     let mut seen = std::collections::BTreeMap::<String, OutputTy>::new();
     for (name_id, name) in module.names() {
-        if let Some(ty) = inference.name_ty_map.get(&name_id) {
+        if let Some(ty) = inference.name_ty_map.get(name_id) {
             seen.entry(name.text.to_string())
                 .and_modify(|existing| {
                     // When the same name appears multiple times (e.g. a let-binding
@@ -99,7 +99,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Print the root expression type.
     let root_ty = inference
         .expr_ty_map
-        .get(&module.entry_expr)
+        .get(module.entry_expr)
         .expect("No type for root module entry");
 
     println!("\nRoot type:\n  {root_ty}");

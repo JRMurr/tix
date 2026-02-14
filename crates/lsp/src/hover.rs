@@ -28,7 +28,7 @@ pub fn hover(analysis: &FileAnalysis, pos: Position, root: &rnix::Root) -> Optio
 
         // Check for a name at this node first (shows the binding's type).
         if let Some(name_id) = analysis.source_map.name_for_node(ptr) {
-            if let Some(ty) = inference.name_ty_map.get(&name_id) {
+            if let Some(ty) = inference.name_ty_map.get(name_id) {
                 let name_text = &analysis.module[name_id].text;
                 let range = analysis.line_index.range(node.text_range());
                 return Some(make_hover(format!("{name_text} :: {ty}"), range));
@@ -37,7 +37,7 @@ pub fn hover(analysis: &FileAnalysis, pos: Position, root: &rnix::Root) -> Optio
 
         // Then check for an expression.
         if let Some(expr_id) = analysis.source_map.expr_for_node(ptr) {
-            if let Some(ty) = inference.expr_ty_map.get(&expr_id) {
+            if let Some(ty) = inference.expr_ty_map.get(expr_id) {
                 let range = analysis.line_index.range(node.text_range());
                 return Some(make_hover(format!("{ty}"), range));
             }

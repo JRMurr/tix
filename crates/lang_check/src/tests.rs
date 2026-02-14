@@ -27,7 +27,7 @@ pub fn get_inferred_root_with_aliases(src: &str, aliases: &TypeAliasRegistry) ->
     let inference = inference.expect("No type error");
     inference
         .expr_ty_map
-        .get(&module.entry_expr)
+        .get(module.entry_expr)
         .expect("No type for root module entry")
         .clone()
 }
@@ -39,7 +39,7 @@ pub fn get_inferred_root(src: &str) -> OutputTy {
 
     inference
         .expr_ty_map
-        .get(&module.entry_expr)
+        .get(module.entry_expr)
         .expect("No type for root module entry")
         .clone()
 }
@@ -521,7 +521,7 @@ fn get_name_type_with_aliases(src: &str, name: &str, aliases: &TypeAliasRegistry
     let mut best: Option<OutputTy> = None;
     for (name_id, name_data) in module.names() {
         if name_data.text == name {
-            if let Some(ty) = inference.name_ty_map.get(&name_id) {
+            if let Some(ty) = inference.name_ty_map.get(name_id) {
                 let is_better = match &best {
                     None => true,
                     Some(prev) => {
@@ -1163,7 +1163,7 @@ mod import_tests {
 
         let root_ty = result
             .expr_ty_map
-            .get(&module.entry_expr)
+            .get(module.entry_expr)
             .expect("root expr should have a type")
             .clone();
 

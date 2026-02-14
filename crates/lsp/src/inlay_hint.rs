@@ -47,7 +47,7 @@ pub fn inlay_hints(
         }
 
         // Look up the inferred type.
-        let ty = match inference.name_ty_map.get(&name_id) {
+        let ty = match inference.name_ty_map.get(name_id) {
             Some(t) => t,
             None => continue,
         };

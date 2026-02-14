@@ -118,7 +118,7 @@ impl CheckCtx<'_> {
         // Record the inferred type in poly_type_env for successfully-inferred
         // names, resolving Variables to their concrete type where possible.
         for (name_id, ty) in inferred {
-            if self.poly_type_env.contains_key(&name_id) {
+            if self.poly_type_env.contains_idx(name_id) {
                 continue;
             }
             let poly_ty = self.resolve_to_concrete_id(ty).unwrap_or(ty);

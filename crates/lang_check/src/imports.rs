@@ -214,7 +214,7 @@ pub fn resolve_imports(
             Ok(result) => {
                 let root_ty = result
                     .expr_ty_map
-                    .get(&target_module.entry_expr)
+                    .get(target_module.entry_expr)
                     .cloned()
                     .unwrap_or(OutputTy::TyVar(0));
 
