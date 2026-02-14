@@ -83,34 +83,13 @@ impl OutputTy {
     }
 
     pub fn normalize_inner(&self, free: &Substitutions) -> OutputTy {
-        match self {
-            OutputTy::TyVar(x) => {
-                let new_idx = free.get(x).unwrap();
-                OutputTy::TyVar(*new_idx)
-            }
-            OutputTy::List(inner) => OutputTy::List(inner.0.normalize_inner(free).into()),
-            OutputTy::Lambda { param, body } => OutputTy::Lambda {
-                param: param.0.normalize_inner(free).into(),
-                body: body.0.normalize_inner(free).into(),
-            },
-            OutputTy::AttrSet(attr_set_ty) => OutputTy::AttrSet(attr_set_ty.normalize_inner(free)),
-            OutputTy::Primitive(_) => self.clone(),
-            OutputTy::Union(members) => OutputTy::Union(
-                members
-                    .iter()
-                    .map(|m| m.0.normalize_inner(free).into())
-                    .collect(),
-            ),
-            OutputTy::Intersection(members) => OutputTy::Intersection(
-                members
-                    .iter()
-                    .map(|m| m.0.normalize_inner(free).into())
-                    .collect(),
-            ),
-            OutputTy::Named(name, inner) => {
-                OutputTy::Named(name.clone(), inner.0.normalize_inner(free).into())
-            }
+        // TyVar is the only leaf that transforms (renumbering); handle it
+        // explicitly, then delegate structural recursion to map_children.
+        if let OutputTy::TyVar(x) = self {
+            let new_idx = free.get(x).unwrap();
+            return OutputTy::TyVar(*new_idx);
         }
+        self.map_children(&mut |child| child.normalize_inner(free))
     }
 
     /// Returns true if any Lambda in this type has a non-primitive param type.
@@ -118,49 +97,34 @@ impl OutputTy {
     /// code generation pattern doesn't fully constrain non-primitive params in
     /// SimpleSub's polarity-aware canonicalization.
     pub fn has_non_primitive_lambda_param(&self) -> bool {
-        match self {
-            OutputTy::Lambda { param, body } => {
-                !matches!(&*param.0, OutputTy::Primitive(_) | OutputTy::TyVar(_))
-                    || param.0.has_non_primitive_lambda_param()
-                    || body.0.has_non_primitive_lambda_param()
+        // Lambda has a special check on the param type before recursing.
+        if let OutputTy::Lambda { param, .. } = self {
+            if !matches!(&*param.0, OutputTy::Primitive(_) | OutputTy::TyVar(_)) {
+                return true;
             }
-            OutputTy::List(inner) => inner.0.has_non_primitive_lambda_param(),
-            OutputTy::AttrSet(attr) => {
-                attr.fields
-                    .values()
-                    .any(|v| v.0.has_non_primitive_lambda_param())
-                    || attr
-                        .dyn_ty
-                        .as_ref()
-                        .is_some_and(|d| d.0.has_non_primitive_lambda_param())
-            }
-            OutputTy::Union(members) | OutputTy::Intersection(members) => {
-                members.iter().any(|m| m.0.has_non_primitive_lambda_param())
-            }
-            OutputTy::TyVar(_) | OutputTy::Primitive(_) => false,
-            OutputTy::Named(_, inner) => inner.0.has_non_primitive_lambda_param(),
         }
+        let mut found = false;
+        self.for_each_child(&mut |child| {
+            if !found {
+                found = child.has_non_primitive_lambda_param();
+            }
+        });
+        found
     }
 
     /// Returns true if this type or any of its children contains a Union or Intersection.
     pub fn contains_union_or_intersection(&self) -> bool {
         match self {
             OutputTy::Union(_) | OutputTy::Intersection(_) => true,
-            OutputTy::TyVar(_) | OutputTy::Primitive(_) => false,
-            OutputTy::List(inner) => inner.0.contains_union_or_intersection(),
-            OutputTy::Lambda { param, body } => {
-                param.0.contains_union_or_intersection() || body.0.contains_union_or_intersection()
+            _ => {
+                let mut found = false;
+                self.for_each_child(&mut |child| {
+                    if !found {
+                        found = child.contains_union_or_intersection();
+                    }
+                });
+                found
             }
-            OutputTy::AttrSet(attr) => {
-                attr.fields
-                    .values()
-                    .any(|v| v.0.contains_union_or_intersection())
-                    || attr
-                        .dyn_ty
-                        .as_ref()
-                        .is_some_and(|d| d.0.contains_union_or_intersection())
-            }
-            OutputTy::Named(_, inner) => inner.0.contains_union_or_intersection(),
         }
     }
 
@@ -173,32 +137,83 @@ impl OutputTy {
     }
 
     fn collect_free_type_vars(&self, result: &mut Vec<u32>, seen: &mut rustc_hash::FxHashSet<u32>) {
+        if let OutputTy::TyVar(x) = self {
+            if seen.insert(*x) {
+                result.push(*x);
+            }
+            return;
+        }
+        self.for_each_child(&mut |child| child.collect_free_type_vars(result, seen));
+    }
+
+    // ==========================================================================
+    // Child traversal helpers
+    // ==========================================================================
+    //
+    // Centralise the "recurse into direct children" logic so that new OutputTy
+    // variants only need one update site. These are intentionally shallow — they
+    // apply `f` to each direct child but do NOT recurse; callers compose
+    // recursion themselves.
+
+    /// Apply `f` to every direct child, producing a new OutputTy with the same
+    /// variant structure. Leaf variants (TyVar, Primitive) are returned as-is.
+    pub fn map_children(&self, f: &mut impl FnMut(&OutputTy) -> OutputTy) -> OutputTy {
         match self {
-            OutputTy::TyVar(x) => {
-                if seen.insert(*x) {
-                    result.push(*x);
-                }
+            OutputTy::TyVar(_) | OutputTy::Primitive(_) => self.clone(),
+            OutputTy::List(inner) => OutputTy::List(f(&inner.0).into()),
+            OutputTy::Lambda { param, body } => OutputTy::Lambda {
+                param: f(&param.0).into(),
+                body: f(&body.0).into(),
+            },
+            OutputTy::AttrSet(attr) => {
+                let fields = attr
+                    .fields
+                    .iter()
+                    .map(|(k, v)| (k.clone(), f(&v.0).into()))
+                    .collect();
+                let dyn_ty = attr.dyn_ty.as_ref().map(|d| f(&d.0).into());
+                OutputTy::AttrSet(AttrSetTy {
+                    fields,
+                    dyn_ty,
+                    open: attr.open,
+                })
             }
-            OutputTy::List(inner) => inner.0.collect_free_type_vars(result, seen),
+            OutputTy::Union(members) => {
+                OutputTy::Union(members.iter().map(|m| f(&m.0).into()).collect())
+            }
+            OutputTy::Intersection(members) => {
+                OutputTy::Intersection(members.iter().map(|m| f(&m.0).into()).collect())
+            }
+            OutputTy::Named(name, inner) => {
+                OutputTy::Named(name.clone(), f(&inner.0).into())
+            }
+        }
+    }
+
+    /// Visit every direct child for read-only inspection. Leaf variants
+    /// (TyVar, Primitive) have no children, so `f` is never called on them.
+    pub fn for_each_child(&self, f: &mut impl FnMut(&OutputTy)) {
+        match self {
+            OutputTy::TyVar(_) | OutputTy::Primitive(_) => {}
+            OutputTy::List(inner) => f(&inner.0),
             OutputTy::Lambda { param, body } => {
-                param.0.collect_free_type_vars(result, seen);
-                body.0.collect_free_type_vars(result, seen);
+                f(&param.0);
+                f(&body.0);
             }
-            OutputTy::AttrSet(attr_set_ty) => {
-                for v in attr_set_ty.fields.values() {
-                    v.0.collect_free_type_vars(result, seen);
+            OutputTy::AttrSet(attr) => {
+                for v in attr.fields.values() {
+                    f(&v.0);
                 }
-                if let Some(dyn_ty) = &attr_set_ty.dyn_ty {
-                    dyn_ty.0.collect_free_type_vars(result, seen);
+                if let Some(dyn_ty) = &attr.dyn_ty {
+                    f(&dyn_ty.0);
                 }
             }
-            OutputTy::Primitive(_) => {}
             OutputTy::Union(members) | OutputTy::Intersection(members) => {
                 for m in members {
-                    m.0.collect_free_type_vars(result, seen);
+                    f(&m.0);
                 }
             }
-            OutputTy::Named(_, inner) => inner.0.collect_free_type_vars(result, seen),
+            OutputTy::Named(_, inner) => f(&inner.0),
         }
     }
 }
@@ -355,22 +370,4 @@ impl AttrSetTy<TyRef> {
         result
     }
 
-    pub(crate) fn normalize_inner(&self, free: &Substitutions) -> Self {
-        let fields = self
-            .fields
-            .iter()
-            .map(|(k, v)| (k.clone(), v.0.normalize_inner(free).into()))
-            .collect();
-
-        let dyn_ty = self
-            .dyn_ty
-            .clone()
-            .map(|dyn_ty| dyn_ty.0.normalize_inner(free).into());
-
-        Self {
-            fields,
-            dyn_ty,
-            open: self.open,
-        }
-    }
 }
