@@ -25,6 +25,8 @@ rnix = "0.11.0"
 # TODO: same as rnix, not sure if we need copying from nixdoc for now
 rowan = "0.15"
 rustc-hash = "2.1.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 tower-lsp = "0.20"
 tokio = { version = "1", features = ["full"] }
 

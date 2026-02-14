@@ -14,18 +14,25 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 
+use crate::config::TixConfig;
 use crate::state::AnalysisState;
 
 pub struct TixLanguageServer {
     client: Client,
     state: Mutex<AnalysisState>,
+    config: Mutex<TixConfig>,
+    /// CLI-provided stub paths, kept so they can be re-loaded when
+    /// the config changes at runtime.
+    cli_stub_paths: Vec<PathBuf>,
 }
 
 impl TixLanguageServer {
-    pub fn new(client: Client, registry: TypeAliasRegistry) -> Self {
+    pub fn new(client: Client, registry: TypeAliasRegistry, cli_stub_paths: Vec<PathBuf>) -> Self {
         Self {
             client,
             state: Mutex::new(AnalysisState::new(registry)),
+            config: Mutex::new(TixConfig::default()),
+            cli_stub_paths,
         }
     }
 
@@ -37,42 +44,95 @@ impl TixLanguageServer {
             None => return,
         };
 
+        let diagnostics_enabled = self.config.lock().unwrap().diagnostics.enable;
+
         // All analysis runs in spawn_blocking because rnix::Root is !Send.
         // We gather the LSP-safe results (diagnostics) inside the blocking
-        // closure and publish them afterwards.
+        // closure and publish them afterwards. We always run analysis (needed
+        // for hover, completion, etc.) but only collect diagnostics if enabled.
         let diagnostics = {
             let mut state = self.state.lock().unwrap();
             let analysis = state.update_file(path, text.clone());
 
-            // Parse again for diagnostic source mapping. The Salsa-cached parse
-            // isn't stored (Root is !Send), so we re-parse here. This is cheap
-            // for single files.
-            let root = rnix::Root::parse(&text).tree();
+            if diagnostics_enabled {
+                let root = rnix::Root::parse(&text).tree();
 
-            let mut diags = crate::diagnostics::to_diagnostics(
-                &analysis.check_result.errors,
-                &analysis.source_map,
-                &analysis.line_index,
-                &root,
-            );
-            diags.extend(crate::diagnostics::warnings_to_diagnostics(
-                &analysis.check_result.warnings,
-                &analysis.source_map,
-                &analysis.line_index,
-                &root,
-            ));
-            diags
+                let mut diags = crate::diagnostics::to_diagnostics(
+                    &analysis.check_result.errors,
+                    &analysis.source_map,
+                    &analysis.line_index,
+                    &root,
+                );
+                diags.extend(crate::diagnostics::warnings_to_diagnostics(
+                    &analysis.check_result.warnings,
+                    &analysis.source_map,
+                    &analysis.line_index,
+                    &root,
+                ));
+                diags
+            } else {
+                vec![]
+            }
         };
 
         self.client
             .publish_diagnostics(uri, diagnostics, None)
             .await;
     }
+
+    /// Build a fresh TypeAliasRegistry from CLI stubs and config stubs.
+    fn build_registry(&self, config: &TixConfig) -> TypeAliasRegistry {
+        let mut registry = TypeAliasRegistry::new();
+
+        // CLI stubs are always loaded first.
+        for stub_path in &self.cli_stub_paths {
+            if let Err(e) = crate::load_stubs(&mut registry, stub_path) {
+                log::warn!(
+                    "Failed to load CLI stubs from {}: {e}",
+                    stub_path.display()
+                );
+            }
+        }
+
+        // Then config-provided stubs.
+        for stub_path in &config.stubs {
+            if let Err(e) = crate::load_stubs(&mut registry, stub_path) {
+                log::warn!(
+                    "Failed to load config stubs from {}: {e}",
+                    stub_path.display()
+                );
+            }
+        }
+
+        if let Err(cycles) = registry.validate() {
+            log::warn!("Cyclic type aliases detected: {:?}", cycles);
+        }
+
+        registry
+    }
 }
 
 #[tower_lsp::async_trait]
 impl LanguageServer for TixLanguageServer {
-    async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult> {
+    async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
+        // Parse editor-provided settings from initializationOptions.
+        if let Some(opts) = params.initialization_options {
+            match serde_json::from_value::<TixConfig>(opts) {
+                Ok(init_config) => {
+                    // If the editor provided stubs paths, rebuild the registry
+                    // to include both CLI and editor-configured stubs.
+                    if !init_config.stubs.is_empty() {
+                        let registry = self.build_registry(&init_config);
+                        self.state.lock().unwrap().reload_registry(registry);
+                    }
+                    *self.config.lock().unwrap() = init_config;
+                }
+                Err(e) => {
+                    log::warn!("Failed to parse initializationOptions: {e}");
+                }
+            }
+        }
+
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
@@ -147,6 +207,67 @@ impl LanguageServer for TixLanguageServer {
             let mut state = self.state.lock().unwrap();
             state.files.remove(&path);
         }
+    }
+
+    async fn did_change_configuration(&self, params: DidChangeConfigurationParams) {
+        let new_config = match serde_json::from_value::<TixConfig>(params.settings) {
+            Ok(c) => c,
+            Err(e) => {
+                log::warn!("Failed to parse configuration: {e}");
+                return;
+            }
+        };
+
+        // Check if stubs changed — if so, rebuild the registry and re-analyze.
+        let stubs_changed = {
+            let old = self.config.lock().unwrap();
+            old.stubs != new_config.stubs
+        };
+
+        // Collect diagnostics to publish while holding the lock, then
+        // release the lock before awaiting the publish calls.
+        let file_diagnostics = if stubs_changed {
+            let registry = self.build_registry(&new_config);
+            let mut state = self.state.lock().unwrap();
+            state.reload_registry(registry);
+
+            let diagnostics_enabled = new_config.diagnostics.enable;
+            state
+                .files
+                .iter()
+                .filter_map(|(path, analysis)| {
+                    let uri = Url::from_file_path(path).ok()?;
+                    let diags = if diagnostics_enabled {
+                        let contents = analysis.nix_file.contents(&state.db);
+                        let root = rnix::Root::parse(contents).tree();
+                        let mut d = crate::diagnostics::to_diagnostics(
+                            &analysis.check_result.errors,
+                            &analysis.source_map,
+                            &analysis.line_index,
+                            &root,
+                        );
+                        d.extend(crate::diagnostics::warnings_to_diagnostics(
+                            &analysis.check_result.warnings,
+                            &analysis.source_map,
+                            &analysis.line_index,
+                            &root,
+                        ));
+                        d
+                    } else {
+                        vec![]
+                    };
+                    Some((uri, diags))
+                })
+                .collect::<Vec<_>>()
+        } else {
+            vec![]
+        };
+
+        for (uri, diags) in file_diagnostics {
+            self.client.publish_diagnostics(uri, diags, None).await;
+        }
+
+        *self.config.lock().unwrap() = new_config;
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
@@ -432,6 +553,10 @@ impl LanguageServer for TixLanguageServer {
     }
 
     async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
+        if !self.config.lock().unwrap().inlay_hints.enable {
+            return Ok(Some(vec![]));
+        }
+
         let uri = params.text_document.uri;
         let path = match uri_to_path(&uri) {
             Some(p) => p,

@@ -1,4 +1,5 @@
 mod completion;
+mod config;
 mod convert;
 mod diagnostics;
 mod document_highlight;
@@ -54,17 +55,20 @@ async fn main() {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
 
-    let (service, socket) =
-        LspService::new(|client| server::TixLanguageServer::new(client, registry));
+    let cli_stub_paths = args.stub_paths;
+
+    let (service, socket) = LspService::new(|client| {
+        server::TixLanguageServer::new(client, registry, cli_stub_paths)
+    });
 
     Server::new(stdin, stdout, socket).serve(service).await;
 }
 
 /// Load .tix files from a path. If the path is a file, load it directly.
 /// If it's a directory, recursively find all .tix files and load them.
-fn load_stubs(
+pub(crate) fn load_stubs(
     registry: &mut TypeAliasRegistry,
-    path: &PathBuf,
+    path: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if path.is_dir() {
         for entry in std::fs::read_dir(path)? {
