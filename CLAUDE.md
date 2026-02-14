@@ -25,6 +25,11 @@ Run a single test:
 cargo test --package lang_check -- test_name
 ```
 
+
+## Must Do
+
+Whenever you fix a bug add a regression test for it
+
 ## Workspace Crates
 
 Five crates under `crates/`, listed in pipeline order:
