@@ -93,10 +93,13 @@ fn build_selection_range(
 mod tests {
     use super::*;
     use crate::state::AnalysisState;
-    use crate::test_util::{find_offset, temp_path};
+    use crate::test_util::{parse_markers, temp_path};
+    use indoc::indoc;
     use lang_check::aliases::TypeAliasRegistry;
 
-    fn get_ranges(src: &str, offset: u32) -> Vec<tower_lsp::lsp_types::Range> {
+    fn get_ranges_at_marker(src: &str, marker: u32) -> Vec<tower_lsp::lsp_types::Range> {
+        let markers = parse_markers(src);
+        let offset = markers[&marker];
         let path = temp_path("test.nix");
         let mut state = AnalysisState::new(TypeAliasRegistry::default());
         state.update_file(path.clone(), src.to_string());
@@ -119,9 +122,11 @@ mod tests {
 
     #[test]
     fn ranges_nest_from_token_to_root() {
-        let src = "let x = 1; in x";
-        let offset = find_offset(src, "1");
-        let ranges = get_ranges(src, offset);
+        let src = indoc! {"
+            let x = 1; in x
+            #       ^1
+        "};
+        let ranges = get_ranges_at_marker(src, 1);
 
         // Should have at least: token "1" → literal → binding value → let-in → root
         assert!(
@@ -129,10 +134,10 @@ mod tests {
             "should have nested ranges, got {ranges:?}"
         );
 
-        // Innermost should be the token "1" range.
+        // Innermost should be the token "1" range (column 8, length 1).
         let first = ranges[0];
-        assert_eq!(first.start.character as u32, offset);
-        assert_eq!(first.end.character as u32, offset + 1);
+        assert_eq!(first.start.character, 8);
+        assert_eq!(first.end.character, 9);
 
         // Outermost should cover the whole source.
         let last = ranges.last().unwrap();
@@ -141,15 +146,19 @@ mod tests {
 
     #[test]
     fn multiple_positions_in_one_request() {
-        let src = "let x = 1; in x";
+        let src = indoc! {"
+            let x = 1; in x
+            #       ^1     ^2
+        "};
+        let markers = parse_markers(src);
         let path = temp_path("test.nix");
         let mut state = AnalysisState::new(TypeAliasRegistry::default());
         state.update_file(path.clone(), src.to_string());
         let analysis = state.get_file(&path).unwrap();
         let root = rnix::Root::parse(src).tree();
 
-        let pos1 = analysis.line_index.position(find_offset(src, "1"));
-        let pos2 = analysis.line_index.position(find_offset(src, "in x") + 3);
+        let pos1 = analysis.line_index.position(markers[&1]);
+        let pos2 = analysis.line_index.position(markers[&2]);
 
         let results = selection_ranges(analysis, vec![pos1, pos2], &root);
         assert_eq!(results.len(), 2);
@@ -157,9 +166,11 @@ mod tests {
 
     #[test]
     fn deduplicates_identical_ranges() {
-        let src = "let x = 1; in x";
-        let offset = find_offset(src, "1");
-        let ranges = get_ranges(src, offset);
+        let src = indoc! {"
+            let x = 1; in x
+            #       ^1
+        "};
+        let ranges = get_ranges_at_marker(src, 1);
 
         // No two consecutive ranges should be identical.
         for pair in ranges.windows(2) {

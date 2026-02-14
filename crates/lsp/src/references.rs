@@ -94,84 +94,73 @@ pub fn find_references(
 mod tests {
     use super::*;
     use crate::state::AnalysisState;
-    use crate::test_util::{find_offset, temp_path};
+    use crate::test_util::{parse_markers, temp_path};
+    use indoc::indoc;
     use lang_check::aliases::TypeAliasRegistry;
 
-    #[test]
-    fn references_for_let_binding() {
-        let src = "let x = 1; in x + x";
+    /// Analyze source, parse markers, and return everything needed for reference tests.
+    fn refs_at_marker(
+        src: &str,
+        marker: u32,
+        include_declaration: bool,
+    ) -> Vec<Location> {
+        let markers = parse_markers(src);
+        let offset = markers[&marker];
         let path = temp_path("test.nix");
         let mut state = AnalysisState::new(TypeAliasRegistry::default());
         state.update_file(path.clone(), src.to_string());
         let analysis = state.get_file(&path).unwrap();
         let uri = Url::from_file_path(&path).unwrap();
         let root = rnix::Root::parse(src).tree();
+        let pos = analysis.line_index.position(offset);
+        find_references(analysis, pos, &uri, &root, include_declaration)
+    }
 
-        // Cursor on the definition `x`.
-        let def_offset = find_offset(src, "x = 1");
-        let pos = analysis.line_index.position(def_offset);
+    #[test]
+    fn references_for_let_binding() {
+        let src = indoc! {"
+            let x = 1; in x + x
+            #   ^1         ^2
+        "};
 
-        let refs = find_references(analysis, pos, &uri, &root, false);
+        // From the definition site.
+        let refs = refs_at_marker(src, 1, false);
         assert_eq!(refs.len(), 2, "should find 2 references to x");
 
-        let refs_with_decl = find_references(analysis, pos, &uri, &root, true);
-        assert_eq!(
-            refs_with_decl.len(),
-            3,
-            "should find 2 refs + 1 declaration"
-        );
+        let refs_with_decl = refs_at_marker(src, 1, true);
+        assert_eq!(refs_with_decl.len(), 3, "should find 2 refs + 1 declaration");
     }
 
     #[test]
     fn references_from_usage_site() {
-        let src = "let x = 1; in x + x";
-        let path = temp_path("test.nix");
-        let mut state = AnalysisState::new(TypeAliasRegistry::default());
-        state.update_file(path.clone(), src.to_string());
-        let analysis = state.get_file(&path).unwrap();
-        let uri = Url::from_file_path(&path).unwrap();
-        let root = rnix::Root::parse(src).tree();
+        let src = indoc! {"
+            let x = 1; in x + x
+            #             ^1
+        "};
 
-        // Cursor on a reference `x` (the one after `in `).
-        let ref_offset = find_offset(src, "in x") + 3;
-        let pos = analysis.line_index.position(ref_offset);
-
-        let refs = find_references(analysis, pos, &uri, &root, true);
+        let refs = refs_at_marker(src, 1, true);
         assert_eq!(refs.len(), 3, "should find 2 refs + 1 declaration");
     }
 
     #[test]
     fn no_references_for_unused_binding() {
-        let src = "let x = 1; y = 2; in y";
-        let path = temp_path("test.nix");
-        let mut state = AnalysisState::new(TypeAliasRegistry::default());
-        state.update_file(path.clone(), src.to_string());
-        let analysis = state.get_file(&path).unwrap();
-        let uri = Url::from_file_path(&path).unwrap();
-        let root = rnix::Root::parse(src).tree();
+        let src = indoc! {"
+            let x = 1; y = 2; in y
+            #   ^1
+        "};
 
-        let def_offset = find_offset(src, "x = 1");
-        let pos = analysis.line_index.position(def_offset);
-
-        let refs = find_references(analysis, pos, &uri, &root, false);
+        let refs = refs_at_marker(src, 1, false);
         assert_eq!(refs.len(), 0, "x has no references");
     }
 
     #[test]
     fn with_expr_returns_empty() {
-        let src = "with { foo = 1; }; foo";
-        let path = temp_path("test.nix");
-        let mut state = AnalysisState::new(TypeAliasRegistry::default());
-        state.update_file(path.clone(), src.to_string());
-        let analysis = state.get_file(&path).unwrap();
-        let uri = Url::from_file_path(&path).unwrap();
-        let root = rnix::Root::parse(src).tree();
+        let src = indoc! {"
+            with { foo = 1; }; foo
+            #                  ^1
+        "};
 
-        // Cursor on `foo` — resolves via `with`, not to a NameId.
-        let offset = find_offset(src, "; foo") + 2;
-        let pos = analysis.line_index.position(offset);
-
-        let refs = find_references(analysis, pos, &uri, &root, true);
+        let refs = refs_at_marker(src, 1, true);
         assert!(refs.is_empty(), "with-resolved names have no NameId");
     }
 }

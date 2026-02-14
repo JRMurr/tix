@@ -169,10 +169,8 @@ mod tests {
     fn attrset_fields_produce_property_symbols() {
         let symbols = get_symbols("{ a = 1; b = 2; }");
         assert_eq!(symbols.len(), 2);
-        assert_eq!(symbols[0].name, "a");
-        assert_eq!(symbols[0].kind, SymbolKind::PROPERTY);
-        assert_eq!(symbols[1].name, "b");
-        assert_eq!(symbols[1].kind, SymbolKind::PROPERTY);
+        assert_eq!(names(&symbols), vec!["a", "b"]);
+        assert!(symbols.iter().all(|s| s.kind == SymbolKind::PROPERTY));
     }
 
     #[test]

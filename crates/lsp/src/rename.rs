@@ -87,40 +87,66 @@ pub fn rename(
 mod tests {
     use super::*;
     use crate::state::AnalysisState;
-    use crate::test_util::{find_offset, temp_path};
+    use crate::test_util::{parse_markers, temp_path};
+    use indoc::indoc;
     use lang_check::aliases::TypeAliasRegistry;
 
-    #[test]
-    fn rename_let_binding() {
-        let src = "let foo = 1; in foo";
+    /// Analyze source at a marker position and run rename.
+    fn rename_at_marker(
+        src: &str,
+        marker: u32,
+        new_name: &str,
+    ) -> Option<WorkspaceEdit> {
+        let markers = parse_markers(src);
+        let offset = markers[&marker];
         let path = temp_path("test.nix");
         let mut state = AnalysisState::new(TypeAliasRegistry::default());
         state.update_file(path.clone(), src.to_string());
         let analysis = state.get_file(&path).unwrap();
         let uri = Url::from_file_path(&path).unwrap();
         let root = rnix::Root::parse(src).tree();
+        let pos = analysis.line_index.position(offset);
+        rename(analysis, pos, new_name, &uri, &root)
+    }
 
-        let def_offset = find_offset(src, "foo = 1");
-        let pos = analysis.line_index.position(def_offset);
+    fn edit_count(edit: &WorkspaceEdit) -> usize {
+        edit.changes
+            .as_ref()
+            .map(|c| c.values().map(|v| v.len()).sum())
+            .unwrap_or(0)
+    }
 
-        let edit = rename(analysis, pos, "bar", &uri, &root);
-        let edit = edit.expect("should produce a workspace edit");
-        let file_edits = edit.changes.unwrap();
-        let edits = &file_edits[&uri];
-        assert_eq!(edits.len(), 2, "should rename definition + 1 reference");
-        assert!(edits.iter().all(|e| e.new_text == "bar"));
+    #[test]
+    fn rename_let_binding() {
+        let src = indoc! {"
+            let foo = 1; in foo
+            #   ^1
+        "};
+
+        let edit = rename_at_marker(src, 1, "bar").expect("should produce edit");
+        assert_eq!(edit_count(&edit), 2, "should rename definition + 1 reference");
+        let all_bar = edit
+            .changes
+            .unwrap()
+            .values()
+            .all(|edits| edits.iter().all(|e| e.new_text == "bar"));
+        assert!(all_bar);
     }
 
     #[test]
     fn prepare_rename_on_literal_returns_none() {
-        let src = "let x = 1; in x";
+        let src = indoc! {"
+            let x = 1; in x
+            #       ^1
+        "};
+
+        let markers = parse_markers(src);
+        let offset = markers[&1];
         let path = temp_path("test.nix");
         let mut state = AnalysisState::new(TypeAliasRegistry::default());
         state.update_file(path.clone(), src.to_string());
         let analysis = state.get_file(&path).unwrap();
         let root = rnix::Root::parse(src).tree();
-
-        let offset = find_offset(src, "1");
         let pos = analysis.line_index.position(offset);
 
         assert!(prepare_rename(analysis, pos, &root).is_none());
@@ -128,39 +154,23 @@ mod tests {
 
     #[test]
     fn rename_with_multiple_references() {
-        let src = "let x = 1; y = x; in y + x";
-        let path = temp_path("test.nix");
-        let mut state = AnalysisState::new(TypeAliasRegistry::default());
-        state.update_file(path.clone(), src.to_string());
-        let analysis = state.get_file(&path).unwrap();
-        let uri = Url::from_file_path(&path).unwrap();
-        let root = rnix::Root::parse(src).tree();
+        let src = indoc! {"
+            let x = 1; y = x; in y + x
+            #   ^1
+        "};
 
-        let def_offset = find_offset(src, "x = 1");
-        let pos = analysis.line_index.position(def_offset);
-
-        let edit = rename(analysis, pos, "z", &uri, &root).unwrap();
-        let file_edits = edit.changes.unwrap();
-        let edits = &file_edits[&uri];
-        assert_eq!(edits.len(), 3, "should rename definition + 2 references");
+        let edit = rename_at_marker(src, 1, "z").unwrap();
+        assert_eq!(edit_count(&edit), 3, "should rename definition + 2 references");
     }
 
     #[test]
     fn rename_pattern_field() {
-        let src = "{ x, ... }: x";
-        let path = temp_path("test.nix");
-        let mut state = AnalysisState::new(TypeAliasRegistry::default());
-        state.update_file(path.clone(), src.to_string());
-        let analysis = state.get_file(&path).unwrap();
-        let uri = Url::from_file_path(&path).unwrap();
-        let root = rnix::Root::parse(src).tree();
+        let src = indoc! {"
+            { x, ... }: x
+            # ^1
+        "};
 
-        let def_offset = find_offset(src, "x, ");
-        let pos = analysis.line_index.position(def_offset);
-
-        let edit = rename(analysis, pos, "y", &uri, &root).unwrap();
-        let file_edits = edit.changes.unwrap();
-        let edits = &file_edits[&uri];
-        assert_eq!(edits.len(), 2, "should rename pattern field + body reference");
+        let edit = rename_at_marker(src, 1, "y").unwrap();
+        assert_eq!(edit_count(&edit), 2, "should rename pattern field + body reference");
     }
 }

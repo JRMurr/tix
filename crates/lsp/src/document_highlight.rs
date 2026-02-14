@@ -56,75 +56,68 @@ pub fn document_highlight(
 mod tests {
     use super::*;
     use crate::state::AnalysisState;
-    use crate::test_util::{find_offset, temp_path};
+    use crate::test_util::{parse_markers, temp_path};
+    use indoc::indoc;
     use lang_check::aliases::TypeAliasRegistry;
 
-    #[test]
-    fn highlights_let_binding() {
-        let src = "let x = 1; in x + x";
+    fn highlight_at_marker(src: &str, marker: u32) -> Vec<DocumentHighlight> {
+        let markers = parse_markers(src);
+        let offset = markers[&marker];
         let path = temp_path("test.nix");
         let mut state = AnalysisState::new(TypeAliasRegistry::default());
         state.update_file(path.clone(), src.to_string());
         let analysis = state.get_file(&path).unwrap();
         let root = rnix::Root::parse(src).tree();
+        let pos = analysis.line_index.position(offset);
+        document_highlight(analysis, pos, &root)
+    }
 
-        let def_offset = find_offset(src, "x = 1");
-        let pos = analysis.line_index.position(def_offset);
-
-        let highlights = document_highlight(analysis, pos, &root);
-        let writes: Vec<_> = highlights
+    fn count_kinds(highlights: &[DocumentHighlight]) -> (usize, usize) {
+        let writes = highlights
             .iter()
             .filter(|h| h.kind == Some(DocumentHighlightKind::WRITE))
-            .collect();
-        let reads: Vec<_> = highlights
+            .count();
+        let reads = highlights
             .iter()
             .filter(|h| h.kind == Some(DocumentHighlightKind::READ))
-            .collect();
+            .count();
+        (writes, reads)
+    }
 
-        assert_eq!(writes.len(), 1, "should have 1 write (definition)");
-        assert_eq!(reads.len(), 2, "should have 2 reads (references)");
+    #[test]
+    fn highlights_let_binding() {
+        let src = indoc! {"
+            let x = 1; in x + x
+            #   ^1
+        "};
+
+        let highlights = highlight_at_marker(src, 1);
+        let (writes, reads) = count_kinds(&highlights);
+        assert_eq!(writes, 1, "should have 1 write (definition)");
+        assert_eq!(reads, 2, "should have 2 reads (references)");
     }
 
     #[test]
     fn cursor_on_literal_returns_empty() {
-        let src = "let x = 1; in x";
-        let path = temp_path("test.nix");
-        let mut state = AnalysisState::new(TypeAliasRegistry::default());
-        state.update_file(path.clone(), src.to_string());
-        let analysis = state.get_file(&path).unwrap();
-        let root = rnix::Root::parse(src).tree();
+        let src = indoc! {"
+            let x = 1; in x
+            #       ^1
+        "};
 
-        let offset = find_offset(src, "1");
-        let pos = analysis.line_index.position(offset);
-
-        let highlights = document_highlight(analysis, pos, &root);
+        let highlights = highlight_at_marker(src, 1);
         assert!(highlights.is_empty());
     }
 
     #[test]
     fn lambda_param_highlight() {
-        let src = "let f = x: x; in f";
-        let path = temp_path("test.nix");
-        let mut state = AnalysisState::new(TypeAliasRegistry::default());
-        state.update_file(path.clone(), src.to_string());
-        let analysis = state.get_file(&path).unwrap();
-        let root = rnix::Root::parse(src).tree();
+        let src = indoc! {"
+            let f = x: x; in f
+            #       ^1
+        "};
 
-        // Cursor on the first `x` (parameter definition).
-        let offset = find_offset(src, "x: x");
-        let pos = analysis.line_index.position(offset);
-
-        let highlights = document_highlight(analysis, pos, &root);
-        let writes: Vec<_> = highlights
-            .iter()
-            .filter(|h| h.kind == Some(DocumentHighlightKind::WRITE))
-            .collect();
-        let reads: Vec<_> = highlights
-            .iter()
-            .filter(|h| h.kind == Some(DocumentHighlightKind::READ))
-            .collect();
-
-        assert_eq!(writes.len(), 1, "param definition is a write");
-        assert_eq!(reads.len(), 1, "param usage in body is a read");
+        let highlights = highlight_at_marker(src, 1);
+        let (writes, reads) = count_kinds(&highlights);
+        assert_eq!(writes, 1, "param definition is a write");
+        assert_eq!(reads, 1, "param usage in body is a read");
     }
 }
