@@ -33,7 +33,7 @@ pub fn to_diagnostics(
                 range,
                 severity: Some(DiagnosticSeverity::ERROR),
                 source: Some("tix".to_string()),
-                message: located.error.to_string(),
+                message: located.payload.to_string(),
                 ..Default::default()
             }
         })
@@ -62,7 +62,7 @@ pub fn warnings_to_diagnostics(
                 range,
                 severity: Some(DiagnosticSeverity::WARNING),
                 source: Some("tix".to_string()),
-                message: located.warning.to_string(),
+                message: located.payload.to_string(),
                 ..Default::default()
             }
         })

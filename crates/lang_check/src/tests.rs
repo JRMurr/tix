@@ -47,7 +47,7 @@ pub fn get_inferred_root(src: &str) -> OutputTy {
 pub fn get_check_error(src: &str) -> InferenceError {
     let (_, inference) = check_str(src);
 
-    inference.expect_err("Expected an inference error").error
+    inference.expect_err("Expected an inference error").payload
 }
 
 #[track_caller]

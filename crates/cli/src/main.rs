@@ -61,7 +61,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let inference = check_file_with_imports(&db, file, &registry, import_resolution.types)?;
 
     for w in &inference.warnings {
-        eprintln!("Warning: {}", w.warning);
+        eprintln!("Warning: {}", w.payload);
     }
 
     // Print per-name types (the let-bindings, function params, etc.).

@@ -116,25 +116,29 @@ pub enum InferenceError {
     InvalidAttrMerge(Ty<TyId>, Ty<TyId>),
 }
 
-/// An inference error paired with the expression where it occurred.
+/// A diagnostic payload paired with the expression where it occurred.
+/// Used for both errors and warnings via type aliases below.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LocatedError {
-    pub error: InferenceError,
-    /// The expression that was being inferred when the error occurred.
+pub struct Located<T> {
+    pub payload: T,
+    /// The expression that was being inferred when the diagnostic occurred.
     pub at_expr: ExprId,
 }
 
-impl std::fmt::Display for LocatedError {
+impl<T: std::fmt::Display> std::fmt::Display for Located<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.error)
+        write!(f, "{}", self.payload)
     }
 }
 
-impl std::error::Error for LocatedError {
+impl<T: std::error::Error + 'static> std::error::Error for Located<T> {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.error)
+        Some(&self.payload)
     }
 }
+
+pub type LocatedError = Located<InferenceError>;
+pub type LocatedWarning = Located<Warning>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Warning {
@@ -147,12 +151,6 @@ impl std::fmt::Display for Warning {
             Warning::UnresolvedName(name) => write!(f, "Unresolved name: {name}"),
         }
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LocatedWarning {
-    pub warning: Warning,
-    pub at_expr: ExprId,
 }
 
 /// Partial inference results plus all collected errors.
@@ -549,16 +547,16 @@ impl<'db> CheckCtx<'db> {
 
     /// Wrap a bare `InferenceError` with the current expression location.
     fn locate_err(&self, err: InferenceError) -> LocatedError {
-        LocatedError {
-            error: err,
+        Located {
+            payload: err,
             at_expr: self.current_expr,
         }
     }
 
     /// Record a warning at the current expression.
     fn emit_warning(&mut self, warning: Warning) {
-        self.warnings.push(LocatedWarning {
-            warning,
+        self.warnings.push(Located {
+            payload: warning,
             at_expr: self.current_expr,
         });
     }
