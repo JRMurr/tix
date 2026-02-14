@@ -3,29 +3,29 @@
 }:
 let
   /**
-      This function adds two numbers
+    This function adds two numbers
 
-      # Example
+    # Example
 
-      ```nix
-      add 4 5
-      =>
-      9
-      ```
+    ```nix
+    add 4 5
+    =>
+    9
+    ```
 
-      # Type
+    # Type
 
-      ```
-      add :: Number -> Number -> Number
-      ```
+    ```
+    add :: Number -> Number -> Number
+    ```
 
-      # Arguments
+    # Arguments
 
-      a
-      : The first number
+    a
+    : The first number
 
-      b
-      : The second number
+    b
+    : The second number
   */
   add = a: b: a + b;
 

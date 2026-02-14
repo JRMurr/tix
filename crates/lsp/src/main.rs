@@ -1,8 +1,18 @@
 mod completion;
+mod config;
 mod convert;
 mod diagnostics;
+mod document_highlight;
+mod document_link;
+mod document_symbol;
+mod formatting;
 mod goto_def;
 mod hover;
+mod inlay_hint;
+mod references;
+mod rename;
+mod selection_range;
+mod semantic_tokens;
 mod server;
 mod state;
 #[cfg(test)]
@@ -20,6 +30,10 @@ struct Cli {
     /// Paths to .tix stub files or directories (recursive)
     #[arg(long = "stubs", value_name = "PATH")]
     stub_paths: Vec<PathBuf>,
+
+    /// Do not load the built-in nixpkgs stubs
+    #[arg(long)]
+    no_default_stubs: bool,
 }
 
 #[tokio::main]
@@ -29,7 +43,12 @@ async fn main() {
     let args = Cli::parse();
 
     // Load .tix stub files once at startup.
-    let mut registry = TypeAliasRegistry::new();
+    // Built-in nixpkgs stubs are included by default unless --no-default-stubs is passed.
+    let mut registry = if args.no_default_stubs {
+        TypeAliasRegistry::new()
+    } else {
+        TypeAliasRegistry::with_builtins()
+    };
     for stub_path in &args.stub_paths {
         if let Err(e) = load_stubs(&mut registry, stub_path) {
             eprintln!(
@@ -45,17 +64,21 @@ async fn main() {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
 
-    let (service, socket) =
-        LspService::new(|client| server::TixLanguageServer::new(client, registry));
+    let cli_stub_paths = args.stub_paths;
+    let no_default_stubs = args.no_default_stubs;
+
+    let (service, socket) = LspService::new(|client| {
+        server::TixLanguageServer::new(client, registry, cli_stub_paths, no_default_stubs)
+    });
 
     Server::new(stdin, stdout, socket).serve(service).await;
 }
 
 /// Load .tix files from a path. If the path is a file, load it directly.
 /// If it's a directory, recursively find all .tix files and load them.
-fn load_stubs(
+pub(crate) fn load_stubs(
     registry: &mut TypeAliasRegistry,
-    path: &PathBuf,
+    path: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if path.is_dir() {
         for entry in std::fs::read_dir(path)? {

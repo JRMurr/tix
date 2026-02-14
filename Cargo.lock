@@ -1712,6 +1712,8 @@ dependencies = [
  "log",
  "rnix",
  "rowan",
+ "serde",
+ "serde_json",
  "smol_str",
  "tokio",
  "tower-lsp",

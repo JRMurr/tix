@@ -684,7 +684,7 @@ fn fields_to_completion_items(fields: &BTreeMap<SmolStr, TyRef>) -> Vec<Completi
 mod tests {
     use super::*;
     use crate::state::AnalysisState;
-    use crate::test_util::{find_offset, temp_path};
+    use crate::test_util::{find_offset, parse_markers, temp_path};
     use indoc::indoc;
     use lang_check::aliases::TypeAliasRegistry;
 
@@ -705,62 +705,6 @@ mod tests {
 
     fn labels(items: &[CompletionItem]) -> Vec<&str> {
         items.iter().map(|i| i.label.as_str()).collect()
-    }
-
-    // ==================================================================
-    // Marker-based test infrastructure
-    // ==================================================================
-    //
-    // Embed `# ^<num>` comments in the test source where `^` points to
-    // the column on the PREVIOUS line where completion should trigger,
-    // and `<num>` is a marker ID.
-    //
-    // Since `#` is a valid Nix comment, the markers don't affect parsing.
-
-    /// Parse `# ^<num>` marker comments from source.
-    /// Returns a BTreeMap from marker number to byte offset on the previous line.
-    fn parse_markers(src: &str) -> BTreeMap<u32, u32> {
-        let mut markers = BTreeMap::new();
-        let lines: Vec<&str> = src.lines().collect();
-
-        for (line_idx, line) in lines.iter().enumerate() {
-            // Find all `^<num>` patterns in comment lines.
-            let trimmed = line.trim();
-            if !trimmed.starts_with('#') {
-                continue;
-            }
-
-            let mut search_from = 0;
-            while let Some(caret_pos) = line[search_from..].find('^') {
-                let abs_caret_pos = search_from + caret_pos;
-                let after_caret = &line[abs_caret_pos + 1..];
-
-                // Parse the marker number immediately after `^`.
-                let num_str: String = after_caret
-                    .chars()
-                    .take_while(|c| c.is_ascii_digit())
-                    .collect();
-                if num_str.is_empty() {
-                    search_from = abs_caret_pos + 1;
-                    continue;
-                }
-                let marker_num: u32 = num_str.parse().unwrap();
-
-                // The column of `^` on the marker line corresponds to the
-                // same column on the PREVIOUS line.
-                assert!(line_idx > 0, "marker on first line has no previous line");
-                let prev_line_start: usize = lines[..line_idx - 1]
-                    .iter()
-                    .map(|l| l.len() + 1) // +1 for the newline
-                    .sum();
-
-                let byte_offset = (prev_line_start + abs_caret_pos) as u32;
-                markers.insert(marker_num, byte_offset);
-                search_from = abs_caret_pos + 1 + num_str.len();
-            }
-        }
-
-        markers
     }
 
     /// Run completions at all marker positions. Returns marker → completions.

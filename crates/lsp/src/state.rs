@@ -139,6 +139,24 @@ impl AnalysisState {
     pub fn get_file(&self, path: &PathBuf) -> Option<&FileAnalysis> {
         self.files.get(path)
     }
+
+    /// Replace the type alias registry and re-analyze all open files.
+    /// Used when stubs configuration changes at runtime.
+    pub fn reload_registry(&mut self, registry: TypeAliasRegistry) {
+        self.registry = registry;
+
+        // Re-analyze every open file with the new registry.
+        let paths: Vec<PathBuf> = self.files.keys().cloned().collect();
+        for path in paths {
+            // Retrieve the current source text from the Salsa database so we
+            // can re-run update_file without needing the original String.
+            let contents = {
+                let analysis = self.files.get(&path).unwrap();
+                analysis.nix_file.contents(&self.db).to_owned()
+            };
+            self.update_file(path, contents);
+        }
+    }
 }
 
 /// Chase through Apply chains to find an import target.

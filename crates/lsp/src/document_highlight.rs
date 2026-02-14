@@ -1,0 +1,123 @@
+// ==============================================================================
+// textDocument/documentHighlight — highlight all occurrences of a name
+// ==============================================================================
+//
+// Same-file variant of find-references, with Read/Write classification.
+// The definition site gets WRITE, reference sites get READ.
+
+use lang_ast::nameres::ResolveResult;
+use rowan::ast::AstNode;
+use tower_lsp::lsp_types::{DocumentHighlight, DocumentHighlightKind, Position};
+
+use crate::state::FileAnalysis;
+
+pub fn document_highlight(
+    analysis: &FileAnalysis,
+    pos: Position,
+    root: &rnix::Root,
+) -> Vec<DocumentHighlight> {
+    let target = match crate::references::name_at_position(analysis, pos, root) {
+        Some(n) => n,
+        None => return Vec::new(),
+    };
+
+    let mut highlights = Vec::new();
+
+    // Definition site — WRITE.
+    if let Some(ptr) = analysis.source_map.nodes_for_name(target).next() {
+        let node = ptr.to_node(root.syntax());
+        let range = analysis.line_index.range(node.text_range());
+        highlights.push(DocumentHighlight {
+            range,
+            kind: Some(DocumentHighlightKind::WRITE),
+        });
+    }
+
+    // Reference sites — READ.
+    for (expr_id, resolved) in analysis.name_res.iter() {
+        if let ResolveResult::Definition(name_id) = resolved {
+            if *name_id == target {
+                if let Some(ptr) = analysis.source_map.node_for_expr(expr_id) {
+                    let node = ptr.to_node(root.syntax());
+                    let range = analysis.line_index.range(node.text_range());
+                    highlights.push(DocumentHighlight {
+                        range,
+                        kind: Some(DocumentHighlightKind::READ),
+                    });
+                }
+            }
+        }
+    }
+
+    highlights
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::AnalysisState;
+    use crate::test_util::{parse_markers, temp_path};
+    use indoc::indoc;
+    use lang_check::aliases::TypeAliasRegistry;
+
+    fn highlight_at_marker(src: &str, marker: u32) -> Vec<DocumentHighlight> {
+        let markers = parse_markers(src);
+        let offset = markers[&marker];
+        let path = temp_path("test.nix");
+        let mut state = AnalysisState::new(TypeAliasRegistry::default());
+        state.update_file(path.clone(), src.to_string());
+        let analysis = state.get_file(&path).unwrap();
+        let root = rnix::Root::parse(src).tree();
+        let pos = analysis.line_index.position(offset);
+        document_highlight(analysis, pos, &root)
+    }
+
+    fn count_kinds(highlights: &[DocumentHighlight]) -> (usize, usize) {
+        let writes = highlights
+            .iter()
+            .filter(|h| h.kind == Some(DocumentHighlightKind::WRITE))
+            .count();
+        let reads = highlights
+            .iter()
+            .filter(|h| h.kind == Some(DocumentHighlightKind::READ))
+            .count();
+        (writes, reads)
+    }
+
+    #[test]
+    fn highlights_let_binding() {
+        let src = indoc! {"
+            let x = 1; in x + x
+            #   ^1
+        "};
+
+        let highlights = highlight_at_marker(src, 1);
+        let (writes, reads) = count_kinds(&highlights);
+        assert_eq!(writes, 1, "should have 1 write (definition)");
+        assert_eq!(reads, 2, "should have 2 reads (references)");
+    }
+
+    #[test]
+    fn cursor_on_literal_returns_empty() {
+        let src = indoc! {"
+            let x = 1; in x
+            #       ^1
+        "};
+
+        let highlights = highlight_at_marker(src, 1);
+        assert!(highlights.is_empty());
+    }
+
+    #[test]
+    fn lambda_param_highlight() {
+        let src = indoc! {"
+            let f = x: x; in f
+            #       ^1
+        "};
+
+        let highlights = highlight_at_marker(src, 1);
+        let (writes, reads) = count_kinds(&highlights);
+        assert_eq!(writes, 1, "param definition is a write");
+        assert_eq!(reads, 1, "param usage in body is a read");
+    }
+}

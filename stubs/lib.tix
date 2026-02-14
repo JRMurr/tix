@@ -3,7 +3,8 @@
 # =============================================================================
 #
 # Type declarations for commonly-used nixpkgs library functions.
-# Load with: tix-cli --stubs stubs/ <file.nix>
+# Embedded into the binary at compile time and loaded by default.
+# Use --no-default-stubs to disable, or --stubs to load additional files.
 
 # ---------------------------------------------------------------------------
 # Top-level types
