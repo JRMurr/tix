@@ -16,7 +16,7 @@ let
     # Type
 
     ```
-    add :: Number -> Number -> Number
+    add :: int -> int -> int
     ```
 
     # Arguments
@@ -41,9 +41,11 @@ let
 
   three = add 1 2;
 
-  /*
+  /**
     Concatenate a list of strings.
+
     # Type
+
     ```
     concatStrings :: [string] -> string
     ```

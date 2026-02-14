@@ -6,16 +6,20 @@ comment_content = {
     SOI ~ (type_block | other_text)* ~ EOI
 }
 
-// If we see "type:", then it's either a triple-tick enclosure or un-fenced content.
+// Two trigger formats:
+// 1. "type:" prefix (tix-native): unfenced or fenced
+// 2. "# Type" markdown heading (nixpkgs/typednix convention): always fenced
 type_block = {
-    "type:" ~ (WHITESPACE | NEWLINE)* // optional spacing/newlines
+    "type:" ~ (WHITESPACE | NEWLINE)*
   ~ ("```" ~ block_content ~ "```" // triple-tick-fenced
   | block_content // free-text (unfenced)
   )
+  | "#" ~ "Type" ~ NEWLINE ~ (WHITESPACE | NEWLINE)*
+  ~ "```" ~ block_content ~ "```"
 }
 
-// Everything else that’s not a `type_block`.
-other_text = _{ (!"type:" ~ ANY)+ }
+// Everything else that's not a `type_block`.
+other_text = _{ (!type_block ~ ANY)+ }
 
 // -------------------------------------------------------------------------
 // The unified content rule for types

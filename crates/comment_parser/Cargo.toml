@@ -11,3 +11,6 @@ smol_str = { workspace = true }
 lang_ty = { path = "../lang_ty" }
 derive_more = { workspace = true, features = ["debug"] }
 # la-arena = { workspace = true }
+
+[dev-dependencies]
+indoc = "2.0.5"

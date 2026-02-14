@@ -189,6 +189,7 @@ fn collect_attrset(pairs: Pairs<Rule>) -> ParsedTy {
 mod tests {
     use super::*;
     use crate::{known_ty, parse_comment_text};
+    use indoc::indoc;
 
     macro_rules! comment_decl_case {
         ($name:ident, $comment:expr, $ident:literal => $ty:tt) => {
@@ -306,4 +307,69 @@ mod tests {
         r#" type: f :: (int -> int) | (string -> string) "#,
         "f" => { union!((int -> int), (string -> string)) }
     );
+
+    // ---- # Type heading format (nixpkgs/typednix convention) ----
+
+    comment_decl_case!(type_heading_simple,
+        indoc! {"
+            # Type
+
+            ```
+            foo :: int -> int
+            ```
+        "},
+        "foo" => { int -> int }
+    );
+
+    #[test]
+    fn type_heading_in_larger_doc_comment() {
+        let example_comment = indoc! {"
+            This function adds two numbers
+
+            # Example
+
+            ```nix
+            add 4 5
+            ```
+
+            # Type
+
+            ```
+            add :: int -> int -> int
+            ```
+
+            # Arguments
+
+            a
+            : The first number
+        "};
+        let pairs = parse_comment_text(example_comment).expect("No parse error");
+        let decs = collect_type_decls(pairs);
+
+        let expected = vec![TypeDecl {
+            identifier: "add".into(),
+            type_expr: known_ty! { int -> int -> int },
+        }];
+        assert_eq!(decs, expected)
+    }
+
+    #[test]
+    fn type_heading_multiple_decls() {
+        let example_comment = indoc! {"
+            # Type
+
+            ```
+            foo :: int
+            bar :: string
+            ```
+        "};
+        let pairs = parse_comment_text(example_comment).expect("No parse error");
+        let decs = collect_type_decls(pairs);
+
+        assert_eq!(decs.len(), 2);
+        assert_eq!(decs[0].identifier.as_str(), "foo");
+        assert_eq!(decs[0].type_expr, known_ty! { int });
+        assert_eq!(decs[1].identifier.as_str(), "bar");
+        assert_eq!(decs[1].type_expr, known_ty! { string });
+    }
 }

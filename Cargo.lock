@@ -272,6 +272,7 @@ name = "comment_parser"
 version = "0.1.0"
 dependencies = [
  "derive_more",
+ "indoc",
  "lang_ty",
  "pest",
  "pest_derive",
