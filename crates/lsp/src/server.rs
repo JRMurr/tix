@@ -86,6 +86,30 @@ impl LanguageServer for TixLanguageServer {
                     trigger_characters: Some(vec![".".to_string()]),
                     ..Default::default()
                 }),
+                document_symbol_provider: Some(OneOf::Left(true)),
+                document_link_provider: Some(DocumentLinkOptions {
+                    resolve_provider: Some(false),
+                    work_done_progress_options: Default::default(),
+                }),
+                document_formatting_provider: Some(OneOf::Left(true)),
+                selection_range_provider: Some(SelectionRangeProviderCapability::Simple(true)),
+                references_provider: Some(OneOf::Left(true)),
+                document_highlight_provider: Some(OneOf::Left(true)),
+                rename_provider: Some(OneOf::Right(RenameOptions {
+                    prepare_provider: Some(true),
+                    work_done_progress_options: Default::default(),
+                })),
+                semantic_tokens_provider: Some(
+                    SemanticTokensServerCapabilities::SemanticTokensOptions(
+                        SemanticTokensOptions {
+                            legend: crate::semantic_tokens::legend(),
+                            full: Some(SemanticTokensFullOptions::Bool(true)),
+                            range: None,
+                            work_done_progress_options: Default::default(),
+                        },
+                    ),
+                ),
+                inlay_hint_provider: Some(OneOf::Left(true)),
                 ..Default::default()
             },
             ..Default::default()
@@ -194,6 +218,237 @@ impl LanguageServer for TixLanguageServer {
         let root = rnix::Root::parse(contents).tree();
 
         Ok(crate::completion::completion(analysis, pos, &root))
+    }
+
+    async fn document_symbol(
+        &self,
+        params: DocumentSymbolParams,
+    ) -> Result<Option<DocumentSymbolResponse>> {
+        let uri = params.text_document.uri;
+        let path = match uri_to_path(&uri) {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+
+        let state = self.state.lock().unwrap();
+        let analysis = match state.get_file(&path) {
+            Some(a) => a,
+            None => return Ok(None),
+        };
+
+        let contents = analysis.nix_file.contents(&state.db);
+        let root = rnix::Root::parse(contents).tree();
+
+        let symbols = crate::document_symbol::document_symbols(analysis, &root);
+        Ok(Some(DocumentSymbolResponse::Nested(symbols)))
+    }
+
+    async fn document_link(
+        &self,
+        params: DocumentLinkParams,
+    ) -> Result<Option<Vec<DocumentLink>>> {
+        let uri = params.text_document.uri;
+        let path = match uri_to_path(&uri) {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+
+        let state = self.state.lock().unwrap();
+        let analysis = match state.get_file(&path) {
+            Some(a) => a,
+            None => return Ok(None),
+        };
+
+        let contents = analysis.nix_file.contents(&state.db);
+        let root = rnix::Root::parse(contents).tree();
+
+        let links = crate::document_link::document_links(analysis, &root);
+        Ok(Some(links))
+    }
+
+    async fn formatting(
+        &self,
+        params: DocumentFormattingParams,
+    ) -> Result<Option<Vec<TextEdit>>> {
+        let uri = params.text_document.uri;
+        let path = match uri_to_path(&uri) {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+
+        let state = self.state.lock().unwrap();
+        let analysis = match state.get_file(&path) {
+            Some(a) => a,
+            None => return Ok(None),
+        };
+
+        let contents = analysis.nix_file.contents(&state.db);
+        Ok(crate::formatting::format_document(contents, &analysis.line_index))
+    }
+
+    async fn selection_range(
+        &self,
+        params: SelectionRangeParams,
+    ) -> Result<Option<Vec<SelectionRange>>> {
+        let uri = params.text_document.uri;
+        let path = match uri_to_path(&uri) {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+
+        let state = self.state.lock().unwrap();
+        let analysis = match state.get_file(&path) {
+            Some(a) => a,
+            None => return Ok(None),
+        };
+
+        let contents = analysis.nix_file.contents(&state.db);
+        let root = rnix::Root::parse(contents).tree();
+
+        let ranges =
+            crate::selection_range::selection_ranges(analysis, params.positions, &root);
+        Ok(Some(ranges))
+    }
+
+    async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
+        let uri = params.text_document_position.text_document.uri;
+        let pos = params.text_document_position.position;
+        let include_declaration = params.context.include_declaration;
+
+        let path = match uri_to_path(&uri) {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+
+        let state = self.state.lock().unwrap();
+        let analysis = match state.get_file(&path) {
+            Some(a) => a,
+            None => return Ok(None),
+        };
+
+        let contents = analysis.nix_file.contents(&state.db);
+        let root = rnix::Root::parse(contents).tree();
+
+        let refs =
+            crate::references::find_references(analysis, pos, &uri, &root, include_declaration);
+        Ok(Some(refs))
+    }
+
+    async fn document_highlight(
+        &self,
+        params: DocumentHighlightParams,
+    ) -> Result<Option<Vec<DocumentHighlight>>> {
+        let uri = params.text_document_position_params.text_document.uri;
+        let pos = params.text_document_position_params.position;
+
+        let path = match uri_to_path(&uri) {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+
+        let state = self.state.lock().unwrap();
+        let analysis = match state.get_file(&path) {
+            Some(a) => a,
+            None => return Ok(None),
+        };
+
+        let contents = analysis.nix_file.contents(&state.db);
+        let root = rnix::Root::parse(contents).tree();
+
+        let highlights = crate::document_highlight::document_highlight(analysis, pos, &root);
+        Ok(Some(highlights))
+    }
+
+    async fn prepare_rename(
+        &self,
+        params: TextDocumentPositionParams,
+    ) -> Result<Option<PrepareRenameResponse>> {
+        let uri = params.text_document.uri;
+        let pos = params.position;
+
+        let path = match uri_to_path(&uri) {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+
+        let state = self.state.lock().unwrap();
+        let analysis = match state.get_file(&path) {
+            Some(a) => a,
+            None => return Ok(None),
+        };
+
+        let contents = analysis.nix_file.contents(&state.db);
+        let root = rnix::Root::parse(contents).tree();
+
+        Ok(crate::rename::prepare_rename(analysis, pos, &root))
+    }
+
+    async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
+        let uri = params.text_document_position.text_document.uri;
+        let pos = params.text_document_position.position;
+        let new_name = params.new_name;
+
+        let path = match uri_to_path(&uri) {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+
+        let state = self.state.lock().unwrap();
+        let analysis = match state.get_file(&path) {
+            Some(a) => a,
+            None => return Ok(None),
+        };
+
+        let contents = analysis.nix_file.contents(&state.db);
+        let root = rnix::Root::parse(contents).tree();
+
+        Ok(crate::rename::rename(analysis, pos, &new_name, &uri, &root))
+    }
+
+    async fn semantic_tokens_full(
+        &self,
+        params: SemanticTokensParams,
+    ) -> Result<Option<SemanticTokensResult>> {
+        let uri = params.text_document.uri;
+        let path = match uri_to_path(&uri) {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+
+        let state = self.state.lock().unwrap();
+        let analysis = match state.get_file(&path) {
+            Some(a) => a,
+            None => return Ok(None),
+        };
+
+        let contents = analysis.nix_file.contents(&state.db);
+        let root = rnix::Root::parse(contents).tree();
+
+        let tokens = crate::semantic_tokens::semantic_tokens(analysis, &root);
+        Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
+            result_id: None,
+            data: tokens,
+        })))
+    }
+
+    async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
+        let uri = params.text_document.uri;
+        let path = match uri_to_path(&uri) {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+
+        let state = self.state.lock().unwrap();
+        let analysis = match state.get_file(&path) {
+            Some(a) => a,
+            None => return Ok(None),
+        };
+
+        let contents = analysis.nix_file.contents(&state.db);
+        let root = rnix::Root::parse(contents).tree();
+
+        let hints = crate::inlay_hint::inlay_hints(analysis, params.range, &root);
+        Ok(Some(hints))
     }
 }
 

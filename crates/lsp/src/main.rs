@@ -1,8 +1,17 @@
 mod completion;
 mod convert;
 mod diagnostics;
+mod document_highlight;
+mod document_link;
+mod document_symbol;
+mod formatting;
 mod goto_def;
 mod hover;
+mod inlay_hint;
+mod references;
+mod rename;
+mod selection_range;
+mod semantic_tokens;
 mod server;
 mod state;
 #[cfg(test)]

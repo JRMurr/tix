@@ -1,0 +1,177 @@
+// ==============================================================================
+// textDocument/references — find all references to a name
+// ==============================================================================
+//
+// Also provides `name_at_position`, a shared helper used by document highlight
+// and rename to resolve the NameId under the cursor.
+
+use lang_ast::nameres::ResolveResult;
+use lang_ast::{AstPtr, Expr, NameId};
+use rowan::ast::AstNode;
+use tower_lsp::lsp_types::{Location, Position, Url};
+
+use crate::state::FileAnalysis;
+
+/// Find the NameId under the cursor. Works on both definition sites (where a
+/// name is bound) and reference sites (where a name is used).
+pub fn name_at_position(
+    analysis: &FileAnalysis,
+    pos: Position,
+    root: &rnix::Root,
+) -> Option<NameId> {
+    let offset = analysis.line_index.offset(pos);
+    let token = root
+        .syntax()
+        .token_at_offset(rowan::TextSize::from(offset))
+        .right_biased()?;
+
+    let mut node = token.parent()?;
+    loop {
+        let ptr = AstPtr::new(&node);
+
+        // Definition site: the cursor is on a name node (let binding, param, etc.).
+        if let Some(name_id) = analysis.source_map.name_for_node(ptr) {
+            return Some(name_id);
+        }
+
+        // Reference site: the cursor is on a variable reference that resolves
+        // to a definition.
+        if let Some(expr_id) = analysis.source_map.expr_for_node(ptr) {
+            if matches!(&analysis.module[expr_id], Expr::Reference(_)) {
+                if let Some(ResolveResult::Definition(name_id)) = analysis.name_res.get(expr_id) {
+                    return Some(*name_id);
+                }
+            }
+            // Found an expression but it's not a resolvable reference — stop.
+            return None;
+        }
+
+        node = node.parent()?;
+    }
+}
+
+/// Find all reference locations for the name under the cursor.
+pub fn find_references(
+    analysis: &FileAnalysis,
+    pos: Position,
+    uri: &Url,
+    root: &rnix::Root,
+    include_declaration: bool,
+) -> Vec<Location> {
+    let target = match name_at_position(analysis, pos, root) {
+        Some(n) => n,
+        None => return Vec::new(),
+    };
+
+    let mut locations = Vec::new();
+
+    // Scan all name resolutions to find references pointing to the target.
+    for (expr_id, resolved) in analysis.name_res.iter() {
+        if let ResolveResult::Definition(name_id) = resolved {
+            if *name_id == target {
+                if let Some(ptr) = analysis.source_map.node_for_expr(expr_id) {
+                    let node = ptr.to_node(root.syntax());
+                    let range = analysis.line_index.range(node.text_range());
+                    locations.push(Location::new(uri.clone(), range));
+                }
+            }
+        }
+    }
+
+    // Add the declaration site itself.
+    if include_declaration {
+        if let Some(ptr) = analysis.source_map.nodes_for_name(target).next() {
+            let node = ptr.to_node(root.syntax());
+            let range = analysis.line_index.range(node.text_range());
+            locations.push(Location::new(uri.clone(), range));
+        }
+    }
+
+    locations
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::AnalysisState;
+    use crate::test_util::{find_offset, temp_path};
+    use lang_check::aliases::TypeAliasRegistry;
+
+    #[test]
+    fn references_for_let_binding() {
+        let src = "let x = 1; in x + x";
+        let path = temp_path("test.nix");
+        let mut state = AnalysisState::new(TypeAliasRegistry::default());
+        state.update_file(path.clone(), src.to_string());
+        let analysis = state.get_file(&path).unwrap();
+        let uri = Url::from_file_path(&path).unwrap();
+        let root = rnix::Root::parse(src).tree();
+
+        // Cursor on the definition `x`.
+        let def_offset = find_offset(src, "x = 1");
+        let pos = analysis.line_index.position(def_offset);
+
+        let refs = find_references(analysis, pos, &uri, &root, false);
+        assert_eq!(refs.len(), 2, "should find 2 references to x");
+
+        let refs_with_decl = find_references(analysis, pos, &uri, &root, true);
+        assert_eq!(
+            refs_with_decl.len(),
+            3,
+            "should find 2 refs + 1 declaration"
+        );
+    }
+
+    #[test]
+    fn references_from_usage_site() {
+        let src = "let x = 1; in x + x";
+        let path = temp_path("test.nix");
+        let mut state = AnalysisState::new(TypeAliasRegistry::default());
+        state.update_file(path.clone(), src.to_string());
+        let analysis = state.get_file(&path).unwrap();
+        let uri = Url::from_file_path(&path).unwrap();
+        let root = rnix::Root::parse(src).tree();
+
+        // Cursor on a reference `x` (the one after `in `).
+        let ref_offset = find_offset(src, "in x") + 3;
+        let pos = analysis.line_index.position(ref_offset);
+
+        let refs = find_references(analysis, pos, &uri, &root, true);
+        assert_eq!(refs.len(), 3, "should find 2 refs + 1 declaration");
+    }
+
+    #[test]
+    fn no_references_for_unused_binding() {
+        let src = "let x = 1; y = 2; in y";
+        let path = temp_path("test.nix");
+        let mut state = AnalysisState::new(TypeAliasRegistry::default());
+        state.update_file(path.clone(), src.to_string());
+        let analysis = state.get_file(&path).unwrap();
+        let uri = Url::from_file_path(&path).unwrap();
+        let root = rnix::Root::parse(src).tree();
+
+        let def_offset = find_offset(src, "x = 1");
+        let pos = analysis.line_index.position(def_offset);
+
+        let refs = find_references(analysis, pos, &uri, &root, false);
+        assert_eq!(refs.len(), 0, "x has no references");
+    }
+
+    #[test]
+    fn with_expr_returns_empty() {
+        let src = "with { foo = 1; }; foo";
+        let path = temp_path("test.nix");
+        let mut state = AnalysisState::new(TypeAliasRegistry::default());
+        state.update_file(path.clone(), src.to_string());
+        let analysis = state.get_file(&path).unwrap();
+        let uri = Url::from_file_path(&path).unwrap();
+        let root = rnix::Root::parse(src).tree();
+
+        // Cursor on `foo` — resolves via `with`, not to a NameId.
+        let offset = find_offset(src, "; foo") + 2;
+        let pos = analysis.line_index.position(offset);
+
+        let refs = find_references(analysis, pos, &uri, &root, true);
+        assert!(refs.is_empty(), "with-resolved names have no NameId");
+    }
+}
