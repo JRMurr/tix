@@ -375,9 +375,11 @@ impl CheckCtx<'_> {
                 // operands become concrete.
                 self.pending_overloads.push(PendingOverload {
                     op: *overload_op,
-                    lhs: lhs_ty,
-                    rhs: rhs_ty,
-                    ret: ret_ty,
+                    constraint: BinConstraint {
+                        lhs: lhs_ty,
+                        rhs: rhs_ty,
+                        ret: ret_ty,
+                    },
                 });
                 Ok(ret_ty)
             }
@@ -437,7 +439,7 @@ impl CheckCtx<'_> {
             BinOP::Normal(NormalBinOp::AttrUpdate) => {
                 // attr merge: we'll handle this as a pending constraint
                 let ret_ty = self.new_var();
-                self.pending_merges.push(PendingMerge {
+                self.pending_merges.push(BinConstraint {
                     lhs: lhs_ty,
                     rhs: rhs_ty,
                     ret: ret_ty,
@@ -560,17 +562,19 @@ impl CheckCtx<'_> {
 // Pending constraint types for deferred resolution
 // ==============================================================================
 
+/// The lhs/rhs/ret triple shared by all deferred binary constraints.
 #[derive(Debug, Clone)]
-pub struct PendingOverload {
-    pub op: OverloadBinOp,
+pub struct BinConstraint {
     pub lhs: TyId,
     pub rhs: TyId,
     pub ret: TyId,
 }
 
 #[derive(Debug, Clone)]
-pub struct PendingMerge {
-    pub lhs: TyId,
-    pub rhs: TyId,
-    pub ret: TyId,
+pub struct PendingOverload {
+    pub op: OverloadBinOp,
+    pub constraint: BinConstraint,
 }
+
+/// A deferred attrset merge constraint (`//` operator).
+pub type PendingMerge = BinConstraint;

@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::{CheckCtx, InferenceError, InferenceResult, LocatedError, TyId};
 use crate::collect::{canonicalize_standalone, Collector};
-use crate::infer_expr::{PendingMerge, PendingOverload};
+use crate::infer_expr::{BinConstraint, PendingMerge, PendingOverload};
 use crate::storage::TypeEntry;
 use lang_ast::nameres::{DependentGroup, GroupedDefs};
 use lang_ast::OverloadBinOp;
@@ -215,9 +215,9 @@ impl CheckCtx<'_> {
                     continue;
                 }
 
-                let any_extruded = cache.contains_key(&ov.lhs)
-                    || cache.contains_key(&ov.rhs)
-                    || cache.contains_key(&ov.ret);
+                let any_extruded = cache.contains_key(&ov.constraint.lhs)
+                    || cache.contains_key(&ov.constraint.rhs)
+                    || cache.contains_key(&ov.constraint.ret);
 
                 if any_extruded {
                     // For each operand, use the cached fresh var if available,
@@ -231,15 +231,17 @@ impl CheckCtx<'_> {
                             }
                         };
 
-                    let new_lhs = get_or_extrude(ov.lhs, self, &mut cache);
-                    let new_rhs = get_or_extrude(ov.rhs, self, &mut cache);
-                    let new_ret = get_or_extrude(ov.ret, self, &mut cache);
+                    let new_lhs = get_or_extrude(ov.constraint.lhs, self, &mut cache);
+                    let new_rhs = get_or_extrude(ov.constraint.rhs, self, &mut cache);
+                    let new_ret = get_or_extrude(ov.constraint.ret, self, &mut cache);
 
                     self.pending_overloads.push(PendingOverload {
                         op: ov.op,
-                        lhs: new_lhs,
-                        rhs: new_rhs,
-                        ret: new_ret,
+                        constraint: BinConstraint {
+                            lhs: new_lhs,
+                            rhs: new_rhs,
+                            ret: new_ret,
+                        },
                     });
 
                     processed[i] = true;
@@ -423,8 +425,9 @@ impl CheckCtx<'_> {
         &mut self,
         ov: &PendingOverload,
     ) -> Result<OverloadProgress, InferenceError> {
-        let lhs_concrete = self.find_concrete(ov.lhs);
-        let rhs_concrete = self.find_concrete(ov.rhs);
+        let c = &ov.constraint;
+        let lhs_concrete = self.find_concrete(c.lhs);
+        let rhs_concrete = self.find_concrete(c.rhs);
 
         // Full resolution: both operands are concrete.
         if let (Some(lhs_ty), Some(rhs_ty)) = (&lhs_concrete, &rhs_concrete) {
@@ -435,8 +438,8 @@ impl CheckCtx<'_> {
                 })?;
 
             let ret_id = self.alloc_concrete(ret_ty);
-            self.constrain(ret_id, ov.ret)?;
-            self.constrain(ov.ret, ret_id)?;
+            self.constrain(ret_id, c.ret)?;
+            self.constrain(c.ret, ret_id)?;
             return Ok(OverloadProgress::FullyResolved);
         }
 
@@ -460,15 +463,15 @@ impl CheckCtx<'_> {
             let number = self.alloc_prim(PrimitiveTy::Number);
             // Only constrain the unknown side — the known side is already concrete.
             if lhs_numeric && rhs_concrete.is_none() {
-                self.constrain(ov.rhs, number)?;
+                self.constrain(c.rhs, number)?;
             }
             if rhs_numeric && lhs_concrete.is_none() {
-                self.constrain(ov.lhs, number)?;
+                self.constrain(c.lhs, number)?;
             }
             // Result bounded above by Number. We only add upper bound (not lower)
             // so that later full resolution can pin to a more specific type like Int.
             // constrain(Int, Number) succeeds because Int <: Number.
-            self.constrain(ov.ret, number)?;
+            self.constrain(c.ret, number)?;
         }
 
         // Partial resolution for + with string/path lhs: the return type of
@@ -486,8 +489,8 @@ impl CheckCtx<'_> {
                 let ret_id = self.alloc_prim(ret_prim);
                 // Pin ret to the lhs type in both directions — full resolution
                 // will produce the same type, so this is safe.
-                self.constrain(ret_id, ov.ret)?;
-                self.constrain(ov.ret, ret_id)?;
+                self.constrain(ret_id, c.ret)?;
+                self.constrain(c.ret, ret_id)?;
             }
         }
 
