@@ -8,15 +8,19 @@
 //    Resolves the base expression's type, walks through any already-typed path
 //    segments, then offers the remaining fields.
 //
-// 2. **Callsite attrset completion** — cursor inside `{ }` that is a function
+// 2. **Attrpath key completion** — cursor after `.` in an attrset key position
+//    (e.g. `programs.` inside a NixOS module body). Finds the module's config
+//    type from the root lambda's pattern fields and suggests nested option paths.
+//
+// 3. **Callsite attrset completion** — cursor inside `{ }` that is a function
 //    argument (e.g. `mkDerivation { | }`). Looks up the function's parameter
 //    type and suggests fields not already present.
 //
-// 3. **Inherit completion** — cursor inside `inherit ...;`. For plain `inherit`,
+// 4. **Inherit completion** — cursor inside `inherit ...;`. For plain `inherit`,
 //    suggests names from the enclosing scope. For `inherit (expr)`, suggests
 //    fields from the expression's type.
 //
-// 4. **Identifier completion** — catch-all for any expression position. Suggests
+// 5. **Identifier completion** — catch-all for any expression position. Suggests
 //    all visible names (let bindings, lambda params, `with` env fields, builtins).
 
 use std::collections::BTreeMap;
@@ -53,6 +57,14 @@ pub fn completion(
 
     // Try dot completion first (cursor right after `.` in a Select).
     if let Some(items) = try_dot_completion(analysis, inference, &token) {
+        if !items.is_empty() {
+            return Some(CompletionResponse::Array(items));
+        }
+    }
+
+    // Try attrpath key completion (cursor after `.` in an attrset key like
+    // `programs.` inside a NixOS module return body).
+    if let Some(items) = try_attrpath_key_completion(analysis, inference, &token) {
         if !items.is_empty() {
             return Some(CompletionResponse::Array(items));
         }
@@ -285,6 +297,204 @@ fn resolve_through_segments(ty: &OutputTy, segments: &[SmolStr]) -> Option<Outpu
         current = (*field_ty.0).clone();
     }
     Some(current)
+}
+
+// ==============================================================================
+// Attrpath key completion: `programs.` in NixOS module return body
+// ==============================================================================
+//
+// Inside a NixOS module like `{ config, ... }: { programs.steam.enable = true; }`,
+// the return attrset's keys are option paths. rnix parses `programs.` as an
+// incomplete AttrpathValue (not a Select expression), so dot completion doesn't
+// trigger. This strategy detects the pattern, finds the config type from the
+// root lambda's pattern fields, and suggests the next level of option keys.
+
+fn try_attrpath_key_completion(
+    analysis: &FileAnalysis,
+    inference: &lang_check::InferenceResult,
+    token: &rowan::SyntaxToken<rnix::NixLanguage>,
+) -> Option<Vec<CompletionItem>> {
+    use rnix::SyntaxKind;
+
+    // Guard: token must be a dot inside an attrpath key.
+    if token.kind() != SyntaxKind::TOKEN_DOT {
+        return None;
+    }
+
+    // Walk ancestors from the token's parent to find an Attrpath node.
+    let node = token.parent()?;
+    let attrpath_node = node
+        .ancestors()
+        .find_map(rnix::ast::Attrpath::cast)?;
+
+    // The Attrpath must be inside an AttrpathValue (not a Select — that's dot
+    // completion). If the parent is a Select, bail out.
+    let parent = attrpath_node.syntax().parent()?;
+    if rnix::ast::Select::can_cast(parent.kind()) {
+        return None;
+    }
+    let _attrpath_value_node = rnix::ast::AttrpathValue::cast(parent)?;
+
+    // Find the enclosing AttrSet.
+    let attrset_node = _attrpath_value_node
+        .syntax()
+        .parent()
+        .and_then(rnix::ast::AttrSet::cast)?;
+
+    // Collect segments from the current attrpath before the cursor.
+    let cursor_offset = token.text_range().end();
+    let current_segments = collect_attrpath_key_segments(&attrpath_node, cursor_offset);
+
+    // Collect parent context segments from enclosing AttrpathValue/AttrSet
+    // nesting. For `{ services.openssh = { enable. } }`, if we're at `enable.`,
+    // the parent context is ["services", "openssh"].
+    let parent_segments = collect_parent_attrpath_context(&attrset_node);
+
+    // Full path = parent context + current segments.
+    let mut full_path = parent_segments;
+    full_path.extend(current_segments);
+
+    log::debug!("attrpath_key_completion: full_path={full_path:?}");
+
+    // Find the module config type: scan the root lambda's pattern fields for
+    // one whose type contains the first path segment as a field.
+    let first_segment = full_path.first()?;
+    let config_ty = get_module_config_type(analysis, inference, first_segment)?;
+
+    // Walk the config type through the full path.
+    let resolved_ty = resolve_through_segments(&config_ty, &full_path).unwrap_or(config_ty);
+
+    // Extract fields and return completion items.
+    let fields = collect_attrset_fields(&resolved_ty);
+    Some(fields_to_completion_items(&fields))
+}
+
+/// Get the module config type from the root lambda's pattern fields.
+///
+/// NixOS modules are lambdas like `{ config, lib, pkgs, ... }: { ... }`. The
+/// context system injects rich types (e.g. `NixosConfig`) onto the pattern
+/// fields. This function scans all pattern field types and returns the first
+/// one that contains `first_segment` as a field — avoiding any hardcoded
+/// parameter name.
+///
+/// Returns `None` when:
+/// - The root expression isn't a lambda with pattern params
+/// - No pattern field's type contains the given segment (e.g. not a NixOS module,
+///   or context stubs aren't loaded)
+fn get_module_config_type(
+    analysis: &FileAnalysis,
+    inference: &lang_check::InferenceResult,
+    first_segment: &SmolStr,
+) -> Option<OutputTy> {
+    let root_expr_id = analysis.module.entry_expr;
+
+    let Expr::Lambda {
+        pat: Some(pat), ..
+    } = &analysis.module[root_expr_id]
+    else {
+        return None;
+    };
+
+    // Search each pattern field for a type that has the first segment.
+    for (name_id, _default) in pat.fields.iter() {
+        let Some(name_id) = name_id else { continue };
+        if let Some(ty) = inference.name_ty_map.get(*name_id) {
+            let fields = collect_attrset_fields(ty);
+            if fields.contains_key(first_segment) {
+                return Some(ty.clone());
+            }
+        }
+    }
+
+    None
+}
+
+/// Collect attrpath segments before the cursor from an Attrpath node.
+///
+/// Similar to `collect_typed_segments` but operates on an `Attrpath` node
+/// directly (rather than extracting it from a Select). Extracts static key
+/// segments, stopping at the cursor position or any error-recovery artifact.
+fn collect_attrpath_key_segments(
+    attrpath: &rnix::ast::Attrpath,
+    cursor_offset: rowan::TextSize,
+) -> Vec<SmolStr> {
+    let mut segments = Vec::new();
+
+    for attr in attrpath.attrs() {
+        // Stop at segments at or after the cursor (being completed or artifacts).
+        if attr.syntax().text_range().start() >= cursor_offset {
+            break;
+        }
+
+        let name = match attr {
+            rnix::ast::Attr::Ident(ref ident) => {
+                ident.ident_token().map(|t| SmolStr::from(t.text()))
+            }
+            rnix::ast::Attr::Str(ref s) => get_str_literal(s),
+            rnix::ast::Attr::Dynamic(_) => None,
+        };
+
+        match name {
+            Some(n) if !n.is_empty() => segments.push(n),
+            _ => break,
+        }
+    }
+
+    segments
+}
+
+/// Walk up through nested AttrSet → AttrpathValue chains to collect parent
+/// path context.
+///
+/// For `{ services.openssh = { enable. } }`, when called on the inner AttrSet
+/// (the one containing `enable.`), this returns `["services", "openssh"]` —
+/// the segments from the outer AttrpathValue that nests into this AttrSet.
+fn collect_parent_attrpath_context(
+    attrset_node: &rnix::ast::AttrSet,
+) -> Vec<SmolStr> {
+    let mut all_segments = Vec::new();
+    let mut current = attrset_node.syntax().clone();
+
+    loop {
+        // Check if this AttrSet is the value of an AttrpathValue.
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        let Some(apv) = rnix::ast::AttrpathValue::cast(parent) else {
+            break;
+        };
+
+        // Collect all segments from the parent AttrpathValue's attrpath.
+        if let Some(attrpath) = apv.attrpath() {
+            let mut parent_segs = Vec::new();
+            for attr in attrpath.attrs() {
+                let name = match attr {
+                    rnix::ast::Attr::Ident(ref ident) => {
+                        ident.ident_token().map(|t| SmolStr::from(t.text()))
+                    }
+                    rnix::ast::Attr::Str(ref s) => get_str_literal(s),
+                    rnix::ast::Attr::Dynamic(_) => None,
+                };
+                match name {
+                    Some(n) if !n.is_empty() => parent_segs.push(n),
+                    _ => break,
+                }
+            }
+            // Prepend parent segments (outer-to-inner order).
+            all_segments.splice(0..0, parent_segs);
+        }
+
+        // Move up to the AttrSet that contains this AttrpathValue.
+        let Some(grandparent) = apv.syntax().parent() else {
+            break;
+        };
+        if !rnix::ast::AttrSet::can_cast(grandparent.kind()) {
+            break;
+        }
+        current = grandparent;
+    }
+
+    all_segments
 }
 
 // ==============================================================================
@@ -683,6 +893,7 @@ fn fields_to_completion_items(fields: &BTreeMap<SmolStr, TyRef>) -> Vec<Completi
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::project_config::{ContextConfig, ProjectConfig};
     use crate::state::AnalysisState;
     use crate::test_util::{find_offset, parse_markers, temp_path};
     use indoc::indoc;
@@ -1047,5 +1258,176 @@ mod tests {
             "should NOT suggest filter (already inherited), got: {names:?}"
         );
         assert!(names.contains(&"map"), "should suggest map, got: {names:?}");
+    }
+
+    // ------------------------------------------------------------------
+    // Attrpath key completion (NixOS module option paths)
+    // ------------------------------------------------------------------
+
+    /// Small context stubs for testing attrpath key completion.
+    /// Defines a TestConfig type with nested programs/services structure,
+    /// and declares `config :: TestConfig` as a context arg.
+    const TEST_CONTEXT_STUBS: &str = indoc! {"
+        type TestConfig = {
+            programs: {
+                steam: { enable: bool, ... },
+                firefox: { enable: bool, ... },
+                ...
+            },
+            services: {
+                openssh: { enable: bool, port: int, ... },
+                ...
+            },
+            ...
+        };
+        val config :: TestConfig;
+    "};
+
+    /// Run completions at marker positions with context stubs injected.
+    ///
+    /// Writes the context stubs to a temp directory, configures a
+    /// ProjectConfig that matches all .nix files with those stubs, and
+    /// runs analysis with context args applied to the root lambda.
+    fn complete_at_markers_with_context(
+        src: &str,
+        context_stubs: &str,
+    ) -> BTreeMap<u32, Vec<CompletionItem>> {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static CTX_COUNTER: AtomicU32 = AtomicU32::new(0);
+
+        let markers = parse_markers(src);
+        assert!(!markers.is_empty(), "no markers found in source");
+
+        // Create a unique temp directory for this test invocation.
+        let id = CTX_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let temp_dir = std::env::temp_dir().join(format!(
+            "tix_ctx_test_{}_{id}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        // Write context stubs to a file in the temp directory.
+        let stubs_path = temp_dir.join("test_context.tix");
+        std::fs::write(&stubs_path, context_stubs).unwrap();
+
+        let nix_path = temp_dir.join("test.nix");
+        let mut state = AnalysisState::new(TypeAliasRegistry::default());
+
+        // Configure project context: all .nix files get our test context stubs.
+        let mut context = std::collections::HashMap::new();
+        context.insert(
+            "test".to_string(),
+            ContextConfig {
+                paths: vec!["*.nix".to_string()],
+                stubs: vec!["test_context.tix".to_string()],
+            },
+        );
+        state.project_config = Some(ProjectConfig {
+            stubs: vec![],
+            context,
+        });
+        state.config_dir = Some(temp_dir.clone());
+
+        state.update_file(nix_path.clone(), src.to_string());
+        let analysis = state.get_file(&nix_path).unwrap();
+        let root = rnix::Root::parse(src).tree();
+
+        let results = markers
+            .into_iter()
+            .map(|(num, offset)| {
+                let pos = analysis.line_index.position(offset);
+                let items = match completion(analysis, pos, &root) {
+                    Some(CompletionResponse::Array(items)) => items,
+                    _ => Vec::new(),
+                };
+                (num, items)
+            })
+            .collect();
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        results
+    }
+
+    #[test]
+    fn attrpath_key_top_level() {
+        // `{ config, ... }: { programs. }` — should suggest fields of
+        // TestConfig.programs (steam, firefox).
+        let src = indoc! {"
+            { config, ... }: { programs. }
+            #                           ^1
+        "};
+        let results = complete_at_markers_with_context(src, TEST_CONTEXT_STUBS);
+        let names = labels(&results[&1]);
+        assert!(
+            names.contains(&"steam"),
+            "should complete steam, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"firefox"),
+            "should complete firefox, got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn attrpath_key_nested_path() {
+        // `{ config, ... }: { programs.steam. }` — should suggest fields of
+        // TestConfig.programs.steam (enable).
+        let src = indoc! {"
+            { config, ... }: { programs.steam. }
+            #                                 ^1
+        "};
+        let results = complete_at_markers_with_context(src, TEST_CONTEXT_STUBS);
+        let names = labels(&results[&1]);
+        assert!(
+            names.contains(&"enable"),
+            "should complete enable, got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn attrpath_key_services() {
+        // Verify that services paths also work.
+        let src = indoc! {"
+            { config, ... }: { services. }
+            #                           ^1
+        "};
+        let results = complete_at_markers_with_context(src, TEST_CONTEXT_STUBS);
+        let names = labels(&results[&1]);
+        assert!(
+            names.contains(&"openssh"),
+            "should complete openssh, got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn attrpath_key_no_false_positive_without_context() {
+        // Without context stubs, attrpath key completion should not fire.
+        let src = indoc! {"
+            { config, ... }: { programs. }
+            #                           ^1
+        "};
+        let results = complete_at_markers(src);
+        let names = labels(&results[&1]);
+        // Without context stubs, `config` has no rich type, so `programs`
+        // won't resolve to anything and no field completions should appear.
+        assert!(
+            !names.contains(&"steam"),
+            "should NOT suggest steam without context stubs, got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn attrpath_key_not_plain_lambda() {
+        // A plain lambda (not a pattern) should not trigger attrpath key completion.
+        let src = indoc! {"
+            config: { programs. }
+            #                   ^1
+        "};
+        let results = complete_at_markers_with_context(src, TEST_CONTEXT_STUBS);
+        let names = labels(&results[&1]);
+        assert!(
+            !names.contains(&"steam"),
+            "should NOT suggest steam for plain lambda param, got: {names:?}"
+        );
     }
 }
