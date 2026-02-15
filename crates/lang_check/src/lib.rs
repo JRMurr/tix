@@ -2,6 +2,7 @@ pub mod aliases;
 mod builtins;
 pub(crate) mod collect;
 mod constrain;
+pub mod diagnostic;
 pub mod imports;
 mod infer;
 pub(crate) mod infer_expr;
@@ -16,6 +17,7 @@ mod pbt;
 use aliases::TypeAliasRegistry;
 use comment_parser::{parse_and_collect, ParsedTy, TypeVarValue};
 use derive_more::Debug;
+use diagnostic::TixDiagnostic;
 use infer_expr::{PendingMerge, PendingOverload};
 use la_arena::ArenaMap;
 use lang_ast::{AstDb, ExprId, Module, NameId, NameResolution, NixFile, OverloadBinOp};
@@ -25,7 +27,10 @@ use storage::TypeStorage;
 use thiserror::Error;
 
 #[salsa::tracked]
-pub fn check_file(db: &dyn AstDb, file: NixFile) -> Result<InferenceResult, LocatedError> {
+pub fn check_file(
+    db: &dyn AstDb,
+    file: NixFile,
+) -> Result<InferenceResult, TixDiagnostic> {
     check_file_with_aliases(db, file, &TypeAliasRegistry::default())
 }
 
@@ -35,7 +40,7 @@ pub fn check_file_with_aliases(
     db: &dyn AstDb,
     file: NixFile,
     aliases: &TypeAliasRegistry,
-) -> Result<InferenceResult, LocatedError> {
+) -> Result<InferenceResult, TixDiagnostic> {
     check_file_with_imports(db, file, aliases, HashMap::new())
 }
 
@@ -45,7 +50,7 @@ pub fn check_file_with_imports(
     file: NixFile,
     aliases: &TypeAliasRegistry,
     import_types: HashMap<ExprId, OutputTy>,
-) -> Result<InferenceResult, LocatedError> {
+) -> Result<InferenceResult, TixDiagnostic> {
     let module = lang_ast::module(db, file);
     let name_res = lang_ast::name_resolution(db, file);
     let grouped_defs = lang_ast::group_def(db, file);
@@ -89,7 +94,6 @@ impl From<TyId> for usize {
 pub struct InferenceResult {
     pub name_ty_map: ArenaMap<NameId, OutputTy>,
     pub expr_ty_map: ArenaMap<ExprId, OutputTy>,
-    pub warnings: Vec<LocatedWarning>,
 }
 
 impl InferenceResult {
@@ -107,8 +111,11 @@ pub enum InferenceError {
     #[error("Type mismatch: {0:?} is not a subtype of {1:?}")]
     TypeMismatch(Ty<TyId>, Ty<TyId>),
 
-    #[error("Missing field: {0:?}")]
-    MissingField(smol_str::SmolStr),
+    #[error("Missing field: {field:?}")]
+    MissingField {
+        field: smol_str::SmolStr,
+        available: Vec<smol_str::SmolStr>,
+    },
 
     #[error("Can not do binary operation ({1:?}) ({0:?}) ({2:?})")]
     InvalidBinOp(OverloadBinOp, Ty<TyId>, Ty<TyId>),
@@ -154,15 +161,16 @@ impl std::fmt::Display for Warning {
     }
 }
 
-/// Partial inference results plus all collected errors.
+/// Partial inference results plus all collected diagnostics.
 /// Allows the LSP to report diagnostics even when inference fails partway.
 #[derive(Debug, Clone)]
 pub struct CheckResult {
     /// If inference succeeded, contains the full result. If it failed, this is
     /// None (future: partial results from error recovery).
     pub inference: Option<InferenceResult>,
-    pub errors: Vec<LocatedError>,
-    pub warnings: Vec<LocatedWarning>,
+    /// Display-ready diagnostics (errors + warnings) with human-readable type
+    /// names via OutputTy.
+    pub diagnostics: Vec<TixDiagnostic>,
 }
 
 /// Type-check a file, collecting errors instead of aborting on the first one.
@@ -179,12 +187,10 @@ pub fn check_file_collecting(
     let name_res = lang_ast::name_resolution(db, file);
     let grouped_defs = lang_ast::group_def(db, file);
     let check = CheckCtx::new(&module, &name_res, aliases.clone(), import_types);
-    let (inference, errors) = check.infer_prog_partial(grouped_defs);
-    let warnings = inference.warnings.clone();
+    let (inference, diagnostics) = check.infer_prog_partial(grouped_defs);
     CheckResult {
         inference: Some(inference),
-        errors,
-        warnings,
+        diagnostics,
     }
 }
 

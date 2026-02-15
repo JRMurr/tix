@@ -10,6 +10,8 @@ use std::collections::{HashMap, HashSet};
 
 use super::{CheckCtx, InferenceError, InferenceResult, LocatedError, TyId};
 use crate::collect::{canonicalize_standalone, Collector};
+use crate::diagnostic;
+use crate::diagnostic::TixDiagnostic;
 use crate::infer_expr::{BinConstraint, PendingMerge, PendingOverload};
 use crate::storage::TypeEntry;
 use lang_ast::nameres::{DependentGroup, GroupedDefs};
@@ -29,13 +31,18 @@ enum OverloadProgress {
 }
 
 impl CheckCtx<'_> {
-    pub fn infer_prog(self, groups: GroupedDefs) -> Result<InferenceResult, LocatedError> {
-        let (result, errors) = self.infer_prog_partial(groups);
-        if let Some(err) = errors.into_iter().next() {
-            Err(err)
-        } else {
-            Ok(result)
+    pub fn infer_prog(self, groups: GroupedDefs) -> Result<InferenceResult, TixDiagnostic> {
+        let (result, diagnostics) = self.infer_prog_partial(groups);
+        // Return the first error diagnostic (skip warnings like UnresolvedName).
+        for diag in diagnostics {
+            if !matches!(
+                diag.kind,
+                crate::diagnostic::TixDiagnosticKind::UnresolvedName { .. }
+            ) {
+                return Err(diag);
+            }
         }
+        Ok(result)
     }
 
     /// Inference entry point that always produces an InferenceResult, even when
@@ -45,7 +52,7 @@ impl CheckCtx<'_> {
     pub fn infer_prog_partial(
         mut self,
         groups: GroupedDefs,
-    ) -> (InferenceResult, Vec<LocatedError>) {
+    ) -> (InferenceResult, Vec<TixDiagnostic>) {
         // Pre-allocate TyIds for all names and expressions so they can be
         // referenced before they are inferred (needed for recursive definitions).
         let len = self.module.names().len() + self.module.exprs().len();
@@ -65,12 +72,16 @@ impl CheckCtx<'_> {
             errors.push(err);
         }
 
-        // Extract warnings before Collector consumes self.
+        // Convert internal errors and warnings to display-ready diagnostics
+        // while we still have access to the TypeStorage for canonicalization.
         let warnings = std::mem::take(&mut self.warnings);
+        let mut diagnostics =
+            diagnostic::errors_to_diagnostics(&errors, &self.table, &self.alias_provenance);
+        diagnostics.extend(diagnostic::warnings_to_diagnostics(&warnings));
+
         let mut collector = Collector::new(self);
-        let mut result = collector.finalize_inference();
-        result.warnings = warnings;
-        (result, errors)
+        let result = collector.finalize_inference();
+        (result, diagnostics)
     }
 
     fn infer_root(&mut self) -> Result<(), LocatedError> {

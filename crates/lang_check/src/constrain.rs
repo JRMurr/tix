@@ -128,7 +128,10 @@ impl CheckCtx<'_> {
                 Some(sub_field) => self.constrain(*sub_field, *sup_field)?,
                 None => {
                     if !sub_attr.open {
-                        return Err(InferenceError::MissingField(key.clone()));
+                        return Err(InferenceError::MissingField {
+                            field: key.clone(),
+                            available: sub_attr.fields.keys().cloned().collect(),
+                        });
                     }
                     // Open attrsets intentionally pass here: the unknown "rest"
                     // portion may contain the required field. This is sound for

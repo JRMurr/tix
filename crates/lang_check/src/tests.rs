@@ -3,11 +3,12 @@ use lang_ast::{module, tests::TestDatabase, Module};
 use lang_ty::{arc_ty, OutputTy, PrimitiveTy};
 
 use crate::aliases::TypeAliasRegistry;
-use crate::{check_file_with_aliases, InferenceError, InferenceResult, LocatedError};
+use crate::diagnostic::{TixDiagnostic, TixDiagnosticKind};
+use crate::{check_file_with_aliases, InferenceResult};
 
 use super::check_file;
 
-pub fn check_str(src: &str) -> (Module, Result<InferenceResult, LocatedError>) {
+pub fn check_str(src: &str) -> (Module, Result<InferenceResult, TixDiagnostic>) {
     let (db, file) = TestDatabase::single_file(src).unwrap();
     let module = module(&db, file);
     (module, check_file(&db, file))
@@ -16,7 +17,7 @@ pub fn check_str(src: &str) -> (Module, Result<InferenceResult, LocatedError>) {
 pub fn check_str_with_aliases(
     src: &str,
     aliases: &TypeAliasRegistry,
-) -> (Module, Result<InferenceResult, LocatedError>) {
+) -> (Module, Result<InferenceResult, TixDiagnostic>) {
     let (db, file) = TestDatabase::single_file(src).unwrap();
     let module = module(&db, file);
     (module, check_file_with_aliases(&db, file, aliases))
@@ -44,10 +45,15 @@ pub fn get_inferred_root(src: &str) -> OutputTy {
         .clone()
 }
 
-pub fn get_check_error(src: &str) -> InferenceError {
+pub fn get_check_error(src: &str) -> TixDiagnosticKind {
     let (_, inference) = check_str(src);
 
-    inference.expect_err("Expected an inference error").payload
+    inference.expect_err("Expected an inference error").kind
+}
+
+/// Get the diagnostic message string for a failing Nix expression.
+pub fn get_diagnostic_message(src: &str) -> String {
+    get_check_error(src).to_string()
 }
 
 #[track_caller]
@@ -58,7 +64,7 @@ pub fn expect_ty_inference(src: &str, expected: OutputTy) {
 }
 
 #[track_caller]
-pub fn expect_inference_error(src: &str, expected: InferenceError) {
+pub fn expect_diagnostic_kind(src: &str, expected: TixDiagnosticKind) {
     let error = get_check_error(src);
 
     assert_eq!(error, expected)
@@ -112,7 +118,33 @@ macro_rules! error_case {
         #[test]
         fn $name() {
             let file = indoc! { $file };
-            expect_inference_error(file, $expected);
+            expect_diagnostic_kind(file, $expected);
+        }
+    };
+}
+
+/// Test that a diagnostic message contains / does not contain a substring.
+macro_rules! diagnostic_msg {
+    ($name:ident, $file:expr, contains $needle:expr) => {
+        #[test]
+        fn $name() {
+            let msg = get_diagnostic_message($file);
+            assert!(
+                msg.contains($needle),
+                "expected message to contain {:?}, got: {msg:?}",
+                $needle,
+            );
+        }
+    };
+    ($name:ident, $file:expr, not contains $needle:expr) => {
+        #[test]
+        fn $name() {
+            let msg = get_diagnostic_message($file);
+            assert!(
+                !msg.contains($needle),
+                "expected message NOT to contain {:?}, got: {msg:?}",
+                $needle,
+            );
         }
     };
 }
@@ -380,7 +412,10 @@ error_case!(
         in
         foo
     ",
-    InferenceError::TypeMismatch(PrimitiveTy::Int.into(), PrimitiveTy::String.into())
+    TixDiagnosticKind::TypeMismatch {
+        actual: OutputTy::Primitive(PrimitiveTy::Int),
+        expected: OutputTy::Primitive(PrimitiveTy::String),
+    }
 );
 
 // ==============================================================================
@@ -430,7 +465,7 @@ error_case!(
         in
         f { x = \"hello\"; }
     ",
-    matches InferenceError::TypeMismatch(..)
+    matches TixDiagnosticKind::TypeMismatch { .. }
 );
 
 test_case!(
@@ -508,7 +543,7 @@ error_case!(
             x
         }: x * 2
     ",
-    matches InferenceError::TypeMismatch(..)
+    matches TixDiagnosticKind::TypeMismatch { .. }
 );
 
 /// Look up the type of a named binding by text name, with aliases loaded.
@@ -683,14 +718,20 @@ test_case!(
 error_case!(
     negate_string_error,
     r#"-"hello""#,
-    InferenceError::TypeMismatch(PrimitiveTy::String.into(), PrimitiveTy::Number.into())
+    TixDiagnosticKind::TypeMismatch {
+        actual: OutputTy::Primitive(PrimitiveTy::String),
+        expected: OutputTy::Primitive(PrimitiveTy::Number),
+    }
 );
 
 // Type error: can't subtract with a string.
 error_case!(
     sub_string_error,
     r#""hello" - 1"#,
-    InferenceError::TypeMismatch(PrimitiveTy::String.into(), PrimitiveTy::Number.into())
+    TixDiagnosticKind::TypeMismatch {
+        actual: OutputTy::Primitive(PrimitiveTy::String),
+        expected: OutputTy::Primitive(PrimitiveTy::Number),
+    }
 );
 
 // ==============================================================================
@@ -751,7 +792,7 @@ test_case!(
 error_case!(
     with_nested_disjoint_errors,
     r#"with { x = 1; }; with { y = "hi"; }; { a = x; b = y; }"#,
-    matches InferenceError::MissingField(_)
+    matches TixDiagnosticKind::MissingField { .. }
 );
 
 // ==============================================================================
@@ -1508,6 +1549,52 @@ fn alias_named_from_global_val_return() {
     );
     assert_eq!(format!("{ty}"), "Derivation");
 }
+
+// ==============================================================================
+// Diagnostic message format tests
+// ==============================================================================
+
+diagnostic_msg!(
+    diag_type_mismatch_if_cond,
+    "if 1 then true else false",
+    contains "type mismatch"
+);
+
+diagnostic_msg!(
+    diag_sub_string_msg,
+    r#""hello" - 1"#,
+    contains "type mismatch"
+);
+
+diagnostic_msg!(
+    diag_missing_field_with_suggestion,
+    "let s = { foo = 1; bar = 2; }; in s.bra",
+    contains "did you mean `bar`"
+);
+
+diagnostic_msg!(
+    diag_missing_field_shows_available,
+    "let s = { foo = 1; bar = 2; }; in s.baz",
+    contains "available fields"
+);
+
+diagnostic_msg!(
+    diag_no_false_suggestion_for_distant_name,
+    "let s = { foo = 1; }; in s.completely_different",
+    not contains "did you mean"
+);
+
+diagnostic_msg!(
+    diag_attrset_merge_error,
+    "1 // 2",
+    contains "cannot merge"
+);
+
+diagnostic_msg!(
+    diag_missing_field_through_function,
+    "let f = { x }: x; in f { y = 1; }",
+    contains "missing field `x`"
+);
 
 // Let-binding flow: `let drv = mkDerivation { ... }; in drv` preserves the alias.
 #[test]

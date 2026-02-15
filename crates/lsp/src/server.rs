@@ -65,19 +65,12 @@ impl TixLanguageServer {
             if diagnostics_enabled {
                 let root = rnix::Root::parse(&text).tree();
 
-                let mut diags = crate::diagnostics::to_diagnostics(
-                    &analysis.check_result.errors,
+                crate::diagnostics::to_lsp_diagnostics(
+                    &analysis.check_result.diagnostics,
                     &analysis.source_map,
                     &analysis.line_index,
                     &root,
-                );
-                diags.extend(crate::diagnostics::warnings_to_diagnostics(
-                    &analysis.check_result.warnings,
-                    &analysis.source_map,
-                    &analysis.line_index,
-                    &root,
-                ));
-                diags
+                )
             } else {
                 vec![]
             }
@@ -252,19 +245,12 @@ impl LanguageServer for TixLanguageServer {
                     let diags = if diagnostics_enabled {
                         let contents = analysis.nix_file.contents(&state.db);
                         let root = rnix::Root::parse(contents).tree();
-                        let mut d = crate::diagnostics::to_diagnostics(
-                            &analysis.check_result.errors,
+                        crate::diagnostics::to_lsp_diagnostics(
+                            &analysis.check_result.diagnostics,
                             &analysis.source_map,
                             &analysis.line_index,
                             &root,
-                        );
-                        d.extend(crate::diagnostics::warnings_to_diagnostics(
-                            &analysis.check_result.warnings,
-                            &analysis.source_map,
-                            &analysis.line_index,
-                            &root,
-                        ));
-                        d
+                        )
                     } else {
                         vec![]
                     };

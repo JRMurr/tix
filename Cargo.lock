@@ -258,6 +258,8 @@ dependencies = [
  "lang_check",
  "lang_ty",
  "miette",
+ "rnix",
+ "rowan",
  "thiserror 2.0.9",
 ]
 

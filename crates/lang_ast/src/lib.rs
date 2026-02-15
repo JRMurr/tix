@@ -13,7 +13,7 @@ pub mod arbitrary;
 #[cfg(any(test, feature = "proptest_support"))]
 pub mod tests;
 
-use std::{collections::HashMap, ops};
+use std::{collections::HashMap, fmt, ops};
 
 use comment::gather_doc_comments;
 pub use db::{AstDb, NixFile, RootDatabase};
@@ -270,6 +270,17 @@ impl From<OverloadBinOp> for String {
         };
 
         v.to_string()
+    }
+}
+
+impl fmt::Display for OverloadBinOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            OverloadBinOp::Add => write!(f, "+"),
+            OverloadBinOp::Sub => write!(f, "-"),
+            OverloadBinOp::Mul => write!(f, "*"),
+            OverloadBinOp::Div => write!(f, "/"),
+        }
     }
 }
 

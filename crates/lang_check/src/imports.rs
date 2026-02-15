@@ -84,7 +84,7 @@ pub enum ImportErrorKind {
     /// Cyclic import detected — file A imports B which (transitively) imports A.
     /// TODO: A future extension could support cross-file SCCs by merging modules.
     CyclicImport(PathBuf),
-    InferenceError(PathBuf, crate::LocatedError),
+    InferenceError(PathBuf, crate::diagnostic::TixDiagnostic),
 }
 
 #[derive(Debug, Clone)]

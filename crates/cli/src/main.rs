@@ -4,9 +4,12 @@ use std::{error::Error, path::PathBuf};
 use clap::Parser;
 use lang_ast::{module_and_source_maps, name_resolution, RootDatabase};
 use lang_check::aliases::TypeAliasRegistry;
-use lang_check::check_file_with_imports;
+use lang_check::check_file_collecting;
+use lang_check::diagnostic::{TixDiagnosticKind};
 use lang_check::imports::resolve_imports;
 use lang_ty::OutputTy;
+use miette::{LabeledSpan, NamedSource};
+use rowan::ast::AstNode;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -43,9 +46,9 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let db: RootDatabase = Default::default();
 
-    let file = db.read_file(args.file_path)?;
+    let file = db.read_file(args.file_path.clone())?;
 
-    let (module, _source_map) = module_and_source_maps(&db, file);
+    let (module, source_map) = module_and_source_maps(&db, file);
     let name_res = name_resolution(&db, file);
 
     // Resolve literal imports recursively before type-checking.
@@ -58,51 +61,104 @@ fn main() -> Result<(), Box<dyn Error>> {
         eprintln!("Import warning: {:?}", err.kind);
     }
 
-    let inference = check_file_with_imports(&db, file, &registry, import_resolution.types)?;
+    let result = check_file_collecting(&db, file, &registry, import_resolution.types);
 
-    for w in &inference.warnings {
-        eprintln!("Warning: {}", w.payload);
-    }
+    // Render diagnostics with miette for source context.
+    let source_text = std::fs::read_to_string(&args.file_path)?;
+    let filename = args.file_path.display().to_string();
+    let root = rnix::Root::parse(&source_text).tree();
+    let mut has_errors = false;
 
-    // Print per-name types (the let-bindings, function params, etc.).
-    // Deduplicate by (name_text, type_string) since the same name can appear
-    // multiple times (e.g. a let-binding and an inherit reference).
-    let mut seen = std::collections::BTreeMap::<String, OutputTy>::new();
-    for (name_id, name) in module.names() {
-        if let Some(ty) = inference.name_ty_map.get(name_id) {
-            seen.entry(name.text.to_string())
-                .and_modify(|existing| {
-                    // When the same name appears multiple times (e.g. a let-binding
-                    // and an inherit reference), prefer the version with fewer
-                    // unions/intersections — that's the cleaner (early-canonicalized)
-                    // form, not contaminated by use-site extrusion.
-                    if ty.contains_union_or_intersection()
-                        && !existing.contains_union_or_intersection()
-                    {
-                        // Keep the existing (cleaner) one.
-                    } else if !ty.contains_union_or_intersection()
-                        && existing.contains_union_or_intersection()
-                    {
-                        *existing = ty.clone();
-                    }
-                    // If both have or both lack unions/intersections, keep existing.
-                })
-                .or_insert(ty.clone());
+    for diag in &result.diagnostics {
+        let is_warning = matches!(diag.kind, TixDiagnosticKind::UnresolvedName { .. });
+        if !is_warning {
+            has_errors = true;
         }
+
+        // Resolve ExprId → source span via the ModuleSourceMap.
+        let span = source_map.node_for_expr(diag.at_expr).map(|ptr| {
+            let node = ptr.to_node(root.syntax());
+            let range = node.text_range();
+            let start: usize = range.start().into();
+            let len: usize = range.len().into();
+            (start, len)
+        });
+
+        // Build help text for MissingField suggestions.
+        let help = match &diag.kind {
+            TixDiagnosticKind::MissingField {
+                suggestion: Some(s),
+                ..
+            } => Some(format!("did you mean `{s}`?")),
+            _ => None,
+        };
+
+        let labels = span
+            .map(|(offset, len)| vec![LabeledSpan::at(offset..offset + len, "here")])
+            .unwrap_or_default();
+
+        let mut builder = miette::MietteDiagnostic::new(diag.kind.to_string());
+        if !labels.is_empty() {
+            builder = builder.with_labels(labels);
+        }
+        if let Some(help_text) = help {
+            builder = builder.with_help(help_text);
+        }
+        if is_warning {
+            builder = builder.with_severity(miette::Severity::Warning);
+        }
+
+        let report = miette::Report::new(builder)
+            .with_source_code(NamedSource::new(filename.clone(), source_text.clone()));
+        eprintln!("{:?}", report);
     }
 
-    println!("Bindings:");
-    for (name, ty) in &seen {
-        println!("  {name} :: {ty}");
+    if has_errors {
+        std::process::exit(1);
     }
 
-    // Print the root expression type.
-    let root_ty = inference
-        .expr_ty_map
-        .get(module.entry_expr)
-        .expect("No type for root module entry");
+    // If inference succeeded, print binding types and root type.
+    if let Some(inference) = &result.inference {
+        // Print per-name types (the let-bindings, function params, etc.).
+        // Deduplicate by (name_text, type_string) since the same name can appear
+        // multiple times (e.g. a let-binding and an inherit reference).
+        let mut seen = std::collections::BTreeMap::<String, OutputTy>::new();
+        for (name_id, name) in module.names() {
+            if let Some(ty) = inference.name_ty_map.get(name_id) {
+                seen.entry(name.text.to_string())
+                    .and_modify(|existing| {
+                        // When the same name appears multiple times (e.g. a let-binding
+                        // and an inherit reference), prefer the version with fewer
+                        // unions/intersections — that's the cleaner (early-canonicalized)
+                        // form, not contaminated by use-site extrusion.
+                        if ty.contains_union_or_intersection()
+                            && !existing.contains_union_or_intersection()
+                        {
+                            // Keep the existing (cleaner) one.
+                        } else if !ty.contains_union_or_intersection()
+                            && existing.contains_union_or_intersection()
+                        {
+                            *existing = ty.clone();
+                        }
+                        // If both have or both lack unions/intersections, keep existing.
+                    })
+                    .or_insert(ty.clone());
+            }
+        }
 
-    println!("\nRoot type:\n  {root_ty}");
+        println!("Bindings:");
+        for (name, ty) in &seen {
+            println!("  {name} :: {ty}");
+        }
+
+        // Print the root expression type.
+        let root_ty = inference
+            .expr_ty_map
+            .get(module.entry_expr)
+            .expect("No type for root module entry");
+
+        println!("\nRoot type:\n  {root_ty}");
+    }
 
     Ok(())
 }

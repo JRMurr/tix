@@ -13,6 +13,8 @@ lang_ast = { path = "../lang_ast" }
 lang_check = { path = "../lang_check" }
 lang_ty = { path = "../lang_ty" }
 comment_parser = { path = "../comment_parser" }
+rnix = { workspace = true }
+rowan = { workspace = true }
 
 
 [[bin]]
