@@ -1,0 +1,9 @@
+# Home Manager module argument types
+#
+# Applied automatically to files matched by a `[context.home]` section in
+# tix.toml, or to lambdas annotated with `/** context: home-manager */`.
+
+val config :: { ... };
+val lib :: Lib;
+val pkgs :: Pkgs;
+val osConfig :: { ... };

@@ -1,0 +1,10 @@
+# NixOS module argument types
+#
+# Applied automatically to files matched by a `[context.nixos]` section in
+# tix.toml, or to lambdas annotated with `/** context: nixos */`.
+
+val config :: { ... };
+val lib :: Lib;
+val pkgs :: Pkgs;
+val options :: { ... };
+val modulesPath :: path;

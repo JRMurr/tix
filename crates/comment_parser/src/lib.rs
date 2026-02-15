@@ -31,6 +31,26 @@ pub fn parse_and_collect(source: &str) -> Result<Vec<TypeDecl>, ParseError> {
 }
 
 // =============================================================================
+// Context annotation parsing
+// =============================================================================
+
+/// Parse a `context: <name>` annotation from a doc comment string.
+///
+/// A doc comment like `/** context: nixos */` is stored as the string
+/// `"context: nixos"` after the leading `/**` and trailing `*/` are stripped.
+/// This function extracts the context name from such a string.
+pub fn parse_context_annotation(doc: &str) -> Option<SmolStr> {
+    let trimmed = doc.trim();
+    let rest = trimmed.strip_prefix("context:")?;
+    let name = rest.trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(SmolStr::from(name))
+    }
+}
+
+// =============================================================================
 // .tix declaration file types and parsing
 // =============================================================================
 
@@ -237,4 +257,40 @@ macro_rules! known_ty {
             body: $crate::ParsedTyRef::from($crate::known_ty!($($ret)*)),
         }
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn context_annotation_valid() {
+        assert_eq!(
+            parse_context_annotation("context: nixos"),
+            Some(SmolStr::from("nixos"))
+        );
+    }
+
+    #[test]
+    fn context_annotation_with_whitespace() {
+        assert_eq!(
+            parse_context_annotation("  context:   home-manager  "),
+            Some(SmolStr::from("home-manager"))
+        );
+    }
+
+    #[test]
+    fn context_annotation_no_prefix() {
+        assert_eq!(parse_context_annotation("type: x :: int"), None);
+    }
+
+    #[test]
+    fn context_annotation_empty_name() {
+        assert_eq!(parse_context_annotation("context:   "), None);
+    }
+
+    #[test]
+    fn context_annotation_bare_prefix() {
+        assert_eq!(parse_context_annotation("context:"), None);
+    }
 }

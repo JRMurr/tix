@@ -1,3 +1,5 @@
+mod config;
+
 use std::collections::{HashMap, HashSet};
 use std::{error::Error, path::PathBuf};
 
@@ -24,6 +26,10 @@ struct Cli {
     /// Do not load the built-in nixpkgs stubs
     #[arg(long)]
     no_default_stubs: bool,
+
+    /// Path to tix.toml config file (auto-discovered if not specified)
+    #[arg(long = "config", value_name = "PATH")]
+    config_path: Option<PathBuf>,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -39,10 +45,67 @@ fn main() -> Result<(), Box<dyn Error>> {
     for stub_path in &args.stub_paths {
         load_stubs(&mut registry, stub_path)?;
     }
+
+    // Discover or load tix.toml configuration.
+    let file_path = std::fs::canonicalize(&args.file_path).unwrap_or(args.file_path.clone());
+    let (toml_config, config_dir) = match &args.config_path {
+        Some(explicit_path) => {
+            let cfg = config::load_config(explicit_path)?;
+            let dir = explicit_path
+                .parent()
+                .unwrap_or(std::path::Path::new("."))
+                .to_path_buf();
+            (Some(cfg), Some(dir))
+        }
+        None => {
+            // Walk up from the file's parent directory looking for tix.toml.
+            let start_dir = file_path.parent().unwrap_or(std::path::Path::new("."));
+            match config::find_config(start_dir) {
+                Some(config_path) => {
+                    let dir = config_path
+                        .parent()
+                        .unwrap_or(std::path::Path::new("."))
+                        .to_path_buf();
+                    match config::load_config(&config_path) {
+                        Ok(cfg) => (Some(cfg), Some(dir)),
+                        Err(e) => {
+                            eprintln!("Warning: failed to load {}: {e}", config_path.display());
+                            (None, None)
+                        }
+                    }
+                }
+                None => (None, None),
+            }
+        }
+    };
+
+    // Load additional stubs from tix.toml config.
+    if let (Some(ref cfg), Some(ref dir)) = (&toml_config, &config_dir) {
+        for stub in &cfg.stubs {
+            let stub_path = dir.join(stub);
+            if let Err(e) = load_stubs(&mut registry, &stub_path) {
+                eprintln!(
+                    "Warning: failed to load config stub '{}': {e}",
+                    stub_path.display()
+                );
+            }
+        }
+    }
+
     if let Err(cycles) = registry.validate() {
         eprintln!("Error: cyclic type aliases detected: {:?}", cycles);
         std::process::exit(1);
     }
+
+    // Resolve context args for this file based on tix.toml context definitions.
+    let context_args = if let (Some(ref cfg), Some(ref dir)) = (&toml_config, &config_dir) {
+        config::resolve_context_for_file(&file_path, cfg, dir, &mut registry).unwrap_or_else(|e| {
+            eprintln!("Warning: failed to resolve context: {e}");
+            HashMap::new()
+        })
+    } else {
+        HashMap::new()
+    };
 
     let db: RootDatabase = Default::default();
 
@@ -67,7 +130,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         eprintln!("Import warning: {:?}", err.kind);
     }
 
-    let result = check_file_collecting(&db, file, &registry, import_resolution.types);
+    let result = check_file_collecting(&db, file, &registry, import_resolution.types, context_args);
 
     // Render diagnostics with miette for source context.
     let source_text = std::fs::read_to_string(&args.file_path)?;

@@ -1629,3 +1629,253 @@ fn alias_named_flows_through_let() {
     );
     assert_eq!(format!("{ty}"), "Derivation");
 }
+
+// ==============================================================================
+// Context args (tix.toml / doc comment context)
+// ==============================================================================
+
+use comment_parser::ParsedTy;
+use smol_str::SmolStr;
+use std::collections::HashMap;
+
+/// Helper to type-check a string with context args applied to the root lambda.
+fn check_str_with_context(
+    src: &str,
+    context_args: HashMap<SmolStr, ParsedTy>,
+) -> (Module, crate::CheckResult) {
+    let (db, file) = TestDatabase::single_file(src).unwrap();
+    let module = module(&db, file);
+    let result = crate::check_file_collecting(
+        &db,
+        file,
+        &TypeAliasRegistry::with_builtins(),
+        HashMap::new(),
+        context_args,
+    );
+    (module, result)
+}
+
+fn get_inferred_root_with_context(src: &str, context_args: HashMap<SmolStr, ParsedTy>) -> OutputTy {
+    let (module, result) = check_str_with_context(src, context_args);
+    result
+        .inference
+        .expect("inference should succeed")
+        .expr_ty_map
+        .get(module.entry_expr)
+        .expect("root expr should have a type")
+        .clone()
+}
+
+fn nixos_context_args() -> HashMap<SmolStr, ParsedTy> {
+    let mut registry = TypeAliasRegistry::with_builtins();
+    registry.load_context_by_name("nixos").unwrap().unwrap()
+}
+
+/// NixOS module pattern: `{ config, lib, pkgs, ... }: lib.id 42`
+/// With context args, `lib` should be typed as `Lib` so `lib.id` resolves.
+#[test]
+fn context_args_type_root_lambda_lib() {
+    let ctx = nixos_context_args();
+    let nix_src = indoc! { "
+        { config, lib, pkgs, ... }: lib.id 42
+    " };
+
+    let ty = get_inferred_root_with_context(nix_src, ctx);
+    // The root lambda returns `lib.id 42` which should be `int`.
+    match &ty {
+        OutputTy::Lambda { body, .. } => {
+            assert_eq!(
+                *body.0,
+                arc_ty!(Int),
+                "lib.id 42 should infer as int with context, got: {}",
+                body.0
+            );
+        }
+        _ => panic!("expected lambda type, got: {ty}"),
+    }
+}
+
+/// Context args should only apply to the root lambda, not inner lambdas.
+#[test]
+fn context_args_do_not_apply_to_inner_lambda() {
+    let ctx = nixos_context_args();
+    let nix_src = indoc! { "
+        { lib, ... }:
+        let
+            inner = { lib, ... }: lib;
+        in
+        inner { lib = 42; }
+    " };
+
+    let ty = get_inferred_root_with_context(nix_src, ctx);
+    // The root lambda's result is `inner { lib = 42; }`.
+    // `inner` is `{ lib, ... }: lib` — an inner lambda that should NOT get
+    // context args. So `inner { lib = 42; }` should infer as `int`.
+    match &ty {
+        OutputTy::Lambda { body, .. } => {
+            assert_eq!(
+                *body.0,
+                arc_ty!(Int),
+                "inner lambda should not get context args, got: {}",
+                body.0
+            );
+        }
+        _ => panic!("expected lambda type, got: {ty}"),
+    }
+}
+
+/// Context args with unknown field names should be silently ignored.
+#[test]
+fn context_args_unknown_fields_ignored() {
+    let mut ctx = nixos_context_args();
+    // Add a field that doesn't exist in the lambda pattern.
+    ctx.insert(
+        SmolStr::from("nonexistent_arg"),
+        comment_parser::known_ty!(int),
+    );
+
+    let nix_src = indoc! { "
+        { config, lib, ... }: lib.id 42
+    " };
+
+    // Should not error — extra context args for names not in the pattern
+    // are simply skipped.
+    let ty = get_inferred_root_with_context(nix_src, ctx);
+    match &ty {
+        OutputTy::Lambda { body, .. } => {
+            assert_eq!(*body.0, arc_ty!(Int));
+        }
+        _ => panic!("expected lambda type, got: {ty}"),
+    }
+}
+
+/// Verify doc comments attach to lambda expressions inside let bindings.
+#[test]
+fn doc_comment_attaches_to_lambda_expr() {
+    let nix_src = indoc! { r#"
+        let
+            mkModule =
+                /** context: nixos */
+                { config, lib, pkgs, ... }: lib.id 42;
+        in
+        mkModule
+    "# };
+
+    let (db, file) = TestDatabase::single_file(nix_src).unwrap();
+    let mod_ = module(&db, file);
+
+    // Find the lambda expression.
+    let lambda_id = mod_
+        .exprs()
+        .find_map(|(id, expr)| match expr {
+            lang_ast::Expr::Lambda { .. } => Some(id),
+            _ => None,
+        })
+        .expect("should have a lambda");
+
+    let docs = mod_.type_dec_map.docs_for_expr(lambda_id);
+    assert!(
+        docs.is_some(),
+        "lambda should have doc comments, but docs_for_expr returned None. \
+         All expr docs: {:?}",
+        mod_.exprs()
+            .filter_map(|(id, _)| mod_.type_dec_map.docs_for_expr(id).map(|d| (id, d)))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// Doc comment `/** context: nixos */` on a non-root lambda should apply types.
+/// The comment must be placed between `=` and the lambda (on the expression),
+/// not before the binding name (which would be a name annotation).
+#[test]
+fn doc_comment_context_on_inner_lambda() {
+    let nix_src = indoc! { "
+        let
+            mkModule =
+                /** context: nixos */
+                { config, lib, pkgs, ... }: lib.id 42;
+        in
+        mkModule
+    " };
+
+    let (db, file) = TestDatabase::single_file(nix_src).unwrap();
+    let mod_ = module(&db, file);
+    let result = crate::check_file_collecting(
+        &db,
+        file,
+        &TypeAliasRegistry::with_builtins(),
+        HashMap::new(),
+        HashMap::new(), // no file-level context
+    );
+
+    let inference = result.inference.expect("inference should succeed");
+
+    // Look up mkModule's type — it's a let binding, so check name_ty_map.
+    let mk_module_ty = mod_
+        .names()
+        .find_map(|(id, name)| {
+            if name.text == "mkModule" {
+                inference.name_ty_map.get(id)
+            } else {
+                None
+            }
+        })
+        .expect("mkModule should have a type");
+
+    // mkModule is a lambda, its body should return int (lib.id 42).
+    match mk_module_ty {
+        OutputTy::Lambda { body, .. } => {
+            assert_eq!(
+                *body.0,
+                arc_ty!(Int),
+                "doc comment context should type lib.id 42 as int, got: {}",
+                body.0
+            );
+        }
+        _ => panic!("expected lambda, got: {mk_module_ty}"),
+    }
+}
+
+/// Both file-level context and doc comment context on the same lambda —
+/// file-level wins for the root expression.
+#[test]
+fn file_level_context_overrides_doc_comment_for_root() {
+    let ctx = nixos_context_args();
+    let nix_src = indoc! { "
+        { lib, ... }: lib.id 42
+    " };
+
+    // Even without a doc comment, the file-level context should type `lib`.
+    let ty = get_inferred_root_with_context(nix_src, ctx);
+    match &ty {
+        OutputTy::Lambda { body, .. } => {
+            assert_eq!(*body.0, arc_ty!(Int));
+        }
+        _ => panic!("expected lambda type, got: {ty}"),
+    }
+}
+
+/// Context args should type `config` as an open attrset.
+#[test]
+fn context_args_config_is_open_attrset() {
+    let ctx = nixos_context_args();
+    let nix_src = indoc! { "
+        { config, ... }: config.networking
+    " };
+
+    let ty = get_inferred_root_with_context(nix_src, ctx);
+    // config is typed as `{ ... }` (open attrset), so `config.networking`
+    // should not produce a type error — it returns a free variable.
+    match &ty {
+        OutputTy::Lambda { body, .. } => {
+            // The body should be a TyVar (since config is open and networking
+            // is unconstrained).
+            assert!(
+                matches!(&*body.0, OutputTy::TyVar(_)),
+                "config.networking should be a free type var, got: {}",
+                body.0
+            );
+        }
+        _ => panic!("expected lambda type, got: {ty}"),
+    }
+}

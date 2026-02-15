@@ -15,6 +15,10 @@ lang_ty = { path = "../lang_ty" }
 comment_parser = { path = "../comment_parser" }
 rnix = { workspace = true }
 rowan = { workspace = true }
+toml = { workspace = true }
+globset = { workspace = true }
+serde = { workspace = true }
+smol_str = { workspace = true }
 
 
 [[bin]]

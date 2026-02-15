@@ -19,6 +19,7 @@ use lang_check::imports::resolve_imports;
 use lang_check::{CheckResult, InferenceResult};
 
 use crate::convert::LineIndex;
+use crate::project_config::ProjectConfig;
 
 /// Cached analysis output for a single open file.
 pub struct FileAnalysis {
@@ -49,6 +50,10 @@ pub struct AnalysisState {
     pub registry: TypeAliasRegistry,
     /// Cached per-file analysis, keyed by the canonical path we give to Salsa.
     pub files: HashMap<PathBuf, FileAnalysis>,
+    /// Project-level tix.toml configuration (if discovered).
+    pub project_config: Option<ProjectConfig>,
+    /// Directory containing the tix.toml file (for resolving relative paths).
+    pub config_dir: Option<PathBuf>,
 }
 
 impl AnalysisState {
@@ -57,6 +62,8 @@ impl AnalysisState {
             db: RootDatabase::default(),
             registry,
             files: HashMap::new(),
+            project_config: None,
+            config_dir: None,
         }
     }
 
@@ -109,11 +116,24 @@ impl AnalysisState {
             }
         }
 
+        // Resolve context args for this file from the project's tix.toml.
+        let context_args =
+            if let (Some(ref cfg), Some(ref dir)) = (&self.project_config, &self.config_dir) {
+                crate::project_config::resolve_context_for_file(&path, cfg, dir, &mut self.registry)
+                    .unwrap_or_else(|e| {
+                        log::warn!("Failed to resolve context for {}: {e}", path.display());
+                        HashMap::new()
+                    })
+            } else {
+                HashMap::new()
+            };
+
         let check_result = lang_check::check_file_collecting(
             &self.db,
             nix_file,
             &self.registry,
             import_resolution.types,
+            context_args,
         );
 
         self.files.insert(

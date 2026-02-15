@@ -14,6 +14,8 @@ use lang_ty::AttrSetTy;
 use smol_str::SmolStr;
 
 const BUILTIN_STUBS: &str = include_str!("../../../stubs/lib.tix");
+const NIXOS_CONTEXT_STUBS: &str = include_str!("../../../stubs/contexts/nixos.tix");
+const HM_CONTEXT_STUBS: &str = include_str!("../../../stubs/contexts/home-manager.tix");
 
 #[derive(Debug, Clone, Default)]
 pub struct TypeAliasRegistry {
@@ -77,6 +79,64 @@ impl TypeAliasRegistry {
     /// Get the global val declarations map.
     pub fn global_vals(&self) -> &HashMap<SmolStr, ParsedTy> {
         &self.global_vals
+    }
+
+    /// Return the embedded source for a built-in context by name.
+    ///
+    /// Known contexts: `"nixos"`, `"home-manager"`.
+    pub fn builtin_context_source(name: &str) -> Option<&'static str> {
+        match name {
+            "nixos" => Some(NIXOS_CONTEXT_STUBS),
+            "home-manager" => Some(HM_CONTEXT_STUBS),
+            _ => None,
+        }
+    }
+
+    /// Parse a `.tix` source string as context stubs, loading any type aliases
+    /// into `self.aliases` (so they can be referenced by val declarations) and
+    /// returning the val declarations as a name→ParsedTy map.
+    ///
+    /// Unlike `load_tix_file`, val declarations are NOT added to `global_vals`
+    /// — they represent lambda parameter types for a specific context, not
+    /// globally available names.
+    pub fn load_context_stubs(
+        &mut self,
+        source: &str,
+    ) -> Result<HashMap<SmolStr, ParsedTy>, Box<dyn std::error::Error>> {
+        let file = comment_parser::parse_tix_file(source)?;
+        let mut context_args = HashMap::new();
+
+        for decl in &file.declarations {
+            match decl {
+                comment_parser::TixDeclaration::TypeAlias { name, body } => {
+                    self.aliases.insert(name.clone(), body.clone());
+                }
+                comment_parser::TixDeclaration::ValDecl { name, ty } => {
+                    context_args.insert(name.clone(), ty.clone());
+                }
+                comment_parser::TixDeclaration::Module { name, declarations } => {
+                    // Register the module as a type alias (same as load_tix_file)
+                    // so that val declarations like `val lib :: Lib` can resolve.
+                    let attrset_ty = module_to_attrset(declarations);
+                    let alias_name = capitalize(name);
+                    self.aliases.insert(alias_name, attrset_ty);
+                }
+            }
+        }
+
+        Ok(context_args)
+    }
+
+    /// Load context stubs for a named built-in context (e.g. "nixos").
+    ///
+    /// Returns `None` if the name doesn't match any built-in context.
+    /// Returns `Some(Err(...))` if the built-in source fails to parse.
+    pub fn load_context_by_name(
+        &mut self,
+        name: &str,
+    ) -> Option<Result<HashMap<SmolStr, ParsedTy>, Box<dyn std::error::Error>>> {
+        let source = Self::builtin_context_source(name)?;
+        Some(self.load_context_stubs(source))
     }
 
     /// Validate the registry for cycles in alias references.
@@ -287,5 +347,47 @@ mod tests {
         registry.load_tix_file(&file);
 
         assert!(registry.validate().is_ok());
+    }
+
+    #[test]
+    fn builtin_context_source_known() {
+        assert!(TypeAliasRegistry::builtin_context_source("nixos").is_some());
+        assert!(TypeAliasRegistry::builtin_context_source("home-manager").is_some());
+    }
+
+    #[test]
+    fn builtin_context_source_unknown() {
+        assert!(TypeAliasRegistry::builtin_context_source("unknown-context").is_none());
+    }
+
+    #[test]
+    fn load_context_stubs_returns_vals() {
+        let mut registry = TypeAliasRegistry::with_builtins();
+        let context_args = registry
+            .load_context_stubs("val config :: { ... };\nval lib :: Lib;")
+            .expect("parse error");
+
+        // Val declarations should be in the returned map, NOT in global_vals.
+        assert!(context_args.contains_key("config"));
+        assert!(context_args.contains_key("lib"));
+        assert!(!registry.global_vals().contains_key("config"));
+        assert!(!registry.global_vals().contains_key("lib"));
+    }
+
+    #[test]
+    fn load_context_by_name_nixos() {
+        let mut registry = TypeAliasRegistry::with_builtins();
+        let result = registry.load_context_by_name("nixos");
+        assert!(result.is_some(), "nixos context should be known");
+        let context_args = result.unwrap().expect("should parse");
+        assert!(context_args.contains_key("config"));
+        assert!(context_args.contains_key("lib"));
+        assert!(context_args.contains_key("pkgs"));
+    }
+
+    #[test]
+    fn load_context_by_name_unknown() {
+        let mut registry = TypeAliasRegistry::new();
+        assert!(registry.load_context_by_name("nonexistent").is_none());
     }
 }

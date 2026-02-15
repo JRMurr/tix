@@ -1,0 +1,5 @@
+# Test project configuration for tix.toml context support.
+
+[context.nixos]
+paths = ["nixos_module.nix"]
+stubs = ["@nixos"]

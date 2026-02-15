@@ -15,7 +15,7 @@ mod tests;
 mod pbt;
 
 use aliases::TypeAliasRegistry;
-use comment_parser::{parse_and_collect, ParsedTy, TypeVarValue};
+use comment_parser::{parse_and_collect, parse_context_annotation, ParsedTy, TypeVarValue};
 use derive_more::Debug;
 use diagnostic::TixDiagnostic;
 use infer_expr::{PendingMerge, PendingOverload};
@@ -51,7 +51,13 @@ pub fn check_file_with_imports(
     let module = lang_ast::module(db, file);
     let name_res = lang_ast::name_resolution(db, file);
     let grouped_defs = lang_ast::group_def(db, file);
-    let check = CheckCtx::new(&module, &name_res, aliases.clone(), import_types);
+    let check = CheckCtx::new(
+        &module,
+        &name_res,
+        aliases.clone(),
+        import_types,
+        HashMap::new(),
+    );
     check.infer_prog(grouped_defs)
 }
 
@@ -179,11 +185,18 @@ pub fn check_file_collecting(
     file: NixFile,
     aliases: &TypeAliasRegistry,
     import_types: HashMap<ExprId, OutputTy>,
+    context_args: HashMap<smol_str::SmolStr, ParsedTy>,
 ) -> CheckResult {
     let module = lang_ast::module(db, file);
     let name_res = lang_ast::name_resolution(db, file);
     let grouped_defs = lang_ast::group_def(db, file);
-    let check = CheckCtx::new(&module, &name_res, aliases.clone(), import_types);
+    let check = CheckCtx::new(
+        &module,
+        &name_res,
+        aliases.clone(),
+        import_types,
+        context_args,
+    );
     let (inference, diagnostics) = check.infer_prog_partial(grouped_defs);
     CheckResult {
         inference: Some(inference),
@@ -256,6 +269,12 @@ pub struct CheckCtx<'db> {
     /// OutputTy::Named so hover display shows the alias name instead of the
     /// fully expanded structural type.
     alias_provenance: HashMap<TyId, smol_str::SmolStr>,
+
+    /// Context argument types for the root lambda (from `tix.toml` context
+    /// configuration). Maps parameter names (e.g. "config", "lib", "pkgs") to
+    /// their declared types. Applied only to the module's entry expression
+    /// when it's a lambda with a pattern parameter.
+    context_args: HashMap<smol_str::SmolStr, ParsedTy>,
 }
 
 impl<'db> CheckCtx<'db> {
@@ -264,6 +283,7 @@ impl<'db> CheckCtx<'db> {
         name_res: &'db NameResolution,
         type_aliases: TypeAliasRegistry,
         import_types: HashMap<ExprId, OutputTy>,
+        context_args: HashMap<smol_str::SmolStr, ParsedTy>,
     ) -> Self {
         Self {
             module,
@@ -279,6 +299,7 @@ impl<'db> CheckCtx<'db> {
             type_aliases,
             import_types,
             alias_provenance: HashMap::new(),
+            context_args,
         }
     }
 
@@ -559,5 +580,35 @@ impl<'db> CheckCtx<'db> {
             payload: warning,
             at_expr: self.current_expr,
         });
+    }
+
+    /// Check whether a lambda expression has a `/** context: <name> */` doc
+    /// comment annotation. If so, load the named context's stubs and return
+    /// the arg→type map.
+    ///
+    /// Results are NOT cached because context annotations are rare (typically
+    /// one per file at most), and the cost of re-parsing is negligible compared
+    /// to inference.
+    fn resolve_doc_comment_context(
+        &mut self,
+        expr_id: ExprId,
+    ) -> Option<HashMap<smol_str::SmolStr, ParsedTy>> {
+        let docs = self.module.type_dec_map.docs_for_expr(expr_id)?;
+        for doc in docs {
+            if let Some(context_name) = parse_context_annotation(doc) {
+                match self.type_aliases.load_context_by_name(&context_name) {
+                    Some(Ok(args)) => return Some(args),
+                    Some(Err(e)) => {
+                        log::warn!("Failed to parse context stubs for '{context_name}': {e}");
+                        return None;
+                    }
+                    None => {
+                        log::warn!("Unknown context name: '{context_name}'");
+                        return None;
+                    }
+                }
+            }
+        }
+        None
     }
 }

@@ -203,11 +203,14 @@ pub fn resolve_imports(
         errors.extend(target_imports.errors);
 
         // Infer the target file with its own resolved imports.
+        // Imported files don't get context args — those only apply to the
+        // root file being type-checked (or via per-lambda doc comments).
         let check = crate::CheckCtx::new(
             &target_module,
             &target_name_res,
             aliases.clone(),
             target_imports.types,
+            std::collections::HashMap::new(),
         );
 
         match check.infer_prog(target_grouped) {

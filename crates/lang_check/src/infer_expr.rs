@@ -88,6 +88,16 @@ impl CheckCtx<'_> {
                 };
 
                 if let Some(pat) = &pat {
+                    // Determine context args for this lambda. Two sources:
+                    // - File-level context (from tix.toml) applies only to the root lambda
+                    // - Doc comment context (/** context: nixos */) applies to any lambda
+                    let effective_context =
+                        if e == self.module.entry_expr && !self.context_args.is_empty() {
+                            Some(self.context_args.clone())
+                        } else {
+                            self.resolve_doc_comment_context(e)
+                        };
+
                     let mut fields = BTreeMap::new();
 
                     for &(name, default_expr) in pat.fields.iter() {
@@ -104,7 +114,21 @@ impl CheckCtx<'_> {
                         // to pattern fields. Without this, annotations on fields of
                         // top-level lambdas (not wrapped in a let binding) would be ignored.
                         self.apply_type_annotation(name, name_ty)?;
+
+                        // Apply context arg types (from tix.toml or /** context: <name> */).
+                        // This constrains pattern fields to their declared types, e.g.
+                        // `lib` gets type `Lib`, `pkgs` gets type `Pkgs`.
                         let field_text = self.module[name].text.clone();
+                        if let Some(ref ctx_args) = effective_context {
+                            if let Some(ctx_ty) = ctx_args.get(&field_text).cloned() {
+                                let interned = self.intern_fresh_ty(ctx_ty);
+                                self.constrain(interned, name_ty)
+                                    .map_err(|err| self.locate_err(err))?;
+                                self.constrain(name_ty, interned)
+                                    .map_err(|err| self.locate_err(err))?;
+                            }
+                        }
+
                         fields.insert(field_text, name_ty);
                     }
 

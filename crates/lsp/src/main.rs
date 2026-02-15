@@ -9,6 +9,7 @@ mod formatting;
 mod goto_def;
 mod hover;
 mod inlay_hint;
+pub(crate) mod project_config;
 mod references;
 mod rename;
 mod selection_range;

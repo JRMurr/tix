@@ -135,6 +135,42 @@ impl LanguageServer for TixLanguageServer {
             }
         }
 
+        // Discover tix.toml project config from the workspace root.
+        if let Some(root_uri) = params.root_uri {
+            if let Some(root_path) = uri_to_path(&root_uri) {
+                if let Some(config_path) = crate::project_config::find_config(&root_path) {
+                    let config_dir = config_path
+                        .parent()
+                        .unwrap_or(std::path::Path::new("."))
+                        .to_path_buf();
+
+                    match crate::project_config::load_config(&config_path) {
+                        Ok(project_cfg) => {
+                            log::info!("Loaded project config from {}", config_path.display());
+
+                            // Load stubs from tix.toml config.
+                            let mut state = self.state.lock().unwrap();
+                            for stub in &project_cfg.stubs {
+                                let stub_path = config_dir.join(stub);
+                                if let Err(e) = crate::load_stubs(&mut state.registry, &stub_path) {
+                                    log::warn!(
+                                        "Failed to load config stub '{}': {e}",
+                                        stub_path.display()
+                                    );
+                                }
+                            }
+
+                            state.project_config = Some(project_cfg);
+                            state.config_dir = Some(config_dir);
+                        }
+                        Err(e) => {
+                            log::warn!("Failed to load {}: {e}", config_path.display());
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
