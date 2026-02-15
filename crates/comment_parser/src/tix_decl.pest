@@ -57,9 +57,15 @@ user_type = @{
     ASCII_ALPHA_UPPER ~ (ASCII_ALPHANUMERIC | "_")*
 }
 
-// Allow trailing apostrophes to match Nix identifiers like `getExe'`.
+// Nix attribute names can be arbitrary strings, so identifiers in .tix files
+// need broad coverage. Allows: letters, digits, underscores, hyphens, apostrophes.
+// Leading digits are fine in field position (e.g. `2bwm: { ... }`) since the
+// colon disambiguates from number literals.
+// Bare `_` is reserved for dyn_field, so underscore-led names need a continuation.
 identifier = @{
-    ASCII_ALPHA ~ (ASCII_ALPHANUMERIC | "_" | "'")*
+    ASCII_ALPHA ~ (ASCII_ALPHANUMERIC | "_" | "'" | "-")*
+  | "_" ~ (ASCII_ALPHANUMERIC | "_" | "'" | "-")+
+  | ASCII_DIGIT ~ (ASCII_ALPHANUMERIC | "_" | "'" | "-")*
 }
 
 primitive_ref = {

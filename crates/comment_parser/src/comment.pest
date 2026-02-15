@@ -33,9 +33,12 @@ type_line = {
     (ANY_WHITESPACE)* ~ identifier ~ "::" ~ type_expr ~ (NEWLINE | EOI)
 }
 
-// Identifiers: allow alphanumeric plus underscores
+// Nix attribute names can be arbitrary strings, so identifiers need broad coverage.
+// Leading underscores and digits are allowed; bare `_` is reserved for dyn_field.
 identifier = @{
-    ASCII_ALPHA ~ (ASCII_ALPHANUMERIC | "_")*
+    ASCII_ALPHA ~ (ASCII_ALPHANUMERIC | "_" | "-")*
+  | "_" ~ (ASCII_ALPHANUMERIC | "_" | "-")+
+  | ASCII_DIGIT ~ (ASCII_ALPHANUMERIC | "_" | "-")*
 }
 
 // A minimal arrow-based type expression, e.g. `Int -> String`, `[a] -> (a -> b) -> [b]`.
