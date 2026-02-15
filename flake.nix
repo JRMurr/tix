@@ -47,6 +47,10 @@
           rust-bin = rustAttrs.binary;
           # rust-docker = rustAttrs.docker;
         };
+
       }
-    );
+    )
+    // {
+      overlays.default = import ./overlay.nix;
+    };
 }
