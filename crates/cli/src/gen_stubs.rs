@@ -385,6 +385,8 @@ pub struct NixosOptions {
     pub nixpkgs: Option<PathBuf>,
     pub flake: Option<PathBuf>,
     pub hostname: Option<String>,
+    /// Pre-computed option tree JSON. When set, skip `nix eval` and read from this file.
+    pub from_json: Option<PathBuf>,
     pub output: Option<PathBuf>,
     pub max_depth: u32,
     /// Emit `##` doc comments with option descriptions.
@@ -400,6 +402,8 @@ pub struct HomeManagerOptions {
     pub flake: Option<PathBuf>,
     /// Username to select from `homeConfigurations` (required if flake has multiple).
     pub username: Option<String>,
+    /// Pre-computed option tree JSON. When set, skip `nix eval` and read from this file.
+    pub from_json: Option<PathBuf>,
     pub output: Option<PathBuf>,
     pub max_depth: u32,
     /// Emit `##` doc comments with option descriptions.
@@ -585,16 +589,33 @@ pub fn invoke_nix_eval(
 // Entry Point
 // =============================================================================
 
+/// Read a pre-computed option tree JSON file.
+fn read_json_file(
+    path: &std::path::Path,
+) -> Result<std::collections::BTreeMap<String, OptionNode>, Box<dyn std::error::Error>> {
+    let data = std::fs::read(path)
+        .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
+    let tree = serde_json::from_slice(&data)
+        .map_err(|e| format!("failed to parse JSON from {}: {}", path.display(), e))?;
+    Ok(tree)
+}
+
 /// Run the `gen-stubs nixos` subcommand.
 pub fn run_nixos(opts: NixosOptions) -> Result<(), Box<dyn std::error::Error>> {
-    let tree = invoke_nix_eval(&opts)?;
+    let tree = match opts.from_json {
+        Some(ref path) => read_json_file(path)?,
+        None => invoke_nix_eval(&opts)?,
+    };
     let tix_content = generate_tix_file_with_docs(&tree, &StubKind::Nixos, opts.descriptions);
     write_generated_stubs(&tix_content, opts.output.as_ref(), "NixOS")
 }
 
 /// Run the `gen-stubs home-manager` subcommand.
 pub fn run_home_manager(opts: HomeManagerOptions) -> Result<(), Box<dyn std::error::Error>> {
-    let tree = invoke_hm_nix_eval(&opts)?;
+    let tree = match opts.from_json {
+        Some(ref path) => read_json_file(path)?,
+        None => invoke_hm_nix_eval(&opts)?,
+    };
     let tix_content =
         generate_tix_file_with_docs(&tree, &StubKind::HomeManager, opts.descriptions);
     write_generated_stubs(&tix_content, opts.output.as_ref(), "Home Manager")
@@ -1204,6 +1225,7 @@ mod tests {
             nixpkgs: None,
             flake: None,
             hostname: None,
+            from_json: None,
             output: None,
             max_depth: 4, // shallow for speed
             descriptions: false,
@@ -1310,6 +1332,7 @@ mod tests {
             home_manager: None,
             flake: None,
             username: None,
+            from_json: None,
             output: None,
             max_depth: 3, // shallow for speed
             descriptions: false,

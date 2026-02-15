@@ -72,6 +72,10 @@ enum GenStubsSource {
         #[arg(long)]
         hostname: Option<String>,
 
+        /// Read pre-computed option tree JSON instead of running nix eval
+        #[arg(long)]
+        from_json: Option<PathBuf>,
+
         /// Output file path (default: stdout)
         #[arg(short, long)]
         output: Option<PathBuf>,
@@ -102,6 +106,10 @@ enum GenStubsSource {
         /// Username to select from homeConfigurations (required if flake has multiple)
         #[arg(long)]
         username: Option<String>,
+
+        /// Read pre-computed option tree JSON instead of running nix eval
+        #[arg(long)]
+        from_json: Option<PathBuf>,
 
         /// Output file path (default: stdout)
         #[arg(short, long)]
@@ -146,6 +154,7 @@ fn run_gen_stubs(source: GenStubsSource) -> Result<(), Box<dyn Error>> {
             nixpkgs,
             flake,
             hostname,
+            from_json,
             output,
             max_depth,
             descriptions,
@@ -153,6 +162,7 @@ fn run_gen_stubs(source: GenStubsSource) -> Result<(), Box<dyn Error>> {
             nixpkgs,
             flake,
             hostname,
+            from_json,
             output,
             max_depth,
             descriptions,
@@ -162,6 +172,7 @@ fn run_gen_stubs(source: GenStubsSource) -> Result<(), Box<dyn Error>> {
             home_manager,
             flake,
             username,
+            from_json,
             output,
             max_depth,
             descriptions,
@@ -170,6 +181,7 @@ fn run_gen_stubs(source: GenStubsSource) -> Result<(), Box<dyn Error>> {
             home_manager,
             flake,
             username,
+            from_json,
             output,
             max_depth,
             descriptions,
@@ -194,6 +206,15 @@ fn run_check(
     } else {
         TypeAliasRegistry::with_builtins()
     };
+
+    // Allow overriding built-in context stubs (e.g. @nixos, @home-manager) with
+    // generated stubs from a directory. Used by the Nix `with-stubs` wrapper to
+    // provide fully-typed NixosConfig/HomeManagerConfig instead of the minimal
+    // compiled-in stubs.
+    if let Ok(dir) = std::env::var("TIX_BUILTIN_STUBS") {
+        registry.set_builtin_stubs_dir(PathBuf::from(dir));
+    }
+
     for stub_path in &stub_paths {
         load_stubs(&mut registry, stub_path)?;
     }

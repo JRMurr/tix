@@ -89,6 +89,11 @@ impl TixLanguageServer {
             TypeAliasRegistry::with_builtins()
         };
 
+        // Allow overriding built-in context stubs via env var.
+        if let Ok(dir) = std::env::var("TIX_BUILTIN_STUBS") {
+            registry.set_builtin_stubs_dir(std::path::PathBuf::from(dir));
+        }
+
         // CLI stubs are always loaded first.
         for stub_path in &self.cli_stub_paths {
             if let Err(e) = crate::load_stubs(&mut registry, stub_path) {

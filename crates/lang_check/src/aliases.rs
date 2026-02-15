@@ -8,6 +8,7 @@
 // unresolved names can fall back to global val declarations.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use comment_parser::{ParsedTy, ParsedTyRef, TixDeclFile, TixDeclaration};
 use lang_ty::AttrSetTy;
@@ -81,6 +82,12 @@ pub struct TypeAliasRegistry {
 
     /// Documentation extracted from .tix stub files.
     pub docs: DocIndex,
+
+    /// Override directory for built-in context stubs. When set,
+    /// `load_context_by_name("nixos")` checks for `<dir>/nixos.tix` before
+    /// falling back to the compiled-in minimal stubs. Set via the
+    /// `TIX_BUILTIN_STUBS` environment variable.
+    builtin_stubs_dir: Option<PathBuf>,
 }
 
 impl TypeAliasRegistry {
@@ -96,6 +103,14 @@ impl TypeAliasRegistry {
             Err(e) => log::warn!("Failed to parse builtin stubs: {e}"),
         }
         registry
+    }
+
+    /// Set the override directory for built-in context stubs.
+    /// When resolving `@nixos` or `/** context: nixos */`, the registry
+    /// will check for `<dir>/nixos.tix` before falling back to the
+    /// compiled-in minimal stubs.
+    pub fn set_builtin_stubs_dir(&mut self, dir: PathBuf) {
+        self.builtin_stubs_dir = Some(dir);
     }
 
     /// Load declarations from a parsed .tix file into the registry.
@@ -268,12 +283,28 @@ impl TypeAliasRegistry {
 
     /// Load context stubs for a named built-in context (e.g. "nixos").
     ///
-    /// Returns `None` if the name doesn't match any built-in context.
-    /// Returns `Some(Err(...))` if the built-in source fails to parse.
+    /// If `builtin_stubs_dir` is set, checks for `<dir>/<name>.tix` first.
+    /// Falls back to the compiled-in minimal stubs if the file doesn't exist
+    /// or the override dir isn't set.
+    ///
+    /// Returns `None` if the name doesn't match any known context.
+    /// Returns `Some(Err(...))` if the source fails to parse.
     pub fn load_context_by_name(
         &mut self,
         name: &str,
     ) -> Option<Result<HashMap<SmolStr, ParsedTy>, Box<dyn std::error::Error>>> {
+        // Check override directory first.
+        if let Some(ref dir) = self.builtin_stubs_dir {
+            let path = dir.join(format!("{name}.tix"));
+            if path.is_file() {
+                return Some(match std::fs::read_to_string(&path) {
+                    Ok(source) => self.load_context_stubs(&source),
+                    Err(e) => Err(format!("failed to read {}: {e}", path.display()).into()),
+                });
+            }
+        }
+
+        // Fall back to compiled-in stubs.
         let source = Self::builtin_context_source(name)?;
         Some(self.load_context_stubs(source))
     }
