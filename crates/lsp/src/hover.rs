@@ -58,11 +58,7 @@ pub fn hover(
                 // walking the Select chain to build a field path and finding
                 // the base name's type alias.
                 let doc = try_select_field_doc(analysis, expr_id, docs);
-                return Some(make_hover(
-                    format!("{ty}"),
-                    doc.as_deref(),
-                    range,
-                ));
+                return Some(make_hover(format!("{ty}"), doc.as_deref(), range));
             }
         }
 
@@ -95,9 +91,7 @@ fn try_select_field_doc(
 
     loop {
         match &module[current] {
-            Expr::Select {
-                set, attrpath, ..
-            } => {
+            Expr::Select { set, attrpath, .. } => {
                 // Attrpath segments are ExprIds — we need to get their string names.
                 // They're typically Literal(String(...)) expressions.
                 for &attr_expr in attrpath.iter().rev() {
@@ -117,21 +111,21 @@ fn try_select_field_doc(
                 let inference = analysis.inference()?;
                 if let Some(ty) = inference.expr_ty_map.get(current) {
                     let ty_str = ty.to_string();
-                    if ty_str.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
+                    if ty_str
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_ascii_uppercase())
+                    {
                         let alias_name = ty_str.split_whitespace().next().unwrap_or(&ty_str);
                         path.reverse();
-                        return docs
-                            .field_doc(alias_name, &path)
-                            .map(|d| d.to_string());
+                        return docs.field_doc(alias_name, &path).map(|d| d.to_string());
                     }
                 }
 
                 // Fallback: try capitalizing the base name as an alias name.
                 let capitalized = capitalize_first(ref_name);
                 path.reverse();
-                return docs
-                    .field_doc(&capitalized, &path)
-                    .map(|d| d.to_string());
+                return docs.field_doc(&capitalized, &path).map(|d| d.to_string());
             }
             _ => return None,
         }

@@ -323,9 +323,7 @@ fn try_attrpath_key_completion(
 
     // Walk ancestors from the token's parent to find an Attrpath node.
     let node = token.parent()?;
-    let attrpath_node = node
-        .ancestors()
-        .find_map(rnix::ast::Attrpath::cast)?;
+    let attrpath_node = node.ancestors().find_map(rnix::ast::Attrpath::cast)?;
 
     // The Attrpath must be inside an AttrpathValue (not a Select — that's dot
     // completion). If the parent is a Select, bail out.
@@ -388,10 +386,7 @@ fn get_module_config_type(
 ) -> Option<OutputTy> {
     let root_expr_id = analysis.module.entry_expr;
 
-    let Expr::Lambda {
-        pat: Some(pat), ..
-    } = &analysis.module[root_expr_id]
-    else {
+    let Expr::Lambda { pat: Some(pat), .. } = &analysis.module[root_expr_id] else {
         return None;
     };
 
@@ -449,9 +444,7 @@ fn collect_attrpath_key_segments(
 /// For `{ services.openssh = { enable. } }`, when called on the inner AttrSet
 /// (the one containing `enable.`), this returns `["services", "openssh"]` —
 /// the segments from the outer AttrpathValue that nests into this AttrSet.
-fn collect_parent_attrpath_context(
-    attrset_node: &rnix::ast::AttrSet,
-) -> Vec<SmolStr> {
+fn collect_parent_attrpath_context(attrset_node: &rnix::ast::AttrSet) -> Vec<SmolStr> {
     let mut all_segments = Vec::new();
     let mut current = attrset_node.syntax().clone();
 
@@ -1300,10 +1293,8 @@ mod tests {
 
         // Create a unique temp directory for this test invocation.
         let id = CTX_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let temp_dir = std::env::temp_dir().join(format!(
-            "tix_ctx_test_{}_{id}",
-            std::process::id()
-        ));
+        let temp_dir =
+            std::env::temp_dir().join(format!("tix_ctx_test_{}_{id}", std::process::id()));
         std::fs::create_dir_all(&temp_dir).unwrap();
 
         // Write context stubs to a file in the temp directory.
