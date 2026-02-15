@@ -64,6 +64,7 @@ identifier = @{
 
 primitive_ref = {
     string_ref
+  | number_ref
   | int_ref
   | bool_ref
   | float_ref
@@ -72,6 +73,7 @@ primitive_ref = {
 }
 
 string_ref = @{ "string" }
+number_ref = @{ "number" }
 int_ref    = @{ "int" }
 bool_ref   = @{ "bool" }
 float_ref  = @{ "float" }

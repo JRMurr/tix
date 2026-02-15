@@ -392,10 +392,14 @@ impl MergingSet {
                 let nested = self.get_or_create_nested_static(ctx, key, attr_ptr);
                 nested.merge_nested_attr_value(ctx, rest, value, doc_comments);
             }
-            AttrKind::Dynamic(_) => {
-                // Dynamic intermediate keys like `${expr}.b = 1` are rare in practice.
-                // TODO: desugar dynamic intermediate keys into nested dynamic entries
-                todo!("dynamic intermediate attr keys not supported yet")
+            AttrKind::Dynamic(key_expr) => {
+                // Dynamic intermediate key: `${expr}.b.c = val` becomes a dynamic
+                // entry whose value is the nested attrset `{ b.c = val; }`.
+                let mut nested = MergingSet::new(NameKind::PlainAttrset, attr_ptr);
+                nested.merge_nested_attr_value(ctx, rest, value, doc_comments);
+                let nested_expr = nested.finish_expr(ctx);
+                let key_expr = ctx.lower_expr_opt(key_expr);
+                self.dynamics.push((key_expr, nested_expr));
             }
         }
     }

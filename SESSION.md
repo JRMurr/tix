@@ -1,14 +1,5 @@
 ## Known Issues & Future Work
 
-### Number Primitive + Partial Resolution
-
-- The `Number` primitive is synthetic — it doesn't correspond to a real Nix type.
-  The comment parser doesn't recognize `number` in type annotations yet (deferred).
-
-- The upper-bound fallback in canonicalization (variables with only primitive upper
-  bounds display as that primitive in positive position) may be too aggressive in
-  some edge cases. Monitor for false positives in PBT.
-
 ### Overload Resolution + Extrusion
 
 - `find_pinned_concrete`: a targeted fix for variables that were fully resolved by
@@ -30,6 +21,10 @@
   extruding the original, and that extruded reference picks up use-site bounds. A full
   fix would propagate early-canonical types through expression-level canonicalization.
 
+- The upper-bound fallback in canonicalization (variables with only primitive upper
+  bounds display as that primitive in positive position) may be too aggressive in
+  some edge cases. Monitor for false positives in PBT.
+
 ### Builtin Types
 
 - Deferred builtins (arithmetic `add`/`sub`/`mul`/`div`, `baseNameOf`/`dirOf`,
@@ -43,19 +38,11 @@
 
 ### Missing Features
 
-- Dynamic bindings in name resolution: `nameres.rs:390` has a `todo!()` for
-  traversing dynamic attrset bindings (`${expr} = value`). Files using dynamic
-  keys will panic during name resolution.
-- Dynamic intermediate keys in nested attr paths (`${expr}.b = 1`) are not
-  desugared yet — a `todo!()` remains in `merge_nested_attr_value`.
 - Multi-`with` fallthrough: only the innermost `with` env is constrained for
   unresolved names. Nix semantics would check outer `with` scopes when the inner
   one lacks the attribute, but that requires runtime-like dynamic dispatch.
-- Dynamic attrset fields in Select expressions
 - `merge_attrset_intersection` field overlap: when one field is a TyVar, the other
   is preferred unconditionally rather than producing a proper intersection.
-- Reference substitution in type annotations (`TypeVarValue::Reference`)
-- AttrSet type annotations in comment parser
 
 ### Multi-File Imports
 

@@ -162,6 +162,9 @@ macro_rules! known_ty {
     (int) => {
         $crate::ParsedTy::Primitive(::lang_ty::PrimitiveTy::Int)
     };
+    (number) => {
+        $crate::ParsedTy::Primitive(::lang_ty::PrimitiveTy::Number)
+    };
     (float) => {
         $crate::ParsedTy::Primitive(::lang_ty::PrimitiveTy::Float)
     };

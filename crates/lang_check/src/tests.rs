@@ -942,15 +942,24 @@ test_case!(
 );
 
 // ==============================================================================
-// Dynamic attrset key — graceful fallback (no longer panics)
+// Dynamic attrset keys
 // ==============================================================================
 
-// Dynamic select key should NOT panic — it now returns a fresh variable.
+// Dynamic select key constrains the result to the attrset's dyn_ty.
 #[test]
 fn dynamic_select_no_panic() {
     let ty = get_inferred_root("let s = { x = 1; }; k = \"x\"; in s.${k}");
-    // The result type is unconstrained since we can't resolve the dynamic key.
-    // Just verify inference doesn't panic.
+    // Dynamic key can't resolve statically, but inference doesn't panic
+    // and the result comes from the attrset's dyn_ty.
+    let _ = ty;
+}
+
+// Dynamic intermediate keys in nested attr paths should not panic.
+#[test]
+fn dynamic_intermediate_attr_key() {
+    let ty = get_inferred_root(r#"let k = "x"; in { ${k}.b = 1; }"#);
+    // The dynamic key produces a dynamic entry whose value is { b = int }.
+    // Just verify lowering and inference don't panic.
     let _ = ty;
 }
 

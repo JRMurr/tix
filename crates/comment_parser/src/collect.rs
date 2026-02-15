@@ -67,6 +67,7 @@ pub fn collect_type_expr(mut pairs: Pairs<Rule>) -> Option<ParsedTy> {
         Rule::attrset_type => collect_attrset(curr.into_inner()),
         Rule::list_type => ParsedTy::List(collect_type_expr(curr.into_inner()).unwrap().into()),
         Rule::string_ref => ParsedTy::Primitive(PrimitiveTy::String),
+        Rule::number_ref => ParsedTy::Primitive(PrimitiveTy::Number),
         Rule::int_ref => ParsedTy::Primitive(PrimitiveTy::Int),
         Rule::bool_ref => ParsedTy::Primitive(PrimitiveTy::Bool),
         Rule::float_ref => ParsedTy::Primitive(PrimitiveTy::Float),
@@ -108,6 +109,7 @@ fn collect_one(pair: pest::iterators::Pair<Rule>) -> ParsedTy {
         Rule::attrset_type => collect_attrset(pair.into_inner()),
         Rule::list_type => ParsedTy::List(collect_type_expr(pair.into_inner()).unwrap().into()),
         Rule::string_ref => ParsedTy::Primitive(PrimitiveTy::String),
+        Rule::number_ref => ParsedTy::Primitive(PrimitiveTy::Number),
         Rule::int_ref => ParsedTy::Primitive(PrimitiveTy::Int),
         Rule::bool_ref => ParsedTy::Primitive(PrimitiveTy::Bool),
         Rule::float_ref => ParsedTy::Primitive(PrimitiveTy::Float),
@@ -306,6 +308,11 @@ mod tests {
     comment_decl_case!(parenthesized_union_in_lambda,
         r#" type: f :: (int -> int) | (string -> string) "#,
         "f" => { union!((int -> int), (string -> string)) }
+    );
+
+    comment_decl_case!(number_primitive,
+        r#" type: add :: number -> number -> number "#,
+        "add" => { number -> number -> number }
     );
 
     // ---- # Type heading format (nixpkgs/typednix convention) ----

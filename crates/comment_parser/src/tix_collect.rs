@@ -79,6 +79,7 @@ fn collect_type_expr(mut pairs: Pairs<Rule>) -> Option<ParsedTy> {
         Rule::attrset_type => collect_attrset(curr.into_inner()),
         Rule::list_type => ParsedTy::List(collect_type_expr(curr.into_inner()).unwrap().into()),
         Rule::string_ref => ParsedTy::Primitive(PrimitiveTy::String),
+        Rule::number_ref => ParsedTy::Primitive(PrimitiveTy::Number),
         Rule::int_ref => ParsedTy::Primitive(PrimitiveTy::Int),
         Rule::bool_ref => ParsedTy::Primitive(PrimitiveTy::Bool),
         Rule::float_ref => ParsedTy::Primitive(PrimitiveTy::Float),
@@ -117,6 +118,7 @@ fn collect_one(pair: pest::iterators::Pair<Rule>) -> ParsedTy {
         Rule::attrset_type => collect_attrset(pair.into_inner()),
         Rule::list_type => ParsedTy::List(collect_type_expr(pair.into_inner()).unwrap().into()),
         Rule::string_ref => ParsedTy::Primitive(PrimitiveTy::String),
+        Rule::number_ref => ParsedTy::Primitive(PrimitiveTy::Number),
         Rule::int_ref => ParsedTy::Primitive(PrimitiveTy::Int),
         Rule::bool_ref => ParsedTy::Primitive(PrimitiveTy::Bool),
         Rule::float_ref => ParsedTy::Primitive(PrimitiveTy::Float),
@@ -277,6 +279,20 @@ mod tests {
         "#;
         let file = parse_tix_file(src).expect("parse error");
         assert_eq!(file.declarations.len(), 3);
+    }
+
+    #[test]
+    fn number_primitive_in_val() {
+        let file = parse_tix_file("val add :: number -> number -> number;").expect("parse error");
+
+        assert_eq!(file.declarations.len(), 1);
+        match &file.declarations[0] {
+            crate::TixDeclaration::ValDecl { name, ty } => {
+                assert_eq!(name.as_str(), "add");
+                assert_eq!(*ty, known_ty!(number -> number -> number));
+            }
+            other => panic!("expected ValDecl, got: {other:?}"),
+        }
     }
 
     #[test]

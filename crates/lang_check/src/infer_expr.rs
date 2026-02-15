@@ -182,14 +182,17 @@ impl CheckCtx<'_> {
                     let opt_key = match &self.module[attr] {
                         Expr::Literal(Literal::String(key)) => key.clone(),
                         _ => {
-                            // Dynamic select keys (e.g. `s.${k}`) are not supported yet.
-                            // Return a fresh variable so inference can continue for the
-                            // rest of the file instead of panicking.
-                            // TODO: constrain set_ty to have a dyn_ty, then return that
-                            // dyn_ty as the result. This would give `s.${k}` the type
-                            // of the attrset's dynamic field type instead of a completely
-                            // unconstrained variable.
-                            return Ok(self.new_var());
+                            // Dynamic select key (e.g. `s.${k}`): constrain set_ty to
+                            // have a dynamic field type and return that as the result.
+                            let dyn_ty = self.new_var();
+                            let dyn_attr = self.alloc_concrete(Ty::AttrSet(AttrSetTy {
+                                fields: BTreeMap::new(),
+                                dyn_ty: Some(dyn_ty),
+                                open: true,
+                            }));
+                            self.constrain(set_ty, dyn_attr)
+                                .map_err(|err| self.locate_err(err))?;
+                            return Ok(dyn_ty);
                         }
                     };
 

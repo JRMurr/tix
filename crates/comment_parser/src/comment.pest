@@ -95,6 +95,7 @@ user_type = @{
 
 primitive_ref = {
     string_ref
+  | number_ref
   | int_ref
   | bool_ref
   | float_ref
@@ -107,6 +108,7 @@ primitive_ref = {
 // maybe making them uppercase is fine?
 // the only reservation I have now is that nixpkgs lib does these are lowercase
 string_ref = @{ "string" }
+number_ref = @{ "number" }
 int_ref    = @{ "int" }
 bool_ref   = @{ "bool" }
 float_ref  = @{ "float" }
