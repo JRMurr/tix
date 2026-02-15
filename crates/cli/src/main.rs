@@ -80,6 +80,33 @@ enum GenStubsSource {
         #[arg(long, default_value = "8")]
         max_depth: u32,
     },
+
+    /// Generate stubs from Home Manager option declarations
+    HomeManager {
+        /// Path to nixpkgs (default: <nixpkgs> from NIX_PATH)
+        #[arg(long)]
+        nixpkgs: Option<PathBuf>,
+
+        /// Path to home-manager source (default: flake registry)
+        #[arg(long)]
+        home_manager: Option<PathBuf>,
+
+        /// Path to a flake directory (evaluates homeConfigurations)
+        #[arg(long)]
+        flake: Option<PathBuf>,
+
+        /// Username to select from homeConfigurations (required if flake has multiple)
+        #[arg(long)]
+        username: Option<String>,
+
+        /// Output file path (default: stdout)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+
+        /// Maximum depth for recursive option tree walking
+        #[arg(long, default_value = "8")]
+        max_depth: u32,
+    },
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -91,7 +118,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             let file_path = args.file_path.ok_or(
                 "No file path provided. Usage: tix-cli <file.nix> or tix-cli gen-stubs <source>",
             )?;
-            run_check(file_path, args.stub_paths, args.no_default_stubs, args.config_path)
+            run_check(
+                file_path,
+                args.stub_paths,
+                args.no_default_stubs,
+                args.config_path,
+            )
         }
     }
 }
@@ -112,6 +144,21 @@ fn run_gen_stubs(source: GenStubsSource) -> Result<(), Box<dyn Error>> {
             nixpkgs,
             flake,
             hostname,
+            output,
+            max_depth,
+        }),
+        GenStubsSource::HomeManager {
+            nixpkgs,
+            home_manager,
+            flake,
+            username,
+            output,
+            max_depth,
+        } => gen_stubs::run_home_manager(gen_stubs::HomeManagerOptions {
+            nixpkgs,
+            home_manager,
+            flake,
+            username,
             output,
             max_depth,
         }),
@@ -152,9 +199,7 @@ fn run_check(
         }
         None => {
             // Walk up from the file's parent directory looking for tix.toml.
-            let start_dir = canonical_path
-                .parent()
-                .unwrap_or(std::path::Path::new("."));
+            let start_dir = canonical_path.parent().unwrap_or(std::path::Path::new("."));
             match config::find_config(start_dir) {
                 Some(found_config_path) => {
                     let dir = found_config_path

@@ -163,7 +163,15 @@ fn collect_attrset(pairs: Pairs<Rule>) -> ParsedTy {
         match pair.as_rule() {
             Rule::named_field => {
                 let mut inner = pair.into_inner();
-                let name: SmolStr = inner.next().unwrap().as_str().into();
+                let name_pair = inner.next().unwrap();
+                // quoted_field includes surrounding quotes — strip them.
+                let name: SmolStr = match name_pair.as_rule() {
+                    Rule::quoted_field => {
+                        let raw = name_pair.as_str();
+                        raw[1..raw.len() - 1].into()
+                    }
+                    _ => name_pair.as_str().into(),
+                };
                 let ty = collect_type_expr(inner).unwrap();
                 fields.insert(name, ty.into());
             }
@@ -304,6 +312,32 @@ mod tests {
             crate::TixDeclaration::TypeAlias { name, body } => {
                 assert_eq!(name.as_str(), "Nullable");
                 assert_eq!(*body, known_ty!(union!((# "a"), null)));
+            }
+            other => panic!("expected TypeAlias, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn quoted_field_name() {
+        let src = r#"type Sysctl = { "net.core.rmem_max": int, enable: bool, ... };"#;
+        let file = parse_tix_file(src).expect("parse error");
+
+        match &file.declarations[0] {
+            crate::TixDeclaration::TypeAlias { name, body } => {
+                assert_eq!(name.as_str(), "Sysctl");
+                match body {
+                    crate::ParsedTy::AttrSet(attr) => {
+                        // Quoted field should have quotes stripped in the parsed representation.
+                        assert!(
+                            attr.fields.contains_key("net.core.rmem_max"),
+                            "expected 'net.core.rmem_max' field, got: {:?}",
+                            attr.fields.keys().collect::<Vec<_>>()
+                        );
+                        assert!(attr.fields.contains_key("enable"));
+                        assert!(attr.open);
+                    }
+                    other => panic!("expected AttrSet, got: {other:?}"),
+                }
             }
             other => panic!("expected TypeAlias, got: {other:?}"),
         }

@@ -139,9 +139,7 @@ fn type_to_tix_prec(ty: &NixosTypeInfo, ctx: Prec) -> String {
         // TODO: use literal types when supported (e.g. `"enabled" | "disabled"`)
         NixosTypeInfo::Enum => "string".to_string(),
 
-        NixosTypeInfo::Submodule { options } => {
-            options_to_attrset_ty(options, 0)
-        }
+        NixosTypeInfo::Submodule { options } => options_to_attrset_ty(options, 0),
 
         NixosTypeInfo::Function { result } => {
             let res = type_to_tix_prec(result, Prec::Arrow);
@@ -165,6 +163,44 @@ fn type_to_tix_prec(ty: &NixosTypeInfo, ctx: Prec) -> String {
 // indentation. Namespaces become nested open attrsets, options become typed
 // fields.
 
+/// Check whether a field name is a valid bare identifier in .tix syntax.
+/// If not, it needs to be quoted.
+fn needs_quoting(name: &str) -> bool {
+    if name.is_empty() {
+        return true;
+    }
+    // Must match the `identifier` rule in tix_decl.pest:
+    //   ASCII_ALPHA ~ (ASCII_ALPHANUMERIC | "_" | "'" | "-")*
+    // | "_" ~ (ASCII_ALPHANUMERIC | "_" | "'" | "-")+
+    // | ASCII_DIGIT ~ (ASCII_ALPHANUMERIC | "_" | "'" | "-")*
+    // Also must not be bare `_` (reserved for dyn_field).
+    if name == "_" {
+        return true;
+    }
+    let first = name.as_bytes()[0];
+    let valid_first = first.is_ascii_alphabetic() || first == b'_' || first.is_ascii_digit();
+    if !valid_first {
+        return true;
+    }
+    // Underscore-led names need at least one continuation character.
+    if first == b'_' && name.len() == 1 {
+        return true;
+    }
+    name.bytes()
+        .skip(1)
+        .any(|b| !b.is_ascii_alphanumeric() && b != b'_' && b != b'\'' && b != b'-')
+}
+
+/// Format a field name, quoting it if it contains characters not valid
+/// as bare identifiers (e.g. dots in `net.core.rmem_max`).
+fn format_field_name(name: &str) -> String {
+    if needs_quoting(name) {
+        format!("\"{}\"", name)
+    } else {
+        name.to_string()
+    }
+}
+
 /// Convert an option tree (BTreeMap from the JSON) to a .tix attrset type string.
 pub fn options_to_attrset_ty(
     options: &std::collections::BTreeMap<String, OptionNode>,
@@ -179,45 +215,96 @@ pub fn options_to_attrset_ty(
     let mut fields = Vec::new();
 
     for (name, node) in options {
+        let field_name = format_field_name(name);
         match node {
             OptionNode::Option(leaf) => {
                 let ty_str = type_to_tix(&leaf.type_info);
-                fields.push(format!("{}{}: {}", pad, name, ty_str));
+                fields.push(format!("{}{}: {}", pad, field_name, ty_str));
             }
             OptionNode::Namespace(ns) => {
                 let nested = options_to_attrset_ty(&ns.children, indent + 1);
-                fields.push(format!("{}{}: {}", pad, name, nested));
+                fields.push(format!("{}{}: {}", pad, field_name, nested));
             }
         }
     }
 
     // Open attrset (with `...`) since NixOS modules can extend config freely.
-    format!(
-        "{{\n{},\n{}...\n{}}}",
-        fields.join(",\n"),
-        pad,
-        close_pad,
-    )
+    format!("{{\n{},\n{}...\n{}}}", fields.join(",\n"), pad, close_pad,)
 }
 
 // =============================================================================
 // .tix File Generation
 // =============================================================================
 
+/// The kind of stub file being generated, controlling the type alias name
+/// and the context val declarations included in the output.
+pub enum StubKind {
+    Nixos,
+    HomeManager,
+}
+
 /// Generate a complete .tix file string from an option tree.
+///
+/// The output includes:
+///   - A type alias (`NixosConfig` or `HomeManagerConfig`)
+///   - Context val declarations (`config`, `lib`, `pkgs`, etc.) so the file
+///     can serve as a drop-in replacement for the `@nixos` or `@home-manager`
+///     built-in context stubs with real typed config.
 pub fn generate_tix_file(
     options: &std::collections::BTreeMap<String, OptionNode>,
+    kind: &StubKind,
 ) -> String {
     let attrset_ty = options_to_attrset_ty(options, 0);
 
+    let (type_name, command, context_vals) = match kind {
+        StubKind::Nixos => (
+            "NixosConfig",
+            "tix-cli gen-stubs nixos",
+            // NixOS module arguments: { config, lib, pkgs, options, modulesPath, ... }
+            "val config :: NixosConfig;\n\
+             val lib :: Lib;\n\
+             val pkgs :: Pkgs;\n\
+             val options :: NixosConfig;\n\
+             val modulesPath :: path;\n",
+        ),
+        StubKind::HomeManager => (
+            "HomeManagerConfig",
+            "tix-cli gen-stubs home-manager",
+            // Home Manager module arguments: { config, lib, pkgs, osConfig, ... }
+            "val config :: HomeManagerConfig;\n\
+             val lib :: Lib;\n\
+             val pkgs :: Pkgs;\n\
+             val osConfig :: { ... };\n",
+        ),
+    };
+
     format!(
-        "# Auto-generated NixOS option type stubs.\n\
-         # Generated by: tix-cli gen-stubs nixos\n\
+        "# Auto-generated {label} option type stubs.\n\
+         # Generated by: {command}\n\
          #\n\
-         # Re-generate with: tix-cli gen-stubs nixos -o <this-file>\n\
+         # Re-generate with: {command} -o <this-file>\n\
+         #\n\
+         # Use in tix.toml as a context stub to get typed config:\n\
+         #\n\
+         #   [context.{ctx}]\n\
+         #   paths = [\"{example_glob}\"]\n\
+         #   stubs = [\"./path/to/this-file.tix\"]\n\
          \n\
-         type NixosConfig = {};\n",
-        attrset_ty
+         type {type_name} = {attrset_ty};\n\
+         \n\
+         {context_vals}",
+        label = match kind {
+            StubKind::Nixos => "NixOS",
+            StubKind::HomeManager => "Home Manager",
+        },
+        ctx = match kind {
+            StubKind::Nixos => "nixos",
+            StubKind::HomeManager => "home",
+        },
+        example_glob = match kind {
+            StubKind::Nixos => "modules/**/*.nix",
+            StubKind::HomeManager => "home/**/*.nix",
+        },
     )
 }
 
@@ -239,6 +326,19 @@ pub struct NixosOptions {
     pub max_depth: u32,
 }
 
+/// Options for the `gen-stubs home-manager` subcommand.
+pub struct HomeManagerOptions {
+    pub nixpkgs: Option<PathBuf>,
+    /// Explicit path to a home-manager source tree (default: flake registry).
+    pub home_manager: Option<PathBuf>,
+    /// Path to a flake directory (evaluates `homeConfigurations`).
+    pub flake: Option<PathBuf>,
+    /// Username to select from `homeConfigurations` (required if flake has multiple).
+    pub username: Option<String>,
+    pub output: Option<PathBuf>,
+    pub max_depth: u32,
+}
+
 /// Build the full nix expression that imports extract-options.nix and passes
 /// the correct `options` argument.
 fn build_nix_expr(opts: &NixosOptions) -> String {
@@ -251,9 +351,7 @@ fn build_nix_expr(opts: &NixosOptions) -> String {
     let options_expr = if let Some(ref flake_path) = opts.flake {
         let flake = flake_path.display();
         if let Some(ref host) = opts.hostname {
-            format!(
-                "(builtins.getFlake \"{flake}\").nixosConfigurations.\"{host}\".options"
-            )
+            format!("(builtins.getFlake \"{flake}\").nixosConfigurations.\"{host}\".options")
         } else {
             // Try the sole configuration, or fall back to "default".
             format!(
@@ -279,6 +377,114 @@ fn build_nix_expr(opts: &NixosOptions) -> String {
         extractor, options_expr, opts.max_depth,
     )
 }
+
+// =============================================================================
+// Home Manager Nix Evaluation
+// =============================================================================
+//
+// Home Manager evaluation is more complex than NixOS because:
+//   1. HM extends `lib` with `lib.hm.*` helpers that modules depend on
+//   2. HM modules need `pkgs` and `osConfig` as module arguments
+//   3. The module list is loaded via `modules/modules.nix`, not eval-config.nix
+//
+// Supports three modes:
+//   1. Registry mode (default): fetch HM from the flake registry
+//   2. Explicit path: use a local home-manager source tree
+//   3. Flake mode: extract options from a flake's homeConfigurations
+
+/// Build the nix expression for evaluating Home Manager options.
+fn build_hm_nix_expr(opts: &HomeManagerOptions) -> String {
+    let extractor = include_str!("../../../tools/extract-options.nix");
+
+    // Determine how to get the home-manager source.
+    let hm_source = if let Some(ref flake_path) = opts.flake {
+        let flake = flake_path.display();
+        // In flake mode, get the options directly from a homeConfiguration.
+        let options_expr = if let Some(ref user) = opts.username {
+            format!("(builtins.getFlake \"{flake}\").homeConfigurations.\"{user}\".options")
+        } else {
+            format!(
+                "let flake = builtins.getFlake \"{flake}\"; \
+                 users = builtins.attrNames flake.homeConfigurations; \
+                 name = if builtins.length users == 1 then builtins.head users \
+                        else \"default\"; \
+                 in flake.homeConfigurations.${{name}}.options"
+            )
+        };
+
+        // Flake mode: options come directly from the evaluated configuration.
+        return format!(
+            "let extract = {}; in extract {{ options = {}; maxDepth = {}; }}",
+            extractor, options_expr, opts.max_depth,
+        );
+    } else {
+        // Non-flake mode: load HM from explicit path or registry.
+        match opts.home_manager {
+            Some(ref p) => format!("{}", p.display()),
+            None => r#"builtins.getFlake "home-manager""#.to_string(),
+        }
+    };
+
+    let nixpkgs = match opts.nixpkgs {
+        Some(ref p) => format!("import {} {{}}", p.display()),
+        None => "import <nixpkgs> {}".to_string(),
+    };
+
+    // Home Manager extends lib with `lib.hm.*` helpers that many modules
+    // reference. We import HM's lib overlay and apply it before loading
+    // the module list.
+    format!(
+        r#"let
+  extract = {extractor};
+  pkgs = {nixpkgs};
+  hmSrc = {hm_source};
+  hmLib = import (hmSrc + "/modules/lib") {{ lib = pkgs.lib; }};
+  extendedLib = pkgs.lib.extend (self: super: {{ hm = hmLib; }});
+  hmModuleList = import (hmSrc + "/modules/modules.nix") {{
+    inherit pkgs;
+    lib = extendedLib;
+    check = false;
+  }};
+  eval = extendedLib.evalModules {{
+    modules = hmModuleList ++ [{{
+      _module.check = false;
+      _module.args = {{
+        inherit pkgs;
+        osConfig = {{}};
+      }};
+    }}];
+  }};
+in extract {{ options = eval.options; maxDepth = {max_depth}; }}"#,
+        max_depth = opts.max_depth,
+    )
+}
+
+/// Invoke `nix eval --json` for Home Manager and parse the result.
+pub fn invoke_hm_nix_eval(
+    opts: &HomeManagerOptions,
+) -> Result<std::collections::BTreeMap<String, OptionNode>, Box<dyn std::error::Error>> {
+    let expr = build_hm_nix_expr(opts);
+
+    let mut cmd = Command::new("nix");
+    cmd.args(["eval", "--json", "--expr", &expr]);
+    cmd.arg("--impure");
+
+    eprintln!("Evaluating Home Manager options (this may take a while)...");
+    let output = cmd.output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("nix eval failed:\n{}", stderr).into());
+    }
+
+    let tree: std::collections::BTreeMap<String, OptionNode> =
+        serde_json::from_slice(&output.stdout)?;
+    Ok(tree)
+}
+
+// =============================================================================
+// NixOS Nix Evaluation
+// =============================================================================
 
 /// Invoke `nix eval --json` and parse the result.
 pub fn invoke_nix_eval(
@@ -315,24 +521,39 @@ pub fn invoke_nix_eval(
 /// Run the `gen-stubs nixos` subcommand.
 pub fn run_nixos(opts: NixosOptions) -> Result<(), Box<dyn std::error::Error>> {
     let tree = invoke_nix_eval(&opts)?;
-    let tix_content = generate_tix_file(&tree);
+    let tix_content = generate_tix_file(&tree, &StubKind::Nixos);
+    write_generated_stubs(&tix_content, opts.output.as_ref(), "NixOS")
+}
 
+/// Run the `gen-stubs home-manager` subcommand.
+pub fn run_home_manager(opts: HomeManagerOptions) -> Result<(), Box<dyn std::error::Error>> {
+    let tree = invoke_hm_nix_eval(&opts)?;
+    let tix_content = generate_tix_file(&tree, &StubKind::HomeManager);
+    write_generated_stubs(&tix_content, opts.output.as_ref(), "Home Manager")
+}
+
+/// Validate and write generated .tix content to a file or stdout.
+fn write_generated_stubs(
+    tix_content: &str,
+    output: Option<&PathBuf>,
+    label: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     // Validate the generated .tix output parses correctly.
-    if let Err(e) = comment_parser::parse_tix_file(&tix_content) {
+    if let Err(e) = comment_parser::parse_tix_file(tix_content) {
         eprintln!(
             "Warning: generated .tix file has parse errors (please report this bug): {}",
             e
         );
     }
 
-    match opts.output {
-        Some(ref path) => {
+    match output {
+        Some(path) => {
             // Ensure parent directory exists.
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            std::fs::write(path, &tix_content)?;
-            eprintln!("Wrote NixOS option stubs to {}", path.display());
+            std::fs::write(path, tix_content)?;
+            eprintln!("Wrote {} option stubs to {}", label, path.display());
         }
         None => {
             std::io::stdout().write_all(tix_content.as_bytes())?;
@@ -362,7 +583,12 @@ mod tests {
         match node {
             OptionNode::Option(leaf) => {
                 assert!(leaf._is_option);
-                assert_eq!(leaf.type_info, NixosTypeInfo::Primitive { value: "bool".into() });
+                assert_eq!(
+                    leaf.type_info,
+                    NixosTypeInfo::Primitive {
+                        value: "bool".into()
+                    }
+                );
             }
             _ => panic!("expected Option"),
         }
@@ -393,7 +619,9 @@ mod tests {
         assert_eq!(
             ty,
             NixosTypeInfo::List {
-                elem: Box::new(NixosTypeInfo::Primitive { value: "string".into() })
+                elem: Box::new(NixosTypeInfo::Primitive {
+                    value: "string".into()
+                })
             }
         );
     }
@@ -405,7 +633,9 @@ mod tests {
         assert_eq!(
             ty,
             NixosTypeInfo::AttrsOf {
-                elem: Box::new(NixosTypeInfo::Primitive { value: "int".into() })
+                elem: Box::new(NixosTypeInfo::Primitive {
+                    value: "int".into()
+                })
             }
         );
     }
@@ -417,7 +647,9 @@ mod tests {
         assert_eq!(
             ty,
             NixosTypeInfo::NullOr {
-                elem: Box::new(NixosTypeInfo::Primitive { value: "string".into() })
+                elem: Box::new(NixosTypeInfo::Primitive {
+                    value: "string".into()
+                })
             }
         );
     }
@@ -456,7 +688,9 @@ mod tests {
         assert_eq!(
             ty,
             NixosTypeInfo::Function {
-                result: Box::new(NixosTypeInfo::Primitive { value: "bool".into() })
+                result: Box::new(NixosTypeInfo::Primitive {
+                    value: "bool".into()
+                })
             }
         );
     }
@@ -474,17 +708,44 @@ mod tests {
 
     #[test]
     fn tix_primitives() {
-        assert_eq!(type_to_tix(&NixosTypeInfo::Primitive { value: "bool".into() }), "bool");
-        assert_eq!(type_to_tix(&NixosTypeInfo::Primitive { value: "string".into() }), "string");
-        assert_eq!(type_to_tix(&NixosTypeInfo::Primitive { value: "int".into() }), "int");
-        assert_eq!(type_to_tix(&NixosTypeInfo::Primitive { value: "float".into() }), "float");
-        assert_eq!(type_to_tix(&NixosTypeInfo::Primitive { value: "path".into() }), "path");
+        assert_eq!(
+            type_to_tix(&NixosTypeInfo::Primitive {
+                value: "bool".into()
+            }),
+            "bool"
+        );
+        assert_eq!(
+            type_to_tix(&NixosTypeInfo::Primitive {
+                value: "string".into()
+            }),
+            "string"
+        );
+        assert_eq!(
+            type_to_tix(&NixosTypeInfo::Primitive {
+                value: "int".into()
+            }),
+            "int"
+        );
+        assert_eq!(
+            type_to_tix(&NixosTypeInfo::Primitive {
+                value: "float".into()
+            }),
+            "float"
+        );
+        assert_eq!(
+            type_to_tix(&NixosTypeInfo::Primitive {
+                value: "path".into()
+            }),
+            "path"
+        );
     }
 
     #[test]
     fn tix_list() {
         let ty = NixosTypeInfo::List {
-            elem: Box::new(NixosTypeInfo::Primitive { value: "string".into() }),
+            elem: Box::new(NixosTypeInfo::Primitive {
+                value: "string".into(),
+            }),
         };
         assert_eq!(type_to_tix(&ty), "[string]");
     }
@@ -492,7 +753,9 @@ mod tests {
     #[test]
     fn tix_attrs_of() {
         let ty = NixosTypeInfo::AttrsOf {
-            elem: Box::new(NixosTypeInfo::Primitive { value: "int".into() }),
+            elem: Box::new(NixosTypeInfo::Primitive {
+                value: "int".into(),
+            }),
         };
         assert_eq!(type_to_tix(&ty), "{ _: int }");
     }
@@ -500,7 +763,9 @@ mod tests {
     #[test]
     fn tix_null_or() {
         let ty = NixosTypeInfo::NullOr {
-            elem: Box::new(NixosTypeInfo::Primitive { value: "string".into() }),
+            elem: Box::new(NixosTypeInfo::Primitive {
+                value: "string".into(),
+            }),
         };
         assert_eq!(type_to_tix(&ty), "string | null");
     }
@@ -511,10 +776,14 @@ mod tests {
         // delimit, so no extra parens needed around the inner union.
         let inner = NixosTypeInfo::NullOr {
             elem: Box::new(NixosTypeInfo::List {
-                elem: Box::new(NixosTypeInfo::Primitive { value: "string".into() }),
+                elem: Box::new(NixosTypeInfo::Primitive {
+                    value: "string".into(),
+                }),
             }),
         };
-        let outer = NixosTypeInfo::List { elem: Box::new(inner) };
+        let outer = NixosTypeInfo::List {
+            elem: Box::new(inner),
+        };
         assert_eq!(type_to_tix(&outer), "[[string] | null]");
     }
 
@@ -525,7 +794,9 @@ mod tests {
         // Test: nullOr as the *result* of functionTo — no parens needed.
         let ty = NixosTypeInfo::Function {
             result: Box::new(NixosTypeInfo::NullOr {
-                elem: Box::new(NixosTypeInfo::Primitive { value: "string".into() }),
+                elem: Box::new(NixosTypeInfo::Primitive {
+                    value: "string".into(),
+                }),
             }),
         };
         assert_eq!(type_to_tix(&ty), "{ ... } -> string | null");
@@ -535,8 +806,12 @@ mod tests {
     fn tix_union() {
         let ty = NixosTypeInfo::Union {
             members: vec![
-                NixosTypeInfo::Primitive { value: "string".into() },
-                NixosTypeInfo::Primitive { value: "int".into() },
+                NixosTypeInfo::Primitive {
+                    value: "string".into(),
+                },
+                NixosTypeInfo::Primitive {
+                    value: "int".into(),
+                },
             ],
         };
         assert_eq!(type_to_tix(&ty), "string | int");
@@ -560,7 +835,9 @@ mod tests {
     #[test]
     fn tix_function() {
         let ty = NixosTypeInfo::Function {
-            result: Box::new(NixosTypeInfo::Primitive { value: "bool".into() }),
+            result: Box::new(NixosTypeInfo::Primitive {
+                value: "bool".into(),
+            }),
         };
         assert_eq!(type_to_tix(&ty), "{ ... } -> bool");
     }
@@ -572,7 +849,9 @@ mod tests {
             "enable".to_string(),
             OptionNode::Option(OptionLeaf {
                 _is_option: true,
-                type_info: NixosTypeInfo::Primitive { value: "bool".into() },
+                type_info: NixosTypeInfo::Primitive {
+                    value: "bool".into(),
+                },
             }),
         );
         let ty = NixosTypeInfo::Submodule { options: opts };
@@ -598,14 +877,18 @@ mod tests {
             "enable".to_string(),
             OptionNode::Option(OptionLeaf {
                 _is_option: true,
-                type_info: NixosTypeInfo::Primitive { value: "bool".into() },
+                type_info: NixosTypeInfo::Primitive {
+                    value: "bool".into(),
+                },
             }),
         );
         opts.insert(
             "port".to_string(),
             OptionNode::Option(OptionLeaf {
                 _is_option: true,
-                type_info: NixosTypeInfo::Primitive { value: "int".into() },
+                type_info: NixosTypeInfo::Primitive {
+                    value: "int".into(),
+                },
             }),
         );
         let result = options_to_attrset_ty(&opts, 0);
@@ -621,7 +904,9 @@ mod tests {
             "enable".to_string(),
             OptionNode::Option(OptionLeaf {
                 _is_option: true,
-                type_info: NixosTypeInfo::Primitive { value: "bool".into() },
+                type_info: NixosTypeInfo::Primitive {
+                    value: "bool".into(),
+                },
             }),
         );
         let mut outer = BTreeMap::new();
@@ -649,7 +934,9 @@ mod tests {
             "enable".to_string(),
             OptionNode::Option(OptionLeaf {
                 _is_option: true,
-                type_info: NixosTypeInfo::Primitive { value: "bool".into() },
+                type_info: NixosTypeInfo::Primitive {
+                    value: "bool".into(),
+                },
             }),
         );
         openssh.insert(
@@ -657,7 +944,9 @@ mod tests {
             OptionNode::Option(OptionLeaf {
                 _is_option: true,
                 type_info: NixosTypeInfo::List {
-                    elem: Box::new(NixosTypeInfo::Primitive { value: "int".into() }),
+                    elem: Box::new(NixosTypeInfo::Primitive {
+                        value: "int".into(),
+                    }),
                 },
             }),
         );
@@ -687,7 +976,9 @@ mod tests {
                         "hostName".to_string(),
                         OptionNode::Option(OptionLeaf {
                             _is_option: true,
-                            type_info: NixosTypeInfo::Primitive { value: "string".into() },
+                            type_info: NixosTypeInfo::Primitive {
+                                value: "string".into(),
+                            },
                         }),
                     );
                     m.insert(
@@ -725,11 +1016,14 @@ mod tests {
             }),
         );
 
-        let tix_content = generate_tix_file(&tree);
+        let tix_content = generate_tix_file(&tree, &StubKind::Nixos);
 
         // The generated file must parse successfully.
         comment_parser::parse_tix_file(&tix_content).unwrap_or_else(|e| {
-            panic!("Generated .tix failed to parse:\n{}\n\nError: {}", tix_content, e);
+            panic!(
+                "Generated .tix failed to parse:\n{}\n\nError: {}",
+                tix_content, e
+            );
         });
     }
 
@@ -741,7 +1035,9 @@ mod tests {
             OptionNode::Option(OptionLeaf {
                 _is_option: true,
                 type_info: NixosTypeInfo::NullOr {
-                    elem: Box::new(NixosTypeInfo::Primitive { value: "string".into() }),
+                    elem: Box::new(NixosTypeInfo::Primitive {
+                        value: "string".into(),
+                    }),
                 },
             }),
         );
@@ -759,14 +1055,19 @@ mod tests {
             OptionNode::Option(OptionLeaf {
                 _is_option: true,
                 type_info: NixosTypeInfo::AttrsOf {
-                    elem: Box::new(NixosTypeInfo::Primitive { value: "string".into() }),
+                    elem: Box::new(NixosTypeInfo::Primitive {
+                        value: "string".into(),
+                    }),
                 },
             }),
         );
 
-        let tix_content = generate_tix_file(&tree);
+        let tix_content = generate_tix_file(&tree, &StubKind::Nixos);
         comment_parser::parse_tix_file(&tix_content).unwrap_or_else(|e| {
-            panic!("Generated .tix failed to parse:\n{}\n\nError: {}", tix_content, e);
+            panic!(
+                "Generated .tix failed to parse:\n{}\n\nError: {}",
+                tix_content, e
+            );
         });
     }
 
@@ -784,7 +1085,9 @@ mod tests {
                         "enable".to_string(),
                         OptionNode::Option(OptionLeaf {
                             _is_option: true,
-                            type_info: NixosTypeInfo::Primitive { value: "bool".into() },
+                            type_info: NixosTypeInfo::Primitive {
+                                value: "bool".into(),
+                            },
                         }),
                     );
                     m
@@ -799,7 +1102,7 @@ mod tests {
             }),
         );
 
-        let tix_content = generate_tix_file(&tree);
+        let tix_content = generate_tix_file(&tree, &StubKind::Nixos);
         assert!(tix_content.contains("systemd-boot"));
         comment_parser::parse_tix_file(&tix_content).unwrap_or_else(|e| {
             panic!(
@@ -833,7 +1136,7 @@ mod tests {
         );
 
         // Generate .tix and verify it parses.
-        let tix_content = generate_tix_file(&tree);
+        let tix_content = generate_tix_file(&tree, &StubKind::Nixos);
         comment_parser::parse_tix_file(&tix_content).unwrap_or_else(|e| {
             // Write to a temp file for debugging.
             let tmp = std::env::temp_dir().join("tix-nixos-stubs-debug.tix");
@@ -842,6 +1145,165 @@ mod tests {
                 "Integration: generated .tix failed to parse (saved to {}):\n{}",
                 tmp.display(),
                 e
+            );
+        });
+    }
+
+    #[test]
+    fn round_trip_home_manager_kind() {
+        let mut tree = BTreeMap::new();
+        tree.insert(
+            "enable".to_string(),
+            OptionNode::Option(OptionLeaf {
+                _is_option: true,
+                type_info: NixosTypeInfo::Primitive {
+                    value: "bool".into(),
+                },
+            }),
+        );
+        tree.insert(
+            "home".to_string(),
+            OptionNode::Namespace(NamespaceNode {
+                _is_option: false,
+                children: {
+                    let mut m = BTreeMap::new();
+                    m.insert(
+                        "username".to_string(),
+                        OptionNode::Option(OptionLeaf {
+                            _is_option: true,
+                            type_info: NixosTypeInfo::Primitive {
+                                value: "string".into(),
+                            },
+                        }),
+                    );
+                    m.insert(
+                        "homeDirectory".to_string(),
+                        OptionNode::Option(OptionLeaf {
+                            _is_option: true,
+                            type_info: NixosTypeInfo::Primitive {
+                                value: "path".into(),
+                            },
+                        }),
+                    );
+                    m.insert(
+                        "packages".to_string(),
+                        OptionNode::Option(OptionLeaf {
+                            _is_option: true,
+                            type_info: NixosTypeInfo::List {
+                                elem: Box::new(NixosTypeInfo::Package),
+                            },
+                        }),
+                    );
+                    m
+                },
+            }),
+        );
+
+        let tix_content = generate_tix_file(&tree, &StubKind::HomeManager);
+
+        // Should contain HomeManagerConfig type and context val declarations.
+        assert!(tix_content.contains("type HomeManagerConfig"));
+        assert!(tix_content.contains("val config :: HomeManagerConfig;"));
+        assert!(tix_content.contains("val lib :: Lib;"));
+        assert!(tix_content.contains("val pkgs :: Pkgs;"));
+        assert!(tix_content.contains("val osConfig :: { ... };"));
+
+        comment_parser::parse_tix_file(&tix_content).unwrap_or_else(|e| {
+            panic!(
+                "HM generated .tix failed to parse:\n{}\n\nError: {}",
+                tix_content, e
+            );
+        });
+    }
+
+    #[test]
+    #[ignore]
+    fn integration_home_manager_eval() {
+        let opts = HomeManagerOptions {
+            nixpkgs: None,
+            home_manager: None,
+            flake: None,
+            username: None,
+            output: None,
+            max_depth: 3, // shallow for speed
+        };
+        let tree = invoke_hm_nix_eval(&opts).expect("nix eval should succeed");
+        assert!(!tree.is_empty(), "option tree should not be empty");
+
+        // HM option tree should contain common top-level namespaces.
+        assert!(
+            tree.contains_key("home") || tree.contains_key("programs"),
+            "expected common Home Manager option namespaces, got: {:?}",
+            tree.keys().collect::<Vec<_>>()
+        );
+
+        let tix_content = generate_tix_file(&tree, &StubKind::HomeManager);
+        comment_parser::parse_tix_file(&tix_content).unwrap_or_else(|e| {
+            let tmp = std::env::temp_dir().join("tix-hm-stubs-debug.tix");
+            let _ = std::fs::write(&tmp, &tix_content);
+            panic!(
+                "Integration: generated HM .tix failed to parse (saved to {}):\n{}",
+                tmp.display(),
+                e
+            );
+        });
+    }
+
+    // -------------------------------------------------------------------------
+    // Field name quoting
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn needs_quoting_plain_idents() {
+        assert!(!needs_quoting("enable"));
+        assert!(!needs_quoting("hostName"));
+        assert!(!needs_quoting("systemd-boot"));
+        assert!(!needs_quoting("2bwm"));
+        assert!(!needs_quoting("_1password"));
+    }
+
+    #[test]
+    fn needs_quoting_dotted_names() {
+        assert!(needs_quoting("net.core.rmem_max"));
+        assert!(needs_quoting("com.apple.controlcenter"));
+        assert!(needs_quoting("NSGlobalDomain.AppleShowAllExtensions"));
+    }
+
+    #[test]
+    fn needs_quoting_edge_cases() {
+        assert!(needs_quoting(""));
+        assert!(needs_quoting("_")); // reserved for dyn_field
+    }
+
+    #[test]
+    fn round_trip_with_dotted_names() {
+        let mut sysctl = BTreeMap::new();
+        sysctl.insert(
+            "net.core.rmem_max".to_string(),
+            OptionNode::Option(OptionLeaf {
+                _is_option: true,
+                type_info: NixosTypeInfo::Primitive {
+                    value: "string".into(),
+                },
+            }),
+        );
+
+        let mut tree = BTreeMap::new();
+        tree.insert(
+            "sysctl".to_string(),
+            OptionNode::Namespace(NamespaceNode {
+                _is_option: false,
+                children: sysctl,
+            }),
+        );
+
+        let tix_content = generate_tix_file(&tree, &StubKind::Nixos);
+        assert!(tix_content.contains(r#""net.core.rmem_max": string"#));
+
+        comment_parser::parse_tix_file(&tix_content).unwrap_or_else(|e| {
+            panic!(
+                "Dotted-name .tix failed to parse:\n{}\n\nError: {}",
+                tix_content, e
             );
         });
     }
