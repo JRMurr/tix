@@ -16,7 +16,13 @@ let
   version = "0.1.0";
 
   fs = lib.fileset;
-  baseSrc = fs.unions [ ./crates ./Cargo.toml ./Cargo.lock ./stubs ];
+  baseSrc = fs.unions [
+    ./crates
+    ./Cargo.toml
+    ./Cargo.lock
+    ./stubs
+    ./tools
+  ];
 
   src = fs.toSource {
     root = ./.;
@@ -29,7 +35,7 @@ let
     inherit src;
     pname = name;
     version = version;
-    
+
     cargoLock.lockFile = ./Cargo.lock;
     nativeBuildInputs = [ ];
   };

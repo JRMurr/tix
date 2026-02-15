@@ -82,6 +82,15 @@
   investigated to ensure NameKind classification is correct for let bindings
   inside top-level lambda bodies.
 
+### Automatic Type Extraction from Nix Ecosystem
+
+- **Eval-assisted stub generation for `lib`**: Use `nix eval` to discover the attrset
+  structure of nixpkgs `lib`, combine with `builtins.functionArgs` to get parameter
+  names, and optionally run tix inference on the lib source where feasible. Output a
+  `.tix` skeleton with known types filled in and TODOs for what couldn't be inferred.
+  `lib` is ~260 functions — manageable to hand-verify once generated. Could evolve
+  into a general `tix-gen` tool for any Nix attrset.
+
 ### Future Enhancements
 
 - Full intersection-type-based operator overloading (replace pragmatic deferred
