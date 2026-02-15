@@ -82,6 +82,25 @@
   investigated to ensure NameKind classification is correct for let bindings
   inside top-level lambda bodies.
 
+### Automatic Type Extraction from Nix Ecosystem
+
+- **Eval-assisted stub generation for `lib`**: Use `nix eval` to discover the attrset
+  structure of nixpkgs `lib`, combine with `builtins.functionArgs` to get parameter
+  names, and optionally run tix inference on the lib source where feasible. Output a
+  `.tix` skeleton with known types filled in and TODOs for what couldn't be inferred.
+  `lib` is ~260 functions — manageable to hand-verify once generated. Could evolve
+  into a general `tix-gen` tool for any Nix attrset.
+
+- **Generated stubs should move to a separate repo**: The NixOS and Home Manager
+  generated stubs (33K+ and 5.8K lines respectively) are large and machine-specific.
+  They should live in a separate repo/registry that gets published with each
+  nixpkgs release. Currently gitignored; users regenerate locally with
+  `tix-cli gen-stubs nixos -o ...` and `tix-cli gen-stubs home-manager -o ...`.
+
+- **Home Manager flake mode**: The `gen-stubs home-manager --flake` path evaluates
+  `homeConfigurations` but hasn't been tested end-to-end with real flakes yet.
+  The non-flake mode (fetching HM from flake registry) works.
+
 ### Future Enhancements
 
 - Full intersection-type-based operator overloading (replace pragmatic deferred

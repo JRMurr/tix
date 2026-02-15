@@ -1,0 +1,1525 @@
+// =============================================================================
+// gen-stubs: Auto-generate .tix declaration files from external sources
+// =============================================================================
+//
+// Currently supports NixOS option tree extraction. The architecture is designed
+// to accommodate future sources (pkgs, lib, home-manager) via additional
+// subcommands.
+
+use std::io::Write;
+use std::path::PathBuf;
+use std::process::Command;
+
+use serde::Deserialize;
+
+// =============================================================================
+// NixOS Option JSON Schema
+// =============================================================================
+//
+// These types mirror the JSON structure produced by tools/extract-options.nix.
+// The option tree is a recursive structure where each node is either a leaf
+// option (with type info) or a namespace containing children.
+
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum OptionNode {
+    Option(OptionLeaf),
+    Namespace(NamespaceNode),
+}
+
+#[derive(Debug, Deserialize, PartialEq)]
+pub struct OptionLeaf {
+    #[serde(rename = "_isOption")]
+    pub _is_option: bool, // always true
+    #[serde(rename = "typeInfo")]
+    pub type_info: NixosTypeInfo,
+    /// NixOS option description text, extracted from the option declaration.
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Deserialize, PartialEq)]
+pub struct NamespaceNode {
+    #[serde(rename = "_isOption")]
+    pub _is_option: bool, // always false
+    pub children: std::collections::BTreeMap<String, OptionNode>,
+}
+
+/// Type representation extracted from NixOS option declarations.
+/// Each variant maps to a NixOS `types.*` constructor.
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(tag = "type")]
+pub enum NixosTypeInfo {
+    #[serde(rename = "primitive")]
+    Primitive { value: String },
+    #[serde(rename = "package")]
+    Package,
+    #[serde(rename = "list")]
+    List { elem: Box<NixosTypeInfo> },
+    #[serde(rename = "attrsOf")]
+    AttrsOf { elem: Box<NixosTypeInfo> },
+    #[serde(rename = "nullOr")]
+    NullOr { elem: Box<NixosTypeInfo> },
+    #[serde(rename = "union")]
+    Union { members: Vec<NixosTypeInfo> },
+    #[serde(rename = "enum")]
+    Enum,
+    #[serde(rename = "submodule")]
+    Submodule {
+        options: std::collections::BTreeMap<String, OptionNode>,
+    },
+    #[serde(rename = "function")]
+    Function { result: Box<NixosTypeInfo> },
+    #[serde(rename = "anything")]
+    Anything,
+}
+
+// =============================================================================
+// Type → .tix Syntax Conversion
+// =============================================================================
+//
+// Converts extracted NixOS types into .tix type expression strings. Handles
+// operator precedence: arrows bind loosest, then unions, then intersections,
+// then atoms. Parentheses are inserted only when necessary.
+
+/// Precedence levels for .tix type expressions.
+#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
+enum Prec {
+    Arrow,      // lowest: `a -> b`
+    Union,      // `a | b`
+    _Intersect, // `a & b` (unused for now — no NixOS types produce intersections)
+    _Atom,      // highest: primitives, parens, lists, attrsets
+}
+
+/// Convert a NixOS type to a .tix type expression string.
+pub fn type_to_tix(ty: &NixosTypeInfo) -> String {
+    type_to_tix_prec(ty, Prec::Arrow)
+}
+
+fn type_to_tix_prec(ty: &NixosTypeInfo, ctx: Prec) -> String {
+    match ty {
+        NixosTypeInfo::Primitive { value } => value.clone(),
+
+        // Packages are derivations — use the Derivation type alias if available,
+        // otherwise fall back to an open attrset.
+        NixosTypeInfo::Package => "{ ... }".to_string(),
+
+        NixosTypeInfo::List { elem } => {
+            format!("[{}]", type_to_tix_prec(elem, Prec::Arrow))
+        }
+
+        NixosTypeInfo::AttrsOf { elem } => {
+            format!("{{ _: {} }}", type_to_tix_prec(elem, Prec::Arrow))
+        }
+
+        NixosTypeInfo::NullOr { elem } => {
+            let inner = type_to_tix_prec(elem, Prec::Union);
+            let result = format!("{} | null", inner);
+            if ctx > Prec::Union {
+                format!("({})", result)
+            } else {
+                result
+            }
+        }
+
+        NixosTypeInfo::Union { members } => {
+            if members.is_empty() {
+                "{ ... }".to_string()
+            } else {
+                let parts: Vec<String> = members
+                    .iter()
+                    .map(|m| type_to_tix_prec(m, Prec::Union))
+                    .collect();
+                let result = parts.join(" | ");
+                if ctx > Prec::Union {
+                    format!("({})", result)
+                } else {
+                    result
+                }
+            }
+        }
+
+        // TODO: use literal types when supported (e.g. `"enabled" | "disabled"`)
+        NixosTypeInfo::Enum => "string".to_string(),
+
+        NixosTypeInfo::Submodule { options } => options_to_attrset_ty(options, 0),
+
+        NixosTypeInfo::Function { result } => {
+            let res = type_to_tix_prec(result, Prec::Arrow);
+            let result_str = format!("{{ ... }} -> {}", res);
+            if ctx > Prec::Arrow {
+                format!("({})", result_str)
+            } else {
+                result_str
+            }
+        }
+
+        NixosTypeInfo::Anything => "{ ... }".to_string(),
+    }
+}
+
+// =============================================================================
+// Option Tree → Attrset Type
+// =============================================================================
+//
+// Walks the option tree and produces a .tix attrset type string with proper
+// indentation. Namespaces become nested open attrsets, options become typed
+// fields.
+
+/// Check whether a field name is a valid bare identifier in .tix syntax.
+/// If not, it needs to be quoted.
+fn needs_quoting(name: &str) -> bool {
+    if name.is_empty() {
+        return true;
+    }
+    // Must match the `identifier` rule in tix_decl.pest:
+    //   ASCII_ALPHA ~ (ASCII_ALPHANUMERIC | "_" | "'" | "-")*
+    // | "_" ~ (ASCII_ALPHANUMERIC | "_" | "'" | "-")+
+    // | ASCII_DIGIT ~ (ASCII_ALPHANUMERIC | "_" | "'" | "-")*
+    // Also must not be bare `_` (reserved for dyn_field).
+    if name == "_" {
+        return true;
+    }
+    let first = name.as_bytes()[0];
+    let valid_first = first.is_ascii_alphabetic() || first == b'_' || first.is_ascii_digit();
+    if !valid_first {
+        return true;
+    }
+    // Underscore-led names need at least one continuation character.
+    if first == b'_' && name.len() == 1 {
+        return true;
+    }
+    name.bytes()
+        .skip(1)
+        .any(|b| !b.is_ascii_alphanumeric() && b != b'_' && b != b'\'' && b != b'-')
+}
+
+/// Format a field name, quoting it if it contains characters not valid
+/// as bare identifiers (e.g. dots in `net.core.rmem_max`).
+fn format_field_name(name: &str) -> String {
+    if needs_quoting(name) {
+        format!("\"{}\"", name)
+    } else {
+        name.to_string()
+    }
+}
+
+/// Convert an option tree (BTreeMap from the JSON) to a .tix attrset type string.
+/// When `emit_docs` is true, option descriptions are emitted as `##` doc comments.
+pub fn options_to_attrset_ty(
+    options: &std::collections::BTreeMap<String, OptionNode>,
+    indent: usize,
+) -> String {
+    options_to_attrset_ty_inner(options, indent, false)
+}
+
+/// Like `options_to_attrset_ty` but with doc comment emission control.
+pub fn options_to_attrset_ty_with_docs(
+    options: &std::collections::BTreeMap<String, OptionNode>,
+    indent: usize,
+    full_descriptions: bool,
+) -> String {
+    options_to_attrset_ty_inner(options, indent, full_descriptions)
+}
+
+fn options_to_attrset_ty_inner(
+    options: &std::collections::BTreeMap<String, OptionNode>,
+    indent: usize,
+    emit_docs: bool,
+) -> String {
+    if options.is_empty() {
+        return "{ ... }".to_string();
+    }
+
+    let pad = "  ".repeat(indent + 1);
+    let close_pad = "  ".repeat(indent);
+    let mut fields = Vec::new();
+
+    for (name, node) in options {
+        let field_name = format_field_name(name);
+        match node {
+            OptionNode::Option(leaf) => {
+                let ty_str = type_to_tix(&leaf.type_info);
+                let mut lines = String::new();
+
+                // Emit doc comment if we have a description.
+                if emit_docs {
+                    if let Some(ref desc) = leaf.description {
+                        let doc_text = format_description(desc);
+                        for doc_line in doc_text.lines() {
+                            if doc_line.is_empty() {
+                                lines.push_str(&format!("{}##\n", pad));
+                            } else {
+                                lines.push_str(&format!("{}## {}\n", pad, doc_line));
+                            }
+                        }
+                    }
+                }
+
+                lines.push_str(&format!("{}{}: {}", pad, field_name, ty_str));
+                fields.push(lines);
+            }
+            OptionNode::Namespace(ns) => {
+                let nested = options_to_attrset_ty_inner(&ns.children, indent + 1, emit_docs);
+                fields.push(format!("{}{}: {}", pad, field_name, nested));
+            }
+        }
+    }
+
+    // Open attrset (with `...`) since NixOS modules can extend config freely.
+    format!("{{\n{},\n{}...\n{}}}", fields.join(",\n"), pad, close_pad,)
+}
+
+/// Format a description for emission as `##` doc comment lines.
+/// By default, uses only the first paragraph (up to the first blank line).
+fn format_description(desc: &str) -> String {
+    // Take the first paragraph only — NixOS descriptions often have lengthy
+    // multi-paragraph explanations that are too verbose for inline docs.
+    let trimmed = desc.trim();
+    match trimmed.find("\n\n") {
+        Some(idx) => trimmed[..idx].to_string(),
+        None => trimmed.to_string(),
+    }
+}
+
+// =============================================================================
+// .tix File Generation
+// =============================================================================
+
+/// The kind of stub file being generated, controlling the type alias name
+/// and the context val declarations included in the output.
+pub enum StubKind {
+    Nixos,
+    HomeManager,
+}
+
+/// Generate a complete .tix file string from an option tree.
+///
+/// The output includes:
+///   - A type alias (`NixosConfig` or `HomeManagerConfig`)
+///   - Context val declarations (`config`, `lib`, `pkgs`, etc.) so the file
+///     can serve as a drop-in replacement for the `@nixos` or `@home-manager`
+///     built-in context stubs with real typed config.
+///
+/// When `full_descriptions` is true, option descriptions are emitted as `##`
+/// doc comment lines above each field.
+#[cfg(test)]
+pub fn generate_tix_file(
+    options: &std::collections::BTreeMap<String, OptionNode>,
+    kind: &StubKind,
+) -> String {
+    generate_tix_file_with_docs(options, kind, false)
+}
+
+/// Like `generate_tix_file` but with explicit doc comment control.
+pub fn generate_tix_file_with_docs(
+    options: &std::collections::BTreeMap<String, OptionNode>,
+    kind: &StubKind,
+    full_descriptions: bool,
+) -> String {
+    let attrset_ty = options_to_attrset_ty_with_docs(options, 0, full_descriptions);
+
+    let (type_name, command, context_vals) = match kind {
+        StubKind::Nixos => (
+            "NixosConfig",
+            "tix-cli gen-stubs nixos",
+            // NixOS module arguments: { config, lib, pkgs, options, modulesPath, ... }
+            "val config :: NixosConfig;\n\
+             val lib :: Lib;\n\
+             val pkgs :: Pkgs;\n\
+             val options :: NixosConfig;\n\
+             val modulesPath :: path;\n",
+        ),
+        StubKind::HomeManager => (
+            "HomeManagerConfig",
+            "tix-cli gen-stubs home-manager",
+            // Home Manager module arguments: { config, lib, pkgs, osConfig, ... }
+            "val config :: HomeManagerConfig;\n\
+             val lib :: Lib;\n\
+             val pkgs :: Pkgs;\n\
+             val osConfig :: { ... };\n",
+        ),
+    };
+
+    format!(
+        "# Auto-generated {label} option type stubs.\n\
+         # Generated by: {command}\n\
+         #\n\
+         # Re-generate with: {command} -o <this-file>\n\
+         #\n\
+         # Use in tix.toml as a context stub to get typed config:\n\
+         #\n\
+         #   [context.{ctx}]\n\
+         #   paths = [\"{example_glob}\"]\n\
+         #   stubs = [\"./path/to/this-file.tix\"]\n\
+         \n\
+         type {type_name} = {attrset_ty};\n\
+         \n\
+         {context_vals}",
+        label = match kind {
+            StubKind::Nixos => "NixOS",
+            StubKind::HomeManager => "Home Manager",
+        },
+        ctx = match kind {
+            StubKind::Nixos => "nixos",
+            StubKind::HomeManager => "home",
+        },
+        example_glob = match kind {
+            StubKind::Nixos => "modules/**/*.nix",
+            StubKind::HomeManager => "home/**/*.nix",
+        },
+    )
+}
+
+// =============================================================================
+// Nix Evaluation
+// =============================================================================
+//
+// Shells out to `nix eval --json` with our extraction expression embedded.
+// Supports two modes:
+//   1. Nixpkgs mode: evaluate `(import <nixpkgs/nixos> {}).options`
+//   2. Flake mode: evaluate a specific nixosConfiguration from a flake
+
+/// Options for the `gen-stubs nixos` subcommand.
+pub struct NixosOptions {
+    pub nixpkgs: Option<PathBuf>,
+    pub flake: Option<PathBuf>,
+    pub hostname: Option<String>,
+    pub output: Option<PathBuf>,
+    pub max_depth: u32,
+    /// Emit `##` doc comments with option descriptions.
+    pub descriptions: bool,
+}
+
+/// Options for the `gen-stubs home-manager` subcommand.
+pub struct HomeManagerOptions {
+    pub nixpkgs: Option<PathBuf>,
+    /// Explicit path to a home-manager source tree (default: flake registry).
+    pub home_manager: Option<PathBuf>,
+    /// Path to a flake directory (evaluates `homeConfigurations`).
+    pub flake: Option<PathBuf>,
+    /// Username to select from `homeConfigurations` (required if flake has multiple).
+    pub username: Option<String>,
+    pub output: Option<PathBuf>,
+    pub max_depth: u32,
+    /// Emit `##` doc comments with option descriptions.
+    pub descriptions: bool,
+}
+
+/// Build the full nix expression that imports extract-options.nix and passes
+/// the correct `options` argument.
+fn build_nix_expr(opts: &NixosOptions) -> String {
+    let extractor = include_str!("../../../tools/extract-options.nix");
+
+    // Build the expression that produces the NixOS option tree.
+    // `eval-config.nix` is used instead of `<nixpkgs/nixos>` because the latter
+    // requires a `nixos-config` in NIX_PATH. eval-config.nix with an empty module
+    // list gives us the full NixOS option tree without needing a system configuration.
+    let options_expr = if let Some(ref flake_path) = opts.flake {
+        let flake = flake_path.display();
+        if let Some(ref host) = opts.hostname {
+            format!("(builtins.getFlake \"{flake}\").nixosConfigurations.\"{host}\".options")
+        } else {
+            // Try the sole configuration, or fall back to "default".
+            format!(
+                "let flake = builtins.getFlake \"{flake}\"; \
+                 hosts = builtins.attrNames flake.nixosConfigurations; \
+                 name = if builtins.length hosts == 1 then builtins.head hosts \
+                        else \"default\"; \
+                 in flake.nixosConfigurations.${{name}}.options"
+            )
+        }
+    } else {
+        let nixpkgs = match opts.nixpkgs {
+            Some(ref p) => format!("{}", p.display()),
+            None => "<nixpkgs>".to_string(),
+        };
+        format!(
+            "(import ({nixpkgs} + \"/nixos/lib/eval-config.nix\") {{ modules = [ {{ _module.check = false; }} ]; }}).options"
+        )
+    };
+
+    format!(
+        "let extract = {}; in extract {{ options = {}; maxDepth = {}; }}",
+        extractor, options_expr, opts.max_depth,
+    )
+}
+
+// =============================================================================
+// Home Manager Nix Evaluation
+// =============================================================================
+//
+// Home Manager evaluation is more complex than NixOS because:
+//   1. HM extends `lib` with `lib.hm.*` helpers that modules depend on
+//   2. HM modules need `pkgs` and `osConfig` as module arguments
+//   3. The module list is loaded via `modules/modules.nix`, not eval-config.nix
+//
+// Supports three modes:
+//   1. Registry mode (default): fetch HM from the flake registry
+//   2. Explicit path: use a local home-manager source tree
+//   3. Flake mode: extract options from a flake's homeConfigurations
+
+/// Build the nix expression for evaluating Home Manager options.
+fn build_hm_nix_expr(opts: &HomeManagerOptions) -> String {
+    let extractor = include_str!("../../../tools/extract-options.nix");
+
+    // Determine how to get the home-manager source.
+    let hm_source = if let Some(ref flake_path) = opts.flake {
+        let flake = flake_path.display();
+        // In flake mode, get the options directly from a homeConfiguration.
+        let options_expr = if let Some(ref user) = opts.username {
+            format!("(builtins.getFlake \"{flake}\").homeConfigurations.\"{user}\".options")
+        } else {
+            format!(
+                "let flake = builtins.getFlake \"{flake}\"; \
+                 users = builtins.attrNames flake.homeConfigurations; \
+                 name = if builtins.length users == 1 then builtins.head users \
+                        else \"default\"; \
+                 in flake.homeConfigurations.${{name}}.options"
+            )
+        };
+
+        // Flake mode: options come directly from the evaluated configuration.
+        return format!(
+            "let extract = {}; in extract {{ options = {}; maxDepth = {}; }}",
+            extractor, options_expr, opts.max_depth,
+        );
+    } else {
+        // Non-flake mode: load HM from explicit path or registry.
+        match opts.home_manager {
+            Some(ref p) => format!("{}", p.display()),
+            None => r#"builtins.getFlake "home-manager""#.to_string(),
+        }
+    };
+
+    let nixpkgs = match opts.nixpkgs {
+        Some(ref p) => format!("import {} {{}}", p.display()),
+        None => "import <nixpkgs> {}".to_string(),
+    };
+
+    // Home Manager extends lib with `lib.hm.*` helpers that many modules
+    // reference. We import HM's lib overlay and apply it before loading
+    // the module list.
+    format!(
+        r#"let
+  extract = {extractor};
+  pkgs = {nixpkgs};
+  hmSrc = {hm_source};
+  hmLib = import (hmSrc + "/modules/lib") {{ lib = pkgs.lib; }};
+  extendedLib = pkgs.lib.extend (self: super: {{ hm = hmLib; }});
+  hmModuleList = import (hmSrc + "/modules/modules.nix") {{
+    inherit pkgs;
+    lib = extendedLib;
+    check = false;
+  }};
+  eval = extendedLib.evalModules {{
+    modules = hmModuleList ++ [{{
+      _module.check = false;
+      _module.args = {{
+        inherit pkgs;
+        osConfig = {{}};
+      }};
+    }}];
+  }};
+in extract {{ options = eval.options; maxDepth = {max_depth}; }}"#,
+        max_depth = opts.max_depth,
+    )
+}
+
+/// Invoke `nix eval --json` for Home Manager and parse the result.
+pub fn invoke_hm_nix_eval(
+    opts: &HomeManagerOptions,
+) -> Result<std::collections::BTreeMap<String, OptionNode>, Box<dyn std::error::Error>> {
+    let expr = build_hm_nix_expr(opts);
+
+    let mut cmd = Command::new("nix");
+    cmd.args(["eval", "--json", "--expr", &expr]);
+    cmd.arg("--impure");
+
+    eprintln!("Evaluating Home Manager options (this may take a while)...");
+    let output = cmd.output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("nix eval failed:\n{}", stderr).into());
+    }
+
+    let tree: std::collections::BTreeMap<String, OptionNode> =
+        serde_json::from_slice(&output.stdout)?;
+    Ok(tree)
+}
+
+// =============================================================================
+// NixOS Nix Evaluation
+// =============================================================================
+
+/// Invoke `nix eval --json` and parse the result.
+pub fn invoke_nix_eval(
+    opts: &NixosOptions,
+) -> Result<std::collections::BTreeMap<String, OptionNode>, Box<dyn std::error::Error>> {
+    let expr = build_nix_expr(opts);
+
+    let mut cmd = Command::new("nix");
+    cmd.args(["eval", "--json", "--expr", &expr]);
+
+    // --impure is needed for:
+    //   - Flake mode: builtins.getFlake requires it
+    //   - Nixpkgs mode with <nixpkgs>: NIX_PATH lookup requires it
+    //   - Explicit path mode: absolute path access requires it
+    cmd.arg("--impure");
+
+    eprintln!("Evaluating NixOS options (this may take a while)...");
+    let output = cmd.output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("nix eval failed:\n{}", stderr).into());
+    }
+
+    let tree: std::collections::BTreeMap<String, OptionNode> =
+        serde_json::from_slice(&output.stdout)?;
+    Ok(tree)
+}
+
+// =============================================================================
+// Entry Point
+// =============================================================================
+
+/// Run the `gen-stubs nixos` subcommand.
+pub fn run_nixos(opts: NixosOptions) -> Result<(), Box<dyn std::error::Error>> {
+    let tree = invoke_nix_eval(&opts)?;
+    let tix_content = generate_tix_file_with_docs(&tree, &StubKind::Nixos, opts.descriptions);
+    write_generated_stubs(&tix_content, opts.output.as_ref(), "NixOS")
+}
+
+/// Run the `gen-stubs home-manager` subcommand.
+pub fn run_home_manager(opts: HomeManagerOptions) -> Result<(), Box<dyn std::error::Error>> {
+    let tree = invoke_hm_nix_eval(&opts)?;
+    let tix_content =
+        generate_tix_file_with_docs(&tree, &StubKind::HomeManager, opts.descriptions);
+    write_generated_stubs(&tix_content, opts.output.as_ref(), "Home Manager")
+}
+
+/// Validate and write generated .tix content to a file or stdout.
+fn write_generated_stubs(
+    tix_content: &str,
+    output: Option<&PathBuf>,
+    label: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Validate the generated .tix output parses correctly.
+    if let Err(e) = comment_parser::parse_tix_file(tix_content) {
+        eprintln!(
+            "Warning: generated .tix file has parse errors (please report this bug): {}",
+            e
+        );
+    }
+
+    match output {
+        Some(path) => {
+            // Ensure parent directory exists.
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(path, tix_content)?;
+            eprintln!("Wrote {} option stubs to {}", label, path.display());
+        }
+        None => {
+            std::io::stdout().write_all(tix_content.as_bytes())?;
+        }
+    }
+
+    Ok(())
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    // -------------------------------------------------------------------------
+    // JSON deserialization
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn deserialize_primitive_option() {
+        let json = r#"{"_isOption": true, "typeInfo": {"type": "primitive", "value": "bool"}}"#;
+        let node: OptionNode = serde_json::from_str(json).unwrap();
+        match node {
+            OptionNode::Option(leaf) => {
+                assert!(leaf._is_option);
+                assert_eq!(
+                    leaf.type_info,
+                    NixosTypeInfo::Primitive {
+                        value: "bool".into()
+                    }
+                );
+            }
+            _ => panic!("expected Option"),
+        }
+    }
+
+    #[test]
+    fn deserialize_namespace() {
+        let json = r#"{
+            "_isOption": false,
+            "children": {
+                "enable": {"_isOption": true, "typeInfo": {"type": "primitive", "value": "bool"}}
+            }
+        }"#;
+        let node: OptionNode = serde_json::from_str(json).unwrap();
+        match node {
+            OptionNode::Namespace(ns) => {
+                assert!(!ns._is_option);
+                assert!(ns.children.contains_key("enable"));
+            }
+            _ => panic!("expected Namespace"),
+        }
+    }
+
+    #[test]
+    fn deserialize_list_type() {
+        let json = r#"{"type": "list", "elem": {"type": "primitive", "value": "string"}}"#;
+        let ty: NixosTypeInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            ty,
+            NixosTypeInfo::List {
+                elem: Box::new(NixosTypeInfo::Primitive {
+                    value: "string".into()
+                })
+            }
+        );
+    }
+
+    #[test]
+    fn deserialize_attrs_of() {
+        let json = r#"{"type": "attrsOf", "elem": {"type": "primitive", "value": "int"}}"#;
+        let ty: NixosTypeInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            ty,
+            NixosTypeInfo::AttrsOf {
+                elem: Box::new(NixosTypeInfo::Primitive {
+                    value: "int".into()
+                })
+            }
+        );
+    }
+
+    #[test]
+    fn deserialize_null_or() {
+        let json = r#"{"type": "nullOr", "elem": {"type": "primitive", "value": "string"}}"#;
+        let ty: NixosTypeInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            ty,
+            NixosTypeInfo::NullOr {
+                elem: Box::new(NixosTypeInfo::Primitive {
+                    value: "string".into()
+                })
+            }
+        );
+    }
+
+    #[test]
+    fn deserialize_union() {
+        let json = r#"{"type": "union", "members": [
+            {"type": "primitive", "value": "string"},
+            {"type": "primitive", "value": "int"}
+        ]}"#;
+        let ty: NixosTypeInfo = serde_json::from_str(json).unwrap();
+        match ty {
+            NixosTypeInfo::Union { members } => assert_eq!(members.len(), 2),
+            _ => panic!("expected Union"),
+        }
+    }
+
+    #[test]
+    fn deserialize_submodule() {
+        let json = r#"{"type": "submodule", "options": {
+            "port": {"_isOption": true, "typeInfo": {"type": "primitive", "value": "int"}}
+        }}"#;
+        let ty: NixosTypeInfo = serde_json::from_str(json).unwrap();
+        match ty {
+            NixosTypeInfo::Submodule { options } => {
+                assert!(options.contains_key("port"));
+            }
+            _ => panic!("expected Submodule"),
+        }
+    }
+
+    #[test]
+    fn deserialize_function() {
+        let json = r#"{"type": "function", "result": {"type": "primitive", "value": "bool"}}"#;
+        let ty: NixosTypeInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            ty,
+            NixosTypeInfo::Function {
+                result: Box::new(NixosTypeInfo::Primitive {
+                    value: "bool".into()
+                })
+            }
+        );
+    }
+
+    #[test]
+    fn deserialize_enum_and_anything() {
+        let _: NixosTypeInfo = serde_json::from_str(r#"{"type": "enum"}"#).unwrap();
+        let _: NixosTypeInfo = serde_json::from_str(r#"{"type": "anything"}"#).unwrap();
+        let _: NixosTypeInfo = serde_json::from_str(r#"{"type": "package"}"#).unwrap();
+    }
+
+    // -------------------------------------------------------------------------
+    // type_to_tix conversion
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn tix_primitives() {
+        assert_eq!(
+            type_to_tix(&NixosTypeInfo::Primitive {
+                value: "bool".into()
+            }),
+            "bool"
+        );
+        assert_eq!(
+            type_to_tix(&NixosTypeInfo::Primitive {
+                value: "string".into()
+            }),
+            "string"
+        );
+        assert_eq!(
+            type_to_tix(&NixosTypeInfo::Primitive {
+                value: "int".into()
+            }),
+            "int"
+        );
+        assert_eq!(
+            type_to_tix(&NixosTypeInfo::Primitive {
+                value: "float".into()
+            }),
+            "float"
+        );
+        assert_eq!(
+            type_to_tix(&NixosTypeInfo::Primitive {
+                value: "path".into()
+            }),
+            "path"
+        );
+    }
+
+    #[test]
+    fn tix_list() {
+        let ty = NixosTypeInfo::List {
+            elem: Box::new(NixosTypeInfo::Primitive {
+                value: "string".into(),
+            }),
+        };
+        assert_eq!(type_to_tix(&ty), "[string]");
+    }
+
+    #[test]
+    fn tix_attrs_of() {
+        let ty = NixosTypeInfo::AttrsOf {
+            elem: Box::new(NixosTypeInfo::Primitive {
+                value: "int".into(),
+            }),
+        };
+        assert_eq!(type_to_tix(&ty), "{ _: int }");
+    }
+
+    #[test]
+    fn tix_null_or() {
+        let ty = NixosTypeInfo::NullOr {
+            elem: Box::new(NixosTypeInfo::Primitive {
+                value: "string".into(),
+            }),
+        };
+        assert_eq!(type_to_tix(&ty), "string | null");
+    }
+
+    #[test]
+    fn tix_null_or_parenthesization() {
+        // nullOr (listOf string) inside a list — the `[...]` brackets already
+        // delimit, so no extra parens needed around the inner union.
+        let inner = NixosTypeInfo::NullOr {
+            elem: Box::new(NixosTypeInfo::List {
+                elem: Box::new(NixosTypeInfo::Primitive {
+                    value: "string".into(),
+                }),
+            }),
+        };
+        let outer = NixosTypeInfo::List {
+            elem: Box::new(inner),
+        };
+        assert_eq!(type_to_tix(&outer), "[[string] | null]");
+    }
+
+    #[test]
+    fn tix_null_or_in_arrow_needs_parens() {
+        // `nullOr string -> bool` should not parenthesize since -> binds tighter
+        // than |. But `(nullOr string) -> bool` as a *param* needs parens.
+        // Test: nullOr as the *result* of functionTo — no parens needed.
+        let ty = NixosTypeInfo::Function {
+            result: Box::new(NixosTypeInfo::NullOr {
+                elem: Box::new(NixosTypeInfo::Primitive {
+                    value: "string".into(),
+                }),
+            }),
+        };
+        assert_eq!(type_to_tix(&ty), "{ ... } -> string | null");
+    }
+
+    #[test]
+    fn tix_union() {
+        let ty = NixosTypeInfo::Union {
+            members: vec![
+                NixosTypeInfo::Primitive {
+                    value: "string".into(),
+                },
+                NixosTypeInfo::Primitive {
+                    value: "int".into(),
+                },
+            ],
+        };
+        assert_eq!(type_to_tix(&ty), "string | int");
+    }
+
+    #[test]
+    fn tix_enum() {
+        assert_eq!(type_to_tix(&NixosTypeInfo::Enum), "string");
+    }
+
+    #[test]
+    fn tix_package() {
+        assert_eq!(type_to_tix(&NixosTypeInfo::Package), "{ ... }");
+    }
+
+    #[test]
+    fn tix_anything() {
+        assert_eq!(type_to_tix(&NixosTypeInfo::Anything), "{ ... }");
+    }
+
+    #[test]
+    fn tix_function() {
+        let ty = NixosTypeInfo::Function {
+            result: Box::new(NixosTypeInfo::Primitive {
+                value: "bool".into(),
+            }),
+        };
+        assert_eq!(type_to_tix(&ty), "{ ... } -> bool");
+    }
+
+    #[test]
+    fn tix_submodule() {
+        let mut opts = BTreeMap::new();
+        opts.insert(
+            "enable".to_string(),
+            OptionNode::Option(OptionLeaf {
+                _is_option: true,
+                type_info: NixosTypeInfo::Primitive {
+                    value: "bool".into(),
+                },
+                description: None,
+            }),
+        );
+        let ty = NixosTypeInfo::Submodule { options: opts };
+        let result = type_to_tix(&ty);
+        assert!(result.contains("enable: bool"));
+        assert!(result.contains("..."));
+    }
+
+    // -------------------------------------------------------------------------
+    // options_to_attrset_ty
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn empty_options() {
+        let opts = BTreeMap::new();
+        assert_eq!(options_to_attrset_ty(&opts, 0), "{ ... }");
+    }
+
+    #[test]
+    fn flat_options() {
+        let mut opts = BTreeMap::new();
+        opts.insert(
+            "enable".to_string(),
+            OptionNode::Option(OptionLeaf {
+                _is_option: true,
+                type_info: NixosTypeInfo::Primitive {
+                    value: "bool".into(),
+                },
+                description: None,
+            }),
+        );
+        opts.insert(
+            "port".to_string(),
+            OptionNode::Option(OptionLeaf {
+                _is_option: true,
+                type_info: NixosTypeInfo::Primitive {
+                    value: "int".into(),
+                },
+                description: None,
+            }),
+        );
+        let result = options_to_attrset_ty(&opts, 0);
+        assert!(result.contains("enable: bool"));
+        assert!(result.contains("port: int"));
+        assert!(result.contains("..."));
+    }
+
+    #[test]
+    fn nested_namespace() {
+        let mut inner = BTreeMap::new();
+        inner.insert(
+            "enable".to_string(),
+            OptionNode::Option(OptionLeaf {
+                _is_option: true,
+                type_info: NixosTypeInfo::Primitive {
+                    value: "bool".into(),
+                },
+                description: None,
+            }),
+        );
+        let mut outer = BTreeMap::new();
+        outer.insert(
+            "services".to_string(),
+            OptionNode::Namespace(NamespaceNode {
+                _is_option: false,
+                children: inner,
+            }),
+        );
+        let result = options_to_attrset_ty(&outer, 0);
+        assert!(result.contains("services:"));
+        assert!(result.contains("enable: bool"));
+    }
+
+    // -------------------------------------------------------------------------
+    // Round-trip: generate → parse
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn round_trip_generated_tix_parses() {
+        let mut services = BTreeMap::new();
+        let mut openssh = BTreeMap::new();
+        openssh.insert(
+            "enable".to_string(),
+            OptionNode::Option(OptionLeaf {
+                _is_option: true,
+                type_info: NixosTypeInfo::Primitive {
+                    value: "bool".into(),
+                },
+                description: None,
+            }),
+        );
+        openssh.insert(
+            "ports".to_string(),
+            OptionNode::Option(OptionLeaf {
+                _is_option: true,
+                type_info: NixosTypeInfo::List {
+                    elem: Box::new(NixosTypeInfo::Primitive {
+                        value: "int".into(),
+                    }),
+                },
+                description: None,
+            }),
+        );
+        services.insert(
+            "openssh".to_string(),
+            OptionNode::Namespace(NamespaceNode {
+                _is_option: false,
+                children: openssh,
+            }),
+        );
+
+        let mut tree = BTreeMap::new();
+        tree.insert(
+            "services".to_string(),
+            OptionNode::Namespace(NamespaceNode {
+                _is_option: false,
+                children: services,
+            }),
+        );
+        tree.insert(
+            "networking".to_string(),
+            OptionNode::Namespace(NamespaceNode {
+                _is_option: false,
+                children: {
+                    let mut m = BTreeMap::new();
+                    m.insert(
+                        "hostName".to_string(),
+                        OptionNode::Option(OptionLeaf {
+                            _is_option: true,
+                            type_info: NixosTypeInfo::Primitive {
+                                value: "string".into(),
+                            },
+                            description: None,
+                        }),
+                    );
+                    m.insert(
+                        "firewall".to_string(),
+                        OptionNode::Namespace(NamespaceNode {
+                            _is_option: false,
+                            children: {
+                                let mut fw = BTreeMap::new();
+                                fw.insert(
+                                    "enable".to_string(),
+                                    OptionNode::Option(OptionLeaf {
+                                        _is_option: true,
+                                        type_info: NixosTypeInfo::Primitive {
+                                            value: "bool".into(),
+                                        },
+                                        description: None,
+                                    }),
+                                );
+                                fw.insert(
+                                    "allowedTCPPorts".to_string(),
+                                    OptionNode::Option(OptionLeaf {
+                                        _is_option: true,
+                                        type_info: NixosTypeInfo::List {
+                                            elem: Box::new(NixosTypeInfo::Primitive {
+                                                value: "int".into(),
+                                            }),
+                                        },
+                                        description: None,
+                                    }),
+                                );
+                                fw
+                            },
+                        }),
+                    );
+                    m
+                },
+            }),
+        );
+
+        let tix_content = generate_tix_file(&tree, &StubKind::Nixos);
+
+        // The generated file must parse successfully.
+        comment_parser::parse_tix_file(&tix_content).unwrap_or_else(|e| {
+            panic!(
+                "Generated .tix failed to parse:\n{}\n\nError: {}",
+                tix_content, e
+            );
+        });
+    }
+
+    #[test]
+    fn round_trip_with_complex_types() {
+        let mut tree = BTreeMap::new();
+        tree.insert(
+            "nullableStr".to_string(),
+            OptionNode::Option(OptionLeaf {
+                _is_option: true,
+                type_info: NixosTypeInfo::NullOr {
+                    elem: Box::new(NixosTypeInfo::Primitive {
+                        value: "string".into(),
+                    }),
+                },
+                description: None,
+            }),
+        );
+        tree.insert(
+            "packages".to_string(),
+            OptionNode::Option(OptionLeaf {
+                _is_option: true,
+                type_info: NixosTypeInfo::List {
+                    elem: Box::new(NixosTypeInfo::Package),
+                },
+                description: None,
+            }),
+        );
+        tree.insert(
+            "extraConfig".to_string(),
+            OptionNode::Option(OptionLeaf {
+                _is_option: true,
+                type_info: NixosTypeInfo::AttrsOf {
+                    elem: Box::new(NixosTypeInfo::Primitive {
+                        value: "string".into(),
+                    }),
+                },
+                description: None,
+            }),
+        );
+
+        let tix_content = generate_tix_file(&tree, &StubKind::Nixos);
+        comment_parser::parse_tix_file(&tix_content).unwrap_or_else(|e| {
+            panic!(
+                "Generated .tix failed to parse:\n{}\n\nError: {}",
+                tix_content, e
+            );
+        });
+    }
+
+    #[test]
+    fn round_trip_with_hyphenated_names() {
+        let mut tree = BTreeMap::new();
+        let mut boot = BTreeMap::new();
+        boot.insert(
+            "systemd-boot".to_string(),
+            OptionNode::Namespace(NamespaceNode {
+                _is_option: false,
+                children: {
+                    let mut m = BTreeMap::new();
+                    m.insert(
+                        "enable".to_string(),
+                        OptionNode::Option(OptionLeaf {
+                            _is_option: true,
+                            type_info: NixosTypeInfo::Primitive {
+                                value: "bool".into(),
+                            },
+                            description: None,
+                        }),
+                    );
+                    m
+                },
+            }),
+        );
+        tree.insert(
+            "boot".to_string(),
+            OptionNode::Namespace(NamespaceNode {
+                _is_option: false,
+                children: boot,
+            }),
+        );
+
+        let tix_content = generate_tix_file(&tree, &StubKind::Nixos);
+        assert!(tix_content.contains("systemd-boot"));
+        comment_parser::parse_tix_file(&tix_content).unwrap_or_else(|e| {
+            panic!(
+                "Generated .tix with hyphens failed to parse:\n{}\n\nError: {}",
+                tix_content, e
+            );
+        });
+    }
+
+    // -------------------------------------------------------------------------
+    // Integration test (requires nix, run with `cargo test -- --ignored`)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    #[ignore]
+    fn integration_nixos_eval() {
+        let opts = NixosOptions {
+            nixpkgs: None,
+            flake: None,
+            hostname: None,
+            output: None,
+            max_depth: 4, // shallow for speed
+            descriptions: false,
+        };
+        let tree = invoke_nix_eval(&opts).expect("nix eval should succeed");
+        assert!(!tree.is_empty(), "option tree should not be empty");
+
+        // The tree should contain common top-level namespaces.
+        assert!(
+            tree.contains_key("services") || tree.contains_key("networking"),
+            "expected common NixOS option namespaces"
+        );
+
+        // Generate .tix and verify it parses.
+        let tix_content = generate_tix_file(&tree, &StubKind::Nixos);
+        comment_parser::parse_tix_file(&tix_content).unwrap_or_else(|e| {
+            // Write to a temp file for debugging.
+            let tmp = std::env::temp_dir().join("tix-nixos-stubs-debug.tix");
+            let _ = std::fs::write(&tmp, &tix_content);
+            panic!(
+                "Integration: generated .tix failed to parse (saved to {}):\n{}",
+                tmp.display(),
+                e
+            );
+        });
+    }
+
+    #[test]
+    fn round_trip_home_manager_kind() {
+        let mut tree = BTreeMap::new();
+        tree.insert(
+            "enable".to_string(),
+            OptionNode::Option(OptionLeaf {
+                _is_option: true,
+                type_info: NixosTypeInfo::Primitive {
+                    value: "bool".into(),
+                },
+                description: None,
+            }),
+        );
+        tree.insert(
+            "home".to_string(),
+            OptionNode::Namespace(NamespaceNode {
+                _is_option: false,
+                children: {
+                    let mut m = BTreeMap::new();
+                    m.insert(
+                        "username".to_string(),
+                        OptionNode::Option(OptionLeaf {
+                            _is_option: true,
+                            type_info: NixosTypeInfo::Primitive {
+                                value: "string".into(),
+                            },
+                            description: None,
+                        }),
+                    );
+                    m.insert(
+                        "homeDirectory".to_string(),
+                        OptionNode::Option(OptionLeaf {
+                            _is_option: true,
+                            type_info: NixosTypeInfo::Primitive {
+                                value: "path".into(),
+                            },
+                            description: None,
+                        }),
+                    );
+                    m.insert(
+                        "packages".to_string(),
+                        OptionNode::Option(OptionLeaf {
+                            _is_option: true,
+                            type_info: NixosTypeInfo::List {
+                                elem: Box::new(NixosTypeInfo::Package),
+                            },
+                            description: None,
+                        }),
+                    );
+                    m
+                },
+            }),
+        );
+
+        let tix_content = generate_tix_file(&tree, &StubKind::HomeManager);
+
+        // Should contain HomeManagerConfig type and context val declarations.
+        assert!(tix_content.contains("type HomeManagerConfig"));
+        assert!(tix_content.contains("val config :: HomeManagerConfig;"));
+        assert!(tix_content.contains("val lib :: Lib;"));
+        assert!(tix_content.contains("val pkgs :: Pkgs;"));
+        assert!(tix_content.contains("val osConfig :: { ... };"));
+
+        comment_parser::parse_tix_file(&tix_content).unwrap_or_else(|e| {
+            panic!(
+                "HM generated .tix failed to parse:\n{}\n\nError: {}",
+                tix_content, e
+            );
+        });
+    }
+
+    #[test]
+    #[ignore]
+    fn integration_home_manager_eval() {
+        let opts = HomeManagerOptions {
+            nixpkgs: None,
+            home_manager: None,
+            flake: None,
+            username: None,
+            output: None,
+            max_depth: 3, // shallow for speed
+            descriptions: false,
+        };
+        let tree = invoke_hm_nix_eval(&opts).expect("nix eval should succeed");
+        assert!(!tree.is_empty(), "option tree should not be empty");
+
+        // HM option tree should contain common top-level namespaces.
+        assert!(
+            tree.contains_key("home") || tree.contains_key("programs"),
+            "expected common Home Manager option namespaces, got: {:?}",
+            tree.keys().collect::<Vec<_>>()
+        );
+
+        let tix_content = generate_tix_file(&tree, &StubKind::HomeManager);
+        comment_parser::parse_tix_file(&tix_content).unwrap_or_else(|e| {
+            let tmp = std::env::temp_dir().join("tix-hm-stubs-debug.tix");
+            let _ = std::fs::write(&tmp, &tix_content);
+            panic!(
+                "Integration: generated HM .tix failed to parse (saved to {}):\n{}",
+                tmp.display(),
+                e
+            );
+        });
+    }
+
+    // -------------------------------------------------------------------------
+    // Field name quoting
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn needs_quoting_plain_idents() {
+        assert!(!needs_quoting("enable"));
+        assert!(!needs_quoting("hostName"));
+        assert!(!needs_quoting("systemd-boot"));
+        assert!(!needs_quoting("2bwm"));
+        assert!(!needs_quoting("_1password"));
+    }
+
+    #[test]
+    fn needs_quoting_dotted_names() {
+        assert!(needs_quoting("net.core.rmem_max"));
+        assert!(needs_quoting("com.apple.controlcenter"));
+        assert!(needs_quoting("NSGlobalDomain.AppleShowAllExtensions"));
+    }
+
+    #[test]
+    fn needs_quoting_edge_cases() {
+        assert!(needs_quoting(""));
+        assert!(needs_quoting("_")); // reserved for dyn_field
+    }
+
+    #[test]
+    fn round_trip_with_dotted_names() {
+        let mut sysctl = BTreeMap::new();
+        sysctl.insert(
+            "net.core.rmem_max".to_string(),
+            OptionNode::Option(OptionLeaf {
+                _is_option: true,
+                type_info: NixosTypeInfo::Primitive {
+                    value: "string".into(),
+                },
+                description: None,
+            }),
+        );
+
+        let mut tree = BTreeMap::new();
+        tree.insert(
+            "sysctl".to_string(),
+            OptionNode::Namespace(NamespaceNode {
+                _is_option: false,
+                children: sysctl,
+            }),
+        );
+
+        let tix_content = generate_tix_file(&tree, &StubKind::Nixos);
+        assert!(tix_content.contains(r#""net.core.rmem_max": string"#));
+
+        comment_parser::parse_tix_file(&tix_content).unwrap_or_else(|e| {
+            panic!(
+                "Dotted-name .tix failed to parse:\n{}\n\nError: {}",
+                tix_content, e
+            );
+        });
+    }
+
+    // -------------------------------------------------------------------------
+    // Doc comment generation
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn doc_comments_emitted_with_descriptions() {
+        let mut tree = BTreeMap::new();
+        tree.insert(
+            "enable".to_string(),
+            OptionNode::Option(OptionLeaf {
+                _is_option: true,
+                type_info: NixosTypeInfo::Primitive {
+                    value: "bool".into(),
+                },
+                description: Some("Whether to enable the service.".to_string()),
+            }),
+        );
+        tree.insert(
+            "port".to_string(),
+            OptionNode::Option(OptionLeaf {
+                _is_option: true,
+                type_info: NixosTypeInfo::Primitive {
+                    value: "int".into(),
+                },
+                description: None,
+            }),
+        );
+
+        let tix_content = generate_tix_file_with_docs(&tree, &StubKind::Nixos, true);
+
+        // The doc comment should appear before the `enable` field.
+        assert!(
+            tix_content.contains("## Whether to enable the service."),
+            "Expected doc comment in output:\n{tix_content}"
+        );
+        // The `port` field should NOT have a doc comment.
+        assert!(
+            !tix_content.contains("## \n  port"),
+            "Unexpected empty doc comment for port:\n{tix_content}"
+        );
+
+        // The output should still parse correctly with doc comments.
+        comment_parser::parse_tix_file(&tix_content).unwrap_or_else(|e| {
+            panic!(
+                "Doc comment .tix failed to parse:\n{}\n\nError: {}",
+                tix_content, e
+            );
+        });
+    }
+
+    #[test]
+    fn doc_comments_round_trip_with_field_docs() {
+        let mut tree = BTreeMap::new();
+        let mut services = BTreeMap::new();
+        services.insert(
+            "enable".to_string(),
+            OptionNode::Option(OptionLeaf {
+                _is_option: true,
+                type_info: NixosTypeInfo::Primitive {
+                    value: "bool".into(),
+                },
+                description: Some("Whether to enable OpenSSH.".to_string()),
+            }),
+        );
+        tree.insert(
+            "services".to_string(),
+            OptionNode::Namespace(NamespaceNode {
+                _is_option: false,
+                children: services,
+            }),
+        );
+
+        let tix_content = generate_tix_file_with_docs(&tree, &StubKind::Nixos, true);
+
+        // Parse the generated file.
+        let file = comment_parser::parse_tix_file(&tix_content).unwrap_or_else(|e| {
+            panic!(
+                "Generated .tix with docs failed to parse:\n{}\n\nError: {}",
+                tix_content, e
+            );
+        });
+
+        // The field doc should be collected during parsing.
+        assert!(
+            !file.field_docs.is_empty(),
+            "Expected field docs to be collected from generated output"
+        );
+
+        // Load into a registry and verify doc index is populated.
+        let mut registry = lang_check::aliases::TypeAliasRegistry::new();
+        registry.load_tix_file(&file);
+
+        let path = vec![
+            smol_str::SmolStr::from("services"),
+            smol_str::SmolStr::from("enable"),
+        ];
+        assert_eq!(
+            registry
+                .docs
+                .field_doc("NixosConfig", &path)
+                .map(|s| s.as_str()),
+            Some("Whether to enable OpenSSH."),
+        );
+    }
+
+    #[test]
+    fn no_doc_comments_without_flag() {
+        let mut tree = BTreeMap::new();
+        tree.insert(
+            "enable".to_string(),
+            OptionNode::Option(OptionLeaf {
+                _is_option: true,
+                type_info: NixosTypeInfo::Primitive {
+                    value: "bool".into(),
+                },
+                description: Some("Whether to enable.".to_string()),
+            }),
+        );
+
+        // Without descriptions flag.
+        let tix_content = generate_tix_file(&tree, &StubKind::Nixos);
+        assert!(
+            !tix_content.contains("##"),
+            "Should not contain doc comments without flag:\n{tix_content}"
+        );
+    }
+}

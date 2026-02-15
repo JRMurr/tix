@@ -17,6 +17,60 @@ const BUILTIN_STUBS: &str = include_str!("../../../stubs/lib.tix");
 const NIXOS_CONTEXT_STUBS: &str = include_str!("../../../stubs/contexts/nixos.tix");
 const HM_CONTEXT_STUBS: &str = include_str!("../../../stubs/contexts/home-manager.tix");
 
+// =============================================================================
+// DocIndex — documentation storage for .tix declarations and fields
+// =============================================================================
+//
+// Stores doc comments extracted from .tix stub files so they can be surfaced
+// in LSP hover and other features. Separate from the type data in the registry
+// because docs are presentation-layer and not needed during inference.
+
+#[derive(Debug, Clone, Default)]
+pub struct DocIndex {
+    /// Docs for top-level declarations (type aliases, vals, modules) by name.
+    decl_docs: HashMap<SmolStr, SmolStr>,
+
+    /// Docs for fields within type aliases.
+    /// Key: alias name (e.g. "NixosConfig"), Value: field path → doc.
+    /// Field path is relative to the alias (e.g. ["services", "enable"]).
+    field_docs: HashMap<SmolStr, HashMap<Vec<SmolStr>, SmolStr>>,
+}
+
+impl DocIndex {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Look up the doc comment for a top-level declaration by name.
+    pub fn decl_doc(&self, name: &str) -> Option<&SmolStr> {
+        self.decl_docs.get(name)
+    }
+
+    /// Look up the doc comment for a field within a type alias.
+    /// `alias` is the type alias name (e.g. "NixosConfig").
+    /// `path` is the dotted path to the field (e.g. ["services", "enable"]).
+    pub fn field_doc(&self, alias: &str, path: &[SmolStr]) -> Option<&SmolStr> {
+        self.field_docs.get(alias)?.get(path)
+    }
+
+    /// Insert a declaration-level doc.
+    fn insert_decl_doc(&mut self, name: SmolStr, doc: SmolStr) {
+        self.decl_docs.insert(name, doc);
+    }
+
+    /// Insert a field-level doc.
+    fn insert_field_doc(&mut self, alias: SmolStr, path: Vec<SmolStr>, doc: SmolStr) {
+        self.field_docs
+            .entry(alias)
+            .or_default()
+            .insert(path, doc);
+    }
+}
+
+// =============================================================================
+// TypeAliasRegistry
+// =============================================================================
+
 #[derive(Debug, Clone, Default)]
 pub struct TypeAliasRegistry {
     /// Type alias name -> body (e.g. `Derivation` -> `{ name: string, ... }`)
@@ -24,6 +78,9 @@ pub struct TypeAliasRegistry {
 
     /// Top-level val declarations (e.g. `mkDerivation` -> `{ name: string, ... } -> Derivation`)
     global_vals: HashMap<SmolStr, ParsedTy>,
+
+    /// Documentation extracted from .tix stub files.
+    pub docs: DocIndex,
 }
 
 impl TypeAliasRegistry {
@@ -44,6 +101,16 @@ impl TypeAliasRegistry {
     /// Load declarations from a parsed .tix file into the registry.
     pub fn load_tix_file(&mut self, file: &TixDeclFile) {
         self.load_declarations(&file.declarations, true);
+
+        // Load field-level docs from the parsed file.
+        for field_doc in &file.field_docs {
+            if field_doc.path.len() >= 2 {
+                let alias = field_doc.path[0].clone();
+                let field_path = field_doc.path[1..].to_vec();
+                self.docs
+                    .insert_field_doc(alias, field_path, field_doc.doc.clone());
+            }
+        }
     }
 
     /// Recursively load declarations. `top_level` controls whether val
@@ -51,22 +118,79 @@ impl TypeAliasRegistry {
     fn load_declarations(&mut self, declarations: &[TixDeclaration], top_level: bool) {
         for decl in declarations {
             match decl {
-                TixDeclaration::TypeAlias { name, body } => {
+                TixDeclaration::TypeAlias { name, body, doc } => {
                     self.aliases.insert(name.clone(), body.clone());
+                    if let Some(doc) = doc {
+                        self.docs.insert_decl_doc(name.clone(), doc.clone());
+                    }
                 }
-                TixDeclaration::ValDecl { name, ty } => {
+                TixDeclaration::ValDecl { name, ty, doc } => {
                     if top_level {
                         self.global_vals.insert(name.clone(), ty.clone());
                     }
+                    if let Some(doc) = doc {
+                        self.docs.insert_decl_doc(name.clone(), doc.clone());
+                    }
                 }
-                TixDeclaration::Module { name, declarations } => {
+                TixDeclaration::Module {
+                    name,
+                    declarations,
+                    doc,
+                } => {
                     // Convert the module into an attrset type and register it
                     // as a type alias with the capitalized module name.
                     // e.g. `module lib { val id :: a -> a; }` -> alias "Lib" = { id: a -> a, ... }
                     let attrset_ty = module_to_attrset(declarations);
                     let alias_name = capitalize(name);
-                    self.aliases.insert(alias_name, attrset_ty);
+                    self.aliases.insert(alias_name.clone(), attrset_ty);
+
+                    if let Some(doc) = doc {
+                        self.docs.insert_decl_doc(alias_name.clone(), doc.clone());
+                    }
+
+                    // Module val docs become field docs on the capitalized alias.
+                    // e.g. `module lib { ## identity fn \n val id :: a -> a; }` →
+                    //   field doc on Lib.id
+                    self.collect_module_field_docs(&alias_name, declarations, &[]);
                 }
+            }
+        }
+    }
+
+    /// Recursively collect doc comments from module val declarations and
+    /// register them as field docs on the capitalized module alias.
+    fn collect_module_field_docs(
+        &mut self,
+        alias_name: &SmolStr,
+        declarations: &[TixDeclaration],
+        prefix: &[SmolStr],
+    ) {
+        for decl in declarations {
+            match decl {
+                TixDeclaration::ValDecl { name, doc, .. } => {
+                    if let Some(doc) = doc {
+                        let mut path = prefix.to_vec();
+                        path.push(name.clone());
+                        self.docs
+                            .insert_field_doc(alias_name.clone(), path, doc.clone());
+                    }
+                }
+                TixDeclaration::Module {
+                    name,
+                    declarations: nested,
+                    doc,
+                } => {
+                    if let Some(doc) = doc {
+                        let mut path = prefix.to_vec();
+                        path.push(name.clone());
+                        self.docs
+                            .insert_field_doc(alias_name.clone(), path, doc.clone());
+                    }
+                    let mut child_prefix = prefix.to_vec();
+                    child_prefix.push(name.clone());
+                    self.collect_module_field_docs(alias_name, nested, &child_prefix);
+                }
+                TixDeclaration::TypeAlias { .. } => {}
             }
         }
     }
@@ -108,19 +232,34 @@ impl TypeAliasRegistry {
 
         for decl in &file.declarations {
             match decl {
-                comment_parser::TixDeclaration::TypeAlias { name, body } => {
+                comment_parser::TixDeclaration::TypeAlias { name, body, doc } => {
                     self.aliases.insert(name.clone(), body.clone());
+                    if let Some(doc) = doc {
+                        self.docs.insert_decl_doc(name.clone(), doc.clone());
+                    }
                 }
-                comment_parser::TixDeclaration::ValDecl { name, ty } => {
+                comment_parser::TixDeclaration::ValDecl { name, ty, .. } => {
                     context_args.insert(name.clone(), ty.clone());
                 }
-                comment_parser::TixDeclaration::Module { name, declarations } => {
+                comment_parser::TixDeclaration::Module {
+                    name, declarations, ..
+                } => {
                     // Register the module as a type alias (same as load_tix_file)
                     // so that val declarations like `val lib :: Lib` can resolve.
                     let attrset_ty = module_to_attrset(declarations);
                     let alias_name = capitalize(name);
                     self.aliases.insert(alias_name, attrset_ty);
                 }
+            }
+        }
+
+        // Load field docs from context stubs too.
+        for field_doc in &file.field_docs {
+            if field_doc.path.len() >= 2 {
+                let alias = field_doc.path[0].clone();
+                let field_path = field_doc.path[1..].to_vec();
+                self.docs
+                    .insert_field_doc(alias, field_path, field_doc.doc.clone());
             }
         }
 
@@ -209,12 +348,13 @@ fn module_to_attrset(declarations: &[TixDeclaration]) -> ParsedTy {
 
     for decl in declarations {
         match decl {
-            TixDeclaration::ValDecl { name, ty } => {
+            TixDeclaration::ValDecl { name, ty, .. } => {
                 fields.insert(name.clone(), ParsedTyRef::from(ty.clone()));
             }
             TixDeclaration::Module {
                 name,
                 declarations: nested,
+                ..
             } => {
                 let nested_attrset = module_to_attrset(nested);
                 fields.insert(name.clone(), ParsedTyRef::from(nested_attrset));
@@ -389,5 +529,104 @@ mod tests {
     fn load_context_by_name_unknown() {
         let mut registry = TypeAliasRegistry::new();
         assert!(registry.load_context_by_name("nonexistent").is_none());
+    }
+
+    // =========================================================================
+    // DocIndex tests
+    // =========================================================================
+
+    #[test]
+    fn doc_index_decl_doc() {
+        let src = "## A configuration type.\ntype Config = { ... };";
+        let file = parse_tix_file(src).expect("parse error");
+        let mut registry = TypeAliasRegistry::new();
+        registry.load_tix_file(&file);
+
+        assert_eq!(
+            registry.docs.decl_doc("Config").map(|s| s.as_str()),
+            Some("A configuration type.")
+        );
+    }
+
+    #[test]
+    fn doc_index_val_doc() {
+        let src = "## Build a derivation.\nval mkDrv :: { ... } -> { ... };";
+        let file = parse_tix_file(src).expect("parse error");
+        let mut registry = TypeAliasRegistry::new();
+        registry.load_tix_file(&file);
+
+        assert_eq!(
+            registry.docs.decl_doc("mkDrv").map(|s| s.as_str()),
+            Some("Build a derivation.")
+        );
+    }
+
+    #[test]
+    fn doc_index_field_doc() {
+        let src = r#"
+            type Config = {
+                ## Whether to enable.
+                enable: bool,
+                ...
+            };
+        "#;
+        let file = parse_tix_file(src).expect("parse error");
+        let mut registry = TypeAliasRegistry::new();
+        registry.load_tix_file(&file);
+
+        let path = vec![SmolStr::from("enable")];
+        assert_eq!(
+            registry.docs.field_doc("Config", &path).map(|s| s.as_str()),
+            Some("Whether to enable.")
+        );
+    }
+
+    #[test]
+    fn doc_index_nested_field_doc() {
+        let src = r#"
+            type Config = {
+                ## Services section.
+                services: {
+                    ## Enable SSH.
+                    enable: bool,
+                    ...
+                },
+                ...
+            };
+        "#;
+        let file = parse_tix_file(src).expect("parse error");
+        let mut registry = TypeAliasRegistry::new();
+        registry.load_tix_file(&file);
+
+        let path = vec![SmolStr::from("services")];
+        assert_eq!(
+            registry.docs.field_doc("Config", &path).map(|s| s.as_str()),
+            Some("Services section.")
+        );
+
+        let path = vec![SmolStr::from("services"), SmolStr::from("enable")];
+        assert_eq!(
+            registry.docs.field_doc("Config", &path).map(|s| s.as_str()),
+            Some("Enable SSH.")
+        );
+    }
+
+    #[test]
+    fn doc_index_module_val_becomes_field_doc() {
+        let src = r#"
+            module lib {
+                ## Identity function.
+                val id :: a -> a;
+            }
+        "#;
+        let file = parse_tix_file(src).expect("parse error");
+        let mut registry = TypeAliasRegistry::new();
+        registry.load_tix_file(&file);
+
+        let path = vec![SmolStr::from("id")];
+        assert_eq!(
+            registry.docs.field_doc("Lib", &path).map(|s| s.as_str()),
+            Some("Identity function.")
+        );
     }
 }

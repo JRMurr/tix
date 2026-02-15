@@ -57,6 +57,17 @@ pub fn parse_context_annotation(doc: &str) -> Option<SmolStr> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TixDeclFile {
     pub declarations: Vec<TixDeclaration>,
+    /// Field-level doc comments collected during parsing, with dotted paths
+    /// from the parent type alias (e.g. `["NixosConfig", "services", "enable"]`).
+    pub field_docs: Vec<FieldDoc>,
+}
+
+/// A doc comment attached to a field inside a type alias body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldDoc {
+    /// Path from the root type alias to the field (e.g. `["NixosConfig", "services", "enable"]`).
+    pub path: Vec<SmolStr>,
+    pub doc: SmolStr,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,14 +75,17 @@ pub enum TixDeclaration {
     TypeAlias {
         name: SmolStr,
         body: ParsedTy,
+        doc: Option<SmolStr>,
     },
     ValDecl {
         name: SmolStr,
         ty: ParsedTy,
+        doc: Option<SmolStr>,
     },
     Module {
         name: SmolStr,
         declarations: Vec<TixDeclaration>,
+        doc: Option<SmolStr>,
     },
 }
 

@@ -1,9 +1,10 @@
 mod config;
+mod gen_stubs;
 
 use std::collections::{HashMap, HashSet};
 use std::{error::Error, path::PathBuf};
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use lang_ast::{module_and_source_maps, name_resolution, RootDatabase};
 use lang_check::aliases::TypeAliasRegistry;
 use lang_check::check_file_collecting;
@@ -13,11 +14,25 @@ use lang_ty::OutputTy;
 use miette::{LabeledSpan, NamedSource};
 use rowan::ast::AstNode;
 
+// =============================================================================
+// CLI Argument Parsing
+// =============================================================================
+//
+// The CLI supports two modes:
+//   1. Type-check mode (default): `tix-cli file.nix [--stubs ...]`
+//   2. Subcommand mode: `tix-cli gen-stubs nixos [...]`
+//
+// Backward compatibility: bare `tix-cli file.nix` works because `file_path`
+// is parsed when no subcommand matches.
+
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// Path to the Nix file to type-check
-    file_path: PathBuf,
+    file_path: Option<PathBuf>,
 
     /// Paths to .tix stub files or directories (recursive)
     #[arg(long = "stubs", value_name = "PATH")]
@@ -32,23 +47,160 @@ struct Cli {
     config_path: Option<PathBuf>,
 }
 
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Generate .tix stub files from external sources
+    GenStubs {
+        #[command(subcommand)]
+        source: GenStubsSource,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum GenStubsSource {
+    /// Generate stubs from NixOS option declarations
+    Nixos {
+        /// Path to nixpkgs (default: <nixpkgs> from NIX_PATH)
+        #[arg(long)]
+        nixpkgs: Option<PathBuf>,
+
+        /// Path to a flake directory (evaluates nixosConfigurations)
+        #[arg(long)]
+        flake: Option<PathBuf>,
+
+        /// Hostname to select from nixosConfigurations (required if flake has multiple)
+        #[arg(long)]
+        hostname: Option<String>,
+
+        /// Output file path (default: stdout)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+
+        /// Maximum depth for recursive option tree walking
+        #[arg(long, default_value = "8")]
+        max_depth: u32,
+
+        /// Include option descriptions as ## doc comments in the output
+        #[arg(long)]
+        descriptions: bool,
+    },
+
+    /// Generate stubs from Home Manager option declarations
+    HomeManager {
+        /// Path to nixpkgs (default: <nixpkgs> from NIX_PATH)
+        #[arg(long)]
+        nixpkgs: Option<PathBuf>,
+
+        /// Path to home-manager source (default: flake registry)
+        #[arg(long)]
+        home_manager: Option<PathBuf>,
+
+        /// Path to a flake directory (evaluates homeConfigurations)
+        #[arg(long)]
+        flake: Option<PathBuf>,
+
+        /// Username to select from homeConfigurations (required if flake has multiple)
+        #[arg(long)]
+        username: Option<String>,
+
+        /// Output file path (default: stdout)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+
+        /// Maximum depth for recursive option tree walking
+        #[arg(long, default_value = "8")]
+        max_depth: u32,
+
+        /// Include option descriptions as ## doc comments in the output
+        #[arg(long)]
+        descriptions: bool,
+    },
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let args = Cli::parse();
 
+    match args.command {
+        Some(Command::GenStubs { source }) => run_gen_stubs(source),
+        None => {
+            let file_path = args.file_path.ok_or(
+                "No file path provided. Usage: tix-cli <file.nix> or tix-cli gen-stubs <source>",
+            )?;
+            run_check(
+                file_path,
+                args.stub_paths,
+                args.no_default_stubs,
+                args.config_path,
+            )
+        }
+    }
+}
+
+// =============================================================================
+// gen-stubs dispatch
+// =============================================================================
+
+fn run_gen_stubs(source: GenStubsSource) -> Result<(), Box<dyn Error>> {
+    match source {
+        GenStubsSource::Nixos {
+            nixpkgs,
+            flake,
+            hostname,
+            output,
+            max_depth,
+            descriptions,
+        } => gen_stubs::run_nixos(gen_stubs::NixosOptions {
+            nixpkgs,
+            flake,
+            hostname,
+            output,
+            max_depth,
+            descriptions,
+        }),
+        GenStubsSource::HomeManager {
+            nixpkgs,
+            home_manager,
+            flake,
+            username,
+            output,
+            max_depth,
+            descriptions,
+        } => gen_stubs::run_home_manager(gen_stubs::HomeManagerOptions {
+            nixpkgs,
+            home_manager,
+            flake,
+            username,
+            output,
+            max_depth,
+            descriptions,
+        }),
+    }
+}
+
+// =============================================================================
+// Type-check mode (original behavior)
+// =============================================================================
+
+fn run_check(
+    file_path: PathBuf,
+    stub_paths: Vec<PathBuf>,
+    no_default_stubs: bool,
+    config_path: Option<PathBuf>,
+) -> Result<(), Box<dyn Error>> {
     // Load .tix stub files into the type alias registry.
     // Built-in nixpkgs stubs are included by default unless --no-default-stubs is passed.
-    let mut registry = if args.no_default_stubs {
+    let mut registry = if no_default_stubs {
         TypeAliasRegistry::new()
     } else {
         TypeAliasRegistry::with_builtins()
     };
-    for stub_path in &args.stub_paths {
+    for stub_path in &stub_paths {
         load_stubs(&mut registry, stub_path)?;
     }
 
     // Discover or load tix.toml configuration.
-    let file_path = std::fs::canonicalize(&args.file_path).unwrap_or(args.file_path.clone());
-    let (toml_config, config_dir) = match &args.config_path {
+    let canonical_path = std::fs::canonicalize(&file_path).unwrap_or(file_path.clone());
+    let (toml_config, config_dir) = match &config_path {
         Some(explicit_path) => {
             let cfg = config::load_config(explicit_path)?;
             let dir = explicit_path
@@ -59,17 +211,20 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         None => {
             // Walk up from the file's parent directory looking for tix.toml.
-            let start_dir = file_path.parent().unwrap_or(std::path::Path::new("."));
+            let start_dir = canonical_path.parent().unwrap_or(std::path::Path::new("."));
             match config::find_config(start_dir) {
-                Some(config_path) => {
-                    let dir = config_path
+                Some(found_config_path) => {
+                    let dir = found_config_path
                         .parent()
                         .unwrap_or(std::path::Path::new("."))
                         .to_path_buf();
-                    match config::load_config(&config_path) {
+                    match config::load_config(&found_config_path) {
                         Ok(cfg) => (Some(cfg), Some(dir)),
                         Err(e) => {
-                            eprintln!("Warning: failed to load {}: {e}", config_path.display());
+                            eprintln!(
+                                "Warning: failed to load {}: {e}",
+                                found_config_path.display()
+                            );
                             (None, None)
                         }
                     }
@@ -99,17 +254,19 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Resolve context args for this file based on tix.toml context definitions.
     let context_args = if let (Some(ref cfg), Some(ref dir)) = (&toml_config, &config_dir) {
-        config::resolve_context_for_file(&file_path, cfg, dir, &mut registry).unwrap_or_else(|e| {
-            eprintln!("Warning: failed to resolve context: {e}");
-            HashMap::new()
-        })
+        config::resolve_context_for_file(&canonical_path, cfg, dir, &mut registry).unwrap_or_else(
+            |e| {
+                eprintln!("Warning: failed to resolve context: {e}");
+                HashMap::new()
+            },
+        )
     } else {
         HashMap::new()
     };
 
     let db: RootDatabase = Default::default();
 
-    let file = db.read_file(args.file_path.clone())?;
+    let file = db.read_file(file_path.clone())?;
 
     let (module, source_map) = module_and_source_maps(&db, file);
     let name_res = name_resolution(&db, file);
@@ -133,8 +290,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let result = check_file_collecting(&db, file, &registry, import_resolution.types, context_args);
 
     // Render diagnostics with miette for source context.
-    let source_text = std::fs::read_to_string(&args.file_path)?;
-    let filename = args.file_path.display().to_string();
+    let source_text = std::fs::read_to_string(&file_path)?;
+    let filename = file_path.display().to_string();
     let root = rnix::Root::parse(&source_text).tree();
     let mut has_errors = false;
 

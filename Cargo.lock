@@ -272,6 +272,7 @@ dependencies = [
  "rnix",
  "rowan",
  "serde",
+ "serde_json",
  "smol_str",
  "thiserror 2.0.9",
  "toml",

@@ -7,16 +7,29 @@
 // newlines as terminators.
 
 WHITESPACE = _{ " " | "\t" | "\r\n" | "\n" }
-COMMENT    = _{ "#" ~ (!"\n" ~ ANY)* }
+
+// Regular comments start with `#` but NOT `##` (which are doc comments).
+COMMENT    = _{ !("##") ~ "#" ~ (!"\n" ~ ANY)* }
+
+// =============================================================================
+// Doc comments
+// =============================================================================
+//
+// `##` lines are doc comments that attach to the next declaration or field.
+// Multiple consecutive `##` lines form a doc block. The `## ` prefix (with
+// trailing space) is stripped during collection; bare `##` lines become empty.
+
+doc_comment = @{ "##" ~ (!"\n" ~ ANY)* }
+doc_block   = { doc_comment+ }
 
 // Entry point
 tix_file = { SOI ~ tix_declaration* ~ EOI }
 
 tix_declaration = _{ type_alias_decl | val_decl | module_decl }
 
-type_alias_decl = { "type" ~ user_type ~ "=" ~ type_expr ~ ";" }
-val_decl        = { "val" ~ identifier ~ "::" ~ type_expr ~ ";" }
-module_decl     = { "module" ~ identifier ~ "{" ~ tix_declaration* ~ "}" }
+type_alias_decl = { doc_block? ~ "type" ~ user_type ~ "=" ~ type_expr ~ ";" }
+val_decl        = { doc_block? ~ "val" ~ identifier ~ "::" ~ type_expr ~ ";" }
+module_decl     = { doc_block? ~ "module" ~ identifier ~ "{" ~ tix_declaration* ~ "}" }
 
 // -------------------------------------------------------------------------
 // Type expressions (duplicated from comment.pest to keep grammars decoupled)
@@ -38,7 +51,11 @@ attrset_inner = _{
   | dyn_field ~ ("," ~ open_marker)? ~ ","?
   | named_field ~ ("," ~ named_field)* ~ ("," ~ (dyn_field ~ ("," ~ open_marker)? | open_marker))? ~ ","?
 }
-named_field = { identifier ~ ":" ~ type_expr }
+named_field = { doc_block? ~ field_name ~ ":" ~ type_expr }
+field_name = _{ quoted_field | identifier }
+// Quoted identifiers for field names containing dots or other special characters
+// (e.g. NixOS sysctl keys like "net.core.rmem_max").
+quoted_field = @{ "\"" ~ (!"\"" ~ ANY)* ~ "\"" }
 dyn_field   = { "_" ~ ":" ~ type_expr }
 open_marker = { "..." }
 
@@ -57,9 +74,15 @@ user_type = @{
     ASCII_ALPHA_UPPER ~ (ASCII_ALPHANUMERIC | "_")*
 }
 
-// Allow trailing apostrophes to match Nix identifiers like `getExe'`.
+// Nix attribute names can be arbitrary strings, so identifiers in .tix files
+// need broad coverage. Allows: letters, digits, underscores, hyphens, apostrophes.
+// Leading digits are fine in field position (e.g. `2bwm: { ... }`) since the
+// colon disambiguates from number literals.
+// Bare `_` is reserved for dyn_field, so underscore-led names need a continuation.
 identifier = @{
-    ASCII_ALPHA ~ (ASCII_ALPHANUMERIC | "_" | "'")*
+    ASCII_ALPHA ~ (ASCII_ALPHANUMERIC | "_" | "'" | "-")*
+  | "_" ~ (ASCII_ALPHANUMERIC | "_" | "'" | "-")+
+  | ASCII_DIGIT ~ (ASCII_ALPHANUMERIC | "_" | "'" | "-")*
 }
 
 primitive_ref = {
