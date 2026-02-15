@@ -16,42 +16,53 @@
       rust-overlay,
       ...
     }:
-    flake-utils.lib.eachDefaultSystem (
-      system:
-      let
-        inherit (nixpkgs) lib;
-        overlays = [ (import rust-overlay) ];
-        /**
-          type: pkgs :: Pkgs
-        */
-        pkgs = import nixpkgs { inherit system overlays; };
-        rustAttrs = import ./rust.nix { inherit pkgs; };
-        tix-lsp-dev = import ./lsp-dev.nix { inherit pkgs; };
-      in
-      {
-        formatter = pkgs.nixfmt;
+    (
+      flake-utils.lib.eachDefaultSystem (
+        system:
+        let
 
-        devShells = {
-          default = pkgs.mkShell {
-            buildInputs = [
-              rustAttrs.rust-shell
-              (pkgs.cargo-tarpaulin.override ({ rustPlatform = rustAttrs.rustPlatform; }))
-              tix-lsp-dev
+          overlays = [ (import rust-overlay) ];
+          /**
+            type: pkgs :: Pkgs
+          */
+          pkgs = import nixpkgs { inherit system overlays; };
+          rustAttrs = import ./rust.nix { inherit pkgs; };
+          tix-lsp-dev = import ./lsp-dev.nix { inherit pkgs; };
+        in
+        {
+          formatter = pkgs.nixfmt;
 
-              # common
-              pkgs.just
-            ];
+          devShells = {
+            default = pkgs.mkShell {
+              buildInputs = [
+                rustAttrs.rust-shell
+                (pkgs.cargo-tarpaulin.override ({ rustPlatform = rustAttrs.rustPlatform; }))
+                tix-lsp-dev
+
+                # common
+                pkgs.just
+              ];
+            };
           };
-        };
-        packages = {
-          default = rustAttrs.binary;
-          rust-bin = rustAttrs.binary;
-          # rust-docker = rustAttrs.docker;
-        };
+          packages = {
+            default = rustAttrs.binary;
+            rust-bin = rustAttrs.binary;
+            # rust-docker = rustAttrs.docker;
+          };
 
+        }
+      )
+      // {
+
+        overlays = {
+          # compose with rust-overlay so the nix build wokred
+          # TODO: see if we can do the build without the rust overlay
+          default = nixpkgs.lib.composeExtensions self.overlays.rust-overlay self.overlays.tix;
+
+          rust-overlay = (import rust-overlay);
+
+          tix = import ./overlay.nix;
+        };
       }
-    )
-    // {
-      overlays.default = lib.composeExtensions (import rust-overlay) import ./overlay.nix;
-    };
+    );
 }
