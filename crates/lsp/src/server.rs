@@ -320,7 +320,7 @@ impl LanguageServer for TixLanguageServer {
         let contents = analysis.nix_file.contents(&state.db);
         let root = rnix::Root::parse(contents).tree();
 
-        Ok(crate::hover::hover(analysis, pos, &root))
+        Ok(crate::hover::hover(analysis, pos, &root, &state.registry.docs))
     }
 
     async fn goto_definition(

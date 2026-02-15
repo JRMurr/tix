@@ -7,54 +7,154 @@
 // `collect.rs` but uses `tix_parser::Rule` variants.
 
 use lang_ty::{AttrSetTy, PrimitiveTy};
-use pest::iterators::Pairs;
+use pest::iterators::{Pair, Pairs};
 use smol_str::SmolStr;
 use std::collections::BTreeMap;
 
 use crate::tix_parser::Rule;
-use crate::{ParsedTy, ParsedTyRef, TixDeclFile, TixDeclaration, TypeVarValue};
+use crate::{FieldDoc, ParsedTy, ParsedTyRef, TixDeclFile, TixDeclaration, TypeVarValue};
+
+// =============================================================================
+// Doc block extraction
+// =============================================================================
+//
+// A `doc_block` contains one or more `doc_comment` children. Each `doc_comment`
+// matches `"##" ~ (!"\n" ~ ANY)*`. We strip the leading `## ` (or bare `##`)
+// prefix and join multiple lines with newlines.
+
+fn extract_doc_block(pair: &Pair<Rule>) -> SmolStr {
+    debug_assert_eq!(pair.as_rule(), Rule::doc_block);
+    let lines: Vec<&str> = pair
+        .clone()
+        .into_inner()
+        .map(|comment| {
+            let text = comment.as_str();
+            // Strip the `##` prefix.
+            let rest = &text[2..];
+            // Strip a single leading space if present (conventional `## text`).
+            rest.strip_prefix(' ').unwrap_or(rest)
+        })
+        .collect();
+    SmolStr::from(lines.join("\n"))
+}
+
+/// Try to extract a doc_block from the first child of `inner` if it matches.
+/// Returns `(Option<SmolStr>, Pairs)` — the doc (if present) and the remaining
+/// children with the doc_block consumed.
+fn take_doc_block(inner: &mut Pairs<Rule>) -> Option<SmolStr> {
+    let first = inner.peek()?;
+    if first.as_rule() == Rule::doc_block {
+        let doc = extract_doc_block(&first);
+        inner.next(); // consume it
+        Some(doc)
+    } else {
+        None
+    }
+}
+
+// =============================================================================
+// Top-level collection
+// =============================================================================
 
 pub fn collect_tix_file(pairs: Pairs<Rule>) -> TixDeclFile {
     let mut declarations = Vec::new();
+    let mut field_docs = Vec::new();
 
+    collect_tix_file_inner(pairs, &mut declarations, &mut field_docs);
+
+    TixDeclFile {
+        declarations,
+        field_docs,
+    }
+}
+
+fn collect_tix_file_inner(
+    pairs: Pairs<Rule>,
+    declarations: &mut Vec<TixDeclaration>,
+    field_docs: &mut Vec<FieldDoc>,
+) {
     for pair in pairs {
         match pair.as_rule() {
             Rule::tix_file => {
-                return collect_tix_file(pair.into_inner());
+                collect_tix_file_inner(pair.into_inner(), declarations, field_docs);
+                return;
             }
             Rule::type_alias_decl => {
                 let mut inner = pair.into_inner();
+                let doc = take_doc_block(&mut inner);
                 let name: SmolStr = inner.next().unwrap().as_str().into();
+
+                // Set path context so field-level doc comments in the body
+                // get the correct prefix (e.g. ["Config", "services", "enable"]).
+                set_field_doc_path(vec![name.clone()]);
                 let body = collect_type_expr(inner).unwrap();
-                declarations.push(TixDeclaration::TypeAlias { name, body });
+                // Drain field docs accumulated during type body collection.
+                field_docs.extend(drain_field_docs());
+                set_field_doc_path(Vec::new());
+
+                declarations.push(TixDeclaration::TypeAlias { name, body, doc });
             }
             Rule::val_decl => {
                 let mut inner = pair.into_inner();
+                let doc = take_doc_block(&mut inner);
                 let name: SmolStr = inner.next().unwrap().as_str().into();
                 let ty = collect_type_expr(inner).unwrap();
-                declarations.push(TixDeclaration::ValDecl { name, ty });
+                declarations.push(TixDeclaration::ValDecl { name, ty, doc });
             }
             Rule::module_decl => {
                 let mut inner = pair.into_inner();
+                let doc = take_doc_block(&mut inner);
                 let name: SmolStr = inner.next().unwrap().as_str().into();
                 // Remaining children are the nested declarations.
-                let nested = collect_declarations(inner);
+                let mut nested = Vec::new();
+                collect_tix_file_inner(inner, &mut nested, field_docs);
                 declarations.push(TixDeclaration::Module {
                     name,
                     declarations: nested,
+                    doc,
                 });
             }
             Rule::EOI => {}
             _ => unreachable!("collect_tix_file: unexpected rule {:?}", pair.as_rule()),
         }
     }
-
-    TixDeclFile { declarations }
 }
 
-fn collect_declarations(pairs: Pairs<Rule>) -> Vec<TixDeclaration> {
-    let file = collect_tix_file(pairs);
-    file.declarations
+// =============================================================================
+// Thread-local field doc accumulator
+// =============================================================================
+//
+// Field-level doc comments are parsed inside attrsets but need to be reported
+// at the TixDeclFile level. We use a thread-local to accumulate them during
+// collection, since they're produced deep in collect_attrset but consumed at
+// the top level.
+
+thread_local! {
+    static FIELD_DOCS: std::cell::RefCell<Vec<FieldDoc>> = const { std::cell::RefCell::new(Vec::new()) };
+    static FIELD_DOC_PATH: std::cell::RefCell<Vec<SmolStr>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn push_field_doc(path: &[SmolStr], field_name: SmolStr, doc: SmolStr) {
+    let mut full_path: Vec<SmolStr> = path.to_vec();
+    full_path.push(field_name);
+    FIELD_DOCS.with(|docs| {
+        docs.borrow_mut().push(FieldDoc {
+            path: full_path,
+            doc,
+        });
+    });
+}
+
+fn drain_field_docs() -> Vec<FieldDoc> {
+    FIELD_DOCS.with(|docs| std::mem::take(&mut *docs.borrow_mut()))
+}
+
+fn set_field_doc_path(path: Vec<SmolStr>) {
+    FIELD_DOC_PATH.with(|p| *p.borrow_mut() = path);
+}
+
+fn get_field_doc_path() -> Vec<SmolStr> {
+    FIELD_DOC_PATH.with(|p| p.borrow().clone())
 }
 
 // =============================================================================
@@ -159,10 +259,15 @@ fn collect_attrset(pairs: Pairs<Rule>) -> ParsedTy {
     let mut dyn_ty: Option<ParsedTyRef> = None;
     let mut open = false;
 
+    let path = get_field_doc_path();
+
     for pair in pairs {
         match pair.as_rule() {
             Rule::named_field => {
                 let mut inner = pair.into_inner();
+                // Check for a doc_block on the field.
+                let field_doc = take_doc_block(&mut inner);
+
                 let name_pair = inner.next().unwrap();
                 // quoted_field includes surrounding quotes — strip them.
                 let name: SmolStr = match name_pair.as_rule() {
@@ -172,8 +277,23 @@ fn collect_attrset(pairs: Pairs<Rule>) -> ParsedTy {
                     }
                     _ => name_pair.as_str().into(),
                 };
+
+                // If this field has a doc comment, record it.
+                if let Some(doc) = field_doc {
+                    push_field_doc(&path, name.clone(), doc);
+                }
+
+                // Set path context for nested attrsets so their field docs
+                // get the correct prefix.
+                let mut child_path = path.clone();
+                child_path.push(name.clone());
+                set_field_doc_path(child_path);
+
                 let ty = collect_type_expr(inner).unwrap();
                 fields.insert(name, ty.into());
+
+                // Restore parent path context.
+                set_field_doc_path(path.clone());
             }
             Rule::dyn_field => {
                 let inner = pair.into_inner();
@@ -205,9 +325,10 @@ mod tests {
 
         assert_eq!(file.declarations.len(), 1);
         match &file.declarations[0] {
-            crate::TixDeclaration::TypeAlias { name, body } => {
+            crate::TixDeclaration::TypeAlias { name, body, doc } => {
                 assert_eq!(name.as_str(), "Derivation");
                 assert_eq!(*body, known_ty!({ "name": string, "system": string }));
+                assert_eq!(*doc, None);
             }
             other => panic!("expected TypeAlias, got: {other:?}"),
         }
@@ -220,12 +341,13 @@ mod tests {
 
         assert_eq!(file.declarations.len(), 1);
         match &file.declarations[0] {
-            crate::TixDeclaration::ValDecl { name, ty } => {
+            crate::TixDeclaration::ValDecl { name, ty, doc } => {
                 assert_eq!(name.as_str(), "mkDerivation");
                 assert_eq!(
                     *ty,
                     known_ty!(({ "name": string; ... }) -> ({ "name": string }))
                 );
+                assert_eq!(*doc, None);
             }
             other => panic!("expected ValDecl, got: {other:?}"),
         }
@@ -245,13 +367,18 @@ mod tests {
 
         assert_eq!(file.declarations.len(), 1);
         match &file.declarations[0] {
-            crate::TixDeclaration::Module { name, declarations } => {
+            crate::TixDeclaration::Module {
+                name,
+                declarations,
+                doc,
+            } => {
                 assert_eq!(name.as_str(), "lib");
                 assert_eq!(declarations.len(), 2);
+                assert_eq!(*doc, None);
 
                 // First: val id
                 match &declarations[0] {
-                    crate::TixDeclaration::ValDecl { name, ty } => {
+                    crate::TixDeclaration::ValDecl { name, ty, .. } => {
                         assert_eq!(name.as_str(), "id");
                         assert_eq!(*ty, known_ty!((# "a") -> (# "a")));
                     }
@@ -260,7 +387,9 @@ mod tests {
 
                 // Second: nested module
                 match &declarations[1] {
-                    crate::TixDeclaration::Module { name, declarations } => {
+                    crate::TixDeclaration::Module {
+                        name, declarations, ..
+                    } => {
                         assert_eq!(name.as_str(), "strings");
                         assert_eq!(declarations.len(), 1);
                     }
@@ -295,7 +424,7 @@ mod tests {
 
         assert_eq!(file.declarations.len(), 1);
         match &file.declarations[0] {
-            crate::TixDeclaration::ValDecl { name, ty } => {
+            crate::TixDeclaration::ValDecl { name, ty, .. } => {
                 assert_eq!(name.as_str(), "add");
                 assert_eq!(*ty, known_ty!(number -> number -> number));
             }
@@ -309,7 +438,7 @@ mod tests {
 
         assert_eq!(file.declarations.len(), 1);
         match &file.declarations[0] {
-            crate::TixDeclaration::TypeAlias { name, body } => {
+            crate::TixDeclaration::TypeAlias { name, body, .. } => {
                 assert_eq!(name.as_str(), "Nullable");
                 assert_eq!(*body, known_ty!(union!((# "a"), null)));
             }
@@ -323,7 +452,7 @@ mod tests {
         let file = parse_tix_file(src).expect("parse error");
 
         match &file.declarations[0] {
-            crate::TixDeclaration::TypeAlias { name, body } => {
+            crate::TixDeclaration::TypeAlias { name, body, .. } => {
                 assert_eq!(name.as_str(), "Sysctl");
                 match body {
                     crate::ParsedTy::AttrSet(attr) => {
@@ -341,5 +470,145 @@ mod tests {
             }
             other => panic!("expected TypeAlias, got: {other:?}"),
         }
+    }
+
+    // =========================================================================
+    // Doc comment tests
+    // =========================================================================
+
+    #[test]
+    fn doc_comment_on_type_alias() {
+        let src = "## A system configuration.\ntype Config = { ... };";
+        let file = parse_tix_file(src).expect("parse error");
+
+        match &file.declarations[0] {
+            crate::TixDeclaration::TypeAlias { name, doc, .. } => {
+                assert_eq!(name.as_str(), "Config");
+                assert_eq!(doc.as_deref(), Some("A system configuration."));
+            }
+            other => panic!("expected TypeAlias, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn doc_comment_on_val_decl() {
+        let src = "## Build a derivation.\nval mkDrv :: { ... } -> { ... };";
+        let file = parse_tix_file(src).expect("parse error");
+
+        match &file.declarations[0] {
+            crate::TixDeclaration::ValDecl { name, doc, .. } => {
+                assert_eq!(name.as_str(), "mkDrv");
+                assert_eq!(doc.as_deref(), Some("Build a derivation."));
+            }
+            other => panic!("expected ValDecl, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn doc_comment_on_module() {
+        let src = "## Library functions.\nmodule lib { val id :: a -> a; }";
+        let file = parse_tix_file(src).expect("parse error");
+
+        match &file.declarations[0] {
+            crate::TixDeclaration::Module { name, doc, .. } => {
+                assert_eq!(name.as_str(), "lib");
+                assert_eq!(doc.as_deref(), Some("Library functions."));
+            }
+            other => panic!("expected Module, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn multi_line_doc_comment() {
+        let src = "## Line one.\n## Line two.\nval x :: int;";
+        let file = parse_tix_file(src).expect("parse error");
+
+        match &file.declarations[0] {
+            crate::TixDeclaration::ValDecl { doc, .. } => {
+                assert_eq!(doc.as_deref(), Some("Line one.\nLine two."));
+            }
+            other => panic!("expected ValDecl, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn doc_comment_on_field() {
+        let src = r#"
+            type Config = {
+                ## Whether to enable.
+                enable: bool,
+                ...
+            };
+        "#;
+        let file = parse_tix_file(src).expect("parse error");
+
+        assert_eq!(file.field_docs.len(), 1);
+        assert_eq!(
+            file.field_docs[0].path,
+            vec![smol_str::SmolStr::from("Config"), smol_str::SmolStr::from("enable")]
+        );
+        assert_eq!(file.field_docs[0].doc.as_str(), "Whether to enable.");
+    }
+
+    #[test]
+    fn doc_comment_mixed_with_regular_comments() {
+        let src = r#"
+            # Regular comment (ignored).
+            ## Doc comment.
+            val x :: int;
+            # Another regular comment.
+            val y :: string;
+        "#;
+        let file = parse_tix_file(src).expect("parse error");
+
+        assert_eq!(file.declarations.len(), 2);
+        match &file.declarations[0] {
+            crate::TixDeclaration::ValDecl { doc, .. } => {
+                assert_eq!(doc.as_deref(), Some("Doc comment."));
+            }
+            other => panic!("expected ValDecl, got: {other:?}"),
+        }
+        match &file.declarations[1] {
+            crate::TixDeclaration::ValDecl { doc, .. } => {
+                assert_eq!(*doc, None);
+            }
+            other => panic!("expected ValDecl, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nested_field_docs() {
+        let src = r#"
+            type Config = {
+                ## Services section.
+                services: {
+                    ## Whether to enable SSH.
+                    enable: bool,
+                    ...
+                },
+                ...
+            };
+        "#;
+        let file = parse_tix_file(src).expect("parse error");
+
+        assert_eq!(file.field_docs.len(), 2);
+
+        // First: Config.services
+        assert_eq!(
+            file.field_docs[0].path,
+            vec![smol_str::SmolStr::from("Config"), smol_str::SmolStr::from("services")]
+        );
+        assert_eq!(file.field_docs[0].doc.as_str(), "Services section.");
+
+        // Second: Config.services.enable
+        assert_eq!(
+            file.field_docs[1].path,
+            vec![
+                smol_str::SmolStr::from("Config"),
+                smol_str::SmolStr::from("services"),
+                smol_str::SmolStr::from("enable"),
+            ]
+        );
+        assert_eq!(file.field_docs[1].doc.as_str(), "Whether to enable SSH.");
     }
 }

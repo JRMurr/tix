@@ -79,6 +79,10 @@ enum GenStubsSource {
         /// Maximum depth for recursive option tree walking
         #[arg(long, default_value = "8")]
         max_depth: u32,
+
+        /// Include option descriptions as ## doc comments in the output
+        #[arg(long)]
+        descriptions: bool,
     },
 
     /// Generate stubs from Home Manager option declarations
@@ -106,6 +110,10 @@ enum GenStubsSource {
         /// Maximum depth for recursive option tree walking
         #[arg(long, default_value = "8")]
         max_depth: u32,
+
+        /// Include option descriptions as ## doc comments in the output
+        #[arg(long)]
+        descriptions: bool,
     },
 }
 
@@ -140,12 +148,14 @@ fn run_gen_stubs(source: GenStubsSource) -> Result<(), Box<dyn Error>> {
             hostname,
             output,
             max_depth,
+            descriptions,
         } => gen_stubs::run_nixos(gen_stubs::NixosOptions {
             nixpkgs,
             flake,
             hostname,
             output,
             max_depth,
+            descriptions,
         }),
         GenStubsSource::HomeManager {
             nixpkgs,
@@ -154,6 +164,7 @@ fn run_gen_stubs(source: GenStubsSource) -> Result<(), Box<dyn Error>> {
             username,
             output,
             max_depth,
+            descriptions,
         } => gen_stubs::run_home_manager(gen_stubs::HomeManagerOptions {
             nixpkgs,
             home_manager,
@@ -161,6 +172,7 @@ fn run_gen_stubs(source: GenStubsSource) -> Result<(), Box<dyn Error>> {
             username,
             output,
             max_depth,
+            descriptions,
         }),
     }
 }

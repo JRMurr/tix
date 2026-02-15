@@ -140,12 +140,24 @@ let
           if isOption v then
             let
               typeInfo = builtins.tryEval (extractType (depth - 1) v.type);
+              # Extract the option description. Handles three cases:
+              #   1. Plain string: `description = "some text";`
+              #   2. mdDoc attrset: `description = lib.mdDoc "some text";` → `{ _type = "mdDoc"; text = "..."; }`
+              #   3. Missing/unevaluable: fall back to null
+              rawDesc = builtins.tryEval (v.description or null);
+              desc =
+                if !rawDesc.success then null
+                else if rawDesc.value == null then null
+                else if builtins.isString rawDesc.value then rawDesc.value
+                else if builtins.isAttrs rawDesc.value && (rawDesc.value.text or null) != null
+                  then rawDesc.value.text
+                else null;
             in [{
               inherit name;
               value = {
                 _isOption = true;
                 typeInfo = if typeInfo.success then typeInfo.value else { type = "anything"; };
-              };
+              } // (if desc != null then { description = desc; } else {});
             }]
           else if builtins.isAttrs v then
             [{
