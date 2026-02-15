@@ -19,6 +19,7 @@
     flake-utils.lib.eachDefaultSystem (
       system:
       let
+        inherit (nixpkgs) lib;
         overlays = [ (import rust-overlay) ];
         /**
           type: pkgs :: Pkgs
@@ -51,6 +52,6 @@
       }
     )
     // {
-      overlays.default = import ./overlay.nix;
+      overlays.default = lib.composeExtensions (import rust-overlay) import ./overlay.nix;
     };
 }

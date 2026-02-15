@@ -16,7 +16,7 @@ let
   version = "0.1.0";
 
   fs = lib.fileset;
-  baseSrc = fs.unions [ ./crates ./Cargo.toml ./Cargo.lock ];
+  baseSrc = fs.unions [ ./crates ./Cargo.toml ./Cargo.lock ./stubs ];
 
   src = fs.toSource {
     root = ./.;

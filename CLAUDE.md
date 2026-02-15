@@ -18,6 +18,7 @@ cargo clippy                         # Lint
 ./pbt.sh                             # Property-based tests (50k cases default)
 ./pbt.sh 100000                      # PBT with custom case count
 ./cov.sh                             # Coverage report (cargo-tarpaulin)
+nix build .#                         # Build with nix
 ```
 
 Run a single test:
