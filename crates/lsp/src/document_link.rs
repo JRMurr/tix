@@ -21,13 +21,10 @@ pub fn document_links(analysis: &FileAnalysis, root: &rnix::Root) -> Vec<Documen
         let range = match &analysis.module[expr_id] {
             Expr::Literal(lang_ast::Literal::Path(_)) => {
                 // This expr IS the path literal — use its range directly.
-                analysis
-                    .source_map
-                    .node_for_expr(expr_id)
-                    .map(|ptr| {
-                        let node = ptr.to_node(root.syntax());
-                        analysis.line_index.range(node.text_range())
-                    })
+                analysis.source_map.node_for_expr(expr_id).map(|ptr| {
+                    let node = ptr.to_node(root.syntax());
+                    analysis.line_index.range(node.text_range())
+                })
             }
             // For Apply expressions (e.g. `import ./foo.nix`), the import_targets
             // map also includes the Apply node itself. We only want the path literal,

@@ -54,11 +54,10 @@ pub fn semantic_tokens(analysis: &FileAnalysis, root: &rnix::Root) -> Vec<Semant
             None => continue,
         };
 
-        let (token_type, token_modifiers) =
-            match classify_token(analysis, root, &token) {
-                Some(classification) => classification,
-                None => continue,
-            };
+        let (token_type, token_modifiers) = match classify_token(analysis, root, &token) {
+            Some(classification) => classification,
+            None => continue,
+        };
 
         let range = analysis.line_index.range(token.text_range());
 
@@ -226,10 +225,10 @@ fn classify_ident(
 /// Map a NameKind to a semantic token type index.
 fn name_kind_to_token_type(kind: NameKind) -> u32 {
     match kind {
-        NameKind::LetIn => 0,                                // VARIABLE
-        NameKind::PlainAttrset | NameKind::RecAttrset => 2,  // PROPERTY
-        NameKind::Param => 1,                                // PARAMETER
-        NameKind::PatField => 1,                             // PARAMETER
+        NameKind::LetIn => 0,                               // VARIABLE
+        NameKind::PlainAttrset | NameKind::RecAttrset => 2, // PROPERTY
+        NameKind::Param => 1,                               // PARAMETER
+        NameKind::PatField => 1,                            // PARAMETER
     }
 }
 
@@ -316,7 +315,10 @@ mod tests {
         let tokens = get_tokens(src);
         // All three should be KEYWORD (4).
         let keyword_count = tokens.iter().filter(|t| t.3 == 4).count();
-        assert_eq!(keyword_count, 3, "true/false/null should be keywords: {tokens:?}");
+        assert_eq!(
+            keyword_count, 3,
+            "true/false/null should be keywords: {tokens:?}"
+        );
     }
 
     #[test]
@@ -336,9 +338,7 @@ mod tests {
         let tokens = get_tokens(src);
         // "a" should be PROPERTY+DEFINITION (2, mod 1)
         assert!(
-            tokens
-                .iter()
-                .any(|t| t.3 == 2 && t.4 == MOD_DEFINITION),
+            tokens.iter().any(|t| t.3 == 2 && t.4 == MOD_DEFINITION),
             "attrset field should be PROPERTY+DEFINITION: {tokens:?}"
         );
     }
@@ -349,9 +349,7 @@ mod tests {
         let tokens = get_tokens(src);
         // First "x" should be PARAMETER+DEFINITION (1, mod 1).
         assert!(
-            tokens
-                .iter()
-                .any(|t| t.3 == 1 && t.4 == MOD_DEFINITION),
+            tokens.iter().any(|t| t.3 == 1 && t.4 == MOD_DEFINITION),
             "lambda param should be PARAMETER+DEFINITION: {tokens:?}"
         );
         // Second "x" should be PARAMETER (1, mod 0).

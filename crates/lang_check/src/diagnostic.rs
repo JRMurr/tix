@@ -347,7 +347,10 @@ mod tests {
     #[test]
     fn suggest_similar_no_false_positive_for_very_different() {
         let candidates: Vec<SmolStr> = vec!["foo".into()];
-        assert_eq!(suggest_similar("completely_different", candidates.iter()), None);
+        assert_eq!(
+            suggest_similar("completely_different", candidates.iter()),
+            None
+        );
     }
 
     #[test]
@@ -394,10 +397,7 @@ mod tests {
             lhs_ty: OutputTy::Primitive(lang_ty::PrimitiveTy::String),
             rhs_ty: OutputTy::Primitive(lang_ty::PrimitiveTy::Int),
         };
-        assert_eq!(
-            kind.to_string(),
-            "cannot apply `-` to `string` and `int`"
-        );
+        assert_eq!(kind.to_string(), "cannot apply `-` to `string` and `int`");
     }
 
     #[test]
@@ -413,9 +413,7 @@ mod tests {
 
     #[test]
     fn unresolved_name_display() {
-        let kind = TixDiagnosticKind::UnresolvedName {
-            name: "foo".into(),
-        };
+        let kind = TixDiagnosticKind::UnresolvedName { name: "foo".into() };
         assert_eq!(kind.to_string(), "unresolved name `foo`");
     }
 }

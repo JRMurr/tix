@@ -92,10 +92,7 @@ impl TixLanguageServer {
         // CLI stubs are always loaded first.
         for stub_path in &self.cli_stub_paths {
             if let Err(e) = crate::load_stubs(&mut registry, stub_path) {
-                log::warn!(
-                    "Failed to load CLI stubs from {}: {e}",
-                    stub_path.display()
-                );
+                log::warn!("Failed to load CLI stubs from {}: {e}", stub_path.display());
             }
         }
 
@@ -315,10 +312,7 @@ impl LanguageServer for TixLanguageServer {
         Ok(location.map(GotoDefinitionResponse::Scalar))
     }
 
-    async fn completion(
-        &self,
-        params: CompletionParams,
-    ) -> Result<Option<CompletionResponse>> {
+    async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
         let uri = params.text_document_position.text_document.uri;
         let pos = params.text_document_position.position;
 
@@ -362,10 +356,7 @@ impl LanguageServer for TixLanguageServer {
         Ok(Some(DocumentSymbolResponse::Nested(symbols)))
     }
 
-    async fn document_link(
-        &self,
-        params: DocumentLinkParams,
-    ) -> Result<Option<Vec<DocumentLink>>> {
+    async fn document_link(&self, params: DocumentLinkParams) -> Result<Option<Vec<DocumentLink>>> {
         let uri = params.text_document.uri;
         let path = match uri_to_path(&uri) {
             Some(p) => p,
@@ -385,10 +376,7 @@ impl LanguageServer for TixLanguageServer {
         Ok(Some(links))
     }
 
-    async fn formatting(
-        &self,
-        params: DocumentFormattingParams,
-    ) -> Result<Option<Vec<TextEdit>>> {
+    async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
         let uri = params.text_document.uri;
         let path = match uri_to_path(&uri) {
             Some(p) => p,
@@ -402,7 +390,10 @@ impl LanguageServer for TixLanguageServer {
         };
 
         let contents = analysis.nix_file.contents(&state.db);
-        Ok(crate::formatting::format_document(contents, &analysis.line_index))
+        Ok(crate::formatting::format_document(
+            contents,
+            &analysis.line_index,
+        ))
     }
 
     async fn selection_range(
@@ -424,8 +415,7 @@ impl LanguageServer for TixLanguageServer {
         let contents = analysis.nix_file.contents(&state.db);
         let root = rnix::Root::parse(contents).tree();
 
-        let ranges =
-            crate::selection_range::selection_ranges(analysis, params.positions, &root);
+        let ranges = crate::selection_range::selection_ranges(analysis, params.positions, &root);
         Ok(Some(ranges))
     }
 

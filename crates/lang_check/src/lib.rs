@@ -27,10 +27,7 @@ use storage::TypeStorage;
 use thiserror::Error;
 
 #[salsa::tracked]
-pub fn check_file(
-    db: &dyn AstDb,
-    file: NixFile,
-) -> Result<InferenceResult, TixDiagnostic> {
+pub fn check_file(db: &dyn AstDb, file: NixFile) -> Result<InferenceResult, TixDiagnostic> {
     check_file_with_aliases(db, file, &TypeAliasRegistry::default())
 }
 
@@ -348,15 +345,9 @@ impl<'db> CheckCtx<'db> {
         self.intern_output_ty_inner(ty, &mut var_map)
     }
 
-    fn intern_output_ty_inner(
-        &mut self,
-        ty: &OutputTy,
-        var_map: &mut HashMap<u32, TyId>,
-    ) -> TyId {
+    fn intern_output_ty_inner(&mut self, ty: &OutputTy, var_map: &mut HashMap<u32, TyId>) -> TyId {
         match ty {
-            OutputTy::TyVar(n) => {
-                *var_map.entry(*n).or_insert_with(|| self.new_var())
-            }
+            OutputTy::TyVar(n) => *var_map.entry(*n).or_insert_with(|| self.new_var()),
             OutputTy::Primitive(prim) => self.alloc_prim(*prim),
             OutputTy::List(inner) => {
                 let elem = self.intern_output_ty_inner(&inner.0, var_map);
@@ -417,24 +408,24 @@ impl<'db> CheckCtx<'db> {
     /// constrain `ty` to match the declared type. Returns Ok(()) if no annotation
     /// is present or if the constraint succeeds.
     fn apply_type_annotation(&mut self, name_id: NameId, ty: TyId) -> Result<(), LocatedError> {
-        let type_annotation =
-            self.module
-                .type_dec_map
-                .docs_for_name(name_id)
-                .and_then(|docs| {
-                    let parsed: Vec<_> = docs
-                        .iter()
-                        .flat_map(|doc| parse_and_collect(doc).unwrap_or_default())
-                        .collect();
-                    let name_str = &self.module[name_id].text;
-                    parsed.into_iter().find_map(|decl| {
-                        if decl.identifier == *name_str {
-                            Some(decl.type_expr)
-                        } else {
-                            None
-                        }
-                    })
-                });
+        let type_annotation = self
+            .module
+            .type_dec_map
+            .docs_for_name(name_id)
+            .and_then(|docs| {
+                let parsed: Vec<_> = docs
+                    .iter()
+                    .flat_map(|doc| parse_and_collect(doc).unwrap_or_default())
+                    .collect();
+                let name_str = &self.module[name_id].text;
+                parsed.into_iter().find_map(|decl| {
+                    if decl.identifier == *name_str {
+                        Some(decl.type_expr)
+                    } else {
+                        None
+                    }
+                })
+            });
 
         if let Some(known_ty) = type_annotation {
             let annotation_ty = self.intern_fresh_ty(known_ty);

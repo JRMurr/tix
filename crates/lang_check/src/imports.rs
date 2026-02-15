@@ -230,5 +230,9 @@ pub fn resolve_imports(
         }
     }
 
-    ImportResolution { types, errors, targets }
+    ImportResolution {
+        types,
+        errors,
+        targets,
+    }
 }

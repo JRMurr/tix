@@ -98,9 +98,7 @@ impl AnalysisState {
         let mut name_to_import = HashMap::new();
         for group in grouped.iter() {
             for typedef in group {
-                if let Some(path) =
-                    chase_import_target(&module, &import_targets, typedef.expr())
-                {
+                if let Some(path) = chase_import_target(&module, &import_targets, typedef.expr()) {
                     log::debug!(
                         "name_to_import: {} -> {}",
                         module[typedef.name()].text,

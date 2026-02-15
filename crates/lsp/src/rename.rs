@@ -92,11 +92,7 @@ mod tests {
     use lang_check::aliases::TypeAliasRegistry;
 
     /// Analyze source at a marker position and run rename.
-    fn rename_at_marker(
-        src: &str,
-        marker: u32,
-        new_name: &str,
-    ) -> Option<WorkspaceEdit> {
+    fn rename_at_marker(src: &str, marker: u32, new_name: &str) -> Option<WorkspaceEdit> {
         let markers = parse_markers(src);
         let offset = markers[&marker];
         let path = temp_path("test.nix");
@@ -124,7 +120,11 @@ mod tests {
         "};
 
         let edit = rename_at_marker(src, 1, "bar").expect("should produce edit");
-        assert_eq!(edit_count(&edit), 2, "should rename definition + 1 reference");
+        assert_eq!(
+            edit_count(&edit),
+            2,
+            "should rename definition + 1 reference"
+        );
         let all_bar = edit
             .changes
             .unwrap()
@@ -160,7 +160,11 @@ mod tests {
         "};
 
         let edit = rename_at_marker(src, 1, "z").unwrap();
-        assert_eq!(edit_count(&edit), 3, "should rename definition + 2 references");
+        assert_eq!(
+            edit_count(&edit),
+            3,
+            "should rename definition + 2 references"
+        );
     }
 
     #[test]
@@ -171,6 +175,10 @@ mod tests {
         "};
 
         let edit = rename_at_marker(src, 1, "y").unwrap();
-        assert_eq!(edit_count(&edit), 2, "should rename pattern field + body reference");
+        assert_eq!(
+            edit_count(&edit),
+            2,
+            "should rename pattern field + body reference"
+        );
     }
 }

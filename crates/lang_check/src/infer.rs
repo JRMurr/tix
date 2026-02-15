@@ -119,7 +119,8 @@ impl CheckCtx<'_> {
         // exit_level and before use-site extrusions add concrete bounds.
         for &(name_id, ty) in &inferred {
             let poly_ty = self.resolve_to_concrete_id(ty).unwrap_or(ty);
-            let output = canonicalize_standalone(&self.table, &self.alias_provenance, poly_ty, true);
+            let output =
+                canonicalize_standalone(&self.table, &self.alias_provenance, poly_ty, true);
             let simplified = simplify(&output);
             self.early_canonical.insert(name_id, simplified);
         }
@@ -158,10 +159,16 @@ impl CheckCtx<'_> {
 
             // Link the pre-allocated name slot to the inferred type.
             let name_slot = self.ty_for_name_direct(name_id);
-            if let Err(err) = self.constrain(ty, name_slot).map_err(|e| self.locate_err(e)) {
+            if let Err(err) = self
+                .constrain(ty, name_slot)
+                .map_err(|e| self.locate_err(e))
+            {
                 return (inferred, Some(err));
             }
-            if let Err(err) = self.constrain(name_slot, ty).map_err(|e| self.locate_err(e)) {
+            if let Err(err) = self
+                .constrain(name_slot, ty)
+                .map_err(|e| self.locate_err(e))
+            {
                 return (inferred, Some(err));
             }
 
@@ -399,7 +406,10 @@ impl CheckCtx<'_> {
             let overloads = std::mem::take(&mut self.deferred.overloads);
             let mut remaining_overloads = Vec::new();
             for ov in overloads {
-                match self.try_resolve_overload(&ov).map_err(|err| self.locate_err(err))? {
+                match self
+                    .try_resolve_overload(&ov)
+                    .map_err(|err| self.locate_err(err))?
+                {
                     OverloadProgress::FullyResolved => made_progress = true,
                     OverloadProgress::PartialProgress => {
                         // Partial work was done (constraints added) but the
@@ -417,7 +427,10 @@ impl CheckCtx<'_> {
             let merges = std::mem::take(&mut self.deferred.merges);
             let mut remaining_merges = Vec::new();
             for mg in merges {
-                match self.try_resolve_merge(&mg).map_err(|err| self.locate_err(err))? {
+                match self
+                    .try_resolve_merge(&mg)
+                    .map_err(|err| self.locate_err(err))?
+                {
                     true => made_progress = true,
                     false => remaining_merges.push(mg),
                 }

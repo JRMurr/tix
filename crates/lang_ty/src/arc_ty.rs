@@ -184,9 +184,7 @@ impl OutputTy {
             OutputTy::Intersection(members) => {
                 OutputTy::Intersection(members.iter().map(|m| f(&m.0).into()).collect())
             }
-            OutputTy::Named(name, inner) => {
-                OutputTy::Named(name.clone(), f(&inner.0).into())
-            }
+            OutputTy::Named(name, inner) => OutputTy::Named(name.clone(), f(&inner.0).into()),
         }
     }
 
@@ -369,5 +367,4 @@ impl AttrSetTy<TyRef> {
         }
         result
     }
-
 }

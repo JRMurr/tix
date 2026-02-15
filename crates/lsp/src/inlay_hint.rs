@@ -13,11 +13,7 @@ use tower_lsp::lsp_types::*;
 
 use crate::state::FileAnalysis;
 
-pub fn inlay_hints(
-    analysis: &FileAnalysis,
-    range: Range,
-    root: &rnix::Root,
-) -> Vec<InlayHint> {
+pub fn inlay_hints(analysis: &FileAnalysis, range: Range, root: &rnix::Root) -> Vec<InlayHint> {
     let inference = match analysis.inference() {
         Some(inf) => inf,
         None => return Vec::new(),
@@ -40,9 +36,7 @@ pub fn inlay_hints(
         let name_range = analysis.line_index.range(node.text_range());
 
         // Filter to the requested range.
-        if name_range.end.line < range.start.line
-            || name_range.start.line > range.end.line
-        {
+        if name_range.end.line < range.start.line || name_range.start.line > range.end.line {
             continue;
         }
 
@@ -92,10 +86,7 @@ fn is_trivial_binding(analysis: &FileAnalysis, name_id: NameId) -> bool {
         matches!(
             &analysis.module[expr_id],
             Expr::Literal(
-                Literal::Integer(_)
-                    | Literal::Float(_)
-                    | Literal::String(_)
-                    | Literal::Path(_)
+                Literal::Integer(_) | Literal::Float(_) | Literal::String(_) | Literal::Path(_)
             )
         )
     } else {
@@ -189,10 +180,7 @@ mod tests {
         let src = "x: x + 1";
         let hints = get_hints(src);
         // Lambda param `x` should always get a hint (type not obvious from syntax).
-        assert!(
-            !hints.is_empty(),
-            "should show hint for lambda param"
-        );
+        assert!(!hints.is_empty(), "should show hint for lambda param");
     }
 
     #[test]

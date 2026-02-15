@@ -99,11 +99,7 @@ mod tests {
     use lang_check::aliases::TypeAliasRegistry;
 
     /// Analyze source, parse markers, and return everything needed for reference tests.
-    fn refs_at_marker(
-        src: &str,
-        marker: u32,
-        include_declaration: bool,
-    ) -> Vec<Location> {
+    fn refs_at_marker(src: &str, marker: u32, include_declaration: bool) -> Vec<Location> {
         let markers = parse_markers(src);
         let offset = markers[&marker];
         let path = temp_path("test.nix");
@@ -128,7 +124,11 @@ mod tests {
         assert_eq!(refs.len(), 2, "should find 2 references to x");
 
         let refs_with_decl = refs_at_marker(src, 1, true);
-        assert_eq!(refs_with_decl.len(), 3, "should find 2 refs + 1 declaration");
+        assert_eq!(
+            refs_with_decl.len(),
+            3,
+            "should find 2 refs + 1 declaration"
+        );
     }
 
     #[test]

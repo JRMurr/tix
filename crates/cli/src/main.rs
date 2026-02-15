@@ -5,7 +5,7 @@ use clap::Parser;
 use lang_ast::{module_and_source_maps, name_resolution, RootDatabase};
 use lang_check::aliases::TypeAliasRegistry;
 use lang_check::check_file_collecting;
-use lang_check::diagnostic::{TixDiagnosticKind};
+use lang_check::diagnostic::TixDiagnosticKind;
 use lang_check::imports::resolve_imports;
 use lang_ty::OutputTy;
 use miette::{LabeledSpan, NamedSource};
@@ -55,7 +55,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut in_progress = HashSet::new();
     let mut cache = HashMap::new();
     let import_resolution = resolve_imports(
-        &db, file, &module, &name_res, &registry, &mut in_progress, &mut cache,
+        &db,
+        file,
+        &module,
+        &name_res,
+        &registry,
+        &mut in_progress,
+        &mut cache,
     );
     for err in &import_resolution.errors {
         eprintln!("Import warning: {:?}", err.kind);
