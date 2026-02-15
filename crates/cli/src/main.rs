@@ -56,72 +56,71 @@ enum Command {
     },
 }
 
+/// Shared CLI arguments for all gen-stubs subcommands.
+#[derive(clap::Args, Debug)]
+struct CommonGenStubsArgs {
+    /// Path to nixpkgs (default: <nixpkgs> from NIX_PATH)
+    #[arg(long)]
+    nixpkgs: Option<PathBuf>,
+
+    /// Path to a flake directory (evaluates configurations)
+    #[arg(long)]
+    flake: Option<PathBuf>,
+
+    /// Read pre-computed option tree JSON instead of running nix eval
+    #[arg(long)]
+    from_json: Option<PathBuf>,
+
+    /// Output file path (default: stdout)
+    #[arg(short, long)]
+    output: Option<PathBuf>,
+
+    /// Maximum depth for recursive option tree walking
+    #[arg(long, default_value = "8")]
+    max_depth: u32,
+
+    /// Include option descriptions as ## doc comments in the output
+    #[arg(long)]
+    descriptions: bool,
+}
+
+impl From<CommonGenStubsArgs> for gen_stubs::CommonOptions {
+    fn from(args: CommonGenStubsArgs) -> Self {
+        Self {
+            nixpkgs: args.nixpkgs,
+            flake: args.flake,
+            from_json: args.from_json,
+            output: args.output,
+            max_depth: args.max_depth,
+            descriptions: args.descriptions,
+        }
+    }
+}
+
 #[derive(Subcommand, Debug)]
 enum GenStubsSource {
     /// Generate stubs from NixOS option declarations
     Nixos {
-        /// Path to nixpkgs (default: <nixpkgs> from NIX_PATH)
-        #[arg(long)]
-        nixpkgs: Option<PathBuf>,
-
-        /// Path to a flake directory (evaluates nixosConfigurations)
-        #[arg(long)]
-        flake: Option<PathBuf>,
+        #[command(flatten)]
+        common: CommonGenStubsArgs,
 
         /// Hostname to select from nixosConfigurations (required if flake has multiple)
         #[arg(long)]
         hostname: Option<String>,
-
-        /// Read pre-computed option tree JSON instead of running nix eval
-        #[arg(long)]
-        from_json: Option<PathBuf>,
-
-        /// Output file path (default: stdout)
-        #[arg(short, long)]
-        output: Option<PathBuf>,
-
-        /// Maximum depth for recursive option tree walking
-        #[arg(long, default_value = "8")]
-        max_depth: u32,
-
-        /// Include option descriptions as ## doc comments in the output
-        #[arg(long)]
-        descriptions: bool,
     },
 
     /// Generate stubs from Home Manager option declarations
     HomeManager {
-        /// Path to nixpkgs (default: <nixpkgs> from NIX_PATH)
-        #[arg(long)]
-        nixpkgs: Option<PathBuf>,
+        #[command(flatten)]
+        common: CommonGenStubsArgs,
 
         /// Path to home-manager source (default: flake registry)
         #[arg(long)]
         home_manager: Option<PathBuf>,
 
-        /// Path to a flake directory (evaluates homeConfigurations)
-        #[arg(long)]
-        flake: Option<PathBuf>,
-
         /// Username to select from homeConfigurations (required if flake has multiple)
         #[arg(long)]
         username: Option<String>,
-
-        /// Read pre-computed option tree JSON instead of running nix eval
-        #[arg(long)]
-        from_json: Option<PathBuf>,
-
-        /// Output file path (default: stdout)
-        #[arg(short, long)]
-        output: Option<PathBuf>,
-
-        /// Maximum depth for recursive option tree walking
-        #[arg(long, default_value = "8")]
-        max_depth: u32,
-
-        /// Include option descriptions as ## doc comments in the output
-        #[arg(long)]
-        descriptions: bool,
     },
 }
 
@@ -150,41 +149,20 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 fn run_gen_stubs(source: GenStubsSource) -> Result<(), Box<dyn Error>> {
     match source {
-        GenStubsSource::Nixos {
-            nixpkgs,
-            flake,
-            hostname,
-            from_json,
-            output,
-            max_depth,
-            descriptions,
-        } => gen_stubs::run_nixos(gen_stubs::NixosOptions {
-            nixpkgs,
-            flake,
-            hostname,
-            from_json,
-            output,
-            max_depth,
-            descriptions,
-        }),
+        GenStubsSource::Nixos { common, hostname } => {
+            gen_stubs::run_nixos(gen_stubs::NixosOptions {
+                common: common.into(),
+                hostname,
+            })
+        }
         GenStubsSource::HomeManager {
-            nixpkgs,
+            common,
             home_manager,
-            flake,
             username,
-            from_json,
-            output,
-            max_depth,
-            descriptions,
         } => gen_stubs::run_home_manager(gen_stubs::HomeManagerOptions {
-            nixpkgs,
+            common: common.into(),
             home_manager,
-            flake,
             username,
-            from_json,
-            output,
-            max_depth,
-            descriptions,
         }),
     }
 }

@@ -5,6 +5,12 @@
 // Walks the pest parse tree from `tix_decl.pest` and produces structured
 // `TixDeclFile` / `TixDeclaration` values. Type expression collection mirrors
 // `collect.rs` but uses `tix_parser::Rule` variants.
+//
+// COUPLING NOTICE: The type expression collection functions below
+// (collect_type_expr, collect_one, collect_union, collect_intersection,
+// collect_attrset) are structurally duplicated from `collect.rs`.
+// See the coupling notice in that file for the rationale. When modifying
+// shared type expression logic, update both files together.
 
 use lang_ty::{AttrSetTy, PrimitiveTy};
 use pest::iterators::{Pair, Pairs};
@@ -58,25 +64,25 @@ fn take_doc_block(inner: &mut Pairs<Rule>) -> Option<SmolStr> {
 
 pub fn collect_tix_file(pairs: Pairs<Rule>) -> TixDeclFile {
     let mut declarations = Vec::new();
-    let mut field_docs = Vec::new();
+    let mut ctx = CollectCtx::new();
 
-    collect_tix_file_inner(pairs, &mut declarations, &mut field_docs);
+    collect_tix_file_inner(pairs, &mut declarations, &mut ctx);
 
     TixDeclFile {
         declarations,
-        field_docs,
+        field_docs: ctx.field_docs,
     }
 }
 
 fn collect_tix_file_inner(
     pairs: Pairs<Rule>,
     declarations: &mut Vec<TixDeclaration>,
-    field_docs: &mut Vec<FieldDoc>,
+    ctx: &mut CollectCtx,
 ) {
     for pair in pairs {
         match pair.as_rule() {
             Rule::tix_file => {
-                collect_tix_file_inner(pair.into_inner(), declarations, field_docs);
+                collect_tix_file_inner(pair.into_inner(), declarations, ctx);
                 return;
             }
             Rule::type_alias_decl => {
@@ -86,11 +92,9 @@ fn collect_tix_file_inner(
 
                 // Set path context so field-level doc comments in the body
                 // get the correct prefix (e.g. ["Config", "services", "enable"]).
-                set_field_doc_path(vec![name.clone()]);
-                let body = collect_type_expr(inner).unwrap();
-                // Drain field docs accumulated during type body collection.
-                field_docs.extend(drain_field_docs());
-                set_field_doc_path(Vec::new());
+                ctx.set_path(vec![name.clone()]);
+                let body = collect_type_expr(inner, ctx).unwrap();
+                ctx.set_path(Vec::new());
 
                 declarations.push(TixDeclaration::TypeAlias { name, body, doc });
             }
@@ -98,7 +102,7 @@ fn collect_tix_file_inner(
                 let mut inner = pair.into_inner();
                 let doc = take_doc_block(&mut inner);
                 let name: SmolStr = inner.next().unwrap().as_str().into();
-                let ty = collect_type_expr(inner).unwrap();
+                let ty = collect_type_expr(inner, ctx).unwrap();
                 declarations.push(TixDeclaration::ValDecl { name, ty, doc });
             }
             Rule::module_decl => {
@@ -107,7 +111,7 @@ fn collect_tix_file_inner(
                 let name: SmolStr = inner.next().unwrap().as_str().into();
                 // Remaining children are the nested declarations.
                 let mut nested = Vec::new();
-                collect_tix_file_inner(inner, &mut nested, field_docs);
+                collect_tix_file_inner(inner, &mut nested, ctx);
                 declarations.push(TixDeclaration::Module {
                     name,
                     declarations: nested,
@@ -121,47 +125,49 @@ fn collect_tix_file_inner(
 }
 
 // =============================================================================
-// Thread-local field doc accumulator
+// Collection context
 // =============================================================================
 //
 // Field-level doc comments are parsed inside attrsets but need to be reported
-// at the TixDeclFile level. We use a thread-local to accumulate them during
-// collection, since they're produced deep in collect_attrset but consumed at
-// the top level.
+// at the TixDeclFile level. `CollectCtx` carries this mutable state explicitly
+// through the recursive collection functions, avoiding hidden thread-local state.
 
-thread_local! {
-    static FIELD_DOCS: std::cell::RefCell<Vec<FieldDoc>> = const { std::cell::RefCell::new(Vec::new()) };
-    static FIELD_DOC_PATH: std::cell::RefCell<Vec<SmolStr>> = const { std::cell::RefCell::new(Vec::new()) };
+struct CollectCtx {
+    field_docs: Vec<FieldDoc>,
+    field_doc_path: Vec<SmolStr>,
 }
 
-fn push_field_doc(path: &[SmolStr], field_name: SmolStr, doc: SmolStr) {
-    let mut full_path: Vec<SmolStr> = path.to_vec();
-    full_path.push(field_name);
-    FIELD_DOCS.with(|docs| {
-        docs.borrow_mut().push(FieldDoc {
+impl CollectCtx {
+    fn new() -> Self {
+        Self {
+            field_docs: Vec::new(),
+            field_doc_path: Vec::new(),
+        }
+    }
+
+    fn push_field_doc(&mut self, field_name: SmolStr, doc: SmolStr) {
+        let mut full_path = self.field_doc_path.clone();
+        full_path.push(field_name);
+        self.field_docs.push(FieldDoc {
             path: full_path,
             doc,
         });
-    });
-}
+    }
 
-fn drain_field_docs() -> Vec<FieldDoc> {
-    FIELD_DOCS.with(|docs| std::mem::take(&mut *docs.borrow_mut()))
-}
+    fn set_path(&mut self, path: Vec<SmolStr>) {
+        self.field_doc_path = path;
+    }
 
-fn set_field_doc_path(path: Vec<SmolStr>) {
-    FIELD_DOC_PATH.with(|p| *p.borrow_mut() = path);
-}
-
-fn get_field_doc_path() -> Vec<SmolStr> {
-    FIELD_DOC_PATH.with(|p| p.borrow().clone())
+    fn path(&self) -> &[SmolStr] {
+        &self.field_doc_path
+    }
 }
 
 // =============================================================================
 // Type expression collection — mirrors collect.rs but for tix_parser::Rule
 // =============================================================================
 
-fn collect_type_expr(mut pairs: Pairs<Rule>) -> Option<ParsedTy> {
+fn collect_type_expr(mut pairs: Pairs<Rule>, ctx: &mut CollectCtx) -> Option<ParsedTy> {
     let curr = pairs.next()?;
 
     let curr = match curr.as_rule() {
@@ -171,13 +177,15 @@ fn collect_type_expr(mut pairs: Pairs<Rule>) -> Option<ParsedTy> {
         | Rule::paren_type
         | Rule::type_ref
         | Rule::primitive_ref
-        | Rule::atom_type => collect_type_expr(curr.into_inner()).unwrap(),
+        | Rule::atom_type => collect_type_expr(curr.into_inner(), ctx).unwrap(),
 
-        Rule::union_type => collect_union(curr.into_inner()),
-        Rule::isect_type => collect_intersection(curr.into_inner()),
+        Rule::union_type => collect_union(curr.into_inner(), ctx),
+        Rule::isect_type => collect_intersection(curr.into_inner(), ctx),
 
-        Rule::attrset_type => collect_attrset(curr.into_inner()),
-        Rule::list_type => ParsedTy::List(collect_type_expr(curr.into_inner()).unwrap().into()),
+        Rule::attrset_type => collect_attrset(curr.into_inner(), ctx),
+        Rule::list_type => {
+            ParsedTy::List(collect_type_expr(curr.into_inner(), ctx).unwrap().into())
+        }
         Rule::string_ref => ParsedTy::Primitive(PrimitiveTy::String),
         Rule::number_ref => ParsedTy::Primitive(PrimitiveTy::Number),
         Rule::int_ref => ParsedTy::Primitive(PrimitiveTy::Int),
@@ -195,7 +203,7 @@ fn collect_type_expr(mut pairs: Pairs<Rule>) -> Option<ParsedTy> {
     };
 
     // Arrow chaining: right-associative lambdas.
-    if let Some(lam_body) = collect_type_expr(pairs) {
+    if let Some(lam_body) = collect_type_expr(pairs, ctx) {
         return Some(ParsedTy::Lambda {
             param: curr.into(),
             body: lam_body.into(),
@@ -205,18 +213,20 @@ fn collect_type_expr(mut pairs: Pairs<Rule>) -> Option<ParsedTy> {
     Some(curr)
 }
 
-fn collect_one(pair: pest::iterators::Pair<Rule>) -> ParsedTy {
+fn collect_one(pair: pest::iterators::Pair<Rule>, ctx: &mut CollectCtx) -> ParsedTy {
     match pair.as_rule() {
-        Rule::isect_type => collect_intersection(pair.into_inner()),
+        Rule::isect_type => collect_intersection(pair.into_inner(), ctx),
         Rule::atom_type
         | Rule::paren_type
         | Rule::type_ref
         | Rule::primitive_ref
         | Rule::arrow_segment
         | Rule::union_type
-        | Rule::type_expr => collect_type_expr(pair.into_inner()).unwrap(),
-        Rule::attrset_type => collect_attrset(pair.into_inner()),
-        Rule::list_type => ParsedTy::List(collect_type_expr(pair.into_inner()).unwrap().into()),
+        | Rule::type_expr => collect_type_expr(pair.into_inner(), ctx).unwrap(),
+        Rule::attrset_type => collect_attrset(pair.into_inner(), ctx),
+        Rule::list_type => {
+            ParsedTy::List(collect_type_expr(pair.into_inner(), ctx).unwrap().into())
+        }
         Rule::string_ref => ParsedTy::Primitive(PrimitiveTy::String),
         Rule::number_ref => ParsedTy::Primitive(PrimitiveTy::Number),
         Rule::int_ref => ParsedTy::Primitive(PrimitiveTy::Int),
@@ -230,8 +240,10 @@ fn collect_one(pair: pest::iterators::Pair<Rule>) -> ParsedTy {
     }
 }
 
-fn collect_union(pairs: Pairs<Rule>) -> ParsedTy {
-    let members: Vec<ParsedTyRef> = pairs.map(|p| ParsedTyRef::from(collect_one(p))).collect();
+fn collect_union(pairs: Pairs<Rule>, ctx: &mut CollectCtx) -> ParsedTy {
+    let members: Vec<ParsedTyRef> = pairs
+        .map(|p| ParsedTyRef::from(collect_one(p, ctx)))
+        .collect();
     match members.len() {
         0 => unreachable!("union_type must have at least one member"),
         1 => {
@@ -242,8 +254,10 @@ fn collect_union(pairs: Pairs<Rule>) -> ParsedTy {
     }
 }
 
-fn collect_intersection(pairs: Pairs<Rule>) -> ParsedTy {
-    let members: Vec<ParsedTyRef> = pairs.map(|p| ParsedTyRef::from(collect_one(p))).collect();
+fn collect_intersection(pairs: Pairs<Rule>, ctx: &mut CollectCtx) -> ParsedTy {
+    let members: Vec<ParsedTyRef> = pairs
+        .map(|p| ParsedTyRef::from(collect_one(p, ctx)))
+        .collect();
     match members.len() {
         0 => unreachable!("isect_type must have at least one member"),
         1 => {
@@ -254,12 +268,12 @@ fn collect_intersection(pairs: Pairs<Rule>) -> ParsedTy {
     }
 }
 
-fn collect_attrset(pairs: Pairs<Rule>) -> ParsedTy {
+fn collect_attrset(pairs: Pairs<Rule>, ctx: &mut CollectCtx) -> ParsedTy {
     let mut fields: BTreeMap<SmolStr, ParsedTyRef> = BTreeMap::new();
     let mut dyn_ty: Option<ParsedTyRef> = None;
     let mut open = false;
 
-    let path = get_field_doc_path();
+    let parent_path = ctx.path().to_vec();
 
     for pair in pairs {
         match pair.as_rule() {
@@ -280,24 +294,24 @@ fn collect_attrset(pairs: Pairs<Rule>) -> ParsedTy {
 
                 // If this field has a doc comment, record it.
                 if let Some(doc) = field_doc {
-                    push_field_doc(&path, name.clone(), doc);
+                    ctx.push_field_doc(name.clone(), doc);
                 }
 
                 // Set path context for nested attrsets so their field docs
                 // get the correct prefix.
-                let mut child_path = path.clone();
+                let mut child_path = parent_path.clone();
                 child_path.push(name.clone());
-                set_field_doc_path(child_path);
+                ctx.set_path(child_path);
 
-                let ty = collect_type_expr(inner).unwrap();
+                let ty = collect_type_expr(inner, ctx).unwrap();
                 fields.insert(name, ty.into());
 
                 // Restore parent path context.
-                set_field_doc_path(path.clone());
+                ctx.set_path(parent_path.clone());
             }
             Rule::dyn_field => {
                 let inner = pair.into_inner();
-                let ty = collect_type_expr(inner).unwrap();
+                let ty = collect_type_expr(inner, ctx).unwrap();
                 dyn_ty = Some(ty.into());
             }
             Rule::open_marker => {
@@ -545,7 +559,10 @@ mod tests {
         assert_eq!(file.field_docs.len(), 1);
         assert_eq!(
             file.field_docs[0].path,
-            vec![smol_str::SmolStr::from("Config"), smol_str::SmolStr::from("enable")]
+            vec![
+                smol_str::SmolStr::from("Config"),
+                smol_str::SmolStr::from("enable")
+            ]
         );
         assert_eq!(file.field_docs[0].doc.as_str(), "Whether to enable.");
     }
@@ -596,7 +613,10 @@ mod tests {
         // First: Config.services
         assert_eq!(
             file.field_docs[0].path,
-            vec![smol_str::SmolStr::from("Config"), smol_str::SmolStr::from("services")]
+            vec![
+                smol_str::SmolStr::from("Config"),
+                smol_str::SmolStr::from("services")
+            ]
         );
         assert_eq!(file.field_docs[0].doc.as_str(), "Services section.");
 

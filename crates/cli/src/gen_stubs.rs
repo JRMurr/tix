@@ -293,6 +293,63 @@ pub enum StubKind {
     HomeManager,
 }
 
+impl StubKind {
+    fn type_name(&self) -> &'static str {
+        match self {
+            StubKind::Nixos => "NixosConfig",
+            StubKind::HomeManager => "HomeManagerConfig",
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            StubKind::Nixos => "NixOS",
+            StubKind::HomeManager => "Home Manager",
+        }
+    }
+
+    fn command(&self) -> &'static str {
+        match self {
+            StubKind::Nixos => "tix-cli gen-stubs nixos",
+            StubKind::HomeManager => "tix-cli gen-stubs home-manager",
+        }
+    }
+
+    fn context_key(&self) -> &'static str {
+        match self {
+            StubKind::Nixos => "nixos",
+            StubKind::HomeManager => "home",
+        }
+    }
+
+    fn example_glob(&self) -> &'static str {
+        match self {
+            StubKind::Nixos => "modules/**/*.nix",
+            StubKind::HomeManager => "home/**/*.nix",
+        }
+    }
+
+    fn context_vals(&self) -> &'static str {
+        match self {
+            // NixOS module arguments: { config, lib, pkgs, options, modulesPath, ... }
+            StubKind::Nixos => {
+                "val config :: NixosConfig;\n\
+                 val lib :: Lib;\n\
+                 val pkgs :: Pkgs;\n\
+                 val options :: NixosConfig;\n\
+                 val modulesPath :: path;\n"
+            }
+            // Home Manager module arguments: { config, lib, pkgs, osConfig, ... }
+            StubKind::HomeManager => {
+                "val config :: HomeManagerConfig;\n\
+                 val lib :: Lib;\n\
+                 val pkgs :: Pkgs;\n\
+                 val osConfig :: { ... };\n"
+            }
+        }
+    }
+}
+
 /// Generate a complete .tix file string from an option tree.
 ///
 /// The output includes:
@@ -318,28 +375,12 @@ pub fn generate_tix_file_with_docs(
     full_descriptions: bool,
 ) -> String {
     let attrset_ty = options_to_attrset_ty_with_docs(options, 0, full_descriptions);
-
-    let (type_name, command, context_vals) = match kind {
-        StubKind::Nixos => (
-            "NixosConfig",
-            "tix-cli gen-stubs nixos",
-            // NixOS module arguments: { config, lib, pkgs, options, modulesPath, ... }
-            "val config :: NixosConfig;\n\
-             val lib :: Lib;\n\
-             val pkgs :: Pkgs;\n\
-             val options :: NixosConfig;\n\
-             val modulesPath :: path;\n",
-        ),
-        StubKind::HomeManager => (
-            "HomeManagerConfig",
-            "tix-cli gen-stubs home-manager",
-            // Home Manager module arguments: { config, lib, pkgs, osConfig, ... }
-            "val config :: HomeManagerConfig;\n\
-             val lib :: Lib;\n\
-             val pkgs :: Pkgs;\n\
-             val osConfig :: { ... };\n",
-        ),
-    };
+    let type_name = kind.type_name();
+    let command = kind.command();
+    let label = kind.label();
+    let ctx = kind.context_key();
+    let example_glob = kind.example_glob();
+    let context_vals = kind.context_vals();
 
     format!(
         "# Auto-generated {label} option type stubs.\n\
@@ -356,18 +397,6 @@ pub fn generate_tix_file_with_docs(
          type {type_name} = {attrset_ty};\n\
          \n\
          {context_vals}",
-        label = match kind {
-            StubKind::Nixos => "NixOS",
-            StubKind::HomeManager => "Home Manager",
-        },
-        ctx = match kind {
-            StubKind::Nixos => "nixos",
-            StubKind::HomeManager => "home",
-        },
-        example_glob = match kind {
-            StubKind::Nixos => "modules/**/*.nix",
-            StubKind::HomeManager => "home/**/*.nix",
-        },
     )
 }
 
@@ -380,11 +409,10 @@ pub fn generate_tix_file_with_docs(
 //   1. Nixpkgs mode: evaluate `(import <nixpkgs/nixos> {}).options`
 //   2. Flake mode: evaluate a specific nixosConfiguration from a flake
 
-/// Options for the `gen-stubs nixos` subcommand.
-pub struct NixosOptions {
+/// Shared options for all `gen-stubs` subcommands.
+pub struct CommonOptions {
     pub nixpkgs: Option<PathBuf>,
     pub flake: Option<PathBuf>,
-    pub hostname: Option<String>,
     /// Pre-computed option tree JSON. When set, skip `nix eval` and read from this file.
     pub from_json: Option<PathBuf>,
     pub output: Option<PathBuf>,
@@ -393,21 +421,19 @@ pub struct NixosOptions {
     pub descriptions: bool,
 }
 
+/// Options for the `gen-stubs nixos` subcommand.
+pub struct NixosOptions {
+    pub common: CommonOptions,
+    pub hostname: Option<String>,
+}
+
 /// Options for the `gen-stubs home-manager` subcommand.
 pub struct HomeManagerOptions {
-    pub nixpkgs: Option<PathBuf>,
+    pub common: CommonOptions,
     /// Explicit path to a home-manager source tree (default: flake registry).
     pub home_manager: Option<PathBuf>,
-    /// Path to a flake directory (evaluates `homeConfigurations`).
-    pub flake: Option<PathBuf>,
     /// Username to select from `homeConfigurations` (required if flake has multiple).
     pub username: Option<String>,
-    /// Pre-computed option tree JSON. When set, skip `nix eval` and read from this file.
-    pub from_json: Option<PathBuf>,
-    pub output: Option<PathBuf>,
-    pub max_depth: u32,
-    /// Emit `##` doc comments with option descriptions.
-    pub descriptions: bool,
 }
 
 /// Build the full nix expression that imports extract-options.nix and passes
@@ -419,7 +445,7 @@ fn build_nix_expr(opts: &NixosOptions) -> String {
     // `eval-config.nix` is used instead of `<nixpkgs/nixos>` because the latter
     // requires a `nixos-config` in NIX_PATH. eval-config.nix with an empty module
     // list gives us the full NixOS option tree without needing a system configuration.
-    let options_expr = if let Some(ref flake_path) = opts.flake {
+    let options_expr = if let Some(ref flake_path) = opts.common.flake {
         let flake = flake_path.display();
         if let Some(ref host) = opts.hostname {
             format!("(builtins.getFlake \"{flake}\").nixosConfigurations.\"{host}\".options")
@@ -434,7 +460,7 @@ fn build_nix_expr(opts: &NixosOptions) -> String {
             )
         }
     } else {
-        let nixpkgs = match opts.nixpkgs {
+        let nixpkgs = match opts.common.nixpkgs {
             Some(ref p) => format!("{}", p.display()),
             None => "<nixpkgs>".to_string(),
         };
@@ -445,7 +471,7 @@ fn build_nix_expr(opts: &NixosOptions) -> String {
 
     format!(
         "let extract = {}; in extract {{ options = {}; maxDepth = {}; }}",
-        extractor, options_expr, opts.max_depth,
+        extractor, options_expr, opts.common.max_depth,
     )
 }
 
@@ -468,7 +494,7 @@ fn build_hm_nix_expr(opts: &HomeManagerOptions) -> String {
     let extractor = include_str!("../../../tools/extract-options.nix");
 
     // Determine how to get the home-manager source.
-    let hm_source = if let Some(ref flake_path) = opts.flake {
+    let hm_source = if let Some(ref flake_path) = opts.common.flake {
         let flake = flake_path.display();
         // In flake mode, get the options directly from a homeConfiguration.
         let options_expr = if let Some(ref user) = opts.username {
@@ -486,7 +512,7 @@ fn build_hm_nix_expr(opts: &HomeManagerOptions) -> String {
         // Flake mode: options come directly from the evaluated configuration.
         return format!(
             "let extract = {}; in extract {{ options = {}; maxDepth = {}; }}",
-            extractor, options_expr, opts.max_depth,
+            extractor, options_expr, opts.common.max_depth,
         );
     } else {
         // Non-flake mode: load HM from explicit path or registry.
@@ -496,7 +522,7 @@ fn build_hm_nix_expr(opts: &HomeManagerOptions) -> String {
         }
     };
 
-    let nixpkgs = match opts.nixpkgs {
+    let nixpkgs = match opts.common.nixpkgs {
         Some(ref p) => format!("import {} {{}}", p.display()),
         None => "import <nixpkgs> {}".to_string(),
     };
@@ -526,63 +552,45 @@ fn build_hm_nix_expr(opts: &HomeManagerOptions) -> String {
     }}];
   }};
 in extract {{ options = eval.options; maxDepth = {max_depth}; }}"#,
-        max_depth = opts.max_depth,
+        max_depth = opts.common.max_depth,
     )
+}
+
+/// Run `nix eval --json --impure --expr <expr>`, parse the JSON output into
+/// an option tree. `label` is used in the progress message (e.g. "NixOS").
+fn invoke_nix_eval_common(
+    expr: &str,
+    label: &str,
+) -> Result<std::collections::BTreeMap<String, OptionNode>, Box<dyn std::error::Error>> {
+    let mut cmd = Command::new("nix");
+    cmd.args(["eval", "--json", "--expr", expr]);
+    cmd.arg("--impure");
+
+    eprintln!("Evaluating {label} options (this may take a while)...");
+    let output = cmd.output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("nix eval failed:\n{}", stderr).into());
+    }
+
+    let tree: std::collections::BTreeMap<String, OptionNode> =
+        serde_json::from_slice(&output.stdout)?;
+    Ok(tree)
 }
 
 /// Invoke `nix eval --json` for Home Manager and parse the result.
 pub fn invoke_hm_nix_eval(
     opts: &HomeManagerOptions,
 ) -> Result<std::collections::BTreeMap<String, OptionNode>, Box<dyn std::error::Error>> {
-    let expr = build_hm_nix_expr(opts);
-
-    let mut cmd = Command::new("nix");
-    cmd.args(["eval", "--json", "--expr", &expr]);
-    cmd.arg("--impure");
-
-    eprintln!("Evaluating Home Manager options (this may take a while)...");
-    let output = cmd.output()?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("nix eval failed:\n{}", stderr).into());
-    }
-
-    let tree: std::collections::BTreeMap<String, OptionNode> =
-        serde_json::from_slice(&output.stdout)?;
-    Ok(tree)
+    invoke_nix_eval_common(&build_hm_nix_expr(opts), "Home Manager")
 }
 
-// =============================================================================
-// NixOS Nix Evaluation
-// =============================================================================
-
-/// Invoke `nix eval --json` and parse the result.
+/// Invoke `nix eval --json` for NixOS and parse the result.
 pub fn invoke_nix_eval(
     opts: &NixosOptions,
 ) -> Result<std::collections::BTreeMap<String, OptionNode>, Box<dyn std::error::Error>> {
-    let expr = build_nix_expr(opts);
-
-    let mut cmd = Command::new("nix");
-    cmd.args(["eval", "--json", "--expr", &expr]);
-
-    // --impure is needed for:
-    //   - Flake mode: builtins.getFlake requires it
-    //   - Nixpkgs mode with <nixpkgs>: NIX_PATH lookup requires it
-    //   - Explicit path mode: absolute path access requires it
-    cmd.arg("--impure");
-
-    eprintln!("Evaluating NixOS options (this may take a while)...");
-    let output = cmd.output()?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("nix eval failed:\n{}", stderr).into());
-    }
-
-    let tree: std::collections::BTreeMap<String, OptionNode> =
-        serde_json::from_slice(&output.stdout)?;
-    Ok(tree)
+    invoke_nix_eval_common(&build_nix_expr(opts), "NixOS")
 }
 
 // =============================================================================
@@ -593,8 +601,8 @@ pub fn invoke_nix_eval(
 fn read_json_file(
     path: &std::path::Path,
 ) -> Result<std::collections::BTreeMap<String, OptionNode>, Box<dyn std::error::Error>> {
-    let data = std::fs::read(path)
-        .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
+    let data =
+        std::fs::read(path).map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
     let tree = serde_json::from_slice(&data)
         .map_err(|e| format!("failed to parse JSON from {}: {}", path.display(), e))?;
     Ok(tree)
@@ -602,23 +610,24 @@ fn read_json_file(
 
 /// Run the `gen-stubs nixos` subcommand.
 pub fn run_nixos(opts: NixosOptions) -> Result<(), Box<dyn std::error::Error>> {
-    let tree = match opts.from_json {
+    let tree = match opts.common.from_json {
         Some(ref path) => read_json_file(path)?,
         None => invoke_nix_eval(&opts)?,
     };
-    let tix_content = generate_tix_file_with_docs(&tree, &StubKind::Nixos, opts.descriptions);
-    write_generated_stubs(&tix_content, opts.output.as_ref(), "NixOS")
+    let tix_content =
+        generate_tix_file_with_docs(&tree, &StubKind::Nixos, opts.common.descriptions);
+    write_generated_stubs(&tix_content, opts.common.output.as_ref(), "NixOS")
 }
 
 /// Run the `gen-stubs home-manager` subcommand.
 pub fn run_home_manager(opts: HomeManagerOptions) -> Result<(), Box<dyn std::error::Error>> {
-    let tree = match opts.from_json {
+    let tree = match opts.common.from_json {
         Some(ref path) => read_json_file(path)?,
         None => invoke_hm_nix_eval(&opts)?,
     };
     let tix_content =
-        generate_tix_file_with_docs(&tree, &StubKind::HomeManager, opts.descriptions);
-    write_generated_stubs(&tix_content, opts.output.as_ref(), "Home Manager")
+        generate_tix_file_with_docs(&tree, &StubKind::HomeManager, opts.common.descriptions);
+    write_generated_stubs(&tix_content, opts.common.output.as_ref(), "Home Manager")
 }
 
 /// Validate and write generated .tix content to a file or stdout.
@@ -1222,13 +1231,15 @@ mod tests {
     #[ignore]
     fn integration_nixos_eval() {
         let opts = NixosOptions {
-            nixpkgs: None,
-            flake: None,
+            common: CommonOptions {
+                nixpkgs: None,
+                flake: None,
+                from_json: None,
+                output: None,
+                max_depth: 4, // shallow for speed
+                descriptions: false,
+            },
             hostname: None,
-            from_json: None,
-            output: None,
-            max_depth: 4, // shallow for speed
-            descriptions: false,
         };
         let tree = invoke_nix_eval(&opts).expect("nix eval should succeed");
         assert!(!tree.is_empty(), "option tree should not be empty");
@@ -1328,14 +1339,16 @@ mod tests {
     #[ignore]
     fn integration_home_manager_eval() {
         let opts = HomeManagerOptions {
-            nixpkgs: None,
+            common: CommonOptions {
+                nixpkgs: None,
+                flake: None,
+                from_json: None,
+                output: None,
+                max_depth: 3, // shallow for speed
+                descriptions: false,
+            },
             home_manager: None,
-            flake: None,
             username: None,
-            from_json: None,
-            output: None,
-            max_depth: 3, // shallow for speed
-            descriptions: false,
         };
         let tree = invoke_hm_nix_eval(&opts).expect("nix eval should succeed");
         assert!(!tree.is_empty(), "option tree should not be empty");

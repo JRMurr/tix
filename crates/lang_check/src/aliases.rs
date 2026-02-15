@@ -61,10 +61,7 @@ impl DocIndex {
 
     /// Insert a field-level doc.
     fn insert_field_doc(&mut self, alias: SmolStr, path: Vec<SmolStr>, doc: SmolStr) {
-        self.field_docs
-            .entry(alias)
-            .or_default()
-            .insert(path, doc);
+        self.field_docs.entry(alias).or_default().insert(path, doc);
     }
 }
 
@@ -88,6 +85,14 @@ pub struct TypeAliasRegistry {
     /// falling back to the compiled-in minimal stubs. Set via the
     /// `TIX_BUILTIN_STUBS` environment variable.
     builtin_stubs_dir: Option<PathBuf>,
+}
+
+/// Controls where val declarations are routed during `load_declarations`.
+enum ValTarget<'a> {
+    /// Store in the registry's `global_vals` map (normal .tix file loading).
+    GlobalVals,
+    /// Collect into a separate map (context stub loading).
+    ContextArgs(&'a mut HashMap<SmolStr, ParsedTy>),
 }
 
 impl TypeAliasRegistry {
@@ -115,22 +120,20 @@ impl TypeAliasRegistry {
 
     /// Load declarations from a parsed .tix file into the registry.
     pub fn load_tix_file(&mut self, file: &TixDeclFile) {
-        self.load_declarations(&file.declarations, true);
-
-        // Load field-level docs from the parsed file.
-        for field_doc in &file.field_docs {
-            if field_doc.path.len() >= 2 {
-                let alias = field_doc.path[0].clone();
-                let field_path = field_doc.path[1..].to_vec();
-                self.docs
-                    .insert_field_doc(alias, field_path, field_doc.doc.clone());
-            }
-        }
+        let mut target = ValTarget::GlobalVals;
+        self.load_declarations(&file.declarations, &mut target);
+        self.load_field_docs(&file.field_docs);
     }
 
-    /// Recursively load declarations. `top_level` controls whether val
-    /// declarations are added to `global_vals` (only at the top level).
-    fn load_declarations(&mut self, declarations: &[TixDeclaration], top_level: bool) {
+    /// Recursively load declarations. `val_target` controls where val
+    /// declarations are routed: `GlobalVals` adds them to the registry's
+    /// `global_vals` map; `ContextArgs` collects them into a separate map
+    /// for context-scoped parameters.
+    fn load_declarations(
+        &mut self,
+        declarations: &[TixDeclaration],
+        val_target: &mut ValTarget<'_>,
+    ) {
         for decl in declarations {
             match decl {
                 TixDeclaration::TypeAlias { name, body, doc } => {
@@ -140,8 +143,13 @@ impl TypeAliasRegistry {
                     }
                 }
                 TixDeclaration::ValDecl { name, ty, doc } => {
-                    if top_level {
-                        self.global_vals.insert(name.clone(), ty.clone());
+                    match val_target {
+                        ValTarget::GlobalVals => {
+                            self.global_vals.insert(name.clone(), ty.clone());
+                        }
+                        ValTarget::ContextArgs(ref mut map) => {
+                            map.insert(name.clone(), ty.clone());
+                        }
                     }
                     if let Some(doc) = doc {
                         self.docs.insert_decl_doc(name.clone(), doc.clone());
@@ -168,6 +176,18 @@ impl TypeAliasRegistry {
                     //   field doc on Lib.id
                     self.collect_module_field_docs(&alias_name, declarations, &[]);
                 }
+            }
+        }
+    }
+
+    /// Load field-level doc comments from a parsed .tix file into the doc index.
+    fn load_field_docs(&mut self, field_docs: &[comment_parser::FieldDoc]) {
+        for field_doc in field_docs {
+            if field_doc.path.len() >= 2 {
+                let alias = field_doc.path[0].clone();
+                let field_path = field_doc.path[1..].to_vec();
+                self.docs
+                    .insert_field_doc(alias, field_path, field_doc.doc.clone());
             }
         }
     }
@@ -244,40 +264,9 @@ impl TypeAliasRegistry {
     ) -> Result<HashMap<SmolStr, ParsedTy>, Box<dyn std::error::Error>> {
         let file = comment_parser::parse_tix_file(source)?;
         let mut context_args = HashMap::new();
-
-        for decl in &file.declarations {
-            match decl {
-                comment_parser::TixDeclaration::TypeAlias { name, body, doc } => {
-                    self.aliases.insert(name.clone(), body.clone());
-                    if let Some(doc) = doc {
-                        self.docs.insert_decl_doc(name.clone(), doc.clone());
-                    }
-                }
-                comment_parser::TixDeclaration::ValDecl { name, ty, .. } => {
-                    context_args.insert(name.clone(), ty.clone());
-                }
-                comment_parser::TixDeclaration::Module {
-                    name, declarations, ..
-                } => {
-                    // Register the module as a type alias (same as load_tix_file)
-                    // so that val declarations like `val lib :: Lib` can resolve.
-                    let attrset_ty = module_to_attrset(declarations);
-                    let alias_name = capitalize(name);
-                    self.aliases.insert(alias_name, attrset_ty);
-                }
-            }
-        }
-
-        // Load field docs from context stubs too.
-        for field_doc in &file.field_docs {
-            if field_doc.path.len() >= 2 {
-                let alias = field_doc.path[0].clone();
-                let field_path = field_doc.path[1..].to_vec();
-                self.docs
-                    .insert_field_doc(alias, field_path, field_doc.doc.clone());
-            }
-        }
-
+        let mut target = ValTarget::ContextArgs(&mut context_args);
+        self.load_declarations(&file.declarations, &mut target);
+        self.load_field_docs(&file.field_docs);
         Ok(context_args)
     }
 

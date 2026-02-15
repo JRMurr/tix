@@ -308,3 +308,130 @@ mod tests {
         assert_eq!(parse_context_annotation("context:"), None);
     }
 }
+
+// =============================================================================
+// Conformance tests: collect.rs ↔ tix_collect.rs
+// =============================================================================
+//
+// Both parsers share type expression syntax but use different pest grammars.
+// These tests verify that identical type expression strings produce the same
+// `ParsedTy` through both paths, catching accidental divergence when one
+// file is updated without the other.
+
+#[cfg(test)]
+mod conformance_tests {
+    use super::*;
+
+    /// Parse a type expression through the doc comment parser (collect.rs).
+    /// Wraps the expression in a `type: x :: <expr>` doc comment.
+    fn parse_via_comment(expr: &str) -> ParsedTy {
+        let comment = format!("type: x :: {expr}");
+        let pairs = parse_comment_text(&comment).expect("comment parse error");
+        let decls = collect::collect_type_decls(pairs);
+        assert_eq!(decls.len(), 1, "expected exactly one decl for: {expr}");
+        decls.into_iter().next().unwrap().type_expr
+    }
+
+    /// Parse a type expression through the .tix parser (tix_collect.rs).
+    /// Wraps the expression in a `val x :: <expr>;` declaration.
+    fn parse_via_tix(expr: &str) -> ParsedTy {
+        let tix = format!("val x :: {expr};");
+        let file = parse_tix_file(&tix).unwrap_or_else(|e| {
+            panic!("tix parse error for '{expr}': {e}");
+        });
+        assert_eq!(
+            file.declarations.len(),
+            1,
+            "expected exactly one decl for: {expr}"
+        );
+        match file.declarations.into_iter().next().unwrap() {
+            TixDeclaration::ValDecl { ty, .. } => ty,
+            other => panic!("expected ValDecl, got: {other:?}"),
+        }
+    }
+
+    /// Assert both parsers produce the same ParsedTy for the given expression.
+    fn assert_conformance(expr: &str) {
+        let comment_ty = parse_via_comment(expr);
+        let tix_ty = parse_via_tix(expr);
+        assert_eq!(
+            comment_ty, tix_ty,
+            "parsers diverged for: {expr}\n  comment: {comment_ty:?}\n  tix:     {tix_ty:?}"
+        );
+    }
+
+    #[test]
+    fn primitives() {
+        for prim in ["int", "string", "bool", "float", "path", "null", "number"] {
+            assert_conformance(prim);
+        }
+    }
+
+    #[test]
+    fn generic_vars() {
+        assert_conformance("a");
+        assert_conformance("b");
+    }
+
+    #[test]
+    fn type_references() {
+        assert_conformance("Derivation");
+        assert_conformance("Lib");
+    }
+
+    #[test]
+    fn list_types() {
+        assert_conformance("[int]");
+        assert_conformance("[a]");
+        assert_conformance("[[string]]");
+    }
+
+    #[test]
+    fn lambda_types() {
+        assert_conformance("a -> b");
+        assert_conformance("int -> string -> bool");
+        assert_conformance("(a -> b) -> a -> b");
+    }
+
+    #[test]
+    fn union_types() {
+        assert_conformance("int | string");
+        assert_conformance("int | string | null");
+    }
+
+    #[test]
+    fn intersection_types() {
+        assert_conformance("a & b");
+        assert_conformance("a & b & c");
+    }
+
+    #[test]
+    fn attrset_closed() {
+        assert_conformance("{ name: string, age: int }");
+    }
+
+    #[test]
+    fn attrset_open() {
+        assert_conformance("{ name: string, ... }");
+    }
+
+    #[test]
+    fn attrset_dyn() {
+        assert_conformance("{ _: int }");
+    }
+
+    #[test]
+    fn attrset_only_open() {
+        assert_conformance("{ ... }");
+    }
+
+    #[test]
+    fn complex_combinations() {
+        assert_conformance("{ name: string, ... } -> Derivation");
+        assert_conformance("[a] -> (a -> b) -> [b]");
+        assert_conformance("int | string -> bool");
+        assert_conformance("int & bool | string");
+        assert_conformance("(int -> int) | (string -> string)");
+        assert_conformance("{ _: int | null }");
+    }
+}

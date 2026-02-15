@@ -1,3 +1,21 @@
+// =============================================================================
+// Doc comment type expression collection
+// =============================================================================
+//
+// COUPLING NOTICE: The type expression collection functions below
+// (collect_type_expr, collect_one, collect_union, collect_intersection,
+// collect_attrset) are structurally duplicated in `tix_collect.rs`.
+//
+// Deduplication isn't practical because:
+//   - pest generates separate, incompatible `Rule` enums per grammar
+//   - tix_collect threads a `CollectCtx` for field doc accumulation
+//   - the grammars have legitimate differences (doc_block, quoted_field,
+//     whitespace handling)
+//
+// When modifying type expression parsing logic here, check whether the
+// same change is needed in `tix_collect.rs`. The conformance tests in
+// `lib.rs` will catch divergence for shared type expression syntax.
+
 use lang_ty::{AttrSetTy, PrimitiveTy};
 use pest::iterators::Pairs;
 use smol_str::SmolStr;
