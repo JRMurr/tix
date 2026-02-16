@@ -189,6 +189,94 @@ fn builtin_stubs_fallback_without_env() {
     assert_binding(&stdout, "greeting", "string");
 }
 
+/// Verify that modules declared in `--stubs` files merge with modules from
+/// the compiled-in builtins (`stubs/lib.tix`). The builtin `module lib`
+/// defines e.g. `val id :: a -> a`; a local stub adds `val customFn :: int -> string`.
+/// Both should be accessible through `lib.id` and `lib.customFn` respectively.
+#[test]
+fn module_merge_builtins_and_local_stubs() {
+    let tmp = tempfile::tempdir().expect("failed to create temp dir");
+
+    // A local stub that extends module lib with a custom function.
+    // This should merge with the built-in lib module from stubs/lib.tix.
+    let custom_stub = tmp.path().join("custom.tix");
+    std::fs::write(
+        &custom_stub,
+        indoc! {"
+            module lib {
+                val customFn :: int -> string;
+            }
+        "},
+    )
+    .unwrap();
+
+    // Minimal nixos.tix context stubs — reference the merged Lib type.
+    let stubs_dir = tmp.path().join("builtin_stubs");
+    std::fs::create_dir(&stubs_dir).unwrap();
+    std::fs::write(
+        stubs_dir.join("nixos.tix"),
+        indoc! {"
+            type NixosConfig = { ... };
+            type Pkgs = { ... };
+
+            val config :: NixosConfig;
+            val lib :: Lib;
+            val pkgs :: Pkgs;
+        "},
+    )
+    .unwrap();
+
+    // tix.toml — context definition matching our test Nix file.
+    let config_path = tmp.path().join("tix.toml");
+    std::fs::write(
+        &config_path,
+        indoc! {r#"
+            [context.nixos]
+            paths = ["merge_test.nix"]
+            stubs = ["@nixos"]
+        "#},
+    )
+    .unwrap();
+
+    // Nix file that uses both the builtin lib.id and the locally-added
+    // lib.customFn, exercising the merged Lib type end-to-end.
+    let nix_file = tmp.path().join("merge_test.nix");
+    std::fs::write(
+        &nix_file,
+        indoc! {"
+            { config, lib, pkgs, ... }:
+            {
+              greeting = lib.id \"hello\";
+              converted = lib.customFn 42;
+            }
+        "},
+    )
+    .unwrap();
+
+    let output = Command::new(tix_cli())
+        .arg(&nix_file)
+        .arg("--stubs")
+        .arg(&custom_stub)
+        .arg("--config")
+        .arg(&config_path)
+        .env("TIX_BUILTIN_STUBS", &stubs_dir)
+        .output()
+        .expect("failed to run tix-cli");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "tix-cli failed with merged stubs.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    // lib.id "hello" should resolve to string (from builtin stubs/lib.tix).
+    assert_binding(&stdout, "greeting", "string");
+    // lib.customFn 42 should resolve to string (from local --stubs file).
+    assert_binding(&stdout, "converted", "string");
+}
+
 /// Verify that deliberately wrong stubs cause a type error, proving the stubs
 /// actually influence inference rather than being silently ignored.
 #[test]
