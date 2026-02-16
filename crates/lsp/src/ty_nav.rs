@@ -62,6 +62,13 @@ pub(crate) fn get_module_config_type(
     first_segment: &SmolStr,
     context_arg_types: &HashMap<SmolStr, OutputTy>,
 ) -> Option<OutputTy> {
+    // Escape hatch: a `/** no-module */` comment at the top of the file
+    // opts out of all module-aware hover/completion. Useful for files that
+    // match a tix.toml glob but aren't actually NixOS/HM modules.
+    if has_no_module_directive(analysis) {
+        return None;
+    }
+
     let root_expr_id = analysis.module.entry_expr;
 
     match &analysis.module[root_expr_id] {
@@ -107,6 +114,34 @@ pub(crate) fn get_module_config_type(
     }
 
     None
+}
+
+/// Check whether the file has a `no-module` directive in its leading comments.
+///
+/// Scans the first tokens of the syntax tree for a comment containing
+/// `no-module`. Both line comments (`# no-module`) and block comments
+/// (`/** no-module */`) are recognized. Stops at the first non-trivia token
+/// (i.e. the first real code token).
+fn has_no_module_directive(analysis: &FileAnalysis) -> bool {
+    use rnix::SyntaxKind;
+
+    let root = analysis.parsed.tree();
+    for token in root.syntax().descendants_with_tokens() {
+        let rowan::NodeOrToken::Token(t) = token else {
+            continue;
+        };
+        match t.kind() {
+            SyntaxKind::TOKEN_COMMENT => {
+                if t.text().contains("no-module") {
+                    return true;
+                }
+            }
+            SyntaxKind::TOKEN_WHITESPACE => continue,
+            // Stop at the first non-trivia token.
+            _ => break,
+        }
+    }
+    false
 }
 
 /// Walk up through nested AttrSet → AttrpathValue chains to collect parent

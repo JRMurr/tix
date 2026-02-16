@@ -1302,6 +1302,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn no_module_directive_disables_attrpath_key_completion() {
+        // A `/** no-module */` comment at the top of the file opts out of
+        // module-aware completion, even when context stubs are loaded.
+        let src = indoc! {"
+            /** no-module */
+            { pkgs, ... }: { programs. }
+            #                         ^1
+        "};
+        let results = complete_at_markers_with_context(src, TEST_CONTEXT_STUBS);
+        let names = labels(&results[&1]);
+        assert!(
+            !names.contains(&"steam"),
+            "no-module directive should suppress attrpath key completion, got: {names:?}"
+        );
+    }
+
     // ------------------------------------------------------------------
     // Completion items include doc comments from stubs
     // ------------------------------------------------------------------
