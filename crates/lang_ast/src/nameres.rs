@@ -255,13 +255,16 @@ impl ModuleScopes {
 pub struct NameResolution {
     /// `None` value for unresolved names.
     resolve_map: ArenaMap<ExprId, Option<ResolveResult>>,
+    /// Inverted index: for each NameId, the ExprIds that resolve to it.
+    /// Built once during name_resolution() so callers avoid repeated O(n) scans.
+    refs_by_name: HashMap<NameId, Vec<ExprId>>,
 }
 
 #[salsa::tracked]
 pub fn name_resolution(db: &dyn crate::AstDb, file: NixFile) -> NameResolution {
     let module = module(db, file);
     let scopes = scopes(db, file);
-    let resolve_map = module
+    let resolve_map: ArenaMap<_, _> = module
         .exprs()
         .filter_map(|(e, kind)| {
             match kind {
@@ -270,9 +273,20 @@ pub fn name_resolution(db: &dyn crate::AstDb, file: NixFile) -> NameResolution {
                 _ => None,
             }
         })
-        .collect::<ArenaMap<_, _>>();
+        .collect();
 
-    NameResolution { resolve_map }
+    // Build the inverted index: NameId → Vec<ExprId>.
+    let mut refs_by_name: HashMap<NameId, Vec<ExprId>> = HashMap::new();
+    for (expr_id, resolved) in resolve_map.iter() {
+        if let Some(ResolveResult::Definition(name_id)) = resolved {
+            refs_by_name.entry(*name_id).or_default().push(expr_id);
+        }
+    }
+
+    NameResolution {
+        resolve_map,
+        refs_by_name,
+    }
 }
 
 impl NameResolution {
@@ -285,6 +299,13 @@ impl NameResolution {
         self.resolve_map
             .iter()
             .filter_map(|(e, res)| Some((e, res.as_ref()?)))
+    }
+
+    /// All reference ExprIds that resolve to the given NameId.
+    pub fn refs_to(&self, name: NameId) -> &[ExprId] {
+        self.refs_by_name
+            .get(&name)
+            .map_or(&[], |v| v.as_slice())
     }
 }
 
@@ -468,4 +489,31 @@ pub fn group_def(db: &dyn crate::AstDb, file: NixFile) -> GroupedDefs {
         .collect();
 
     scc
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn refs_to_returns_all_reference_sites() {
+        // `let x = 1; in x + x` — x has two references after `in`.
+        let mut db = crate::RootDatabase::default();
+        let nix_file = db.set_file_contents(
+            std::path::PathBuf::from("/test_refs.nix"),
+            "let x = 1; in x + x".to_string(),
+        );
+        let module = crate::module(&db, nix_file);
+        let name_res = name_resolution(&db, nix_file);
+
+        // Find the NameId for `x` (should be the only name).
+        let (x_name, _) = module.names().next().expect("should have a name");
+
+        let refs = name_res.refs_to(x_name);
+        assert_eq!(
+            refs.len(),
+            2,
+            "x should have exactly 2 reference sites, got: {refs:?}"
+        );
+    }
 }

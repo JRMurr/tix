@@ -65,16 +65,12 @@ pub fn find_references(
 
     let mut locations = Vec::new();
 
-    // Scan all name resolutions to find references pointing to the target.
-    for (expr_id, resolved) in analysis.name_res.iter() {
-        if let ResolveResult::Definition(name_id) = resolved {
-            if *name_id == target {
-                if let Some(ptr) = analysis.source_map.node_for_expr(expr_id) {
-                    let node = ptr.to_node(root.syntax());
-                    let range = analysis.line_index.range(node.text_range());
-                    locations.push(Location::new(uri.clone(), range));
-                }
-            }
+    // Use the inverted index to find all references to the target name.
+    for &expr_id in analysis.name_res.refs_to(target) {
+        if let Some(ptr) = analysis.source_map.node_for_expr(expr_id) {
+            let node = ptr.to_node(root.syntax());
+            let range = analysis.line_index.range(node.text_range());
+            locations.push(Location::new(uri.clone(), range));
         }
     }
 

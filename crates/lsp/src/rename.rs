@@ -5,7 +5,6 @@
 // Renames a name across all its definition and reference sites within a single
 // file. Cross-file rename is not yet supported.
 
-use lang_ast::nameres::ResolveResult;
 use rowan::ast::AstNode;
 use tower_lsp::lsp_types::*;
 
@@ -54,18 +53,14 @@ pub fn rename(
     }
 
     // Reference sites.
-    for (expr_id, resolved) in analysis.name_res.iter() {
-        if let ResolveResult::Definition(name_id) = resolved {
-            if *name_id == target {
-                if let Some(ptr) = analysis.source_map.node_for_expr(expr_id) {
-                    let node = ptr.to_node(root.syntax());
-                    let range = analysis.line_index.range(node.text_range());
-                    edits.push(TextEdit {
-                        range,
-                        new_text: new_name.to_string(),
-                    });
-                }
-            }
+    for &expr_id in analysis.name_res.refs_to(target) {
+        if let Some(ptr) = analysis.source_map.node_for_expr(expr_id) {
+            let node = ptr.to_node(root.syntax());
+            let range = analysis.line_index.range(node.text_range());
+            edits.push(TextEdit {
+                range,
+                new_text: new_name.to_string(),
+            });
         }
     }
 

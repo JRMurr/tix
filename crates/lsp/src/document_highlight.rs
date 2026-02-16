@@ -5,7 +5,6 @@
 // Same-file variant of find-references, with Read/Write classification.
 // The definition site gets WRITE, reference sites get READ.
 
-use lang_ast::nameres::ResolveResult;
 use rowan::ast::AstNode;
 use tower_lsp::lsp_types::{DocumentHighlight, DocumentHighlightKind, Position};
 
@@ -34,18 +33,14 @@ pub fn document_highlight(
     }
 
     // Reference sites — READ.
-    for (expr_id, resolved) in analysis.name_res.iter() {
-        if let ResolveResult::Definition(name_id) = resolved {
-            if *name_id == target {
-                if let Some(ptr) = analysis.source_map.node_for_expr(expr_id) {
-                    let node = ptr.to_node(root.syntax());
-                    let range = analysis.line_index.range(node.text_range());
-                    highlights.push(DocumentHighlight {
-                        range,
-                        kind: Some(DocumentHighlightKind::READ),
-                    });
-                }
-            }
+    for &expr_id in analysis.name_res.refs_to(target) {
+        if let Some(ptr) = analysis.source_map.node_for_expr(expr_id) {
+            let node = ptr.to_node(root.syntax());
+            let range = analysis.line_index.range(node.text_range());
+            highlights.push(DocumentHighlight {
+                range,
+                kind: Some(DocumentHighlightKind::READ),
+            });
         }
     }
 
