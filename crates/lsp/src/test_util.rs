@@ -120,7 +120,7 @@ impl TestAnalysis {
         let path = temp_path("test.nix");
         let mut state = AnalysisState::new(registry);
         state.update_file(path.clone(), src.to_string());
-        let root = rnix::Root::parse(src).tree();
+        let root = state.get_file(&path).unwrap().parsed.tree();
         Self { state, path, root }
     }
 

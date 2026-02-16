@@ -25,6 +25,10 @@ use crate::project_config::ProjectConfig;
 pub struct FileAnalysis {
     pub nix_file: NixFile,
     pub line_index: LineIndex,
+    /// Cached parse result. Call `.tree()` to get an rnix::Root.
+    /// We store the Parse (which contains the Send-safe green tree) rather
+    /// than the Root directly because Root is !Send.
+    pub parsed: rnix::Parse<rnix::Root>,
     pub module: Module,
     pub source_map: ModuleSourceMap,
     pub name_res: NameResolution,
@@ -71,6 +75,7 @@ impl AnalysisState {
     /// for cache lookup (the same PathBuf passed in).
     pub fn update_file(&mut self, path: PathBuf, contents: String) -> &FileAnalysis {
         let line_index = LineIndex::new(&contents);
+        let parsed = rnix::Root::parse(&contents);
         let nix_file = self.db.set_file_contents(path.clone(), contents);
 
         let (module, source_map) = module_and_source_maps(&self.db, nix_file);
@@ -141,6 +146,7 @@ impl AnalysisState {
             FileAnalysis {
                 nix_file,
                 line_index,
+                parsed,
                 module,
                 source_map,
                 name_res,
@@ -195,4 +201,27 @@ fn chase_import_target(
         return chase_import_target(module, import_targets, *fun);
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lang_check::aliases::TypeAliasRegistry;
+    use rowan::ast::AstNode;
+
+    #[test]
+    fn cached_parse_roundtrips_source_text() {
+        let src = "let x = 1; in x + x";
+        let path = crate::test_util::temp_path("parse_cache.nix");
+        let mut state = AnalysisState::new(TypeAliasRegistry::default());
+        state.update_file(path.clone(), src.to_string());
+        let analysis = state.get_file(&path).unwrap();
+
+        let root = analysis.parsed.tree();
+        assert_eq!(
+            root.syntax().text().to_string(),
+            src,
+            "cached parse should reproduce the original source"
+        );
+    }
 }

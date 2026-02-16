@@ -705,7 +705,7 @@ mod tests {
 
         state.update_file(nix_path.clone(), src.to_string());
         let analysis = state.get_file(&nix_path).unwrap();
-        let root = rnix::Root::parse(src).tree();
+        let root = analysis.parsed.tree();
         let docs = &state.registry.docs;
 
         let results = markers

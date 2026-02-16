@@ -61,10 +61,10 @@ impl TixLanguageServer {
         // for hover, completion, etc.) but only collect diagnostics if enabled.
         let diagnostics = {
             let mut state = self.state.lock();
-            let analysis = state.update_file(path, text.clone());
+            let analysis = state.update_file(path, text);
 
             if diagnostics_enabled {
-                let root = rnix::Root::parse(&text).tree();
+                let root = analysis.parsed.tree();
 
                 crate::diagnostics::to_lsp_diagnostics(
                     &analysis.check_result.diagnostics,
@@ -330,8 +330,7 @@ impl LanguageServer for TixLanguageServer {
                 .filter_map(|(path, analysis)| {
                     let uri = Url::from_file_path(path).ok()?;
                     let diags = if diagnostics_enabled {
-                        let contents = analysis.nix_file.contents(&state.db);
-                        let root = rnix::Root::parse(contents).tree();
+                        let root = analysis.parsed.tree();
                         crate::diagnostics::to_lsp_diagnostics(
                             &analysis.check_result.diagnostics,
                             &analysis.source_map,
@@ -370,9 +369,7 @@ impl LanguageServer for TixLanguageServer {
             None => return Ok(None),
         };
 
-        // Re-parse to get a Root we can use for node lookup.
-        let contents = analysis.nix_file.contents(&state.db);
-        let root = rnix::Root::parse(contents).tree();
+        let root = analysis.parsed.tree();
 
         Ok(crate::hover::hover(
             analysis,
@@ -400,8 +397,7 @@ impl LanguageServer for TixLanguageServer {
             None => return Ok(None),
         };
 
-        let contents = analysis.nix_file.contents(&state.db);
-        let root = rnix::Root::parse(contents).tree();
+        let root = analysis.parsed.tree();
 
         let location = crate::goto_def::goto_definition(&state, analysis, pos, &uri, &root);
         Ok(location.map(GotoDefinitionResponse::Scalar))
@@ -422,8 +418,7 @@ impl LanguageServer for TixLanguageServer {
             None => return Ok(None),
         };
 
-        let contents = analysis.nix_file.contents(&state.db);
-        let root = rnix::Root::parse(contents).tree();
+        let root = analysis.parsed.tree();
 
         Ok(crate::completion::completion(
             analysis,
@@ -478,8 +473,7 @@ impl LanguageServer for TixLanguageServer {
             None => return Ok(None),
         };
 
-        let contents = analysis.nix_file.contents(&state.db);
-        let root = rnix::Root::parse(contents).tree();
+        let root = analysis.parsed.tree();
 
         let symbols = crate::document_symbol::document_symbols(analysis, &root);
         Ok(Some(DocumentSymbolResponse::Nested(symbols)))
@@ -498,8 +492,7 @@ impl LanguageServer for TixLanguageServer {
             None => return Ok(None),
         };
 
-        let contents = analysis.nix_file.contents(&state.db);
-        let root = rnix::Root::parse(contents).tree();
+        let root = analysis.parsed.tree();
 
         let links = crate::document_link::document_links(analysis, &root);
         Ok(Some(links))
@@ -541,8 +534,7 @@ impl LanguageServer for TixLanguageServer {
             None => return Ok(None),
         };
 
-        let contents = analysis.nix_file.contents(&state.db);
-        let root = rnix::Root::parse(contents).tree();
+        let root = analysis.parsed.tree();
 
         let ranges = crate::selection_range::selection_ranges(analysis, params.positions, &root);
         Ok(Some(ranges))
@@ -564,8 +556,7 @@ impl LanguageServer for TixLanguageServer {
             None => return Ok(None),
         };
 
-        let contents = analysis.nix_file.contents(&state.db);
-        let root = rnix::Root::parse(contents).tree();
+        let root = analysis.parsed.tree();
 
         let refs =
             crate::references::find_references(analysis, pos, &uri, &root, include_declaration);
@@ -590,8 +581,7 @@ impl LanguageServer for TixLanguageServer {
             None => return Ok(None),
         };
 
-        let contents = analysis.nix_file.contents(&state.db);
-        let root = rnix::Root::parse(contents).tree();
+        let root = analysis.parsed.tree();
 
         let highlights = crate::document_highlight::document_highlight(analysis, pos, &root);
         Ok(Some(highlights))
@@ -615,8 +605,7 @@ impl LanguageServer for TixLanguageServer {
             None => return Ok(None),
         };
 
-        let contents = analysis.nix_file.contents(&state.db);
-        let root = rnix::Root::parse(contents).tree();
+        let root = analysis.parsed.tree();
 
         Ok(crate::rename::prepare_rename(analysis, pos, &root))
     }
@@ -637,8 +626,7 @@ impl LanguageServer for TixLanguageServer {
             None => return Ok(None),
         };
 
-        let contents = analysis.nix_file.contents(&state.db);
-        let root = rnix::Root::parse(contents).tree();
+        let root = analysis.parsed.tree();
 
         Ok(crate::rename::rename(analysis, pos, &new_name, &uri, &root))
     }
@@ -659,8 +647,7 @@ impl LanguageServer for TixLanguageServer {
             None => return Ok(None),
         };
 
-        let contents = analysis.nix_file.contents(&state.db);
-        let root = rnix::Root::parse(contents).tree();
+        let root = analysis.parsed.tree();
 
         let tokens = crate::semantic_tokens::semantic_tokens(analysis, &root);
         Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
@@ -686,8 +673,7 @@ impl LanguageServer for TixLanguageServer {
             None => return Ok(None),
         };
 
-        let contents = analysis.nix_file.contents(&state.db);
-        let root = rnix::Root::parse(contents).tree();
+        let root = analysis.parsed.tree();
 
         let hints = crate::inlay_hint::inlay_hints(analysis, params.range, &root);
         Ok(Some(hints))
