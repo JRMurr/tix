@@ -189,3 +189,44 @@ pub(crate) fn extract_alias_name(ty: &OutputTy) -> Option<&SmolStr> {
         _ => None,
     }
 }
+
+/// Collect attrpath segments from an Attrpath node, relative to a boundary position.
+///
+/// When `inclusive` is true (hover), includes the segment whose end >= boundary.
+/// When `inclusive` is false (completion), excludes segments whose start >= boundary.
+/// Handles both Ident and Str attrs.
+pub(crate) fn collect_attrpath_segments(
+    attrpath: &rnix::ast::Attrpath,
+    boundary: rowan::TextSize,
+    inclusive: bool,
+) -> Vec<SmolStr> {
+    let mut segments = Vec::new();
+
+    for attr in attrpath.attrs() {
+        // In exclusive mode (completion), skip segments at or after the boundary.
+        if !inclusive && attr.syntax().text_range().start() >= boundary {
+            break;
+        }
+
+        let name = match attr {
+            rnix::ast::Attr::Ident(ref ident) => {
+                ident.ident_token().map(|t| SmolStr::from(t.text()))
+            }
+            rnix::ast::Attr::Str(ref s) => get_str_literal(s),
+            rnix::ast::Attr::Dynamic(_) => None,
+        };
+
+        match name {
+            Some(n) if !n.is_empty() => {
+                segments.push(n);
+                // In inclusive mode (hover), stop after the boundary segment.
+                if inclusive && attr.syntax().text_range().end() >= boundary {
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+
+    segments
+}

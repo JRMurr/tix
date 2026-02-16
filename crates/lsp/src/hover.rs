@@ -115,8 +115,8 @@ fn try_attrpath_key_hover(
     docs: &DocIndex,
 ) -> Option<Hover> {
     use crate::ty_nav::{
-        collect_parent_attrpath_context, extract_alias_name, get_module_config_type,
-        resolve_through_segments,
+        collect_attrpath_segments, collect_parent_attrpath_context, extract_alias_name,
+        get_module_config_type, resolve_through_segments,
     };
 
     let inference = analysis.inference()?;
@@ -138,26 +138,8 @@ fn try_attrpath_key_hover(
 
     // Collect all segments from this attrpath, up to and including the
     // hovered token.
-    let hovered_end = token.text_range().end();
-    let mut current_segments = Vec::new();
-    for attr in attrpath_node.attrs() {
-        let name = match attr {
-            rnix::ast::Attr::Ident(ref ident) => {
-                ident.ident_token().map(|t| SmolStr::from(t.text()))
-            }
-            _ => None,
-        };
-        match name {
-            Some(n) if !n.is_empty() => {
-                current_segments.push(n);
-                // Stop after the hovered segment.
-                if attr.syntax().text_range().end() >= hovered_end {
-                    break;
-                }
-            }
-            _ => break,
-        }
-    }
+    let current_segments =
+        collect_attrpath_segments(&attrpath_node, token.text_range().end(), true);
 
     // Collect parent context from enclosing nesting.
     let parent_segments = collect_parent_attrpath_context(&attrset_node);
@@ -205,7 +187,8 @@ fn try_attrpath_key_field_doc(
     docs: &DocIndex,
 ) -> Option<String> {
     use crate::ty_nav::{
-        collect_parent_attrpath_context, extract_alias_name, get_module_config_type,
+        collect_attrpath_segments, collect_parent_attrpath_context, extract_alias_name,
+        get_module_config_type,
     };
 
     let inference = analysis.inference()?;
@@ -221,26 +204,8 @@ fn try_attrpath_key_field_doc(
 
     let attrset_node = apv.syntax().parent().and_then(rnix::ast::AttrSet::cast)?;
 
-    // Collect attrpath segments up to and including the hovered token.
-    let hovered_end = token.text_range().end();
-    let mut current_segments = Vec::new();
-    for attr in attrpath_node.attrs() {
-        let name = match attr {
-            rnix::ast::Attr::Ident(ref ident) => {
-                ident.ident_token().map(|t| SmolStr::from(t.text()))
-            }
-            _ => None,
-        };
-        match name {
-            Some(n) if !n.is_empty() => {
-                current_segments.push(n);
-                if attr.syntax().text_range().end() >= hovered_end {
-                    break;
-                }
-            }
-            _ => break,
-        }
-    }
+    let current_segments =
+        collect_attrpath_segments(&attrpath_node, token.text_range().end(), true);
 
     let parent_segments = collect_parent_attrpath_context(&attrset_node);
     let mut full_path = parent_segments;

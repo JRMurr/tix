@@ -318,7 +318,8 @@ fn try_attrpath_key_completion(
 
     // Collect segments from the current attrpath before the cursor.
     let cursor_offset = token.text_range().end();
-    let current_segments = collect_attrpath_key_segments(&attrpath_node, cursor_offset);
+    let current_segments =
+        crate::ty_nav::collect_attrpath_segments(&attrpath_node, cursor_offset, false);
 
     // Collect parent context segments from enclosing AttrpathValue/AttrSet
     // nesting. For `{ services.openssh = { enable. } }`, if we're at `enable.`,
@@ -360,39 +361,6 @@ fn try_attrpath_key_completion(
 /// Get the module config type from the root lambda's pattern fields.
 ///
 
-/// Collect attrpath segments before the cursor from an Attrpath node.
-///
-/// Similar to `collect_typed_segments` but operates on an `Attrpath` node
-/// directly (rather than extracting it from a Select). Extracts static key
-/// segments, stopping at the cursor position or any error-recovery artifact.
-fn collect_attrpath_key_segments(
-    attrpath: &rnix::ast::Attrpath,
-    cursor_offset: rowan::TextSize,
-) -> Vec<SmolStr> {
-    let mut segments = Vec::new();
-
-    for attr in attrpath.attrs() {
-        // Stop at segments at or after the cursor (being completed or artifacts).
-        if attr.syntax().text_range().start() >= cursor_offset {
-            break;
-        }
-
-        let name = match attr {
-            rnix::ast::Attr::Ident(ref ident) => {
-                ident.ident_token().map(|t| SmolStr::from(t.text()))
-            }
-            rnix::ast::Attr::Str(ref s) => get_str_literal(s),
-            rnix::ast::Attr::Dynamic(_) => None,
-        };
-
-        match name {
-            Some(n) if !n.is_empty() => segments.push(n),
-            _ => break,
-        }
-    }
-
-    segments
-}
 
 
 // ==============================================================================
