@@ -93,23 +93,17 @@ pub fn find_references(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::AnalysisState;
-    use crate::test_util::{parse_markers, temp_path};
+    use crate::test_util::{parse_markers, TestAnalysis};
     use indoc::indoc;
-    use lang_check::aliases::TypeAliasRegistry;
 
-    /// Analyze source, parse markers, and return everything needed for reference tests.
     fn refs_at_marker(src: &str, marker: u32, include_declaration: bool) -> Vec<Location> {
         let markers = parse_markers(src);
         let offset = markers[&marker];
-        let path = temp_path("test.nix");
-        let mut state = AnalysisState::new(TypeAliasRegistry::default());
-        state.update_file(path.clone(), src.to_string());
-        let analysis = state.get_file(&path).unwrap();
-        let uri = Url::from_file_path(&path).unwrap();
-        let root = rnix::Root::parse(src).tree();
+        let t = TestAnalysis::new(src);
+        let analysis = t.analysis();
+        let uri = t.uri();
         let pos = analysis.line_index.position(offset);
-        find_references(analysis, pos, &uri, &root, include_declaration)
+        find_references(analysis, pos, &uri, &t.root, include_declaration)
     }
 
     #[test]

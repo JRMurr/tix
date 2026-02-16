@@ -2,6 +2,11 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use tower_lsp::lsp_types::Url;
+
+use crate::state::{AnalysisState, FileAnalysis};
+use lang_check::aliases::TypeAliasRegistry;
+
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
 /// Generate a unique temporary file path for tests, avoiding collisions
@@ -64,4 +69,62 @@ pub fn parse_markers(src: &str) -> BTreeMap<u32, u32> {
     }
 
     markers
+}
+
+/// A temporary directory with Nix files for multi-file LSP tests.
+///
+/// Files are written as `(relative_name, contents)` pairs. The directory
+/// and all its contents are cleaned up on drop.
+pub struct TempProject {
+    dir: PathBuf,
+}
+
+impl TempProject {
+    pub fn new(files: &[(&str, &str)]) -> Self {
+        let dir = temp_path("project");
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        for (name, contents) in files {
+            let path = dir.join(name);
+            std::fs::write(&path, contents).expect("write temp file");
+        }
+        TempProject { dir }
+    }
+
+    pub fn path(&self, name: &str) -> PathBuf {
+        self.dir.join(name).canonicalize().expect("canonicalize")
+    }
+}
+
+impl Drop for TempProject {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// Single-file analysis setup for LSP tests.
+///
+/// Encapsulates the common pattern of creating a temp file, initializing
+/// `AnalysisState`, parsing, and providing access to `FileAnalysis`.
+pub struct TestAnalysis {
+    pub state: AnalysisState,
+    pub path: PathBuf,
+    pub root: rnix::Root,
+}
+
+impl TestAnalysis {
+    pub fn new(src: &str) -> Self {
+        let path = temp_path("test.nix");
+        let mut state = AnalysisState::new(TypeAliasRegistry::default());
+        state.update_file(path.clone(), src.to_string());
+        let root = rnix::Root::parse(src).tree();
+        Self { state, path, root }
+    }
+
+    pub fn analysis(&self) -> &FileAnalysis {
+        self.state.get_file(&self.path).unwrap()
+    }
+
+    pub fn uri(&self) -> Url {
+        Url::from_file_path(&self.path).unwrap()
+    }
 }

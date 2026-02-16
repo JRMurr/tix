@@ -55,21 +55,16 @@ pub fn document_highlight(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::AnalysisState;
-    use crate::test_util::{parse_markers, temp_path};
+    use crate::test_util::{parse_markers, TestAnalysis};
     use indoc::indoc;
-    use lang_check::aliases::TypeAliasRegistry;
 
     fn highlight_at_marker(src: &str, marker: u32) -> Vec<DocumentHighlight> {
         let markers = parse_markers(src);
         let offset = markers[&marker];
-        let path = temp_path("test.nix");
-        let mut state = AnalysisState::new(TypeAliasRegistry::default());
-        state.update_file(path.clone(), src.to_string());
-        let analysis = state.get_file(&path).unwrap();
-        let root = rnix::Root::parse(src).tree();
+        let t = TestAnalysis::new(src);
+        let analysis = t.analysis();
         let pos = analysis.line_index.position(offset);
-        document_highlight(analysis, pos, &root)
+        document_highlight(analysis, pos, &t.root)
     }
 
     fn count_kinds(highlights: &[DocumentHighlight]) -> (usize, usize) {

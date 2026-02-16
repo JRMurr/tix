@@ -4,10 +4,11 @@
 //
 // Lifecycle (initialize/shutdown) and request dispatch. Analysis runs inside
 // spawn_blocking because rnix::Root is !Send + !Sync. The AnalysisState is
-// behind a std::sync::Mutex and all access happens within the blocking task.
+// behind a parking_lot::Mutex and all access happens within the blocking task.
 
 use std::path::PathBuf;
-use std::sync::Mutex;
+
+use parking_lot::Mutex;
 
 use lang_check::aliases::TypeAliasRegistry;
 use tower_lsp::jsonrpc::Result;
@@ -52,14 +53,14 @@ impl TixLanguageServer {
             None => return,
         };
 
-        let diagnostics_enabled = self.config.lock().unwrap().diagnostics.enable;
+        let diagnostics_enabled = self.config.lock().diagnostics.enable;
 
         // All analysis runs in spawn_blocking because rnix::Root is !Send.
         // We gather the LSP-safe results (diagnostics) inside the blocking
         // closure and publish them afterwards. We always run analysis (needed
         // for hover, completion, etc.) but only collect diagnostics if enabled.
         let diagnostics = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock();
             let analysis = state.update_file(path, text.clone());
 
             if diagnostics_enabled {
@@ -130,9 +131,9 @@ impl LanguageServer for TixLanguageServer {
                     // to include both CLI and editor-configured stubs.
                     if !init_config.stubs.is_empty() {
                         let registry = self.build_registry(&init_config);
-                        self.state.lock().unwrap().reload_registry(registry);
+                        self.state.lock().reload_registry(registry);
                     }
-                    *self.config.lock().unwrap() = init_config;
+                    *self.config.lock() = init_config;
                 }
                 Err(e) => {
                     log::warn!("Failed to parse initializationOptions: {e}");
@@ -154,7 +155,7 @@ impl LanguageServer for TixLanguageServer {
                             log::info!("Loaded project config from {}", config_path.display());
 
                             // Load stubs from tix.toml config.
-                            let mut state = self.state.lock().unwrap();
+                            let mut state = self.state.lock();
                             for stub in &project_cfg.stubs {
                                 let stub_path = config_dir.join(stub);
                                 if let Err(e) = crate::load_stubs(&mut state.registry, &stub_path) {
@@ -247,7 +248,7 @@ impl LanguageServer for TixLanguageServer {
 
         // Remove cached analysis.
         if let Some(path) = uri_to_path(&params.text_document.uri) {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock();
             state.files.remove(&path);
         }
     }
@@ -263,7 +264,7 @@ impl LanguageServer for TixLanguageServer {
 
         // Check if stubs changed — if so, rebuild the registry and re-analyze.
         let stubs_changed = {
-            let old = self.config.lock().unwrap();
+            let old = self.config.lock();
             old.stubs != new_config.stubs
         };
 
@@ -271,7 +272,7 @@ impl LanguageServer for TixLanguageServer {
         // release the lock before awaiting the publish calls.
         let file_diagnostics = if stubs_changed {
             let registry = self.build_registry(&new_config);
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock();
             state.reload_registry(registry);
 
             let diagnostics_enabled = new_config.diagnostics.enable;
@@ -303,7 +304,7 @@ impl LanguageServer for TixLanguageServer {
             self.client.publish_diagnostics(uri, diags, None).await;
         }
 
-        *self.config.lock().unwrap() = new_config;
+        *self.config.lock() = new_config;
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
@@ -315,7 +316,7 @@ impl LanguageServer for TixLanguageServer {
             None => return Ok(None),
         };
 
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock();
         let analysis = match state.get_file(&path) {
             Some(a) => a,
             None => return Ok(None),
@@ -345,7 +346,7 @@ impl LanguageServer for TixLanguageServer {
             None => return Ok(None),
         };
 
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock();
         let analysis = match state.get_file(&path) {
             Some(a) => a,
             None => return Ok(None),
@@ -367,7 +368,7 @@ impl LanguageServer for TixLanguageServer {
             None => return Ok(None),
         };
 
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock();
         let analysis = match state.get_file(&path) {
             Some(a) => a,
             None => return Ok(None),
@@ -389,7 +390,7 @@ impl LanguageServer for TixLanguageServer {
             None => return Ok(None),
         };
 
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock();
         let analysis = match state.get_file(&path) {
             Some(a) => a,
             None => return Ok(None),
@@ -409,7 +410,7 @@ impl LanguageServer for TixLanguageServer {
             None => return Ok(None),
         };
 
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock();
         let analysis = match state.get_file(&path) {
             Some(a) => a,
             None => return Ok(None),
@@ -429,7 +430,7 @@ impl LanguageServer for TixLanguageServer {
             None => return Ok(None),
         };
 
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock();
         let analysis = match state.get_file(&path) {
             Some(a) => a,
             None => return Ok(None),
@@ -452,7 +453,7 @@ impl LanguageServer for TixLanguageServer {
             None => return Ok(None),
         };
 
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock();
         let analysis = match state.get_file(&path) {
             Some(a) => a,
             None => return Ok(None),
@@ -475,7 +476,7 @@ impl LanguageServer for TixLanguageServer {
             None => return Ok(None),
         };
 
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock();
         let analysis = match state.get_file(&path) {
             Some(a) => a,
             None => return Ok(None),
@@ -501,7 +502,7 @@ impl LanguageServer for TixLanguageServer {
             None => return Ok(None),
         };
 
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock();
         let analysis = match state.get_file(&path) {
             Some(a) => a,
             None => return Ok(None),
@@ -526,7 +527,7 @@ impl LanguageServer for TixLanguageServer {
             None => return Ok(None),
         };
 
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock();
         let analysis = match state.get_file(&path) {
             Some(a) => a,
             None => return Ok(None),
@@ -548,7 +549,7 @@ impl LanguageServer for TixLanguageServer {
             None => return Ok(None),
         };
 
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock();
         let analysis = match state.get_file(&path) {
             Some(a) => a,
             None => return Ok(None),
@@ -570,7 +571,7 @@ impl LanguageServer for TixLanguageServer {
             None => return Ok(None),
         };
 
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock();
         let analysis = match state.get_file(&path) {
             Some(a) => a,
             None => return Ok(None),
@@ -587,7 +588,7 @@ impl LanguageServer for TixLanguageServer {
     }
 
     async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
-        if !self.config.lock().unwrap().inlay_hints.enable {
+        if !self.config.lock().inlay_hints.enable {
             return Ok(Some(vec![]));
         }
 
@@ -597,7 +598,7 @@ impl LanguageServer for TixLanguageServer {
             None => return Ok(None),
         };
 
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock();
         let analysis = match state.get_file(&path) {
             Some(a) => a,
             None => return Ok(None),

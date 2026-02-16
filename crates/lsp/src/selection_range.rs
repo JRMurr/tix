@@ -92,22 +92,17 @@ fn build_selection_range(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::AnalysisState;
-    use crate::test_util::{parse_markers, temp_path};
+    use crate::test_util::{parse_markers, TestAnalysis};
     use indoc::indoc;
-    use lang_check::aliases::TypeAliasRegistry;
 
     fn get_ranges_at_marker(src: &str, marker: u32) -> Vec<tower_lsp::lsp_types::Range> {
         let markers = parse_markers(src);
         let offset = markers[&marker];
-        let path = temp_path("test.nix");
-        let mut state = AnalysisState::new(TypeAliasRegistry::default());
-        state.update_file(path.clone(), src.to_string());
-        let analysis = state.get_file(&path).unwrap();
-        let root = rnix::Root::parse(src).tree();
+        let t = TestAnalysis::new(src);
+        let analysis = t.analysis();
         let pos = analysis.line_index.position(offset);
 
-        let results = selection_ranges(analysis, vec![pos], &root);
+        let results = selection_ranges(analysis, vec![pos], &t.root);
         assert_eq!(results.len(), 1);
 
         // Flatten the linked list into a Vec.
@@ -151,16 +146,13 @@ mod tests {
             #       ^1     ^2
         "};
         let markers = parse_markers(src);
-        let path = temp_path("test.nix");
-        let mut state = AnalysisState::new(TypeAliasRegistry::default());
-        state.update_file(path.clone(), src.to_string());
-        let analysis = state.get_file(&path).unwrap();
-        let root = rnix::Root::parse(src).tree();
+        let t = TestAnalysis::new(src);
+        let analysis = t.analysis();
 
         let pos1 = analysis.line_index.position(markers[&1]);
         let pos2 = analysis.line_index.position(markers[&2]);
 
-        let results = selection_ranges(analysis, vec![pos1, pos2], &root);
+        let results = selection_ranges(analysis, vec![pos1, pos2], &t.root);
         assert_eq!(results.len(), 2);
     }
 

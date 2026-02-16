@@ -117,20 +117,15 @@ fn find_binding_expr(analysis: &FileAnalysis, target: NameId) -> Option<ExprId> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::AnalysisState;
-    use crate::test_util::temp_path;
-    use lang_check::aliases::TypeAliasRegistry;
+    use crate::test_util::TestAnalysis;
 
     fn get_hints(src: &str) -> Vec<InlayHint> {
-        let path = temp_path("test.nix");
-        let mut state = AnalysisState::new(TypeAliasRegistry::default());
-        state.update_file(path.clone(), src.to_string());
-        let analysis = state.get_file(&path).unwrap();
-        let root = rnix::Root::parse(src).tree();
+        let t = TestAnalysis::new(src);
+        let analysis = t.analysis();
 
         // Request hints for the full document.
         let full_range = Range::new(Position::new(0, 0), Position::new(u32::MAX, 0));
-        inlay_hints(analysis, full_range, &root)
+        inlay_hints(analysis, full_range, &t.root)
     }
 
     fn hint_labels(hints: &[InlayHint]) -> Vec<String> {
@@ -231,15 +226,12 @@ mod tests {
     #[test]
     fn empty_range_returns_empty() {
         let src = "let x = 1 + 2; y = 3 + 4; in x + y";
-        let path = temp_path("test.nix");
-        let mut state = AnalysisState::new(TypeAliasRegistry::default());
-        state.update_file(path.clone(), src.to_string());
-        let analysis = state.get_file(&path).unwrap();
-        let root = rnix::Root::parse(src).tree();
+        let t = TestAnalysis::new(src);
+        let analysis = t.analysis();
 
         // Request a range that contains no names (past end of file).
         let range = Range::new(Position::new(100, 0), Position::new(101, 0));
-        let hints = inlay_hints(analysis, range, &root);
+        let hints = inlay_hints(analysis, range, &t.root);
         assert!(hints.is_empty());
     }
 }
