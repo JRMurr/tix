@@ -8,6 +8,9 @@ stubs/generated/
 # Generated VS Code settings for test fixtures
 test/nixos_fixture/.vscode/
 
+# mdbook build output
+docs/book/
+
 # Added by cargo
 
 /target

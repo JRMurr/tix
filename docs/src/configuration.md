@@ -1,0 +1,57 @@
+# Configuration
+
+**TLDR:** `tix.toml` maps file paths to contexts (like `@nixos` or `@home-manager`), controlling which stubs get loaded and how module parameters are typed.
+
+## tix.toml
+
+Tix auto-discovers `tix.toml` by walking up from the file being checked. You can also pass `--config path/to/tix.toml` explicitly.
+
+### Contexts
+
+A context tells tix "files matching these paths are NixOS modules (or Home Manager modules, etc.)" so it knows how to type the standard `{ config, lib, pkgs, ... }:` parameter pattern.
+
+```toml
+[context.nixos]
+paths = ["modules/*.nix", "hosts/**/*.nix"]
+stubs = ["@nixos"]
+
+[context.home-manager]
+paths = ["home/*.nix"]
+stubs = ["@home-manager"]
+```
+
+- **paths** — glob patterns matching files in this context
+- **stubs** — which stub sets to load. `@nixos` and `@home-manager` are built-in references to the generated NixOS/Home Manager stubs (requires the `with-stubs` package or `TIX_BUILTIN_STUBS` env var)
+
+### What contexts do
+
+When a file matches a context, tix automatically types the module's function parameters. A NixOS module like:
+
+```nix
+{ config, lib, pkgs, ... }:
+{
+  services.foo.enable = true;
+}
+```
+
+Gets `config`, `lib`, and `pkgs` typed according to the context's stubs, without any doc comment annotations in the file.
+
+### Inline context annotation
+
+You can also set context per-file with a doc comment at the top:
+
+```nix
+/** context: nixos */
+{ config, lib, pkgs, ... }:
+{
+  # ...
+}
+```
+
+### No-module escape hatch
+
+If tix incorrectly treats a file as a module, add this comment to disable module-aware features:
+
+```nix
+/** no-module */
+```

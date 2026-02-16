@@ -69,6 +69,7 @@
 
                 # common
                 pkgs.just
+                pkgs.mdbook
               ];
             };
           };

@@ -1,58 +1,84 @@
 # Tix
 
-A very simple/basic type checker for nix.
+A type checker for Nix, built on [MLsub/SimpleSub](https://lptk.github.io/programming/2020/03/26/demystifying-mlsub.html) — Hindley-Milner extended with subtyping, union types, and intersection types.
 
+The ideology: do as much inference as is reasonable but defer to doc comment annotations when it would be too hard to infer.
 
-## High level design
+## Quick Start
 
-The type checker uses MLsub/SimpleSub — an extension of Hindley-Milner with subtyping,
-union types, and intersection types. This is based on Parreaux's
-[The Simple Essence of Algebraic Subtyping](https://lptk.github.io/programming/2020/03/26/demystifying-mlsub.html).
+### Install via Nix Flake
 
-Key ideas:
-- **Subtyping constraints** instead of equality unification: `constrain(sub, sup)` records
-  directional bounds rather than merging variables.
-- **Union and intersection types** emerge naturally — if-then-else with different branch
-  types produces a union; function params used in multiple ways produce an intersection.
-- **Level-based let-polymorphism** with `extrude` instead of `instantiate` — type variables
-  at deeper levels are copied to fresh variables at the current level during reference.
-- **Polarity-aware canonicalization** — variables expand to union of lower bounds in positive
-  position (output) and intersection of upper bounds in negative position (input).
+```bash
+# Run directly
+nix run github:JRMurr/tix -- my-file.nix
 
-My "ideology" for the type checker is do as much inference as is reasonable but defer
-to comments with type annotations when it would be too hard to infer.
+# Or add to your flake inputs
+{
+  inputs.tix.url = "github:JRMurr/tix";
+}
+```
 
-### Pipeline
+The `with-stubs` package includes pre-generated NixOS and Home Manager type stubs:
 
-- Parse program into AST: `lang_ast/lower.rs`
-- Name resolution to find variable dependencies/scopes: `lang_ast/nameres.rs`
-- Group definitions by SCC (strongly connected components) for mutual recursion: `lang_ast/group_defs.rs`
-- Infer types bottom-up per SCC group: `lang_check/infer.rs`
+```bash
+nix run github:JRMurr/tix#with-stubs -- my-file.nix
+```
 
-### Inference pipeline (`lang_check`)
+### Type-check a file
 
-- **Pre-allocate** TyIds for all names and expressions so recursive references work.
-- **Single-pass AST walk** (`infer_expr.rs`): for each expression, infer its type and
-  call `constrain(sub, sup)` inline. No separate constraint generation phase.
-- **constrain** (`constrain.rs`): the core subtyping function. Records bounds on variables,
-  decomposes structural types (contravariant params, covariant bodies/fields).
-- **Overload resolution**: overloaded operators (`+`, `*`, etc.) are deferred until the
-  SCC group is fully inferred, then resolved based on concrete bounds. Unresolved
-  overloads are re-instantiated per call-site during extrusion.
-- **Extrude** (`infer.rs`): copies deep-level type variables to fresh variables at the
-  current level, preserving bounds via subtyping constraints. This replaces traditional
-  instantiate/generalize.
-- **Canonicalize** (`collect.rs`): expands the internal bounds-based representation into
-  canonical `OutputTy` values with explicit Union/Intersection variants.
+```bash
+tix-cli my-file.nix
+```
 
-## links
-- https://github.com/oxalica/nil
-  - does some level of type inference but doest support annotations (at least for now)
-  - read over its source a lot and took some code from there to get started
-  - Long term would be nice to merge into their. For now re-implementing for my own understanding and ease of messing around
-- https://github.com/nix-community/nixdoc stole some parsing logic from there
-- [nix types rfc](https://github.com/hsjobeki/nix-types/blob/main/docs/README.md#nix-types-rfc-draft)
-  - good spec for parsing doc comments
-- https://simon.peytonjones.org/assets/pdfs/hashing-modulo-alpha.pdf
-  - An approach to hash expressions that is used here to hash our type representation
-  - hashing a type makes it easy to see if two types are basically the same when they are in a union together
+### Use the LSP
+
+```bash
+tix-lsp
+```
+
+Works with any editor that supports LSP. Provides hover types, completions, go-to-definition, rename, inlay hints, and more.
+
+### CLI flags
+
+```
+tix-cli <file.nix> [--stubs path/to/stubs/] [--no-default-stubs] [--config tix.toml]
+tix-cli gen-stubs nixos [--flake .] [--hostname myhost] [-o nixos.tix]
+tix-cli gen-stubs home-manager [--flake .] [--username jr] [-o hm.tix]
+```
+
+## What does it do?
+
+Given a Nix file like:
+
+```nix
+let
+  add = a: b: a + b;
+  result = add 1 2;
+  greeting = if result > 0 then "positive" else null;
+in
+{ inherit add result greeting; }
+```
+
+Tix infers:
+
+```
+add     :: int -> int -> int
+result  :: int
+greeting :: string | null
+```
+
+Union types fall out naturally — `if-then-else` with different branch types, heterogeneous lists, etc. all just work.
+
+## Documentation
+
+Full docs (type system, stubs, configuration, internals): `docs/` directory, built with mdbook.
+
+```bash
+cd docs && mdbook serve
+```
+
+## Links
+
+- [nil](https://github.com/oxalica/nil) — Nix LSP that does some type inference. Read over its source a lot and took some code from there to get started.
+- [nix-types RFC](https://github.com/hsjobeki/nix-types/blob/main/docs/README.md#nix-types-rfc-draft) — good spec for parsing doc comments
+- [The Simple Essence of Algebraic Subtyping](https://lptk.github.io/programming/2020/03/26/demystifying-mlsub.html) — the paper this is based on
