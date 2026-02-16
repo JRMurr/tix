@@ -6,6 +6,7 @@
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    crane.url = "github:ipetkov/crane";
     home-manager = {
       url = "github:nix-community/home-manager";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -18,6 +19,7 @@
       nixpkgs,
       flake-utils,
       rust-overlay,
+      crane,
       home-manager,
       ...
     }:
@@ -31,7 +33,7 @@
             type: pkgs :: Pkgs
           */
           pkgs = import nixpkgs { inherit system overlays; };
-          rustAttrs = import ./rust.nix { inherit pkgs; };
+          rustAttrs = import ./rust.nix { inherit pkgs crane; };
           tix-lsp-dev = import ./lsp-dev.nix { inherit pkgs; };
 
           tix-stubs = import ./stubs.nix {
@@ -89,7 +91,7 @@
 
           rust-overlay = (import rust-overlay);
 
-          tix = import ./overlay.nix;
+          tix = import ./overlay.nix { inherit crane; };
         };
       }
     );

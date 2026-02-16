@@ -3,42 +3,45 @@
     type: pkgs :: Pkgs
   */
   pkgs,
+  crane,
 }:
 
 let
   lib = pkgs.lib;
-  rustVersion = (pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml); # rust-bin.stable.latest.default
+  rustVersion = (pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml);
   rustPlatform = pkgs.makeRustPlatform {
     cargo = rustVersion;
     rustc = rustVersion;
   };
-  name = "tix";
-  version = "0.1.0";
+
+  craneLib = (crane.mkLib pkgs).overrideToolchain rustVersion;
 
   fs = lib.fileset;
-  baseSrc = fs.unions [
-    ./crates
-    ./Cargo.toml
-    ./Cargo.lock
-    ./stubs
-    ./tools
-  ];
-
   src = fs.toSource {
     root = ./.;
-    fileset = baseSrc;
+    fileset = fs.unions [
+      ./crates
+      ./Cargo.toml
+      ./Cargo.lock
+      ./stubs
+      ./tools
+    ];
   };
-  # filterMarkdownFiles = fs.fileFilter (file: lib.strings.hasSuffix ".md" file.name) ./.;
-  # removedMarkedDown = fs.difference baseSrc filterMarkdownFiles;
 
-  rustBin = rustPlatform.buildRustPackage {
+  commonArgs = {
     inherit src;
-    pname = name;
-    version = version;
-
-    cargoLock.lockFile = ./Cargo.lock;
-    nativeBuildInputs = [ ];
+    pname = "tix";
+    version = "0.1.0";
   };
+
+  # Phase 1: Build only third-party dependencies (cached separately).
+  # Rebuilds only when Cargo.toml or Cargo.lock changes.
+  cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+
+  # Phase 2: Build workspace crates, reusing pre-built deps.
+  rustBin = craneLib.buildPackage (commonArgs // {
+    inherit cargoArtifacts;
+  });
 in
 {
   inherit rustPlatform;
