@@ -890,20 +890,17 @@ mod tests {
 
     use crate::project_config::{ContextConfig, ProjectConfig};
     use crate::state::AnalysisState;
-    use crate::test_util::{find_offset, parse_markers, temp_path};
+    use crate::test_util::{find_offset, parse_markers, TestAnalysis};
     use indoc::indoc;
     use lang_check::aliases::TypeAliasRegistry;
 
     /// Analyze source and get completions at a given byte offset.
     fn complete_at(src: &str, offset: u32) -> Vec<CompletionItem> {
-        let path = temp_path("test.nix");
-        let mut state = AnalysisState::new(TypeAliasRegistry::default());
-        state.update_file(path.clone(), src.to_string());
-        let analysis = state.get_file(&path).unwrap();
-        let root = rnix::Root::parse(src).tree();
+        let t = TestAnalysis::new(src);
+        let analysis = t.analysis();
         let pos = analysis.line_index.position(offset);
 
-        match completion(analysis, pos, &root) {
+        match completion(analysis, pos, &t.root) {
             Some(CompletionResponse::Array(items)) => items,
             _ => Vec::new(),
         }
@@ -918,17 +915,14 @@ mod tests {
         let markers = parse_markers(src);
         assert!(!markers.is_empty(), "no markers found in source");
 
-        let path = temp_path("test.nix");
-        let mut state = AnalysisState::new(TypeAliasRegistry::default());
-        state.update_file(path.clone(), src.to_string());
-        let analysis = state.get_file(&path).unwrap();
-        let root = rnix::Root::parse(src).tree();
+        let t = TestAnalysis::new(src);
+        let analysis = t.analysis();
 
         markers
             .into_iter()
             .map(|(num, offset)| {
                 let pos = analysis.line_index.position(offset);
-                let items = match completion(analysis, pos, &root) {
+                let items = match completion(analysis, pos, &t.root) {
                     Some(CompletionResponse::Array(items)) => items,
                     _ => Vec::new(),
                 };

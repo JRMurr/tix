@@ -57,35 +57,8 @@ pub fn document_links(analysis: &FileAnalysis, root: &rnix::Root) -> Vec<Documen
 mod tests {
     use super::*;
     use crate::state::AnalysisState;
-    use crate::test_util::temp_path;
+    use crate::test_util::{temp_path, TempProject};
     use lang_check::aliases::TypeAliasRegistry;
-    use std::path::PathBuf;
-
-    struct TempProject {
-        dir: PathBuf,
-    }
-
-    impl TempProject {
-        fn new(files: &[(&str, &str)]) -> Self {
-            let dir = temp_path("project");
-            std::fs::create_dir_all(&dir).expect("create temp dir");
-            for (name, contents) in files {
-                let path = dir.join(name);
-                std::fs::write(&path, contents).expect("write temp file");
-            }
-            TempProject { dir }
-        }
-
-        fn path(&self, name: &str) -> PathBuf {
-            self.dir.join(name).canonicalize().expect("canonicalize")
-        }
-    }
-
-    impl Drop for TempProject {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.dir);
-        }
-    }
 
     #[test]
     fn import_produces_link() {

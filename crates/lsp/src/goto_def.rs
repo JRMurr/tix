@@ -192,37 +192,9 @@ fn try_resolve_select_field(
 mod tests {
     use super::*;
     use crate::state::AnalysisState;
-    use crate::test_util::{find_offset, temp_path};
+    use crate::test_util::{find_offset, TempProject};
     use lang_check::aliases::TypeAliasRegistry;
     use std::path::PathBuf;
-
-    /// Create a temp directory with Nix files, returning the directory path.
-    /// Files are written as `(relative_name, contents)` pairs.
-    struct TempProject {
-        dir: PathBuf,
-    }
-
-    impl TempProject {
-        fn new(files: &[(&str, &str)]) -> Self {
-            let dir = temp_path("project");
-            std::fs::create_dir_all(&dir).expect("create temp dir");
-            for (name, contents) in files {
-                let path = dir.join(name);
-                std::fs::write(&path, contents).expect("write temp file");
-            }
-            TempProject { dir }
-        }
-
-        fn path(&self, name: &str) -> PathBuf {
-            self.dir.join(name).canonicalize().expect("canonicalize")
-        }
-    }
-
-    impl Drop for TempProject {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.dir);
-        }
-    }
 
     /// Build an AnalysisState and analyze a file, returning everything needed
     /// to call goto_definition.

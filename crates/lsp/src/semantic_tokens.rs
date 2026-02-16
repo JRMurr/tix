@@ -235,20 +235,15 @@ fn name_kind_to_token_type(kind: NameKind) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::AnalysisState;
-    use crate::test_util::temp_path;
-    use lang_check::aliases::TypeAliasRegistry;
+    use crate::test_util::TestAnalysis;
 
     /// Get semantic tokens for a source string. Returns the raw tokens with
     /// absolute positions (not delta-encoded) for easier assertions.
     fn get_tokens(src: &str) -> Vec<(u32, u32, u32, u32, u32)> {
-        let path = temp_path("test.nix");
-        let mut state = AnalysisState::new(TypeAliasRegistry::default());
-        state.update_file(path.clone(), src.to_string());
-        let analysis = state.get_file(&path).unwrap();
-        let root = rnix::Root::parse(src).tree();
+        let t = TestAnalysis::new(src);
+        let analysis = t.analysis();
 
-        let tokens = semantic_tokens(analysis, &root);
+        let tokens = semantic_tokens(analysis, &t.root);
 
         // Convert delta-encoded tokens back to absolute positions.
         let mut result = Vec::new();

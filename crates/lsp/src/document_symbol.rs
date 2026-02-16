@@ -138,17 +138,12 @@ fn collect_binding_symbols(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::AnalysisState;
-    use crate::test_util::temp_path;
-    use lang_check::aliases::TypeAliasRegistry;
+    use crate::test_util::TestAnalysis;
 
     fn get_symbols(src: &str) -> Vec<DocumentSymbol> {
-        let path = temp_path("test.nix");
-        let mut state = AnalysisState::new(TypeAliasRegistry::default());
-        state.update_file(path.clone(), src.to_string());
-        let analysis = state.get_file(&path).unwrap();
-        let root = rnix::Root::parse(src).tree();
-        document_symbols(analysis, &root)
+        let t = TestAnalysis::new(src);
+        let analysis = t.analysis();
+        document_symbols(analysis, &t.root)
     }
 
     fn names(symbols: &[DocumentSymbol]) -> Vec<&str> {

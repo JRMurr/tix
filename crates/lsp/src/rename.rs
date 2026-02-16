@@ -86,23 +86,17 @@ pub fn rename(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::AnalysisState;
-    use crate::test_util::{parse_markers, temp_path};
+    use crate::test_util::{parse_markers, TestAnalysis};
     use indoc::indoc;
-    use lang_check::aliases::TypeAliasRegistry;
 
-    /// Analyze source at a marker position and run rename.
     fn rename_at_marker(src: &str, marker: u32, new_name: &str) -> Option<WorkspaceEdit> {
         let markers = parse_markers(src);
         let offset = markers[&marker];
-        let path = temp_path("test.nix");
-        let mut state = AnalysisState::new(TypeAliasRegistry::default());
-        state.update_file(path.clone(), src.to_string());
-        let analysis = state.get_file(&path).unwrap();
-        let uri = Url::from_file_path(&path).unwrap();
-        let root = rnix::Root::parse(src).tree();
+        let t = TestAnalysis::new(src);
+        let analysis = t.analysis();
+        let uri = t.uri();
         let pos = analysis.line_index.position(offset);
-        rename(analysis, pos, new_name, &uri, &root)
+        rename(analysis, pos, new_name, &uri, &t.root)
     }
 
     fn edit_count(edit: &WorkspaceEdit) -> usize {
@@ -142,14 +136,11 @@ mod tests {
 
         let markers = parse_markers(src);
         let offset = markers[&1];
-        let path = temp_path("test.nix");
-        let mut state = AnalysisState::new(TypeAliasRegistry::default());
-        state.update_file(path.clone(), src.to_string());
-        let analysis = state.get_file(&path).unwrap();
-        let root = rnix::Root::parse(src).tree();
+        let t = TestAnalysis::new(src);
+        let analysis = t.analysis();
         let pos = analysis.line_index.position(offset);
 
-        assert!(prepare_rename(analysis, pos, &root).is_none());
+        assert!(prepare_rename(analysis, pos, &t.root).is_none());
     }
 
     #[test]
