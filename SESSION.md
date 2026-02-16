@@ -72,6 +72,15 @@
   the Select's attrpath, mangling subsequent expressions. This can destroy call
   sites that would otherwise constrain lambda parameters.
 
+### LSP Hover on Multi-Element Attrpaths
+
+- rnix parses `a.foo.bar` as a single Select with a two-element attrpath, not
+  nested Selects. Hovering on any element (`foo` or `bar`) skips to the same
+  Select node and shows the overall result type (`int`), rather than the
+  intermediate type (`{ bar: int }` for `foo`). Fixing this would require
+  mapping individual attrpath elements back to their corresponding intermediate
+  ExprIds from the Tix AST lowering (which does produce nested Selects).
+
 ### LSP Inlay Hints & NameKind Classification
 
 - Files wrapped in a top-level lambda with `{ pkgs ? <nixpkgs> }:` produce
