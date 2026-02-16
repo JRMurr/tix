@@ -1,0 +1,13 @@
+# Fixture tix.toml for testing NixOS/Home Manager context completion.
+#
+# Usage:
+#   cargo run --bin tix-cli -- test/nixos_fixture/hosts/desktop/gaming.nix \
+#       --stubs test/nixos_fixture/stubs/nixos.tix
+
+[context.nixos]
+paths = ["hosts/**/*.nix", "common/*.nix"]
+stubs = ["stubs/nixos.tix"]
+
+[context.home]
+paths = ["common/homemanager/**/*.nix"]
+stubs = ["stubs/home-manager.tix"]

@@ -1,0 +1,22 @@
+# Minimal Home Manager context stubs for fixture testing.
+
+type HomeManagerConfig = {
+    programs: {
+        bash: { enable: bool, ... },
+        git: { enable: bool, userName: string, ... },
+        ...
+    },
+    services: {
+        syncthing: { enable: bool, ... },
+        ...
+    },
+    ...
+};
+
+type Lib = { mkIf: bool -> a -> a, ... };
+type Pkgs = { ... };
+
+val config :: HomeManagerConfig;
+val lib :: Lib;
+val pkgs :: Pkgs;
+val osConfig :: { ... };

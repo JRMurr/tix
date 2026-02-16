@@ -1461,4 +1461,552 @@ mod tests {
             "should NOT suggest steam for plain lambda param, got: {names:?}"
         );
     }
+
+    // ==================================================================
+    // NixOS config fixture integration tests
+    // ==================================================================
+    //
+    // These tests exercise the full attrpath key completion pipeline with
+    // realistic NixOS/Home Manager module structures: tix.toml context
+    // config, .tix stubs with named types, glob-matched file paths, and
+    // various Nix module patterns (plain return attrset, lib.mkIf wrapping,
+    // nested attrsets, etc.).
+
+    /// Minimal but realistic NixOS context stubs. Declares a `NixosConfig`
+    /// type with nested `programs`, `services`, and `networking` sections,
+    /// plus `Lib` with `mkIf`/`mkMerge` and `Pkgs`.
+    const NIXOS_FIXTURE_STUBS: &str = indoc! {"
+        type NixosConfig = {
+            programs: {
+                steam: {
+                    enable: bool,
+                    remotePlay: { enable: bool, ... },
+                    ...
+                },
+                firefox: { enable: bool, ... },
+                dconf: { enable: bool, ... },
+                ...
+            },
+            services: {
+                openssh: {
+                    enable: bool,
+                    settings: { PasswordAuthentication: bool, ... },
+                    ...
+                },
+                pipewire: { enable: bool, ... },
+                ...
+            },
+            networking: {
+                firewall: { enable: bool, allowedTCPPorts: [int], ... },
+                hostName: string,
+                ...
+            },
+            ...
+        };
+
+        type Lib = { mkIf: bool -> a -> a, mkMerge: [a] -> a, ... };
+        type Pkgs = { hello: string, firefox: string, ... };
+
+        val config :: NixosConfig;
+        val lib :: Lib;
+        val pkgs :: Pkgs;
+        val options :: { ... };
+        val modulesPath :: path;
+    "};
+
+    /// Minimal Home Manager context stubs. Declares a `HomeManagerConfig`
+    /// type with `programs` and `services` sections distinct from NixOS.
+    const HM_FIXTURE_STUBS: &str = indoc! {"
+        type HomeManagerConfig = {
+            programs: {
+                bash: { enable: bool, ... },
+                git: { enable: bool, userName: string, ... },
+                ...
+            },
+            services: {
+                syncthing: { enable: bool, ... },
+                ...
+            },
+            ...
+        };
+
+        type Lib = { mkIf: bool -> a -> a, ... };
+        type Pkgs = { ... };
+
+        val config :: HomeManagerConfig;
+        val lib :: Lib;
+        val pkgs :: Pkgs;
+        val osConfig :: { ... };
+    "};
+
+    // ------------------------------------------------------------------
+    // NixosFixtureProject: multi-file project with context stubs
+    // ------------------------------------------------------------------
+
+    /// A temporary project directory with tix.toml, .tix stubs, and .nix
+    /// module files. Configures `AnalysisState` with project-level context
+    /// so that attrpath key completion resolves through the stub types.
+    struct NixosFixtureProject {
+        temp_dir: std::path::PathBuf,
+        state: AnalysisState,
+    }
+
+    fn next_fixture_id() -> u32 {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static FIXTURE_COUNTER: AtomicU32 = AtomicU32::new(0);
+        FIXTURE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Create a fixture project with inline context stubs.
+    ///
+    /// Each context is a `(name, glob_patterns, stubs_content)` tuple.
+    /// Stubs are written to `stubs/{name}.tix` and referenced from the
+    /// project config.
+    fn make_fixture(contexts: &[(&str, &[&str], &str)]) -> NixosFixtureProject {
+        let id = next_fixture_id();
+        let temp_dir = std::env::temp_dir()
+            .join(format!("tix_nixos_fixture_{}_{id}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let temp_dir = temp_dir.canonicalize().unwrap();
+
+        let stubs_dir = temp_dir.join("stubs");
+        std::fs::create_dir_all(&stubs_dir).unwrap();
+
+        let mut context_map = std::collections::HashMap::new();
+        for (name, globs, stubs_content) in contexts {
+            let stub_filename = format!("{name}.tix");
+            std::fs::write(stubs_dir.join(&stub_filename), stubs_content).unwrap();
+            context_map.insert(
+                name.to_string(),
+                ContextConfig {
+                    paths: globs.iter().map(|s| s.to_string()).collect(),
+                    stubs: vec![format!("stubs/{stub_filename}")],
+                },
+            );
+        }
+
+        let mut state = AnalysisState::new(TypeAliasRegistry::default());
+        state.project_config = Some(ProjectConfig {
+            stubs: vec![],
+            context: context_map,
+        });
+        state.config_dir = Some(temp_dir.clone());
+
+        NixosFixtureProject { temp_dir, state }
+    }
+
+    /// Create a fixture project using `@builtin` context references.
+    ///
+    /// If `override_stubs` is provided, the registry's builtin stubs dir
+    /// is set to a temp directory containing those files, so `@nixos` etc.
+    /// resolve to the rich stubs instead of the compiled-in minimal ones.
+    fn make_builtin_fixture(
+        contexts: &[(&str, &[&str])],
+        override_stubs: Option<&[(&str, &str)]>,
+    ) -> NixosFixtureProject {
+        let id = next_fixture_id();
+        let temp_dir = std::env::temp_dir()
+            .join(format!("tix_builtin_fixture_{}_{id}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let temp_dir = temp_dir.canonicalize().unwrap();
+
+        let mut registry = TypeAliasRegistry::default();
+        if let Some(overrides) = override_stubs {
+            let dir = temp_dir.join("builtin_override");
+            std::fs::create_dir_all(&dir).unwrap();
+            for (name, content) in overrides {
+                std::fs::write(dir.join(format!("{name}.tix")), content).unwrap();
+            }
+            registry.set_builtin_stubs_dir(dir);
+        }
+
+        let mut context_map = std::collections::HashMap::new();
+        for (name, globs) in contexts {
+            context_map.insert(
+                name.to_string(),
+                ContextConfig {
+                    paths: globs.iter().map(|s| s.to_string()).collect(),
+                    stubs: vec![format!("@{name}")],
+                },
+            );
+        }
+
+        let mut state = AnalysisState::new(registry);
+        state.project_config = Some(ProjectConfig {
+            stubs: vec![],
+            context: context_map,
+        });
+        state.config_dir = Some(temp_dir.clone());
+
+        NixosFixtureProject { temp_dir, state }
+    }
+
+    impl NixosFixtureProject {
+        /// Add (or update) a .nix module file at the given path relative to
+        /// the project root. Parent directories are created automatically.
+        fn add_file(&mut self, relative_path: &str, content: &str) {
+            let path = self.temp_dir.join(relative_path);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&path, content).unwrap();
+            self.state.update_file(path, content.to_string());
+        }
+
+        /// Run completions at all `# ^N` marker positions in the file.
+        fn complete_at_markers(
+            &self,
+            relative_path: &str,
+        ) -> BTreeMap<u32, Vec<CompletionItem>> {
+            let path = self.temp_dir.join(relative_path);
+            let src = std::fs::read_to_string(&path).unwrap();
+            let analysis = self.state.get_file(&path).expect("file not loaded");
+            let root = rnix::Root::parse(&src).tree();
+            let markers = parse_markers(&src);
+            assert!(!markers.is_empty(), "no markers found in {relative_path}");
+
+            markers
+                .into_iter()
+                .map(|(num, offset)| {
+                    let pos = analysis.line_index.position(offset);
+                    let items = match completion(analysis, pos, &root) {
+                        Some(CompletionResponse::Array(items)) => items,
+                        _ => Vec::new(),
+                    };
+                    (num, items)
+                })
+                .collect()
+        }
+    }
+
+    impl Drop for NixosFixtureProject {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.temp_dir);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Integration tests: NixOS config completion with fixture stubs
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn nixos_fixture_programs_dot() {
+        // The user's exact bug: `programs.` in a NixOS module should suggest
+        // the program names from the config type.
+        let mut project = make_fixture(&[("nixos", &["**/*.nix"], NIXOS_FIXTURE_STUBS)]);
+        project.add_file(
+            "modules/test.nix",
+            indoc! {"
+                { config, ... }: { programs. }
+                #                           ^1
+            "},
+        );
+        let results = project.complete_at_markers("modules/test.nix");
+        let names = labels(&results[&1]);
+        assert!(
+            names.contains(&"steam"),
+            "should complete steam, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"firefox"),
+            "should complete firefox, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"dconf"),
+            "should complete dconf, got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn nixos_fixture_nested_path() {
+        // `programs.steam.` should suggest fields of the steam submodule.
+        let mut project = make_fixture(&[("nixos", &["**/*.nix"], NIXOS_FIXTURE_STUBS)]);
+        project.add_file(
+            "modules/test.nix",
+            indoc! {"
+                { config, ... }: { programs.steam. }
+                #                                 ^1
+            "},
+        );
+        let results = project.complete_at_markers("modules/test.nix");
+        let names = labels(&results[&1]);
+        assert!(
+            names.contains(&"enable"),
+            "should complete enable, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"remotePlay"),
+            "should complete remotePlay, got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn nixos_fixture_services_dot() {
+        // `services.` should suggest service names.
+        let mut project = make_fixture(&[("nixos", &["**/*.nix"], NIXOS_FIXTURE_STUBS)]);
+        project.add_file(
+            "modules/test.nix",
+            indoc! {"
+                { config, ... }: { services. }
+                #                           ^1
+            "},
+        );
+        let results = project.complete_at_markers("modules/test.nix");
+        let names = labels(&results[&1]);
+        assert!(
+            names.contains(&"openssh"),
+            "should complete openssh, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"pipewire"),
+            "should complete pipewire, got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn nixos_fixture_deep_nesting() {
+        // `services.openssh.settings.` should reach deeply nested fields.
+        let mut project = make_fixture(&[("nixos", &["**/*.nix"], NIXOS_FIXTURE_STUBS)]);
+        project.add_file(
+            "modules/test.nix",
+            indoc! {"
+                { config, ... }: { services.openssh.settings. }
+                #                                            ^1
+            "},
+        );
+        let results = project.complete_at_markers("modules/test.nix");
+        let names = labels(&results[&1]);
+        assert!(
+            names.contains(&"PasswordAuthentication"),
+            "should complete PasswordAuthentication, got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn nixos_fixture_mkif_wrapping() {
+        // NixOS modules commonly wrap the return attrset in `lib.mkIf`:
+        //   { config, lib, ... }: { config = lib.mkIf cond { programs. }; }
+        // Completion should still find the config type from the root lambda.
+        let mut project = make_fixture(&[("nixos", &["**/*.nix"], NIXOS_FIXTURE_STUBS)]);
+        project.add_file(
+            "modules/test.nix",
+            indoc! {"
+                { config, lib, ... }:
+                {
+                  config = lib.mkIf true {
+                    programs.
+                #            ^1
+                  };
+                }
+            "},
+        );
+        let results = project.complete_at_markers("modules/test.nix");
+        let names = labels(&results[&1]);
+        assert!(
+            names.contains(&"steam"),
+            "should complete steam inside mkIf, got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn nixos_fixture_mkif_config_guard() {
+        // A common NixOS pattern: guard a config block with a config option
+        // reference, e.g. `lib.mkIf config.programs.steam.enable { ... }`.
+        // The `config.programs.steam.enable` is a Select on the config param,
+        // and the attrset argument should still get attrpath key completion.
+        let mut project = make_fixture(&[("nixos", &["**/*.nix"], NIXOS_FIXTURE_STUBS)]);
+        project.add_file(
+            "modules/gaming.nix",
+            indoc! {"
+                { config, lib, ... }:
+                {
+                  config = lib.mkIf config.programs.steam.enable {
+                    networking.firewall.
+                #                       ^1
+                  };
+                }
+            "},
+        );
+        let results = project.complete_at_markers("modules/gaming.nix");
+        let names = labels(&results[&1]);
+        assert!(
+            names.contains(&"enable"),
+            "should complete firewall.enable inside mkIf with config guard, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"allowedTCPPorts"),
+            "should complete allowedTCPPorts inside mkIf with config guard, got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn nixos_fixture_mkif_nested_config_guard() {
+        // lib.mkIf guarded by a deeply nested config option reference.
+        // The guard reads `config.services.pipewire.enable` and the body
+        // configures a different section — a realistic cross-section pattern.
+        let mut project = make_fixture(&[("nixos", &["**/*.nix"], NIXOS_FIXTURE_STUBS)]);
+        project.add_file(
+            "modules/audio.nix",
+            indoc! {"
+                { config, lib, ... }:
+                lib.mkIf config.services.pipewire.enable {
+                  services.openssh.
+                #                  ^1
+                }
+            "},
+        );
+        let results = project.complete_at_markers("modules/audio.nix");
+        let names = labels(&results[&1]);
+        assert!(
+            names.contains(&"enable"),
+            "should complete openssh.enable in mkIf with config guard, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"settings"),
+            "should complete openssh.settings in mkIf with config guard, got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn nixos_fixture_home_manager_context() {
+        // Home Manager context should provide HM-specific completions,
+        // not NixOS ones.
+        let mut project = make_fixture(&[("home", &["**/*.nix"], HM_FIXTURE_STUBS)]);
+        project.add_file(
+            "modules/test.nix",
+            indoc! {"
+                { config, ... }: { programs. }
+                #                           ^1
+            "},
+        );
+        let results = project.complete_at_markers("modules/test.nix");
+        let names = labels(&results[&1]);
+        assert!(
+            names.contains(&"bash"),
+            "should complete bash, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"git"),
+            "should complete git, got: {names:?}"
+        );
+        assert!(
+            !names.contains(&"steam"),
+            "should NOT complete steam in HM context, got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn nixos_fixture_context_isolation() {
+        // NixOS and HM files in the same project should get different
+        // completions based on their context glob match.
+        let mut project = make_fixture(&[
+            ("nixos", &["hosts/**/*.nix"], NIXOS_FIXTURE_STUBS),
+            ("home", &["home/**/*.nix"], HM_FIXTURE_STUBS),
+        ]);
+        project.add_file(
+            "hosts/test.nix",
+            indoc! {"
+                { config, ... }: { programs. }
+                #                           ^1
+            "},
+        );
+        project.add_file(
+            "home/test.nix",
+            indoc! {"
+                { config, ... }: { programs. }
+                #                           ^1
+            "},
+        );
+
+        // NixOS file should get NixOS completions.
+        let nixos_results = project.complete_at_markers("hosts/test.nix");
+        let nixos_names = labels(&nixos_results[&1]);
+        assert!(
+            nixos_names.contains(&"steam"),
+            "NixOS file should complete steam, got: {nixos_names:?}"
+        );
+
+        // HM file should get HM completions.
+        let hm_results = project.complete_at_markers("home/test.nix");
+        let hm_names = labels(&hm_results[&1]);
+        assert!(
+            hm_names.contains(&"bash"),
+            "HM file should complete bash, got: {hm_names:?}"
+        );
+        assert!(
+            !hm_names.contains(&"steam"),
+            "HM file should NOT complete steam, got: {hm_names:?}"
+        );
+    }
+
+    #[test]
+    fn nixos_fixture_hosts_glob() {
+        // Deeply nested file paths should match `hosts/**/*.nix` glob.
+        let mut project = make_fixture(&[("nixos", &["hosts/**/*.nix"], NIXOS_FIXTURE_STUBS)]);
+        project.add_file(
+            "hosts/desktop/gaming.nix",
+            indoc! {"
+                { pkgs, config, ... }: { programs. }
+                #                                 ^1
+            "},
+        );
+        let results = project.complete_at_markers("hosts/desktop/gaming.nix");
+        let names = labels(&results[&1]);
+        assert!(
+            names.contains(&"steam"),
+            "should complete steam via hosts glob, got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn nixos_fixture_no_completion_without_stubs() {
+        // The built-in @nixos stubs declare `val config :: { ... }` with no
+        // named fields. Without an override dir, no field completions should
+        // appear — this is the bug that motivated these tests.
+        let mut project = make_builtin_fixture(&[("nixos", &["**/*.nix"])], None);
+        project.add_file(
+            "test.nix",
+            indoc! {"
+                { config, ... }: { programs. }
+                #                           ^1
+            "},
+        );
+        let results = project.complete_at_markers("test.nix");
+        let names = labels(&results[&1]);
+        assert!(
+            !names.contains(&"steam"),
+            "should NOT complete steam without rich stubs, got: {names:?}"
+        );
+        assert!(
+            !names.contains(&"firefox"),
+            "should NOT complete firefox without rich stubs, got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn nixos_fixture_builtin_stubs_override() {
+        // When set_builtin_stubs_dir points to a directory with rich stubs,
+        // @nixos resolves to the full NixosConfig type and completions work.
+        let mut project = make_builtin_fixture(
+            &[("nixos", &["**/*.nix"])],
+            Some(&[("nixos", NIXOS_FIXTURE_STUBS)]),
+        );
+        project.add_file(
+            "test.nix",
+            indoc! {"
+                { config, ... }: { programs. }
+                #                           ^1
+            "},
+        );
+        let results = project.complete_at_markers("test.nix");
+        let names = labels(&results[&1]);
+        assert!(
+            names.contains(&"steam"),
+            "should complete steam with override stubs, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"firefox"),
+            "should complete firefox with override stubs, got: {names:?}"
+        );
+    }
 }

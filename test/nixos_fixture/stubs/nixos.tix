@@ -1,0 +1,41 @@
+# Minimal NixOS context stubs for fixture testing.
+#
+# Declares a NixosConfig type with realistic nested structure
+# (programs, services, networking) and the standard module args.
+
+type NixosConfig = {
+    programs: {
+        steam: {
+            enable: bool,
+            remotePlay: { enable: bool, ... },
+            ...
+        },
+        firefox: { enable: bool, ... },
+        dconf: { enable: bool, ... },
+        ...
+    },
+    services: {
+        openssh: {
+            enable: bool,
+            settings: { PasswordAuthentication: bool, ... },
+            ...
+        },
+        pipewire: { enable: bool, ... },
+        ...
+    },
+    networking: {
+        firewall: { enable: bool, allowedTCPPorts: [int], ... },
+        hostName: string,
+        ...
+    },
+    ...
+};
+
+type Lib = { mkIf: bool -> a -> a, mkMerge: [a] -> a, ... };
+type Pkgs = { hello: string, firefox: string, ... };
+
+val config :: NixosConfig;
+val lib :: Lib;
+val pkgs :: Pkgs;
+val options :: { ... };
+val modulesPath :: path;
