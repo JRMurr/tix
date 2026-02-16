@@ -105,7 +105,9 @@ pub fn resolve_context_for_file(
 
     for ctx in config.context.values() {
         let matched = ctx.paths.iter().any(|pattern| {
-            globset::Glob::new(pattern)
+            globset::GlobBuilder::new(pattern)
+                .literal_separator(true)
+                .build()
                 .ok()
                 .and_then(|g| g.compile_matcher().is_match(relative).then_some(()))
                 .is_some()
@@ -170,5 +172,48 @@ mod tests {
         let config: TixConfig = toml::from_str("").expect("parse error");
         assert!(config.stubs.is_empty());
         assert!(config.context.is_empty());
+    }
+
+    // Regression: `common/*.nix` was matching `common/homemanager/default.nix`
+    // because globset defaults to `literal_separator: false`, allowing `*` to
+    // cross `/` boundaries. This caused files in subdirectories to match a
+    // parent-only glob, picking up the wrong context stubs.
+    #[test]
+    fn star_glob_does_not_cross_path_separators() {
+        let config: TixConfig = toml::from_str(
+            r#"
+            [context.nixos]
+            paths = ["common/*.nix"]
+            stubs = ["@nixos"]
+
+            [context.home]
+            paths = ["common/homemanager/**/*.nix"]
+            stubs = ["@home-manager"]
+            "#,
+        )
+        .expect("parse error");
+
+        let mut registry = TypeAliasRegistry::with_builtins();
+
+        // A file directly in common/ should match the nixos context.
+        let direct = Path::new("common/programs.nix");
+        let args = resolve_context_for_file(direct, &config, Path::new("."), &mut registry)
+            .expect("resolve error");
+        assert!(
+            args.contains_key("modulesPath"),
+            "common/programs.nix should match nixos context (has modulesPath), got keys: {:?}",
+            args.keys().collect::<Vec<_>>()
+        );
+
+        // A file in a subdirectory should NOT match `common/*.nix` — it should
+        // fall through to the `common/homemanager/**/*.nix` glob instead.
+        let nested = Path::new("common/homemanager/default.nix");
+        let args = resolve_context_for_file(nested, &config, Path::new("."), &mut registry)
+            .expect("resolve error");
+        assert!(
+            args.contains_key("osConfig"),
+            "common/homemanager/default.nix should match home-manager context (has osConfig), got keys: {:?}",
+            args.keys().collect::<Vec<_>>()
+        );
     }
 }

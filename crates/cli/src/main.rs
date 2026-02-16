@@ -202,10 +202,12 @@ fn run_check(
     let (toml_config, config_dir) = match &config_path {
         Some(explicit_path) => {
             let cfg = config::load_config(explicit_path)?;
-            let dir = explicit_path
+            // Canonicalize the config directory so strip_prefix works against
+            // the canonicalized file path (both must be absolute).
+            let raw_dir = explicit_path
                 .parent()
-                .unwrap_or(std::path::Path::new("."))
-                .to_path_buf();
+                .unwrap_or(std::path::Path::new("."));
+            let dir = std::fs::canonicalize(raw_dir).unwrap_or(raw_dir.to_path_buf());
             (Some(cfg), Some(dir))
         }
         None => {

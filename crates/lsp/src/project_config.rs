@@ -85,7 +85,9 @@ pub fn resolve_context_for_file(
 
     for ctx in config.context.values() {
         let matched = ctx.paths.iter().any(|pattern| {
-            globset::Glob::new(pattern)
+            globset::GlobBuilder::new(pattern)
+                .literal_separator(true)
+                .build()
                 .ok()
                 .and_then(|g| g.compile_matcher().is_match(relative).then_some(()))
                 .is_some()
