@@ -163,10 +163,7 @@ impl LanguageServer for TixLanguageServer {
             match serde_json::from_value::<TixConfig>(opts) {
                 Ok(init_config) => {
                     if !init_config.stubs.is_empty() {
-                        log::info!(
-                            "Editor provided {} stub path(s)",
-                            init_config.stubs.len(),
-                        );
+                        log::info!("Editor provided {} stub path(s)", init_config.stubs.len(),);
                         // Rebuild the registry to include both CLI and
                         // editor-configured stubs.
                         let registry = self.build_registry(&init_config);
@@ -194,10 +191,7 @@ impl LanguageServer for TixLanguageServer {
                             log::info!("Loaded project config from {}", config_path.display());
 
                             if !project_cfg.stubs.is_empty() {
-                                log::info!(
-                                    "Project stubs: {}",
-                                    project_cfg.stubs.join(", "),
-                                );
+                                log::info!("Project stubs: {}", project_cfg.stubs.join(", "),);
                             }
                             if !project_cfg.context.is_empty() {
                                 log::info!(
@@ -287,8 +281,16 @@ impl LanguageServer for TixLanguageServer {
             "Ready — {} type aliases, {} global vals, diagnostics {}, inlay hints {}",
             state.registry.alias_count(),
             state.registry.global_vals().len(),
-            if config.diagnostics.enable { "on" } else { "off" },
-            if config.inlay_hints.enable { "on" } else { "off" },
+            if config.diagnostics.enable {
+                "on"
+            } else {
+                "off"
+            },
+            if config.inlay_hints.enable {
+                "on"
+            } else {
+                "off"
+            },
         );
     }
 

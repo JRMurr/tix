@@ -312,10 +312,7 @@ impl TypeAliasRegistry {
         if let Some(ref dir) = self.builtin_stubs_dir {
             let path = dir.join(format!("{name}.tix"));
             if path.is_file() {
-                log::info!(
-                    "Loading context stubs for @{name} from {}",
-                    path.display()
-                );
+                log::info!("Loading context stubs for @{name} from {}", path.display());
                 return Some(match std::fs::read_to_string(&path) {
                     Ok(source) => self.load_context_stubs(&source),
                     Err(e) => Err(format!("failed to read {}: {e}", path.display()).into()),
@@ -752,7 +749,10 @@ mod tests {
         let lib_ty = registry.get("Lib").expect("Lib alias should exist");
         match lib_ty {
             ParsedTy::AttrSet(attr) => {
-                assert!(attr.fields.contains_key("id"), "should keep field from first file");
+                assert!(
+                    attr.fields.contains_key("id"),
+                    "should keep field from first file"
+                );
                 assert!(
                     attr.fields.contains_key("const"),
                     "should have field from second file"
@@ -795,7 +795,10 @@ mod tests {
             panic!("expected AttrSet, got: {lib_ty:?}")
         };
 
-        let strings_ref = lib_attr.fields.get("strings").expect("strings field should exist");
+        let strings_ref = lib_attr
+            .fields
+            .get("strings")
+            .expect("strings field should exist");
         let ParsedTy::AttrSet(strings_attr) = strings_ref.0.as_ref() else {
             panic!("expected nested AttrSet for strings")
         };

@@ -204,9 +204,7 @@ fn run_check(
             let cfg = config::load_config(explicit_path)?;
             // Canonicalize the config directory so strip_prefix works against
             // the canonicalized file path (both must be absolute).
-            let raw_dir = explicit_path
-                .parent()
-                .unwrap_or(std::path::Path::new("."));
+            let raw_dir = explicit_path.parent().unwrap_or(std::path::Path::new("."));
             let dir = std::fs::canonicalize(raw_dir).unwrap_or(raw_dir.to_path_buf());
             (Some(cfg), Some(dir))
         }

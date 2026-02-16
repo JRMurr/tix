@@ -1871,13 +1871,7 @@ fn context_args_preserve_alias_provenance() {
     " };
     let (db, file) = TestDatabase::single_file(nix_src).unwrap();
     let module = module(&db, file);
-    let result = crate::check_file_collecting(
-        &db,
-        file,
-        &registry,
-        HashMap::new(),
-        ctx,
-    );
+    let result = crate::check_file_collecting(&db, file, &registry, HashMap::new(), ctx);
     let inference = result.inference.expect("inference should succeed");
 
     // The `config` pattern field should be typed as Named("NixosConfig", ...)
@@ -1900,9 +1894,7 @@ fn context_args_preserve_alias_provenance() {
                 "config should be Named(\"NixosConfig\", ...), got Named(\"{name}\", ...)"
             );
         }
-        other => panic!(
-            "config should be Named(\"NixosConfig\", ...), got: {other}"
-        ),
+        other => panic!("config should be Named(\"NixosConfig\", ...), got: {other}"),
     }
 }
 

@@ -297,10 +297,7 @@ mod tests {
         "};
         let markers = parse_markers(src);
 
-        let project = TempProject::new(&[
-            ("main.nix", src),
-            ("lib.nix", "{ x = 1; y = 2; }"),
-        ]);
+        let project = TempProject::new(&[("main.nix", src), ("lib.nix", "{ x = 1; y = 2; }")]);
         let main_path = project.path("main.nix");
         let lib_path = project.path("lib.nix");
 
