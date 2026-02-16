@@ -306,7 +306,7 @@ fn get_str_literal(s: &rnix::ast::Str) -> Option<SmolStr> {
 }
 
 /// Walk a type through a series of field names, resolving each one.
-fn resolve_through_segments(ty: &OutputTy, segments: &[SmolStr]) -> Option<OutputTy> {
+pub(crate) fn resolve_through_segments(ty: &OutputTy, segments: &[SmolStr]) -> Option<OutputTy> {
     let mut current = ty.clone();
     for seg in segments {
         let fields = collect_attrset_fields(&current);
@@ -410,7 +410,7 @@ fn try_attrpath_key_completion(
 /// - The root expression isn't a lambda with pattern params
 /// - No pattern field's type contains the given segment (e.g. not a NixOS module,
 ///   or context stubs aren't loaded)
-fn get_module_config_type(
+pub(crate) fn get_module_config_type(
     analysis: &FileAnalysis,
     inference: &lang_check::InferenceResult,
     first_segment: &SmolStr,
@@ -475,7 +475,7 @@ fn collect_attrpath_key_segments(
 /// For `{ services.openssh = { enable. } }`, when called on the inner AttrSet
 /// (the one containing `enable.`), this returns `["services", "openssh"]` —
 /// the segments from the outer AttrpathValue that nests into this AttrSet.
-fn collect_parent_attrpath_context(attrset_node: &rnix::ast::AttrSet) -> Vec<SmolStr> {
+pub(crate) fn collect_parent_attrpath_context(attrset_node: &rnix::ast::AttrSet) -> Vec<SmolStr> {
     let mut all_segments = Vec::new();
     let mut current = attrset_node.syntax().clone();
 
@@ -842,7 +842,7 @@ fn is_function_ty(ty: &OutputTy) -> bool {
 
 /// Extract attrset fields from a type, unwrapping Named, Intersection, and Union
 /// wrappers as appropriate.
-fn collect_attrset_fields(ty: &OutputTy) -> BTreeMap<SmolStr, TyRef> {
+pub(crate) fn collect_attrset_fields(ty: &OutputTy) -> BTreeMap<SmolStr, TyRef> {
     match ty {
         OutputTy::AttrSet(attr) => attr.fields.clone(),
 
@@ -949,7 +949,7 @@ fn fields_to_completion_items(
 }
 
 /// Extract the type alias name from an OutputTy, if it's a Named type.
-fn extract_alias_name(ty: &OutputTy) -> Option<&SmolStr> {
+pub(crate) fn extract_alias_name(ty: &OutputTy) -> Option<&SmolStr> {
     match ty {
         OutputTy::Named(name, _) => Some(name),
         _ => None,

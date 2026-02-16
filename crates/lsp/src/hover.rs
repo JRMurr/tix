@@ -10,6 +10,7 @@
 use lang_ast::{AstPtr, Expr};
 use lang_check::aliases::DocIndex;
 use rowan::ast::AstNode;
+use smol_str::SmolStr;
 use tower_lsp::lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind, Position, Range};
 
 use crate::state::FileAnalysis;
@@ -40,10 +41,18 @@ pub fn hover(
                 let range = analysis.line_index.range(node.text_range());
 
                 // Look up doc comment for this name from stubs.
-                let doc = docs.decl_doc(name_text.as_str());
+                // First try decl-level docs (global vals, type aliases).
+                let mut doc = docs.decl_doc(name_text.as_str()).map(|d| d.to_string());
+
+                // If no decl doc, check if this name is an attrpath key inside
+                // a NixOS module body — use field-level docs from the config type.
+                if doc.is_none() {
+                    doc = try_attrpath_key_field_doc(analysis, &token, docs);
+                }
+
                 return Some(make_hover(
                     format!("{name_text} :: {ty}"),
-                    doc.map(|d| d.as_str()),
+                    doc.as_deref(),
                     range,
                 ));
             }
@@ -83,8 +92,173 @@ pub fn hover(
             }
         }
 
-        node = node.parent()?;
+        node = match node.parent() {
+            Some(p) => p,
+            None => break,
+        };
     }
+
+    // Fallback: if the token is an attrpath key inside an attrset definition
+    // (e.g. `programs.steam.enable` in `{ programs.steam.enable = true; }`),
+    // resolve the type and doc from the module config type.
+    try_attrpath_key_hover(analysis, &token, docs)
+}
+
+/// Hover on an attrpath key inside an attrset definition.
+///
+/// For `{ programs.steam.enable = true; }` in a NixOS module, hovering on
+/// `steam` should show the type of `config.programs.steam` and any field-level
+/// docs from the stubs.
+fn try_attrpath_key_hover(
+    analysis: &FileAnalysis,
+    token: &rowan::SyntaxToken<rnix::NixLanguage>,
+    docs: &DocIndex,
+) -> Option<Hover> {
+    use crate::completion::{
+        collect_attrset_fields, collect_parent_attrpath_context, extract_alias_name,
+        get_module_config_type, resolve_through_segments,
+    };
+
+    let inference = analysis.inference()?;
+    let node = token.parent()?;
+
+    // The token must be inside an Attrpath → AttrpathValue (not a Select).
+    let attrpath_node = node.ancestors().find_map(rnix::ast::Attrpath::cast)?;
+    let parent = attrpath_node.syntax().parent()?;
+    if rnix::ast::Select::can_cast(parent.kind()) {
+        return None;
+    }
+    let _apv = rnix::ast::AttrpathValue::cast(parent)?;
+
+    // Find the enclosing AttrSet.
+    let attrset_node = _apv
+        .syntax()
+        .parent()
+        .and_then(rnix::ast::AttrSet::cast)?;
+
+    // Collect all segments from this attrpath, up to and including the
+    // hovered token.
+    let hovered_end = token.text_range().end();
+    let mut current_segments = Vec::new();
+    for attr in attrpath_node.attrs() {
+        let name = match attr {
+            rnix::ast::Attr::Ident(ref ident) => {
+                ident.ident_token().map(|t| SmolStr::from(t.text()))
+            }
+            _ => None,
+        };
+        match name {
+            Some(n) if !n.is_empty() => {
+                current_segments.push(n);
+                // Stop after the hovered segment.
+                if attr.syntax().text_range().end() >= hovered_end {
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+
+    // Collect parent context from enclosing nesting.
+    let parent_segments = collect_parent_attrpath_context(&attrset_node);
+
+    // Full path = parent context + current segments.
+    let mut full_path = parent_segments;
+    full_path.extend(current_segments);
+
+    if full_path.is_empty() {
+        return None;
+    }
+
+    // Find the config type from the root lambda's pattern.
+    let first_segment = full_path.first()?;
+    let config_ty = get_module_config_type(analysis, &inference, first_segment)?;
+
+    let alias = extract_alias_name(&config_ty).cloned();
+
+    // Resolve the type at the full path.
+    let resolved_ty = resolve_through_segments(&config_ty, &full_path)?;
+
+    // Look up field doc.
+    let doc = alias.as_ref().and_then(|a| {
+        docs.field_doc(a.as_str(), &full_path)
+            .map(|d| d.to_string())
+    });
+
+    // Show the last segment name and its type, plus any docs.
+    let last_segment = full_path.last()?;
+    let range = analysis.line_index.range(token.text_range());
+
+    // For attrset-typed fields, show the type concisely. For leaf values, show
+    // the concrete type.
+    let fields = collect_attrset_fields(&resolved_ty);
+    let type_display = if fields.is_empty() {
+        format!("{last_segment} :: {resolved_ty}")
+    } else {
+        format!("{last_segment} :: {resolved_ty}")
+    };
+
+    Some(make_hover(type_display, doc.as_deref(), range))
+}
+
+/// Look up field-level docs for a token that's an attrpath key in an attrset
+/// definition (e.g. `steam` in `{ programs.steam.enable = true; }`).
+///
+/// Builds the full path from parent context + attrpath segments, finds the
+/// module config type, and queries the DocIndex for field docs at that path.
+fn try_attrpath_key_field_doc(
+    analysis: &FileAnalysis,
+    token: &rowan::SyntaxToken<rnix::NixLanguage>,
+    docs: &DocIndex,
+) -> Option<String> {
+    use crate::completion::{
+        collect_parent_attrpath_context, extract_alias_name, get_module_config_type,
+    };
+
+    let inference = analysis.inference()?;
+    let node = token.parent()?;
+
+    // The token must be inside an Attrpath → AttrpathValue (not a Select).
+    let attrpath_node = node.ancestors().find_map(rnix::ast::Attrpath::cast)?;
+    let parent = attrpath_node.syntax().parent()?;
+    if rnix::ast::Select::can_cast(parent.kind()) {
+        return None;
+    }
+    let apv = rnix::ast::AttrpathValue::cast(parent)?;
+
+    let attrset_node = apv.syntax().parent().and_then(rnix::ast::AttrSet::cast)?;
+
+    // Collect attrpath segments up to and including the hovered token.
+    let hovered_end = token.text_range().end();
+    let mut current_segments = Vec::new();
+    for attr in attrpath_node.attrs() {
+        let name = match attr {
+            rnix::ast::Attr::Ident(ref ident) => {
+                ident.ident_token().map(|t| SmolStr::from(t.text()))
+            }
+            _ => None,
+        };
+        match name {
+            Some(n) if !n.is_empty() => {
+                current_segments.push(n);
+                if attr.syntax().text_range().end() >= hovered_end {
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+
+    let parent_segments = collect_parent_attrpath_context(&attrset_node);
+    let mut full_path = parent_segments;
+    full_path.extend(current_segments);
+
+    let first_segment = full_path.first()?;
+    let config_ty = get_module_config_type(analysis, &inference, first_segment)?;
+    let alias = extract_alias_name(&config_ty)?;
+
+    docs.field_doc(alias.as_str(), &full_path)
+        .map(|d| d.to_string())
 }
 
 /// Check whether a syntax node is an attrpath element inside a Select expression.
@@ -491,6 +665,117 @@ mod tests {
             doc.as_deref(),
             Some("Whether the service is enabled."),
             "hover on attrpath element should show field doc"
+        );
+    }
+
+    // ==================================================================
+    // Attrpath key hover (attrset definition, not Select)
+    // ==================================================================
+
+    /// Helper: set up a NixOS module context and hover at markers.
+    fn hover_at_markers_with_context(
+        src: &str,
+        context_stubs: &str,
+    ) -> std::collections::BTreeMap<u32, Option<Hover>> {
+        use crate::project_config::{ContextConfig, ProjectConfig};
+        use crate::state::AnalysisState;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        static CTX_COUNTER: AtomicU32 = AtomicU32::new(0);
+        let markers = parse_markers(src);
+        assert!(!markers.is_empty(), "no markers found in source");
+
+        let id = CTX_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let temp_dir = std::env::temp_dir()
+            .join(format!("tix_hover_ctx_{}_{id}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let stubs_path = temp_dir.join("test_context.tix");
+        std::fs::write(&stubs_path, context_stubs).unwrap();
+
+        let nix_path = temp_dir.join("test.nix");
+        let mut state = AnalysisState::new(TypeAliasRegistry::default());
+
+        let mut context = std::collections::HashMap::new();
+        context.insert(
+            "test".to_string(),
+            ContextConfig {
+                paths: vec!["*.nix".to_string()],
+                stubs: vec!["test_context.tix".to_string()],
+            },
+        );
+        state.project_config = Some(ProjectConfig {
+            stubs: vec![],
+            context,
+        });
+        state.config_dir = Some(temp_dir.clone());
+
+        state.update_file(nix_path.clone(), src.to_string());
+        let analysis = state.get_file(&nix_path).unwrap();
+        let root = rnix::Root::parse(src).tree();
+        let docs = &state.registry.docs;
+
+        let results = markers
+            .into_iter()
+            .map(|(num, offset)| {
+                let pos = analysis.line_index.position(offset);
+                (num, hover(analysis, pos, &root, docs))
+            })
+            .collect();
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        results
+    }
+
+    #[test]
+    fn hover_attrpath_key_shows_type_and_doc() {
+        let stubs = indoc! {"
+            type TestConfig = {
+                programs: {
+                    ## Whether to enable the steam game launcher.
+                    steam: { enable: bool, ... },
+                    firefox: { enable: bool, ... },
+                    ...
+                },
+                ...
+            };
+            val config :: TestConfig;
+        "};
+        let src = indoc! {"
+            { config, ... }: {
+              programs.steam.enable = true;
+            # ^1       ^2   ^3
+            }
+        "};
+        let results = hover_at_markers_with_context(src, stubs);
+
+        // Hover on `programs` — should show type.
+        let h1 = results[&1].as_ref().expect("hover on programs");
+        let (ty1, _doc1) = hover_parts(h1);
+        assert!(
+            ty1.contains("programs"),
+            "hover on `programs` attrpath key should show type, got: {ty1}"
+        );
+
+        // Hover on `steam` — should show type and doc.
+        let h2 = results[&2].as_ref().expect("hover on steam");
+        let (ty2, doc2) = hover_parts(h2);
+        assert!(
+            ty2.contains("steam"),
+            "hover on `steam` should show type, got: {ty2}"
+        );
+        assert_eq!(
+            doc2.as_deref(),
+            Some("Whether to enable the steam game launcher."),
+            "hover on `steam` attrpath key should show field doc"
+        );
+
+        // Hover on `enable` — should show type (bool).
+        let h3 = results[&3].as_ref().expect("hover on enable");
+        let (ty3, _doc3) = hover_parts(h3);
+        assert!(
+            ty3.contains("bool"),
+            "hover on `enable` should show bool type, got: {ty3}"
         );
     }
 }
