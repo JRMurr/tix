@@ -61,14 +61,15 @@ pub fn semantic_tokens(analysis: &FileAnalysis, root: &rnix::Root) -> Vec<Semant
 
         let range = analysis.line_index.range(token.text_range());
 
-        // For multi-line tokens the end character can be less than the start
-        // character (it's on a different line), so use saturating subtraction
-        // and fall back to the raw text length.
-        let length = range
-            .end
-            .character
-            .checked_sub(range.start.character)
-            .unwrap_or(token.text_range().len().into());
+        // For multi-line tokens the LSP spec says `length` covers only the
+        // portion on the starting line. Single-line: simple end - start.
+        // Multi-line: measure from the token start to the first newline.
+        let length = if range.start.line == range.end.line {
+            range.end.character - range.start.character
+        } else {
+            let text = token.text();
+            text.find('\n').unwrap_or(text.len()) as u32
+        };
 
         raw_tokens.push(RawToken {
             line: range.start.line,
@@ -377,6 +378,39 @@ mod tests {
         assert!(
             tokens.iter().any(|t| t.3 == 5),
             "multiline string should produce STRING tokens: {tokens:?}"
+        );
+        // The length of each token should not exceed the source line's length.
+        let lines: Vec<&str> = src.lines().collect();
+        for tok in &tokens {
+            let line_len = lines.get(tok.0 as usize).map_or(0, |l| l.len() as u32);
+            assert!(
+                tok.1 + tok.2 <= line_len,
+                "token at ({},{}) with length {} exceeds line length {}: {tokens:?}",
+                tok.0,
+                tok.1,
+                tok.2,
+                line_len
+            );
+        }
+    }
+
+    #[test]
+    fn multiline_comment_length() {
+        let src = "/* line one\n   line two */ 42";
+        let tokens = get_tokens(src);
+        // The comment starts at column 0 on line 0. Its length should cover
+        // only up to the first newline (11 chars: "/* line one").
+        let comment = tokens
+            .iter()
+            .find(|t| t.3 == 7)
+            .expect("should have a COMMENT token");
+        assert_eq!(
+            comment.0, 0,
+            "comment should start on line 0: {tokens:?}"
+        );
+        assert_eq!(
+            comment.2, 11,
+            "multi-line comment length should be chars to first newline: {tokens:?}"
         );
     }
 
