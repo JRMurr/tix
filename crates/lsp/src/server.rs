@@ -16,7 +16,7 @@ use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 
 use crate::config::TixConfig;
-use crate::state::AnalysisState;
+use crate::state::{AnalysisState, FileAnalysis};
 
 pub struct TixLanguageServer {
     client: Client,
@@ -80,6 +80,26 @@ impl TixLanguageServer {
         self.client
             .publish_diagnostics(uri, diagnostics, None)
             .await;
+    }
+
+    /// Lock the state, look up the file analysis for `uri`, and call `f`.
+    /// Returns `Ok(None)` if the URI isn't a file path or the file hasn't been
+    /// analyzed yet.
+    fn with_analysis<T>(
+        &self,
+        uri: &Url,
+        f: impl FnOnce(&AnalysisState, &FileAnalysis) -> Option<T>,
+    ) -> Result<Option<T>> {
+        let path = match uri_to_path(uri) {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+        let state = self.state.lock();
+        let analysis = match state.get_file(&path) {
+            Some(a) => a,
+            None => return Ok(None),
+        };
+        Ok(f(&state, analysis))
     }
 
     /// Build a fresh TypeAliasRegistry from CLI stubs and config stubs.
@@ -355,28 +375,12 @@ impl LanguageServer for TixLanguageServer {
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
-        let uri = params.text_document_position_params.text_document.uri;
+        let uri = &params.text_document_position_params.text_document.uri;
         let pos = params.text_document_position_params.position;
-
-        let path = match uri_to_path(&uri) {
-            Some(p) => p,
-            None => return Ok(None),
-        };
-
-        let state = self.state.lock();
-        let analysis = match state.get_file(&path) {
-            Some(a) => a,
-            None => return Ok(None),
-        };
-
-        let root = analysis.parsed.tree();
-
-        Ok(crate::hover::hover(
-            analysis,
-            pos,
-            &root,
-            &state.registry.docs,
-        ))
+        self.with_analysis(uri, |state, analysis| {
+            let root = analysis.parsed.tree();
+            crate::hover::hover(analysis, pos, &root, &state.registry.docs)
+        })
     }
 
     async fn goto_definition(
@@ -385,47 +389,20 @@ impl LanguageServer for TixLanguageServer {
     ) -> Result<Option<GotoDefinitionResponse>> {
         let uri = params.text_document_position_params.text_document.uri;
         let pos = params.text_document_position_params.position;
-
-        let path = match uri_to_path(&uri) {
-            Some(p) => p,
-            None => return Ok(None),
-        };
-
-        let state = self.state.lock();
-        let analysis = match state.get_file(&path) {
-            Some(a) => a,
-            None => return Ok(None),
-        };
-
-        let root = analysis.parsed.tree();
-
-        let location = crate::goto_def::goto_definition(&state, analysis, pos, &uri, &root);
-        Ok(location.map(GotoDefinitionResponse::Scalar))
+        self.with_analysis(&uri, |state, analysis| {
+            let root = analysis.parsed.tree();
+            crate::goto_def::goto_definition(state, analysis, pos, &uri, &root)
+                .map(GotoDefinitionResponse::Scalar)
+        })
     }
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
-        let uri = params.text_document_position.text_document.uri;
+        let uri = &params.text_document_position.text_document.uri;
         let pos = params.text_document_position.position;
-
-        let path = match uri_to_path(&uri) {
-            Some(p) => p,
-            None => return Ok(None),
-        };
-
-        let state = self.state.lock();
-        let analysis = match state.get_file(&path) {
-            Some(a) => a,
-            None => return Ok(None),
-        };
-
-        let root = analysis.parsed.tree();
-
-        Ok(crate::completion::completion(
-            analysis,
-            pos,
-            &root,
-            &state.registry.docs,
-        ))
+        self.with_analysis(uri, |state, analysis| {
+            let root = analysis.parsed.tree();
+            crate::completion::completion(analysis, pos, &root, &state.registry.docs)
+        })
     }
 
     async fn completion_resolve(&self, mut item: CompletionItem) -> Result<CompletionItem> {
@@ -461,222 +438,117 @@ impl LanguageServer for TixLanguageServer {
         &self,
         params: DocumentSymbolParams,
     ) -> Result<Option<DocumentSymbolResponse>> {
-        let uri = params.text_document.uri;
-        let path = match uri_to_path(&uri) {
-            Some(p) => p,
-            None => return Ok(None),
-        };
-
-        let state = self.state.lock();
-        let analysis = match state.get_file(&path) {
-            Some(a) => a,
-            None => return Ok(None),
-        };
-
-        let root = analysis.parsed.tree();
-
-        let symbols = crate::document_symbol::document_symbols(analysis, &root);
-        Ok(Some(DocumentSymbolResponse::Nested(symbols)))
+        self.with_analysis(&params.text_document.uri, |_, analysis| {
+            let root = analysis.parsed.tree();
+            let symbols = crate::document_symbol::document_symbols(analysis, &root);
+            Some(DocumentSymbolResponse::Nested(symbols))
+        })
     }
 
     async fn document_link(&self, params: DocumentLinkParams) -> Result<Option<Vec<DocumentLink>>> {
-        let uri = params.text_document.uri;
-        let path = match uri_to_path(&uri) {
-            Some(p) => p,
-            None => return Ok(None),
-        };
-
-        let state = self.state.lock();
-        let analysis = match state.get_file(&path) {
-            Some(a) => a,
-            None => return Ok(None),
-        };
-
-        let root = analysis.parsed.tree();
-
-        let links = crate::document_link::document_links(analysis, &root);
-        Ok(Some(links))
+        self.with_analysis(&params.text_document.uri, |_, analysis| {
+            let root = analysis.parsed.tree();
+            Some(crate::document_link::document_links(analysis, &root))
+        })
     }
 
     async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
-        let uri = params.text_document.uri;
-        let path = match uri_to_path(&uri) {
-            Some(p) => p,
-            None => return Ok(None),
-        };
-
-        let state = self.state.lock();
-        let analysis = match state.get_file(&path) {
-            Some(a) => a,
-            None => return Ok(None),
-        };
-
-        let contents = analysis.nix_file.contents(&state.db);
-        Ok(crate::formatting::format_document(
-            contents,
-            &analysis.line_index,
-        ))
+        self.with_analysis(&params.text_document.uri, |state, analysis| {
+            let contents = analysis.nix_file.contents(&state.db);
+            crate::formatting::format_document(contents, &analysis.line_index)
+        })
     }
 
     async fn selection_range(
         &self,
         params: SelectionRangeParams,
     ) -> Result<Option<Vec<SelectionRange>>> {
-        let uri = params.text_document.uri;
-        let path = match uri_to_path(&uri) {
-            Some(p) => p,
-            None => return Ok(None),
-        };
-
-        let state = self.state.lock();
-        let analysis = match state.get_file(&path) {
-            Some(a) => a,
-            None => return Ok(None),
-        };
-
-        let root = analysis.parsed.tree();
-
-        let ranges = crate::selection_range::selection_ranges(analysis, params.positions, &root);
-        Ok(Some(ranges))
+        self.with_analysis(&params.text_document.uri, |_, analysis| {
+            let root = analysis.parsed.tree();
+            Some(crate::selection_range::selection_ranges(
+                analysis,
+                params.positions,
+                &root,
+            ))
+        })
     }
 
     async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
         let uri = params.text_document_position.text_document.uri;
         let pos = params.text_document_position.position;
         let include_declaration = params.context.include_declaration;
-
-        let path = match uri_to_path(&uri) {
-            Some(p) => p,
-            None => return Ok(None),
-        };
-
-        let state = self.state.lock();
-        let analysis = match state.get_file(&path) {
-            Some(a) => a,
-            None => return Ok(None),
-        };
-
-        let root = analysis.parsed.tree();
-
-        let refs =
-            crate::references::find_references(analysis, pos, &uri, &root, include_declaration);
-        Ok(Some(refs))
+        self.with_analysis(&uri, |_, analysis| {
+            let root = analysis.parsed.tree();
+            Some(crate::references::find_references(
+                analysis,
+                pos,
+                &uri,
+                &root,
+                include_declaration,
+            ))
+        })
     }
 
     async fn document_highlight(
         &self,
         params: DocumentHighlightParams,
     ) -> Result<Option<Vec<DocumentHighlight>>> {
-        let uri = params.text_document_position_params.text_document.uri;
+        let uri = &params.text_document_position_params.text_document.uri;
         let pos = params.text_document_position_params.position;
-
-        let path = match uri_to_path(&uri) {
-            Some(p) => p,
-            None => return Ok(None),
-        };
-
-        let state = self.state.lock();
-        let analysis = match state.get_file(&path) {
-            Some(a) => a,
-            None => return Ok(None),
-        };
-
-        let root = analysis.parsed.tree();
-
-        let highlights = crate::document_highlight::document_highlight(analysis, pos, &root);
-        Ok(Some(highlights))
+        self.with_analysis(uri, |_, analysis| {
+            let root = analysis.parsed.tree();
+            Some(crate::document_highlight::document_highlight(
+                analysis, pos, &root,
+            ))
+        })
     }
 
     async fn prepare_rename(
         &self,
         params: TextDocumentPositionParams,
     ) -> Result<Option<PrepareRenameResponse>> {
-        let uri = params.text_document.uri;
-        let pos = params.position;
-
-        let path = match uri_to_path(&uri) {
-            Some(p) => p,
-            None => return Ok(None),
-        };
-
-        let state = self.state.lock();
-        let analysis = match state.get_file(&path) {
-            Some(a) => a,
-            None => return Ok(None),
-        };
-
-        let root = analysis.parsed.tree();
-
-        Ok(crate::rename::prepare_rename(analysis, pos, &root))
+        self.with_analysis(&params.text_document.uri, |_, analysis| {
+            let root = analysis.parsed.tree();
+            crate::rename::prepare_rename(analysis, params.position, &root)
+        })
     }
 
     async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
         let uri = params.text_document_position.text_document.uri;
         let pos = params.text_document_position.position;
         let new_name = params.new_name;
-
-        let path = match uri_to_path(&uri) {
-            Some(p) => p,
-            None => return Ok(None),
-        };
-
-        let state = self.state.lock();
-        let analysis = match state.get_file(&path) {
-            Some(a) => a,
-            None => return Ok(None),
-        };
-
-        let root = analysis.parsed.tree();
-
-        Ok(crate::rename::rename(analysis, pos, &new_name, &uri, &root))
+        self.with_analysis(&uri, |_, analysis| {
+            let root = analysis.parsed.tree();
+            crate::rename::rename(analysis, pos, &new_name, &uri, &root)
+        })
     }
 
     async fn semantic_tokens_full(
         &self,
         params: SemanticTokensParams,
     ) -> Result<Option<SemanticTokensResult>> {
-        let uri = params.text_document.uri;
-        let path = match uri_to_path(&uri) {
-            Some(p) => p,
-            None => return Ok(None),
-        };
-
-        let state = self.state.lock();
-        let analysis = match state.get_file(&path) {
-            Some(a) => a,
-            None => return Ok(None),
-        };
-
-        let root = analysis.parsed.tree();
-
-        let tokens = crate::semantic_tokens::semantic_tokens(analysis, &root);
-        Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
-            result_id: None,
-            data: tokens,
-        })))
+        self.with_analysis(&params.text_document.uri, |_, analysis| {
+            let root = analysis.parsed.tree();
+            let tokens = crate::semantic_tokens::semantic_tokens(analysis, &root);
+            Some(SemanticTokensResult::Tokens(SemanticTokens {
+                result_id: None,
+                data: tokens,
+            }))
+        })
     }
 
     async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
         if !self.config.lock().inlay_hints.enable {
             return Ok(Some(vec![]));
         }
-
-        let uri = params.text_document.uri;
-        let path = match uri_to_path(&uri) {
-            Some(p) => p,
-            None => return Ok(None),
-        };
-
-        let state = self.state.lock();
-        let analysis = match state.get_file(&path) {
-            Some(a) => a,
-            None => return Ok(None),
-        };
-
-        let root = analysis.parsed.tree();
-
-        let hints = crate::inlay_hint::inlay_hints(analysis, params.range, &root);
-        Ok(Some(hints))
+        self.with_analysis(&params.text_document.uri, |_, analysis| {
+            let root = analysis.parsed.tree();
+            Some(crate::inlay_hint::inlay_hints(
+                analysis,
+                params.range,
+                &root,
+            ))
+        })
     }
 }
 
