@@ -113,8 +113,12 @@ pub struct TestAnalysis {
 
 impl TestAnalysis {
     pub fn new(src: &str) -> Self {
+        Self::with_registry(src, TypeAliasRegistry::default())
+    }
+
+    pub fn with_registry(src: &str, registry: TypeAliasRegistry) -> Self {
         let path = temp_path("test.nix");
-        let mut state = AnalysisState::new(TypeAliasRegistry::default());
+        let mut state = AnalysisState::new(registry);
         state.update_file(path.clone(), src.to_string());
         let root = rnix::Root::parse(src).tree();
         Self { state, path, root }

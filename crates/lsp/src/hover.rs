@@ -54,6 +54,18 @@ pub fn hover(
             if let Some(ty) = inference.expr_ty_map.get(expr_id) {
                 let range = analysis.line_index.range(node.text_range());
 
+                // For Reference expressions (variable uses), look up decl_doc
+                // by the referenced name. This surfaces docs for global vals
+                // from stubs (e.g. hovering on `mkDerivation` shows its doc).
+                if let Expr::Reference(ref_name) = &analysis.module[expr_id] {
+                    let doc = docs.decl_doc(ref_name.as_str());
+                    return Some(make_hover(
+                        format!("{ty}"),
+                        doc.map(|d| d.as_str()),
+                        range,
+                    ));
+                }
+
                 // For Select expressions, try to find field-level docs by
                 // walking the Select chain to build a field path and finding
                 // the base name's type alias.
@@ -156,5 +168,219 @@ fn make_hover(type_text: String, doc: Option<&str>, range: Range) -> Hover {
     Hover {
         contents: HoverContents::Array(parts),
         range: Some(range),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_util::{find_offset, parse_markers, TestAnalysis};
+    use indoc::indoc;
+    use lang_check::aliases::TypeAliasRegistry;
+
+    /// Helper: hover at a byte offset and return the hover contents.
+    fn hover_at(t: &TestAnalysis, offset: u32) -> Option<Hover> {
+        let analysis = t.analysis();
+        let pos = analysis.line_index.position(offset);
+        hover(analysis, pos, &t.root, &t.state.registry.docs)
+    }
+
+    /// Extract the type string and optional doc string from hover contents.
+    fn hover_parts(h: &Hover) -> (String, Option<String>) {
+        let HoverContents::Array(parts) = &h.contents else {
+            panic!("expected Array hover contents");
+        };
+        let type_text = match &parts[0] {
+            MarkedString::LanguageString(ls) => ls.value.clone(),
+            other => panic!("expected LanguageString, got: {other:?}"),
+        };
+        let doc = parts.get(1).map(|p| match p {
+            MarkedString::String(s) => s.clone(),
+            other => panic!("expected String for doc, got: {other:?}"),
+        });
+        (type_text, doc)
+    }
+
+    #[test]
+    fn hover_shows_decl_doc_for_global_val() {
+        let stubs = r#"
+            ## Build a derivation from source.
+            val mkDrv :: { name: string, ... } -> { name: string, ... };
+        "#;
+        let file = comment_parser::parse_tix_file(stubs).expect("parse stubs");
+        let mut registry = TypeAliasRegistry::new();
+        registry.load_tix_file(&file);
+
+        // mkDrv is a global val — hovering on the reference should show the
+        // decl doc. The expression type is the expanded function type (not
+        // "mkDrv :: ...") because references show just the type.
+        let src = "mkDrv { name = \"hello\"; }";
+        let offset = find_offset(src, "mkDrv");
+        let t = TestAnalysis::with_registry(src, registry);
+        let h = hover_at(&t, offset).expect("hover should return a result");
+        let (_type_text, doc) = hover_parts(&h);
+
+        assert_eq!(
+            doc.as_deref(),
+            Some("Build a derivation from source."),
+            "hover on global val reference should include the stub doc comment"
+        );
+    }
+
+    #[test]
+    fn hover_on_name_binding_without_doc() {
+        let src = indoc! {"
+            let x = 1; in x
+            #   ^1
+        "};
+        let markers = parse_markers(src);
+        let t = TestAnalysis::new(src);
+        let h = hover_at(&t, markers[&1]).expect("hover should return a result");
+        let (type_text, doc) = hover_parts(&h);
+
+        assert!(
+            type_text.contains("int"),
+            "hover should show type, got: {type_text}"
+        );
+        assert_eq!(doc, None, "hover should have no doc for plain let bindings");
+    }
+
+    #[test]
+    fn hover_shows_field_doc_on_select() {
+        let stubs = r#"
+            type Config = {
+                ## Whether the service is enabled.
+                enable: bool,
+                ...
+            };
+            val config :: Config;
+        "#;
+        let file = comment_parser::parse_tix_file(stubs).expect("parse stubs");
+        let mut registry = TypeAliasRegistry::new();
+        registry.load_tix_file(&file);
+
+        // Hover on the `.` to target the Select expression (not the attrpath
+        // literal, which would just show `string`).
+        let src = "config.enable";
+        let offset = find_offset(src, ".enable");
+        let t = TestAnalysis::with_registry(src, registry);
+        let h = hover_at(&t, offset).expect("hover should return a result");
+        let (_type_text, doc) = hover_parts(&h);
+
+        assert_eq!(
+            doc.as_deref(),
+            Some("Whether the service is enabled."),
+            "hover on select should show field doc"
+        );
+    }
+
+    #[test]
+    fn hover_shows_nested_field_doc() {
+        let stubs = r#"
+            type Config = {
+                services: {
+                    ## SSH daemon configuration.
+                    openssh: {
+                        ## Whether to enable sshd.
+                        enable: bool,
+                        ...
+                    },
+                    ...
+                },
+                ...
+            };
+            val config :: Config;
+        "#;
+        let file = comment_parser::parse_tix_file(stubs).expect("parse stubs");
+        let mut registry = TypeAliasRegistry::new();
+        registry.load_tix_file(&file);
+
+        // Hover on the last `.` to get the outermost Select expression.
+        let src = "config.services.openssh.enable";
+        let offset = find_offset(src, ".enable");
+        let t = TestAnalysis::with_registry(src, registry);
+        let h = hover_at(&t, offset).expect("hover should return a result");
+        let (_type_text, doc) = hover_parts(&h);
+
+        assert_eq!(
+            doc.as_deref(),
+            Some("Whether to enable sshd."),
+            "hover on deeply nested select should show field doc"
+        );
+    }
+
+    #[test]
+    fn hover_shows_module_field_doc() {
+        let stubs = r#"
+            module lib {
+                ## Identity function.
+                val id :: a -> a;
+            }
+        "#;
+        let file = comment_parser::parse_tix_file(stubs).expect("parse stubs");
+        let mut registry = TypeAliasRegistry::new();
+        registry.load_tix_file(&file);
+
+        // Use a doc comment annotation to give `lib` the type alias `Lib`.
+        // Hover on the `.` to target the Select expression.
+        let src = indoc! {"
+            let
+                /** type: lib :: Lib */
+                lib = { id = x: x; };
+            in lib.id
+        "};
+        let offset = find_offset(src, ".id");
+        let t = TestAnalysis::with_registry(src, registry);
+        let h = hover_at(&t, offset).expect("hover should return a result");
+        let (_type_text, doc) = hover_parts(&h);
+
+        assert_eq!(
+            doc.as_deref(),
+            Some("Identity function."),
+            "hover on module field should show val doc"
+        );
+    }
+
+    #[test]
+    fn hover_shows_docs_after_module_merge() {
+        let file1 = comment_parser::parse_tix_file(
+            r#"
+            module lib {
+                ## Identity function.
+                val id :: a -> a;
+            }
+            "#,
+        )
+        .expect("parse file1");
+        let file2 = comment_parser::parse_tix_file(
+            r#"
+            module lib {
+                ## Constant function.
+                val const :: a -> b -> a;
+            }
+            "#,
+        )
+        .expect("parse file2");
+
+        let mut registry = TypeAliasRegistry::new();
+        registry.load_tix_file(&file1);
+        registry.load_tix_file(&file2);
+
+        let src = indoc! {"
+            let
+                /** type: lib :: Lib */
+                lib = { id = x: x; const = x: y: x; };
+            in lib.id
+        "};
+        let offset = find_offset(src, ".id");
+        let t = TestAnalysis::with_registry(src, registry);
+        let h = hover_at(&t, offset).expect("hover should return a result");
+        let (_type_text, doc) = hover_parts(&h);
+
+        assert_eq!(
+            doc.as_deref(),
+            Some("Identity function."),
+            "doc from first file should survive module merge and appear in hover"
+        );
     }
 }

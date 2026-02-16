@@ -860,4 +860,116 @@ mod tests {
             "module should overwrite non-attrset alias, got: {lib_ty:?}"
         );
     }
+
+    #[test]
+    fn module_merge_preserves_docs_from_both_files() {
+        let file1 = parse_tix_file(
+            r#"
+            ## The standard library.
+            module lib {
+                ## Identity function.
+                val id :: a -> a;
+            }
+            "#,
+        )
+        .expect("parse file1");
+        let file2 = parse_tix_file(
+            r#"
+            module lib {
+                ## Constant function.
+                val const :: a -> b -> a;
+            }
+            "#,
+        )
+        .expect("parse file2");
+
+        let mut registry = TypeAliasRegistry::new();
+        registry.load_tix_file(&file1);
+        registry.load_tix_file(&file2);
+
+        // Types from both files should be present.
+        let lib_ty = registry.get("Lib").expect("Lib alias should exist");
+        let ParsedTy::AttrSet(attr) = lib_ty else {
+            panic!("expected AttrSet, got: {lib_ty:?}")
+        };
+        assert!(attr.fields.contains_key("id"));
+        assert!(attr.fields.contains_key("const"));
+
+        // Docs from file1 should survive the merge.
+        let id_path = vec![SmolStr::from("id")];
+        assert_eq!(
+            registry.docs.field_doc("Lib", &id_path).map(|s| s.as_str()),
+            Some("Identity function."),
+            "doc from first file should survive module merge"
+        );
+
+        // Docs from file2 should also be present.
+        let const_path = vec![SmolStr::from("const")];
+        assert_eq!(
+            registry
+                .docs
+                .field_doc("Lib", &const_path)
+                .map(|s| s.as_str()),
+            Some("Constant function."),
+            "doc from second file should be added"
+        );
+
+        // The decl doc for the module itself — file2 has no module-level doc,
+        // so file1's doc should still be there.
+        assert_eq!(
+            registry.docs.decl_doc("Lib").map(|s| s.as_str()),
+            Some("The standard library."),
+            "module-level decl doc from first file should survive"
+        );
+    }
+
+    #[test]
+    fn module_merge_nested_preserves_docs() {
+        let file1 = parse_tix_file(
+            r#"
+            module lib {
+                module strings {
+                    ## Join strings with a separator.
+                    val concatStringsSep :: string -> [string] -> string;
+                }
+            }
+            "#,
+        )
+        .expect("parse file1");
+        let file2 = parse_tix_file(
+            r#"
+            module lib {
+                module strings {
+                    ## Split a string by delimiter.
+                    val splitString :: string -> string -> [string];
+                }
+            }
+            "#,
+        )
+        .expect("parse file2");
+
+        let mut registry = TypeAliasRegistry::new();
+        registry.load_tix_file(&file1);
+        registry.load_tix_file(&file2);
+
+        let concat_path = vec![SmolStr::from("strings"), SmolStr::from("concatStringsSep")];
+        assert_eq!(
+            registry
+                .docs
+                .field_doc("Lib", &concat_path)
+                .map(|s| s.as_str()),
+            Some("Join strings with a separator."),
+            "nested doc from first file should survive merge"
+        );
+
+        let split_path = vec![SmolStr::from("strings"), SmolStr::from("splitString")];
+        assert_eq!(
+            registry
+                .docs
+                .field_doc("Lib", &split_path)
+                .map(|s| s.as_str()),
+            Some("Split a string by delimiter."),
+            "nested doc from second file should be added"
+        );
+    }
 }
