@@ -78,6 +78,13 @@
             rust-bin = rustAttrs.binary;
             stubs = tix-stubs;
             with-stubs = tix-with-stubs;
+            docs = pkgs.stdenv.mkDerivation {
+              name = "tix-docs";
+              src = ./docs;
+              nativeBuildInputs = [ pkgs.mdbook ];
+              buildPhase = "mdbook build -d $out";
+              dontInstall = true;
+            };
             # rust-docker = rustAttrs.docker;
           };
 
