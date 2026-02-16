@@ -25,6 +25,7 @@ let
       ./Cargo.lock
       ./stubs
       ./tools
+      ./test
     ];
   };
 
