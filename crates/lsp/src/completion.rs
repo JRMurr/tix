@@ -1408,6 +1408,46 @@ mod tests {
     }
 
     #[test]
+    fn attrpath_key_inside_function_call() {
+        // NixOS modules commonly wrap the return attrset in `lib.mkIf`:
+        //   { config, lib, ... }: { config = lib.mkIf cond { programs. }; }
+        // The attrset is an argument to mkIf, not the direct return value.
+        // Completion should still find the config type from the root lambda.
+        let stubs = indoc! {"
+            type TestConfig = {
+                programs: {
+                    steam: { enable: bool, ... },
+                    firefox: { enable: bool, ... },
+                    ...
+                },
+                services: {
+                    openssh: { enable: bool, port: int, ... },
+                    ...
+                },
+                ...
+            };
+            type Lib = { mkIf: bool -> a -> a, ... };
+            val config :: TestConfig;
+            val lib :: Lib;
+        "};
+        let src = indoc! {"
+            { config, lib, ... }:
+            {
+              config = lib.mkIf true {
+                programs.
+            #            ^1
+              };
+            }
+        "};
+        let results = complete_at_markers_with_context(src, stubs);
+        let names = labels(&results[&1]);
+        assert!(
+            names.contains(&"steam"),
+            "should complete steam inside mkIf, got: {names:?}"
+        );
+    }
+
+    #[test]
     fn attrpath_key_not_plain_lambda() {
         // A plain lambda (not a pattern) should not trigger attrpath key completion.
         let src = indoc! {"

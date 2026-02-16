@@ -345,34 +345,38 @@ fn run_check(
     // If inference succeeded, print binding types and root type.
     if let Some(inference) = &result.inference {
         // Print per-name types (the let-bindings, function params, etc.).
-        // Deduplicate by (name_text, type_string) since the same name can appear
-        // multiple times (e.g. a let-binding and an inherit reference).
-        let mut seen = std::collections::BTreeMap::<String, OutputTy>::new();
+        // Deduplicate by name text since the same name can appear multiple times
+        // (e.g. a lambda pattern field `config` and a return attrset key `config`).
+        // Prefer definitions (PatField, Param, LetIn) over PlainAttrset keys,
+        // then prefer types without unions/intersections (cleaner early-canonical form).
+        let mut seen = std::collections::BTreeMap::<String, (lang_ast::NameKind, OutputTy)>::new();
         for (name_id, name) in module.names() {
             if let Some(ty) = inference.name_ty_map.get(name_id) {
                 seen.entry(name.text.to_string())
-                    .and_modify(|existing| {
-                        // When the same name appears multiple times (e.g. a let-binding
-                        // and an inherit reference), prefer the version with fewer
-                        // unions/intersections — that's the cleaner (early-canonicalized)
-                        // form, not contaminated by use-site extrusion.
-                        if ty.contains_union_or_intersection()
-                            && !existing.contains_union_or_intersection()
+                    .and_modify(|(existing_kind, existing_ty)| {
+                        // Prefer definitions over plain attrset keys.
+                        if !existing_kind.is_definition() && name.kind.is_definition() {
+                            *existing_kind = name.kind;
+                            *existing_ty = ty.clone();
+                        } else if existing_kind.is_definition() && !name.kind.is_definition() {
+                            // Keep the existing definition type.
+                        } else if ty.contains_union_or_intersection()
+                            && !existing_ty.contains_union_or_intersection()
                         {
                             // Keep the existing (cleaner) one.
                         } else if !ty.contains_union_or_intersection()
-                            && existing.contains_union_or_intersection()
+                            && existing_ty.contains_union_or_intersection()
                         {
-                            *existing = ty.clone();
+                            *existing_kind = name.kind;
+                            *existing_ty = ty.clone();
                         }
-                        // If both have or both lack unions/intersections, keep existing.
                     })
-                    .or_insert(ty.clone());
+                    .or_insert((name.kind, ty.clone()));
             }
         }
 
         println!("Bindings:");
-        for (name, ty) in &seen {
+        for (name, (_kind, ty)) in &seen {
             println!("  {name} :: {ty}");
         }
 
