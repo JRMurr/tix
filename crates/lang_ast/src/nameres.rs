@@ -60,6 +60,29 @@ pub enum ResolveResult {
 // Builtin Metadata
 // ==============================================================================
 
+/// All global builtin names (available without the `builtins.` prefix in Nix).
+/// Derived from the match arms in `lookup_global_builtin`.
+pub const GLOBAL_BUILTIN_NAMES: &[&str] = &[
+    "abort",
+    "baseNameOf",
+    "derivation",
+    "dirOf",
+    "fetchGit",
+    "fetchMercurial",
+    "fetchTarball",
+    "fetchTree",
+    "fetchurl",
+    "fromTOML",
+    "import",
+    "isNull",
+    "map",
+    "placeholder",
+    "removeAttrs",
+    "scopedImport",
+    "throw",
+    "toString",
+];
+
 /// Returns the static name string if `name` is a known global builtin
 /// (i.e. available without the `builtins.` prefix in Nix).
 pub fn lookup_global_builtin(name: &str) -> Option<&'static str> {
@@ -555,5 +578,15 @@ mod tests {
             matches!(module[*lambda_id.unwrap()], crate::Expr::Lambda { .. }),
             "param_to_lambda should point to a Lambda expression"
         );
+    }
+
+    #[test]
+    fn global_builtin_names_all_resolve() {
+        for name in super::GLOBAL_BUILTIN_NAMES {
+            assert!(
+                super::lookup_global_builtin(name).is_some(),
+                "GLOBAL_BUILTIN_NAMES entry {name:?} should resolve via lookup_global_builtin"
+            );
+        }
     }
 }

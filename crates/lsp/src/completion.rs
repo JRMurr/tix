@@ -622,33 +622,12 @@ fn collect_visible_names(
         }
     }
 
-    // Append builtins at lowest priority. We use `builtins` itself as a name
-    // (it's a Nix global), plus all global builtins from nameres.
-    let builtin_names = [
-        "abort",
-        "baseNameOf",
-        "builtins",
-        "derivation",
-        "dirOf",
-        "fetchGit",
-        "fetchMercurial",
-        "fetchTarball",
-        "fetchTree",
-        "fetchurl",
-        "fromTOML",
-        "import",
-        "isNull",
-        "map",
-        "placeholder",
-        "removeAttrs",
-        "scopedImport",
-        "throw",
-        "toString",
-        "true",
-        "false",
-        "null",
-    ];
-    for name in builtin_names {
+    // Append builtins at lowest priority, sourced from the authoritative list
+    // in nameres. Extras: `builtins` namespace and keyword-like literals.
+    for name in lang_ast::nameres::GLOBAL_BUILTIN_NAMES {
+        result.entry(SmolStr::from(*name)).or_insert(None);
+    }
+    for name in ["builtins", "true", "false", "null"] {
         result.entry(SmolStr::from(name)).or_insert(None);
     }
 
