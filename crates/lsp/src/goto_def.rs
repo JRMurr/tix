@@ -192,7 +192,8 @@ fn try_resolve_select_field(
 mod tests {
     use super::*;
     use crate::state::AnalysisState;
-    use crate::test_util::{find_offset, TempProject};
+    use crate::test_util::{find_offset, parse_markers, TempProject};
+    use indoc::indoc;
     use lang_check::aliases::TypeAliasRegistry;
     use std::path::PathBuf;
 
@@ -210,7 +211,13 @@ mod tests {
     // ------------------------------------------------------------------
     #[test]
     fn same_file_reference() {
-        let project = TempProject::new(&[("ref.nix", "let x = 1; in x")]);
+        let src = indoc! {"
+            let x = 1; in x
+            #   ^1        ^2
+        "};
+        let markers = parse_markers(src);
+
+        let project = TempProject::new(&[("ref.nix", src)]);
         let path = project.path("ref.nix");
 
         let mut state = AnalysisState::new(TypeAliasRegistry::default());
@@ -218,17 +225,14 @@ mod tests {
         let analysis = state.get_file(&path).unwrap();
         let root = rnix::Root::parse(&contents).tree();
 
-        // Position the cursor on the trailing `x` (the reference).
-        let ref_offset = find_offset(&contents, "in x") + 3; // the `x` after `in `
-        let pos = analysis.line_index.position(ref_offset);
-
+        // Cursor on the trailing `x` (the reference).
+        let pos = analysis.line_index.position(markers[&2]);
         let loc = goto_definition(&state, analysis, pos, &uri, &root);
         let loc = loc.expect("should resolve same-file reference");
 
         // Should jump to the definition `x` in `let x = 1`.
         assert_eq!(loc.uri, uri);
-        let def_offset = find_offset(&contents, "x = 1");
-        let expected_pos = analysis.line_index.position(def_offset);
+        let expected_pos = analysis.line_index.position(markers[&1]);
         assert_eq!(loc.range.start, expected_pos);
     }
 
@@ -258,7 +262,13 @@ mod tests {
 
     #[test]
     fn import_path_literal_jumps_to_file() {
-        let project = TempProject::new(&[("main.nix", "import ./lib.nix"), ("lib.nix", "42")]);
+        let src = indoc! {"
+            import ./lib.nix
+            #      ^1
+        "};
+        let markers = parse_markers(src);
+
+        let project = TempProject::new(&[("main.nix", src), ("lib.nix", "42")]);
         let main_path = project.path("main.nix");
         let lib_path = project.path("lib.nix");
 
@@ -268,8 +278,7 @@ mod tests {
         let root = rnix::Root::parse(&contents).tree();
 
         // Cursor on the path literal `./lib.nix`.
-        let path_offset = find_offset(&contents, "./lib.nix");
-        let pos = analysis.line_index.position(path_offset);
+        let pos = analysis.line_index.position(markers[&1]);
         let loc = goto_definition(&state, analysis, pos, &uri, &root);
         let loc = loc.expect("should resolve path literal to target file");
 
@@ -282,8 +291,14 @@ mod tests {
     // ------------------------------------------------------------------
     #[test]
     fn select_through_import_jumps_to_field() {
+        let src = indoc! {"
+            let lib = import ./lib.nix; in lib.x
+            #                                  ^1
+        "};
+        let markers = parse_markers(src);
+
         let project = TempProject::new(&[
-            ("main.nix", "let lib = import ./lib.nix; in lib.x"),
+            ("main.nix", src),
             ("lib.nix", "{ x = 1; y = 2; }"),
         ]);
         let main_path = project.path("main.nix");
@@ -295,8 +310,7 @@ mod tests {
         let root = rnix::Root::parse(&contents).tree();
 
         // Cursor on `x` in `lib.x` (the field name after the dot).
-        let select_offset = find_offset(&contents, "lib.x") + 4; // the `x` after dot
-        let pos = analysis.line_index.position(select_offset);
+        let pos = analysis.line_index.position(markers[&1]);
         let loc = goto_definition(&state, analysis, pos, &uri, &root);
         let loc = loc.expect("should resolve select field to target file");
 
@@ -317,11 +331,14 @@ mod tests {
     // ------------------------------------------------------------------
     #[test]
     fn select_through_applied_import() {
+        let src = indoc! {"
+            let attrs = import ./lib.nix { x = 1; }; in attrs.name
+            #                                                 ^1
+        "};
+        let markers = parse_markers(src);
+
         let project = TempProject::new(&[
-            (
-                "main.nix",
-                "let attrs = import ./lib.nix { x = 1; }; in attrs.name",
-            ),
+            ("main.nix", src),
             ("lib.nix", "{ x }: { name = x; value = 2; }"),
         ]);
         let main_path = project.path("main.nix");
@@ -333,8 +350,7 @@ mod tests {
         let root = rnix::Root::parse(&contents).tree();
 
         // Cursor on `name` in `attrs.name`.
-        let select_offset = find_offset(&contents, "attrs.name") + 6; // the `n` in `name`
-        let pos = analysis.line_index.position(select_offset);
+        let pos = analysis.line_index.position(markers[&1]);
         let loc = goto_definition(&state, analysis, pos, &uri, &root);
         let loc = loc.expect("should resolve select field through applied import");
 
