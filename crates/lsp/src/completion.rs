@@ -32,7 +32,8 @@ use rowan::ast::AstNode;
 use smol_str::SmolStr;
 use lang_check::aliases::DocIndex;
 use tower_lsp::lsp_types::{
-    CompletionItem, CompletionItemKind, CompletionResponse, Documentation, Position,
+    CompletionItem, CompletionItemKind, CompletionResponse, Documentation, MarkupContent,
+    MarkupKind, Position,
 };
 
 use crate::state::FileAnalysis;
@@ -921,13 +922,26 @@ fn fields_to_completion_items(
                 let mut path: Vec<SmolStr> = prefix.to_vec();
                 path.push(name.clone());
                 docs.field_doc(alias, &path)
-                    .map(|d| Documentation::String(d.to_string()))
+                    .map(|d| Documentation::MarkupContent(MarkupContent {
+                        kind: MarkupKind::Markdown,
+                        value: d.to_string(),
+                    }))
             });
+
+            // Store alias + field path in `data` for completionItem/resolve.
+            // This lets the client lazily fetch documentation on highlight.
+            let data = doc_ctx.map(|(_, alias, prefix)| {
+                let mut path: Vec<&str> = prefix.iter().map(|s| s.as_str()).collect();
+                path.push(name.as_str());
+                serde_json::json!({ "alias": alias, "path": path })
+            });
+
             CompletionItem {
                 label: name.to_string(),
                 kind: Some(CompletionItemKind::FIELD),
                 detail: Some(format!("{ty}")),
                 documentation,
+                data,
                 ..Default::default()
             }
         })
@@ -1553,9 +1567,9 @@ mod tests {
         assert!(steam.is_some(), "should complete steam, got: {:?}", labels(items));
         assert_eq!(
             steam.unwrap().documentation,
-            Some(Documentation::String(
+            Some(Documentation::MarkupContent(MarkupContent { kind: MarkupKind::Markdown, value:
                 "Enable the steam game launcher.".to_string()
-            )),
+            })),
             "steam should have doc comment from stubs"
         );
         // firefox has no doc comment — documentation should be None.
@@ -1594,9 +1608,9 @@ mod tests {
         assert!(steam.is_some(), "should complete steam, got: {:?}", labels(items));
         assert_eq!(
             steam.unwrap().documentation,
-            Some(Documentation::String(
+            Some(Documentation::MarkupContent(MarkupContent { kind: MarkupKind::Markdown, value:
                 "Enable the steam game launcher.".to_string()
-            )),
+            })),
         );
         // firefox has no doc comment.
         let firefox = items.iter().find(|i| i.label == "firefox");
@@ -2158,9 +2172,9 @@ mod tests {
         assert!(steam.is_some(), "should complete steam, got: {:?}", labels(items));
         assert_eq!(
             steam.unwrap().documentation,
-            Some(Documentation::String(
+            Some(Documentation::MarkupContent(MarkupContent { kind: MarkupKind::Markdown, value:
                 "Whether to enable the steam game platform.".to_string()
-            )),
+            })),
             "steam completion item should carry doc from override stubs"
         );
         // firefox has no doc comment — should be None.

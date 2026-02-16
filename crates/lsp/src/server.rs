@@ -227,6 +227,7 @@ impl LanguageServer for TixLanguageServer {
                 definition_provider: Some(OneOf::Left(true)),
                 completion_provider: Some(CompletionOptions {
                     trigger_characters: Some(vec![".".to_string()]),
+                    resolve_provider: Some(true),
                     ..Default::default()
                 }),
                 document_symbol_provider: Some(OneOf::Left(true)),
@@ -430,6 +431,35 @@ impl LanguageServer for TixLanguageServer {
             &root,
             &state.registry.docs,
         ))
+    }
+
+    async fn completion_resolve(&self, mut item: CompletionItem) -> Result<CompletionItem> {
+        // Lazily populate documentation from the DocIndex when the client
+        // highlights a completion item. The alias name and field path are
+        // stored in the item's `data` field during initial completion.
+        if item.documentation.is_none() {
+            if let Some(ref data) = item.data {
+                let alias = data.get("alias").and_then(|v| v.as_str());
+                let path = data.get("path").and_then(|v| v.as_array());
+                if let (Some(alias), Some(path_arr)) = (alias, path) {
+                    let path: Vec<smol_str::SmolStr> = path_arr
+                        .iter()
+                        .filter_map(|v| v.as_str().map(smol_str::SmolStr::from))
+                        .collect();
+                    let state = self.state.lock();
+                    if let Some(doc) = state.registry.docs.field_doc(alias, &path) {
+                        item.documentation =
+                            Some(tower_lsp::lsp_types::Documentation::MarkupContent(
+                                tower_lsp::lsp_types::MarkupContent {
+                                    kind: tower_lsp::lsp_types::MarkupKind::Markdown,
+                                    value: doc.to_string(),
+                                },
+                            ));
+                    }
+                }
+            }
+        }
+        Ok(item)
     }
 
     async fn document_symbol(
