@@ -1115,59 +1115,27 @@ mod tests {
         src: &str,
         context_stubs: &str,
     ) -> BTreeMap<u32, Vec<CompletionItem>> {
-        use std::sync::atomic::{AtomicU32, Ordering};
-        static CTX_COUNTER: AtomicU32 = AtomicU32::new(0);
+        use crate::test_util::ContextTestSetup;
 
         let markers = parse_markers(src);
         assert!(!markers.is_empty(), "no markers found in source");
 
-        // Create a unique temp directory for this test invocation.
-        let id = CTX_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let temp_dir =
-            std::env::temp_dir().join(format!("tix_ctx_test_{}_{id}", std::process::id()));
-        std::fs::create_dir_all(&temp_dir).unwrap();
+        let ctx = ContextTestSetup::new(src, context_stubs);
+        let analysis = ctx.analysis();
+        let root = ctx.root();
+        let docs = ctx.docs();
 
-        // Write context stubs to a file in the temp directory.
-        let stubs_path = temp_dir.join("test_context.tix");
-        std::fs::write(&stubs_path, context_stubs).unwrap();
-
-        let nix_path = temp_dir.join("test.nix");
-        let mut state = AnalysisState::new(TypeAliasRegistry::default());
-
-        // Configure project context: all .nix files get our test context stubs.
-        let mut context = std::collections::HashMap::new();
-        context.insert(
-            "test".to_string(),
-            ContextConfig {
-                paths: vec!["*.nix".to_string()],
-                stubs: vec!["test_context.tix".to_string()],
-            },
-        );
-        state.project_config = Some(ProjectConfig {
-            stubs: vec![],
-            context,
-        });
-        state.config_dir = Some(temp_dir.clone());
-
-        state.update_file(nix_path.clone(), src.to_string());
-        let analysis = state.get_file(&nix_path).unwrap();
-        let root = rnix::Root::parse(src).tree();
-        let docs = state.registry.docs.clone();
-
-        let results = markers
+        markers
             .into_iter()
             .map(|(num, offset)| {
                 let pos = analysis.line_index.position(offset);
-                let items = match completion(analysis, pos, &root, &docs) {
+                let items = match completion(analysis, pos, &root, docs) {
                     Some(CompletionResponse::Array(items)) => items,
                     _ => Vec::new(),
                 };
                 (num, items)
             })
-            .collect();
-
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        results
+            .collect()
     }
 
     #[test]

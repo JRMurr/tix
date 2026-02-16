@@ -4,8 +4,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use tower_lsp::lsp_types::Url;
 
+use crate::project_config::{ContextConfig, ProjectConfig};
 use crate::state::{AnalysisState, FileAnalysis};
-use lang_check::aliases::TypeAliasRegistry;
+use lang_check::aliases::{DocIndex, TypeAliasRegistry};
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -130,5 +131,71 @@ impl TestAnalysis {
 
     pub fn uri(&self) -> Url {
         Url::from_file_path(&self.path).unwrap()
+    }
+}
+
+/// Test setup with context stubs (`.tix` declarations) injected via ProjectConfig.
+///
+/// Used by both completion and hover tests that need NixOS module context.
+/// Creates a temp directory with the stubs file, configures a ProjectConfig
+/// that matches all `.nix` files, runs analysis, and cleans up on drop.
+pub struct ContextTestSetup {
+    pub state: AnalysisState,
+    pub nix_path: PathBuf,
+    temp_dir: PathBuf,
+}
+
+impl ContextTestSetup {
+    pub fn new(src: &str, context_stubs: &str) -> Self {
+        let temp_dir = temp_path("ctx");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        // Write context stubs to a file in the temp directory.
+        let stubs_path = temp_dir.join("test_context.tix");
+        std::fs::write(&stubs_path, context_stubs).unwrap();
+
+        let nix_path = temp_dir.join("test.nix");
+        let mut state = AnalysisState::new(TypeAliasRegistry::default());
+
+        // Configure project context: all .nix files get our test context stubs.
+        let mut context = std::collections::HashMap::new();
+        context.insert(
+            "test".to_string(),
+            ContextConfig {
+                paths: vec!["*.nix".to_string()],
+                stubs: vec!["test_context.tix".to_string()],
+            },
+        );
+        state.project_config = Some(ProjectConfig {
+            stubs: vec![],
+            context,
+        });
+        state.config_dir = Some(temp_dir.clone());
+
+        state.update_file(nix_path.clone(), src.to_string());
+
+        Self {
+            state,
+            nix_path,
+            temp_dir,
+        }
+    }
+
+    pub fn analysis(&self) -> &FileAnalysis {
+        self.state.get_file(&self.nix_path).unwrap()
+    }
+
+    pub fn docs(&self) -> &DocIndex {
+        &self.state.registry.docs
+    }
+
+    pub fn root(&self) -> rnix::Root {
+        self.analysis().parsed.tree()
+    }
+}
+
+impl Drop for ContextTestSetup {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.temp_dir);
     }
 }
