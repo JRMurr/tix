@@ -54,9 +54,11 @@ pub fn completion(
         .left_biased()?;
 
     log::debug!(
-        "completion: pos={pos:?}, token={:?} {:?}",
+        "completion: pos={pos:?}, token={:?} {:?}, doc_field_docs={}, doc_decl_docs={}",
         token.kind(),
-        token.text()
+        token.text(),
+        docs.field_docs_count(),
+        docs.decl_docs_count(),
     );
 
     // Try dot completion first (cursor right after `.` in a Select).
@@ -376,6 +378,12 @@ fn try_attrpath_key_completion(
 
     // Extract the alias name before unwrap_or moves config_ty.
     let alias = extract_alias_name(&config_ty).cloned();
+
+    log::debug!(
+        "attrpath_key_completion: config_ty alias={:?}, full_path={:?}",
+        alias,
+        full_path,
+    );
 
     // Walk the config type through the full path.
     let resolved_ty = resolve_through_segments(&config_ty, &full_path).unwrap_or(config_ty);

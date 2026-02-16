@@ -109,6 +109,21 @@
   `homeConfigurations` but hasn't been tested end-to-end with real flakes yet.
   The non-flake mode (fetching HM from flake registry) works.
 
+### tower-lsp Transport Crash
+
+- Editing files in VS Code can trigger `unreachable!()` at
+  `tower-lsp-0.20.0/src/transport.rs:120`. This is inside tower-lsp's message
+  transport, not our code. May be a known upstream issue. Investigate whether
+  upgrading tower-lsp or switching to a different LSP framework resolves it.
+
+### Stub Generator: Namespace-Level Doc Comments
+
+- Generated stubs only have `##` doc comments on leaf options (e.g.
+  `programs.steam.enable`), not on intermediate namespace fields (e.g.
+  `programs.steam`). This means completing `programs.` shows no docs for
+  most entries. Could hoist the `enable` option's description up to the
+  parent namespace, or synthesize a summary from child options.
+
 ### Future Enhancements
 
 - Full intersection-type-based operator overloading (replace pragmatic deferred

@@ -54,6 +54,16 @@ impl DocIndex {
         self.field_docs.get(alias)?.get(path)
     }
 
+    /// Number of aliases with field docs.
+    pub fn field_docs_count(&self) -> usize {
+        self.field_docs.values().map(|m| m.len()).sum()
+    }
+
+    /// Number of declaration-level docs.
+    pub fn decl_docs_count(&self) -> usize {
+        self.decl_docs.len()
+    }
+
     /// Insert a declaration-level doc.
     fn insert_decl_doc(&mut self, name: SmolStr, doc: SmolStr) {
         self.decl_docs.insert(name, doc);
@@ -302,6 +312,10 @@ impl TypeAliasRegistry {
         if let Some(ref dir) = self.builtin_stubs_dir {
             let path = dir.join(format!("{name}.tix"));
             if path.is_file() {
+                log::info!(
+                    "Loading context stubs for @{name} from {}",
+                    path.display()
+                );
                 return Some(match std::fs::read_to_string(&path) {
                     Ok(source) => self.load_context_stubs(&source),
                     Err(e) => Err(format!("failed to read {}: {e}", path.display()).into()),
