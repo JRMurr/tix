@@ -16,6 +16,7 @@ mod selection_range;
 mod semantic_tokens;
 mod server;
 mod state;
+mod ty_nav;
 #[cfg(test)]
 mod test_util;
 

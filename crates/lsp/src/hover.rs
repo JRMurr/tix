@@ -114,7 +114,7 @@ fn try_attrpath_key_hover(
     token: &rowan::SyntaxToken<rnix::NixLanguage>,
     docs: &DocIndex,
 ) -> Option<Hover> {
-    use crate::completion::{
+    use crate::ty_nav::{
         collect_parent_attrpath_context, extract_alias_name, get_module_config_type,
         resolve_through_segments,
     };
@@ -204,7 +204,7 @@ fn try_attrpath_key_field_doc(
     token: &rowan::SyntaxToken<rnix::NixLanguage>,
     docs: &DocIndex,
 ) -> Option<String> {
-    use crate::completion::{
+    use crate::ty_nav::{
         collect_parent_attrpath_context, extract_alias_name, get_module_config_type,
     };
 
