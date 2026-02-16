@@ -39,6 +39,55 @@ pub fn module(db: &dyn crate::AstDb, file: NixFile) -> Module {
     module_and_source_maps(db, file).0
 }
 
+/// Pre-built indices over a Module's structure, cached by Salsa.
+///
+/// These avoid repeated O(all_exprs) linear scans in LSP handlers that need
+/// to map names to their binding expressions or owning lambdas.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleIndices {
+    /// Name → its binding value expression (for LetIn/AttrSet bindings).
+    pub binding_expr: HashMap<NameId, ExprId>,
+    /// Param/PatField name → the Lambda ExprId that owns it.
+    pub param_to_lambda: HashMap<NameId, ExprId>,
+}
+
+#[salsa::tracked]
+pub fn module_indices(db: &dyn crate::AstDb, file: NixFile) -> ModuleIndices {
+    let module = module(db, file);
+    let mut binding_expr = HashMap::new();
+    let mut param_to_lambda = HashMap::new();
+
+    for (expr_id, expr) in module.exprs() {
+        match expr {
+            Expr::LetIn { bindings, .. } | Expr::AttrSet { bindings, .. } => {
+                for &(name_id, ref value) in bindings.statics.iter() {
+                    if let BindingValue::Expr(e) = value {
+                        binding_expr.insert(name_id, *e);
+                    }
+                }
+            }
+            Expr::Lambda { param, pat, .. } => {
+                if let Some(name_id) = param {
+                    param_to_lambda.insert(*name_id, expr_id);
+                }
+                if let Some(pat) = pat {
+                    for &(opt_name, _) in pat.fields.iter() {
+                        if let Some(name_id) = opt_name {
+                            param_to_lambda.insert(name_id, expr_id);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    ModuleIndices {
+        binding_expr,
+        param_to_lambda,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Name {
     pub text: SmolStr,

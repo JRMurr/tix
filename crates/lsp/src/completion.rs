@@ -199,7 +199,7 @@ fn resolve_base_type(
     // Lambda's canonicalized type.
     let name = &analysis.module[name_id];
     if matches!(name.kind, NameKind::Param | NameKind::PatField) {
-        if let Some(lambda_expr_id) = find_lambda_for_param(&analysis.module, name_id) {
+        if let Some(&lambda_expr_id) = analysis.module_indices.param_to_lambda.get(&name_id) {
             if let Some(lambda_ty) = inference.expr_ty_map.get(lambda_expr_id) {
                 log::debug!(
                     "dot_completion fallback: lambda ty={lambda_ty} for param {:?}",
@@ -224,28 +224,6 @@ fn resolve_base_type(
 
     // Last resort: return whatever expr_ty_map has, even if it's a TyVar.
     inference.expr_ty_map.get(base_expr_id).cloned()
-}
-
-/// Find the Lambda ExprId that owns the given parameter NameId.
-fn find_lambda_for_param(
-    module: &lang_ast::Module,
-    param_name: lang_ast::NameId,
-) -> Option<ExprId> {
-    for (expr_id, expr) in module.exprs() {
-        if let Expr::Lambda { param, pat, .. } = expr {
-            // Direct parameter: `pkgs: body`
-            if *param == Some(param_name) {
-                return Some(expr_id);
-            }
-            // Pattern field: `{ pkgs, ... }: body`
-            if let Some(pat) = pat {
-                if pat.fields.iter().any(|(n, _)| *n == Some(param_name)) {
-                    return Some(expr_id);
-                }
-            }
-        }
-    }
-    None
 }
 
 /// Collect the attrpath segments that have already been typed (i.e. that have

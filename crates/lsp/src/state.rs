@@ -11,8 +11,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use lang_ast::{
-    module_and_source_maps, Expr, ExprId, Module, ModuleScopes, ModuleSourceMap, NameId,
-    NameResolution, NixFile, RootDatabase,
+    module_and_source_maps, Expr, ExprId, Module, ModuleIndices, ModuleScopes, ModuleSourceMap,
+    NameId, NameResolution, NixFile, RootDatabase,
 };
 use lang_check::aliases::TypeAliasRegistry;
 use lang_check::imports::resolve_imports;
@@ -30,6 +30,7 @@ pub struct FileAnalysis {
     /// than the Root directly because Root is !Send.
     pub parsed: rnix::Parse<rnix::Root>,
     pub module: Module,
+    pub module_indices: ModuleIndices,
     pub source_map: ModuleSourceMap,
     pub name_res: NameResolution,
     pub scopes: ModuleScopes,
@@ -79,6 +80,7 @@ impl AnalysisState {
         let nix_file = self.db.set_file_contents(path.clone(), contents);
 
         let (module, source_map) = module_and_source_maps(&self.db, nix_file);
+        let module_indices = lang_ast::module_indices(&self.db, nix_file);
         let name_res = lang_ast::name_resolution(&self.db, nix_file);
         let scopes = lang_ast::scopes(&self.db, nix_file);
 
@@ -148,6 +150,7 @@ impl AnalysisState {
                 line_index,
                 parsed,
                 module,
+                module_indices,
                 source_map,
                 name_res,
                 scopes,

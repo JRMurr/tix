@@ -516,4 +516,44 @@ mod tests {
             "x should have exactly 2 reference sites, got: {refs:?}"
         );
     }
+
+    #[test]
+    fn module_indices_binding_expr() {
+        let mut db = crate::RootDatabase::default();
+        let nix_file = db.set_file_contents(
+            std::path::PathBuf::from("/test_indices.nix"),
+            "let x = 1 + 2; in x".to_string(),
+        );
+        let module = crate::module(&db, nix_file);
+        let indices = crate::module_indices(&db, nix_file);
+
+        let (x_name, _) = module.names().next().expect("should have a name");
+        assert!(
+            indices.binding_expr.contains_key(&x_name),
+            "x should have a binding expression in the index"
+        );
+    }
+
+    #[test]
+    fn module_indices_param_to_lambda() {
+        let mut db = crate::RootDatabase::default();
+        let nix_file = db.set_file_contents(
+            std::path::PathBuf::from("/test_param.nix"),
+            "x: x + 1".to_string(),
+        );
+        let module = crate::module(&db, nix_file);
+        let indices = crate::module_indices(&db, nix_file);
+
+        // The only name is the lambda param `x`.
+        let (x_name, _) = module.names().next().expect("should have a name");
+        let lambda_id = indices.param_to_lambda.get(&x_name);
+        assert!(
+            lambda_id.is_some(),
+            "lambda param x should map to its owning Lambda"
+        );
+        assert!(
+            matches!(module[*lambda_id.unwrap()], crate::Expr::Lambda { .. }),
+            "param_to_lambda should point to a Lambda expression"
+        );
+    }
 }

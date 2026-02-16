@@ -7,7 +7,7 @@
 // Skips trivial bindings where the type is obvious from the literal value
 // (e.g. `let x = 42` — int is obvious).
 
-use lang_ast::{BindingValue, Expr, ExprId, Literal, NameId, NameKind};
+use lang_ast::{Expr, ExprId, Literal, NameId, NameKind};
 use rowan::ast::AstNode;
 use tower_lsp::lsp_types::*;
 
@@ -94,24 +94,9 @@ fn is_trivial_binding(analysis: &FileAnalysis, name_id: NameId) -> bool {
     }
 }
 
-/// Find the value ExprId for a name's binding. Searches LetIn and AttrSet
-/// bindings in the module for the given name.
+/// Find the value ExprId for a name's binding via the pre-built module index.
 fn find_binding_expr(analysis: &FileAnalysis, target: NameId) -> Option<ExprId> {
-    for (_, expr) in analysis.module.exprs() {
-        let bindings = match expr {
-            Expr::LetIn { bindings, .. } | Expr::AttrSet { bindings, .. } => bindings,
-            _ => continue,
-        };
-        for &(name_id, ref value) in bindings.statics.iter() {
-            if name_id == target {
-                return match value {
-                    BindingValue::Expr(e) => Some(*e),
-                    _ => None,
-                };
-            }
-        }
-    }
-    None
+    analysis.module_indices.binding_expr.get(&target).copied()
 }
 
 #[cfg(test)]
