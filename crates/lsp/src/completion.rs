@@ -886,6 +886,8 @@ fn fields_to_completion_items(fields: &BTreeMap<SmolStr, TyRef>) -> Vec<Completi
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
     use crate::project_config::{ContextConfig, ProjectConfig};
     use crate::state::AnalysisState;
     use crate::test_util::{find_offset, parse_markers, temp_path};
@@ -1959,10 +1961,10 @@ mod tests {
     }
 
     #[test]
-    fn nixos_fixture_no_completion_without_stubs() {
-        // The built-in @nixos stubs declare `val config :: { ... }` with no
-        // named fields. Without an override dir, no field completions should
-        // appear — this is the bug that motivated these tests.
+    fn nixos_fixture_builtin_stubs_have_completions() {
+        // The compiled-in @nixos stubs (generated at depth 4) now include
+        // full option trees. Using @nixos without any override dir should
+        // produce completions for top-level option groups.
         let mut project = make_builtin_fixture(&[("nixos", &["**/*.nix"])], None);
         project.add_file(
             "test.nix",
@@ -1974,39 +1976,104 @@ mod tests {
         let results = project.complete_at_markers("test.nix");
         let names = labels(&results[&1]);
         assert!(
-            !names.contains(&"steam"),
-            "should NOT complete steam without rich stubs, got: {names:?}"
+            !names.is_empty(),
+            "builtin @nixos stubs should produce completions, got: {names:?}"
+        );
+    }
+
+    // ======================================================================
+    // On-disk fixture tests (test/nixos_fixture/)
+    // ======================================================================
+    //
+    // These load real Nix files from test/nixos_fixture/ and verify
+    // completion through the full pipeline: tix.toml discovery -> stub
+    // loading -> context injection -> completion.
+
+    /// Set up an AnalysisState pointing at the test/nixos_fixture/ directory.
+    ///
+    /// Loads the fixture's tix.toml and configures the state so that
+    /// context resolution works for files under the fixture directory.
+    /// Uses `with_builtins()` so that Lib/Pkgs from `stubs/lib.tix` resolve
+    /// when context stubs reference them.
+    fn fixture_state() -> (AnalysisState, PathBuf) {
+        let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../test/nixos_fixture")
+            .canonicalize()
+            .expect("test/nixos_fixture fixture directory must exist");
+
+        let config_path = fixture_dir.join("tix.toml");
+        let config = crate::project_config::load_config(&config_path)
+            .expect("fixture tix.toml should parse");
+
+        let mut state = AnalysisState::new(TypeAliasRegistry::with_builtins());
+        state.project_config = Some(config);
+        state.config_dir = Some(fixture_dir.clone());
+
+        (state, fixture_dir)
+    }
+
+    /// Run completions at marker positions in a fixture file.
+    fn complete_fixture_markers(rel_path: &str) -> BTreeMap<u32, Vec<CompletionItem>> {
+        let (mut state, fixture_dir) = fixture_state();
+        let file_path = fixture_dir.join(rel_path);
+        let src = std::fs::read_to_string(&file_path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {e}", file_path.display()));
+
+        let markers = parse_markers(&src);
+        assert!(!markers.is_empty(), "no markers in {rel_path}");
+
+        state.update_file(file_path.clone(), src.clone());
+        let analysis = state.get_file(&file_path).unwrap();
+        let root = rnix::Root::parse(&src).tree();
+
+        markers
+            .into_iter()
+            .map(|(num, offset)| {
+                let pos = analysis.line_index.position(offset);
+                let items = match completion(analysis, pos, &root) {
+                    Some(CompletionResponse::Array(items)) => items,
+                    _ => Vec::new(),
+                };
+                (num, items)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn fixture_gaming_nix_programs() {
+        // gaming.nix has `programs.` with a marker — should complete with
+        // steam, firefox, etc. from the fixture's nixos.tix stubs.
+        let results = complete_fixture_markers("hosts/desktop/gaming.nix");
+        let names = labels(&results[&1]);
+        assert!(
+            names.contains(&"steam"),
+            "expected steam in gaming.nix, got: {names:?}"
         );
         assert!(
-            !names.contains(&"firefox"),
-            "should NOT complete firefox without rich stubs, got: {names:?}"
+            names.contains(&"firefox"),
+            "expected firefox in gaming.nix, got: {names:?}"
         );
     }
 
     #[test]
-    fn nixos_fixture_builtin_stubs_override() {
-        // When set_builtin_stubs_dir points to a directory with rich stubs,
-        // @nixos resolves to the full NixosConfig type and completions work.
-        let mut project = make_builtin_fixture(
-            &[("nixos", &["**/*.nix"])],
-            Some(&[("nixos", NIXOS_FIXTURE_STUBS)]),
-        );
-        project.add_file(
-            "test.nix",
-            indoc! {"
-                { config, ... }: { programs. }
-                #                           ^1
-            "},
-        );
-        let results = project.complete_at_markers("test.nix");
+    fn fixture_home_shell_nix_programs() {
+        // home/shell.nix uses the @home-manager context (via tix.toml
+        // `[context.home]`). The compiled-in HM stubs define
+        // HomeManagerConfig with programs, services, etc. Verify that
+        // `programs.` completion includes common HM program modules.
+        let results = complete_fixture_markers("home/shell.nix");
         let names = labels(&results[&1]);
         assert!(
-            names.contains(&"steam"),
-            "should complete steam with override stubs, got: {names:?}"
+            names.contains(&"fish"),
+            "expected fish in home/shell.nix programs completion, got: {names:?}"
         );
         assert!(
-            names.contains(&"firefox"),
-            "should complete firefox with override stubs, got: {names:?}"
+            names.contains(&"git"),
+            "expected git in home/shell.nix programs completion, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"bash"),
+            "expected bash in home/shell.nix programs completion, got: {names:?}"
         );
     }
 }

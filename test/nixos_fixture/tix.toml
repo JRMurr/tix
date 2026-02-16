@@ -9,5 +9,5 @@ paths = ["hosts/**/*.nix", "common/*.nix"]
 stubs = ["stubs/nixos.tix"]
 
 [context.home]
-paths = ["common/homemanager/**/*.nix"]
-stubs = ["stubs/home-manager.tix"]
+paths = ["common/homemanager/**/*.nix", "home/**/*.nix"]
+stubs = ["@home-manager"]
