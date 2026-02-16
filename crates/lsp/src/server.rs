@@ -92,6 +92,7 @@ impl TixLanguageServer {
 
         // Allow overriding built-in context stubs via env var.
         if let Ok(dir) = std::env::var("TIX_BUILTIN_STUBS") {
+            log::info!("TIX_BUILTIN_STUBS override: {dir}");
             registry.set_builtin_stubs_dir(std::path::PathBuf::from(dir));
         }
 
@@ -123,13 +124,31 @@ impl TixLanguageServer {
 #[tower_lsp::async_trait]
 impl LanguageServer for TixLanguageServer {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
+        if let Some(ref root_uri) = params.root_uri {
+            log::info!("Workspace root: {}", root_uri.as_str());
+        }
+
+        if let Some(ref info) = params.client_info {
+            log::info!(
+                "Client: {}{}",
+                info.name,
+                info.version
+                    .as_deref()
+                    .map_or(String::new(), |v| format!(" v{v}")),
+            );
+        }
+
         // Parse editor-provided settings from initializationOptions.
         if let Some(opts) = params.initialization_options {
             match serde_json::from_value::<TixConfig>(opts) {
                 Ok(init_config) => {
-                    // If the editor provided stubs paths, rebuild the registry
-                    // to include both CLI and editor-configured stubs.
                     if !init_config.stubs.is_empty() {
+                        log::info!(
+                            "Editor provided {} stub path(s)",
+                            init_config.stubs.len(),
+                        );
+                        // Rebuild the registry to include both CLI and
+                        // editor-configured stubs.
                         let registry = self.build_registry(&init_config);
                         self.state.lock().reload_registry(registry);
                     }
@@ -154,6 +173,24 @@ impl LanguageServer for TixLanguageServer {
                         Ok(project_cfg) => {
                             log::info!("Loaded project config from {}", config_path.display());
 
+                            if !project_cfg.stubs.is_empty() {
+                                log::info!(
+                                    "Project stubs: {}",
+                                    project_cfg.stubs.join(", "),
+                                );
+                            }
+                            if !project_cfg.context.is_empty() {
+                                log::info!(
+                                    "Project contexts: {}",
+                                    project_cfg
+                                        .context
+                                        .keys()
+                                        .cloned()
+                                        .collect::<Vec<_>>()
+                                        .join(", "),
+                                );
+                            }
+
                             // Load stubs from tix.toml config.
                             let mut state = self.state.lock();
                             for stub in &project_cfg.stubs {
@@ -173,6 +210,8 @@ impl LanguageServer for TixLanguageServer {
                             log::warn!("Failed to load {}: {e}", config_path.display());
                         }
                     }
+                } else {
+                    log::info!("No tix.toml found");
                 }
             }
         }
@@ -221,7 +260,15 @@ impl LanguageServer for TixLanguageServer {
     }
 
     async fn initialized(&self, _: InitializedParams) {
-        log::info!("tix-lsp initialized");
+        let state = self.state.lock();
+        let config = self.config.lock();
+        log::info!(
+            "Ready — {} type aliases, {} global vals, diagnostics {}, inlay hints {}",
+            state.registry.alias_count(),
+            state.registry.global_vals().len(),
+            if config.diagnostics.enable { "on" } else { "off" },
+            if config.inlay_hints.enable { "on" } else { "off" },
+        );
     }
 
     async fn shutdown(&self) -> Result<()> {

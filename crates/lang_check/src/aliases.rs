@@ -246,6 +246,11 @@ impl TypeAliasRegistry {
         self.aliases.get(name)
     }
 
+    /// Number of registered type aliases.
+    pub fn alias_count(&self) -> usize {
+        self.aliases.len()
+    }
+
     /// Get the global val declarations map.
     pub fn global_vals(&self) -> &HashMap<SmolStr, ParsedTy> {
         &self.global_vals

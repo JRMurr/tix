@@ -43,24 +43,36 @@ async fn main() {
 
     let args = Cli::parse();
 
+    log::info!(
+        "tix-lsp {} starting (pid {})",
+        env!("CARGO_PKG_VERSION"),
+        std::process::id(),
+    );
+
     // Load .tix stub files once at startup.
     // Built-in nixpkgs stubs are included by default unless --no-default-stubs is passed.
     let mut registry = if args.no_default_stubs {
+        log::info!("Built-in stubs: disabled (--no-default-stubs)");
         TypeAliasRegistry::new()
     } else {
+        log::info!("Built-in stubs: enabled");
         TypeAliasRegistry::with_builtins()
     };
     for stub_path in &args.stub_paths {
-        if let Err(e) = load_stubs(&mut registry, stub_path) {
-            eprintln!(
-                "Warning: failed to load stubs from {}: {e}",
-                stub_path.display()
-            );
+        match load_stubs(&mut registry, stub_path) {
+            Ok(()) => log::info!("Loaded CLI stubs from {}", stub_path.display()),
+            Err(e) => log::warn!("Failed to load stubs from {}: {e}", stub_path.display()),
         }
     }
     if let Err(cycles) = registry.validate() {
-        eprintln!("Warning: cyclic type aliases detected: {:?}", cycles);
+        log::warn!("Cyclic type aliases detected: {:?}", cycles);
     }
+
+    log::info!(
+        "Initial registry: {} type aliases, {} global vals",
+        registry.alias_count(),
+        registry.global_vals().len(),
+    );
 
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
