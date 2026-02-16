@@ -72,16 +72,6 @@
   the Select's attrpath, mangling subsequent expressions. This can destroy call
   sites that would otherwise constrain lambda parameters.
 
-### LSP Hover on Attrpath Elements
-
-- Hovering on an attrpath element (e.g. `enable` in `config.enable`) shows the
-  type of the string literal key (`string`) rather than the Select result type
-  (`bool`). This is because the lowering maps each attrpath ident to its own
-  `Expr::Literal(String)` with a source_map entry, and the hover code returns
-  the first matching expression walking up from the token. Fixing this would
-  require the hover to detect attrpath literal expressions and skip up to the
-  parent Select node.
-
 ### LSP Inlay Hints & NameKind Classification
 
 - Files wrapped in a top-level lambda with `{ pkgs ? <nixpkgs> }:` produce

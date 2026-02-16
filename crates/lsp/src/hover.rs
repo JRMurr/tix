@@ -51,6 +51,15 @@ pub fn hover(
 
         // Then check for an expression.
         if let Some(expr_id) = analysis.source_map.expr_for_node(ptr) {
+            // Attrpath idents are lowered to Literal(String) with their own
+            // source_map entries, so the walk-up finds them before the parent
+            // Select. Skip these so we land on the Select node instead, which
+            // has the correct field type and docs.
+            if is_select_attrpath(&node) {
+                node = node.parent()?;
+                continue;
+            }
+
             if let Some(ty) = inference.expr_ty_map.get(expr_id) {
                 let range = analysis.line_index.range(node.text_range());
 
@@ -76,6 +85,18 @@ pub fn hover(
 
         node = node.parent()?;
     }
+}
+
+/// Check whether a syntax node is an attrpath element inside a Select expression.
+///
+/// Returns true when the node is a child of an `Attrpath` whose parent is a
+/// `Select`. This correctly excludes attrpath keys in attrset definitions
+/// (`AttrpathValue`) — those have a different parent type.
+fn is_select_attrpath(node: &rnix::SyntaxNode) -> bool {
+    node.ancestors()
+        .find_map(rnix::ast::Attrpath::cast)
+        .and_then(|ap| ap.syntax().parent())
+        .is_some_and(|parent| rnix::ast::Select::can_cast(parent.kind()))
 }
 
 /// Walk a Select expression chain to extract the field path and look up
@@ -381,6 +402,95 @@ mod tests {
             doc.as_deref(),
             Some("Identity function."),
             "doc from first file should survive module merge and appear in hover"
+        );
+    }
+
+    #[test]
+    fn hover_on_attrpath_shows_field_type() {
+        let stubs = r#"
+            type Config = {
+                ## Whether the service is enabled.
+                enable: bool,
+                ...
+            };
+            val config :: Config;
+        "#;
+        let file = comment_parser::parse_tix_file(stubs).expect("parse stubs");
+        let mut registry = TypeAliasRegistry::new();
+        registry.load_tix_file(&file);
+
+        // Hover on `enable` (the attrpath element) should show `bool`, not `string`.
+        let src = indoc! {"
+            config.enable
+            #      ^1
+        "};
+        let markers = parse_markers(src);
+        let t = TestAnalysis::with_registry(src, registry);
+        let h = hover_at(&t, markers[&1]).expect("hover should return a result");
+        let (type_text, _doc) = hover_parts(&h);
+
+        assert!(
+            type_text.contains("bool"),
+            "hover on attrpath element should show field type `bool`, got: {type_text}"
+        );
+    }
+
+    #[test]
+    fn hover_on_nested_attrpath_shows_field_type() {
+        // rnix parses `a.foo.bar` as a single Select with a two-element attrpath,
+        // so hovering on either `foo` or `bar` walks up to the same Select node
+        // and shows its result type (`int`). This is correct — previously both
+        // would have shown `string` (the literal key type).
+        let src = indoc! {"
+            let a = { foo = { bar = 42; }; }; in a.foo.bar
+            #                                        ^1 ^2
+        "};
+        let markers = parse_markers(src);
+        let t = TestAnalysis::new(src);
+
+        let h1 = hover_at(&t, markers[&1]).expect("hover on `foo`");
+        let (ty1, _) = hover_parts(&h1);
+        assert!(
+            ty1.contains("int"),
+            "hover on `foo` should show Select result type, got: {ty1}"
+        );
+
+        let h2 = hover_at(&t, markers[&2]).expect("hover on `bar`");
+        let (ty2, _) = hover_parts(&h2);
+        assert!(
+            ty2.contains("int"),
+            "hover on `bar` should show Select result type, got: {ty2}"
+        );
+    }
+
+    #[test]
+    fn hover_on_attrpath_shows_field_doc() {
+        let stubs = r#"
+            type Config = {
+                ## Whether the service is enabled.
+                enable: bool,
+                ...
+            };
+            val config :: Config;
+        "#;
+        let file = comment_parser::parse_tix_file(stubs).expect("parse stubs");
+        let mut registry = TypeAliasRegistry::new();
+        registry.load_tix_file(&file);
+
+        // Hover on `enable` (attrpath element) should surface field docs.
+        let src = indoc! {"
+            config.enable
+            #      ^1
+        "};
+        let markers = parse_markers(src);
+        let t = TestAnalysis::with_registry(src, registry);
+        let h = hover_at(&t, markers[&1]).expect("hover should return a result");
+        let (_type_text, doc) = hover_parts(&h);
+
+        assert_eq!(
+            doc.as_deref(),
+            Some("Whether the service is enabled."),
+            "hover on attrpath element should show field doc"
         );
     }
 }
