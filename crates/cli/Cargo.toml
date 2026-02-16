@@ -23,6 +23,7 @@ smol_str = { workspace = true }
 
 
 [dev-dependencies]
+indoc = "2.0.5"
 tempfile = "3"
 
 [[bin]]

@@ -3,6 +3,7 @@
 //! These run `tix-cli` as a subprocess so each test gets an isolated environment —
 //! no risk of env var pollution between parallel test threads.
 
+use indoc::indoc;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -20,9 +21,35 @@ fn tix_cli() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_tix-cli"))
 }
 
+/// Assert that `stdout` contains a binding line matching `name :: ty_fragment`.
+/// The type fragment is checked as a substring of the type portion, so you can
+/// match `config :: NixosConfig` without spelling out the full expanded type.
+fn assert_binding(stdout: &str, name: &str, ty_fragment: &str) {
+    let binding_prefix = format!("{name} :: ");
+    let matching_line = stdout.lines().find(|l| {
+        let trimmed = l.trim();
+        trimmed.starts_with(&binding_prefix)
+    });
+    match matching_line {
+        Some(line) => {
+            let ty_part = line.trim().strip_prefix(&binding_prefix).unwrap();
+            assert!(
+                ty_part.contains(ty_fragment),
+                "binding `{name}` has type `{ty_part}`, expected it to contain `{ty_fragment}`\nfull stdout:\n{stdout}"
+            );
+        }
+        None => {
+            panic!("expected binding `{name}` in output, but not found.\nstdout:\n{stdout}");
+        }
+    }
+}
+
 /// Write minimal NixOS context stubs to a temp directory and verify that
 /// `tix-cli` picks them up via `TIX_BUILTIN_STUBS` when processing a file
 /// matched by `stubs = ["@nixos"]` in tix.toml.
+///
+/// Checks that the stubs actually affect type inference — `config` gets the
+/// alias type, `lib.id "hello"` resolves to `string`, etc.
 #[test]
 fn builtin_stubs_env_override_nixos() {
     let root = repo_root();
@@ -32,20 +59,20 @@ fn builtin_stubs_env_override_nixos() {
     // accesses config, lib (mkEnableOption, mkOption, id), and pkgs.
     std::fs::write(
         tmp.path().join("nixos.tix"),
-        r#"
-type NixosConfig = { ... };
-type Lib = {
-    mkEnableOption: string -> bool,
-    mkOption: { ... } -> a,
-    id: a -> a,
-    ...
-};
-type Pkgs = { ... };
+        indoc! {"
+            type NixosConfig = { ... };
+            type Lib = {
+                mkEnableOption: string -> bool,
+                mkOption: { ... } -> a,
+                id: a -> a,
+                ...
+            };
+            type Pkgs = { ... };
 
-val config :: NixosConfig;
-val lib :: Lib;
-val pkgs :: Pkgs;
-"#,
+            val config :: NixosConfig;
+            val lib :: Lib;
+            val pkgs :: Pkgs;
+        "},
     )
     .unwrap();
 
@@ -64,13 +91,21 @@ val pkgs :: Pkgs;
         output.status.success(),
         "tix-cli failed with override nixos stubs.\nstdout: {stdout}\nstderr: {stderr}"
     );
-    assert!(
-        stdout.contains("config"),
-        "expected 'config' binding in output.\nstdout: {stdout}"
-    );
+
+    // Verify that stubs actually fed types into inference.
+    assert_binding(&stdout, "config", "NixosConfig");
+    assert_binding(&stdout, "lib", "Lib");
+    assert_binding(&stdout, "pkgs", "Pkgs");
+    // `lib.id "hello"` should resolve to string via the `id: a -> a` stub.
+    assert_binding(&stdout, "greeting", "string");
+    // `lib.mkEnableOption "my-service"` should resolve to bool.
+    assert_binding(&stdout, "enable", "bool");
 }
 
 /// Same idea for the `@home-manager` context, using the nixos_fixture layout.
+///
+/// Verifies that config field access (`config.programs.fish.enable`) resolves
+/// through the stub-declared `HomeManagerConfig` type.
 #[test]
 fn builtin_stubs_env_override_home_manager() {
     let root = repo_root();
@@ -79,22 +114,22 @@ fn builtin_stubs_env_override_home_manager() {
     // Minimal home-manager.tix — shell.nix accesses config.programs.fish.enable.
     std::fs::write(
         tmp.path().join("home-manager.tix"),
-        r#"
-type HomeManagerConfig = {
-    programs: {
-        fish: { enable: bool, ... },
-        ...
-    },
-    ...
-};
-type Lib = { ... };
-type Pkgs = { ... };
+        indoc! {"
+            type HomeManagerConfig = {
+                programs: {
+                    fish: { enable: bool, ... },
+                    ...
+                },
+                ...
+            };
+            type Lib = { ... };
+            type Pkgs = { ... };
 
-val config :: HomeManagerConfig;
-val lib :: Lib;
-val pkgs :: Pkgs;
-val osConfig :: { ... };
-"#,
+            val config :: HomeManagerConfig;
+            val lib :: Lib;
+            val pkgs :: Pkgs;
+            val osConfig :: { ... };
+        "},
     )
     .unwrap();
 
@@ -113,14 +148,20 @@ val osConfig :: { ... };
         output.status.success(),
         "tix-cli failed with override home-manager stubs.\nstdout: {stdout}\nstderr: {stderr}"
     );
-    assert!(
-        stdout.contains("config"),
-        "expected 'config' binding in output.\nstdout: {stdout}"
-    );
+
+    // Verify stub types propagated through field access.
+    assert_binding(&stdout, "config", "HomeManagerConfig");
+    assert_binding(&stdout, "lib", "Lib");
+    assert_binding(&stdout, "pkgs", "Pkgs");
+    // `config.programs.fish.enable` should resolve to `bool`.
+    assert_binding(&stdout, "enable", "bool");
+    // `config.programs.fish` should contain the `enable: bool` field.
+    assert_binding(&stdout, "fish", "enable: bool");
 }
 
 /// When `TIX_BUILTIN_STUBS` is unset, the compiled-in stubs should be used
-/// as a fallback. Verify the binary still type-checks successfully.
+/// as a fallback. Verify the binary still type-checks successfully and produces
+/// the same types as the override path.
 #[test]
 fn builtin_stubs_fallback_without_env() {
     let root = repo_root();
@@ -140,8 +181,44 @@ fn builtin_stubs_fallback_without_env() {
         output.status.success(),
         "tix-cli failed without TIX_BUILTIN_STUBS (compiled-in fallback).\nstdout: {stdout}\nstderr: {stderr}"
     );
+
+    // Same type assertions as the override test — compiled-in stubs should
+    // produce equivalent results.
+    assert_binding(&stdout, "config", "NixosConfig");
+    assert_binding(&stdout, "lib", "Lib");
+    assert_binding(&stdout, "greeting", "string");
+}
+
+/// Verify that deliberately wrong stubs cause a type error, proving the stubs
+/// actually influence inference rather than being silently ignored.
+#[test]
+fn wrong_stubs_cause_type_error() {
+    let root = repo_root();
+    let tmp = tempfile::tempdir().expect("failed to create temp dir");
+
+    // Declare lib as `int` — `lib.id "hello"` should fail because you can't
+    // access fields on an int.
+    std::fs::write(
+        tmp.path().join("nixos.tix"),
+        indoc! {"
+            val config :: int;
+            val lib :: int;
+            val pkgs :: int;
+        "},
+    )
+    .unwrap();
+
+    let output = Command::new(tix_cli())
+        .arg(root.join("test/nixos_module.nix"))
+        .arg("--config")
+        .arg(root.join("test/tix.toml"))
+        .env("TIX_BUILTIN_STUBS", tmp.path())
+        .output()
+        .expect("failed to run tix-cli");
+
     assert!(
-        stdout.contains("config"),
-        "expected 'config' binding in output.\nstdout: {stdout}"
+        !output.status.success(),
+        "tix-cli should have failed with wrong stubs but succeeded.\nstdout: {}",
+        String::from_utf8_lossy(&output.stdout)
     );
 }
