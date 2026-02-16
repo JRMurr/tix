@@ -10,7 +10,7 @@
 use lang_ast::{AstPtr, Expr};
 use lang_check::aliases::DocIndex;
 use rowan::ast::AstNode;
-use tower_lsp::lsp_types::{Hover, HoverContents, MarkedString, Position, Range};
+use tower_lsp::lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind, Position, Range};
 
 use crate::state::FileAnalysis;
 
@@ -175,19 +175,17 @@ fn capitalize_first(s: &str) -> String {
 }
 
 fn make_hover(type_text: String, doc: Option<&str>, range: Range) -> Hover {
-    let mut parts = vec![MarkedString::LanguageString(
-        tower_lsp::lsp_types::LanguageString {
-            language: "tix".to_string(),
-            value: type_text,
-        },
-    )];
-
+    let mut value = format!("```tix\n{type_text}\n```");
     if let Some(doc) = doc {
-        parts.push(MarkedString::String(doc.to_string()));
+        value.push_str("\n\n---\n\n");
+        value.push_str(doc);
     }
 
     Hover {
-        contents: HoverContents::Array(parts),
+        contents: HoverContents::Markup(MarkupContent {
+            kind: MarkupKind::Markdown,
+            value,
+        }),
         range: Some(range),
     }
 }
@@ -208,17 +206,19 @@ mod tests {
 
     /// Extract the type string and optional doc string from hover contents.
     fn hover_parts(h: &Hover) -> (String, Option<String>) {
-        let HoverContents::Array(parts) = &h.contents else {
-            panic!("expected Array hover contents");
+        let HoverContents::Markup(markup) = &h.contents else {
+            panic!("expected Markup hover contents, got: {:?}", h.contents);
         };
-        let type_text = match &parts[0] {
-            MarkedString::LanguageString(ls) => ls.value.clone(),
-            other => panic!("expected LanguageString, got: {other:?}"),
-        };
-        let doc = parts.get(1).map(|p| match p {
-            MarkedString::String(s) => s.clone(),
-            other => panic!("expected String for doc, got: {other:?}"),
-        });
+        // Format is: ```tix\n<type>\n```[\n\n---\n\n<doc>]
+        let value = &markup.value;
+        let type_text = value
+            .strip_prefix("```tix\n")
+            .and_then(|s| s.split_once("\n```"))
+            .map(|(ty, _)| ty.to_string())
+            .unwrap_or_else(|| panic!("unexpected hover format: {value}"));
+        let doc = value
+            .split_once("\n```\n\n---\n\n")
+            .map(|(_, doc)| doc.to_string());
         (type_text, doc)
     }
 
