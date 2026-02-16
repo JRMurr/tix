@@ -115,8 +115,8 @@ fn try_attrpath_key_hover(
     docs: &DocIndex,
 ) -> Option<Hover> {
     use crate::completion::{
-        collect_attrset_fields, collect_parent_attrpath_context, extract_alias_name,
-        get_module_config_type, resolve_through_segments,
+        collect_parent_attrpath_context, extract_alias_name, get_module_config_type,
+        resolve_through_segments,
     };
 
     let inference = analysis.inference()?;
@@ -189,14 +189,7 @@ fn try_attrpath_key_hover(
     let last_segment = full_path.last()?;
     let range = analysis.line_index.range(token.text_range());
 
-    // For attrset-typed fields, show the type concisely. For leaf values, show
-    // the concrete type.
-    let fields = collect_attrset_fields(&resolved_ty);
-    let type_display = if fields.is_empty() {
-        format!("{last_segment} :: {resolved_ty}")
-    } else {
-        format!("{last_segment} :: {resolved_ty}")
-    };
+    let type_display = format!("{last_segment} :: {resolved_ty}");
 
     Some(make_hover(type_display, doc.as_deref(), range))
 }
@@ -749,20 +742,28 @@ mod tests {
         "};
         let results = hover_at_markers_with_context(src, stubs);
 
-        // Hover on `programs` — should show type.
+        // Hover on `programs` — should show type with `:: ` format.
         let h1 = results[&1].as_ref().expect("hover on programs");
         let (ty1, _doc1) = hover_parts(h1);
         assert!(
             ty1.contains("programs"),
             "hover on `programs` attrpath key should show type, got: {ty1}"
         );
+        assert!(
+            ty1.contains(" :: "),
+            "attrset-typed field should use `name :: type` format, got: {ty1}"
+        );
 
-        // Hover on `steam` — should show type and doc.
+        // Hover on `steam` — should show type and doc with `:: ` format.
         let h2 = results[&2].as_ref().expect("hover on steam");
         let (ty2, doc2) = hover_parts(h2);
         assert!(
             ty2.contains("steam"),
             "hover on `steam` should show type, got: {ty2}"
+        );
+        assert!(
+            ty2.contains(" :: "),
+            "attrset-typed field should use `name :: type` format, got: {ty2}"
         );
         assert_eq!(
             doc2.as_deref(),
