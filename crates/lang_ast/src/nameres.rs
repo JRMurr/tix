@@ -326,9 +326,7 @@ impl NameResolution {
 
     /// All reference ExprIds that resolve to the given NameId.
     pub fn refs_to(&self, name: NameId) -> &[ExprId] {
-        self.refs_by_name
-            .get(&name)
-            .map_or(&[], |v| v.as_slice())
+        self.refs_by_name.get(&name).map_or(&[], |v| v.as_slice())
     }
 }
 

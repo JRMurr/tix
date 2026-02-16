@@ -27,10 +27,10 @@ use std::collections::BTreeMap;
 
 use lang_ast::nameres::{self, ResolveResult};
 use lang_ast::{AstPtr, Expr, ExprId, NameKind};
+use lang_check::aliases::DocIndex;
 use lang_ty::{OutputTy, TyRef};
 use rowan::ast::AstNode;
 use smol_str::SmolStr;
-use lang_check::aliases::DocIndex;
 use tower_lsp::lsp_types::{
     CompletionItem, CompletionItemKind, CompletionResponse, Documentation, MarkupContent,
     MarkupKind, Position,
@@ -358,11 +358,6 @@ fn try_attrpath_key_completion(
     Some(fields_to_completion_items(&fields, doc_ctx))
 }
 
-/// Get the module config type from the root lambda's pattern fields.
-///
-
-
-
 // ==============================================================================
 // Callsite attrset completion: `f { | }`
 // ==============================================================================
@@ -661,7 +656,6 @@ fn is_function_ty(ty: &OutputTy) -> bool {
 // Type unwrapping helpers
 // ==============================================================================
 
-
 // ==============================================================================
 // CompletionItem construction
 // ==============================================================================
@@ -684,11 +678,12 @@ fn fields_to_completion_items(
             let documentation = doc_ctx.and_then(|(docs, alias, prefix)| {
                 let mut path: Vec<SmolStr> = prefix.to_vec();
                 path.push(name.clone());
-                docs.field_doc(alias, &path)
-                    .map(|d| Documentation::MarkupContent(MarkupContent {
+                docs.field_doc(alias, &path).map(|d| {
+                    Documentation::MarkupContent(MarkupContent {
                         kind: MarkupKind::Markdown,
                         value: d.to_string(),
-                    }))
+                    })
+                })
             });
 
             // Store alias + field path in `data` for completionItem/resolve.
@@ -1287,11 +1282,16 @@ mod tests {
         let results = complete_at_markers_with_context(src, stubs);
         let items = &results[&1];
         let steam = items.iter().find(|i| i.label == "steam");
-        assert!(steam.is_some(), "should complete steam, got: {:?}", labels(items));
+        assert!(
+            steam.is_some(),
+            "should complete steam, got: {:?}",
+            labels(items)
+        );
         assert_eq!(
             steam.unwrap().documentation,
-            Some(Documentation::MarkupContent(MarkupContent { kind: MarkupKind::Markdown, value:
-                "Enable the steam game launcher.".to_string()
+            Some(Documentation::MarkupContent(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: "Enable the steam game launcher.".to_string()
             })),
             "steam should have doc comment from stubs"
         );
@@ -1299,7 +1299,8 @@ mod tests {
         let firefox = items.iter().find(|i| i.label == "firefox");
         assert!(firefox.is_some(), "should complete firefox");
         assert_eq!(
-            firefox.unwrap().documentation, None,
+            firefox.unwrap().documentation,
+            None,
             "firefox should have no documentation"
         );
     }
@@ -1328,11 +1329,16 @@ mod tests {
         let results = complete_at_markers_with_context(src, stubs);
         let items = &results[&1];
         let steam = items.iter().find(|i| i.label == "steam");
-        assert!(steam.is_some(), "should complete steam, got: {:?}", labels(items));
+        assert!(
+            steam.is_some(),
+            "should complete steam, got: {:?}",
+            labels(items)
+        );
         assert_eq!(
             steam.unwrap().documentation,
-            Some(Documentation::MarkupContent(MarkupContent { kind: MarkupKind::Markdown, value:
-                "Enable the steam game launcher.".to_string()
+            Some(Documentation::MarkupContent(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: "Enable the steam game launcher.".to_string()
             })),
         );
         // firefox has no doc comment.
@@ -1443,8 +1449,8 @@ mod tests {
     /// project config.
     fn make_fixture(contexts: &[(&str, &[&str], &str)]) -> NixosFixtureProject {
         let id = next_fixture_id();
-        let temp_dir = std::env::temp_dir()
-            .join(format!("tix_nixos_fixture_{}_{id}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("tix_nixos_fixture_{}_{id}", std::process::id()));
         std::fs::create_dir_all(&temp_dir).unwrap();
         let temp_dir = temp_dir.canonicalize().unwrap();
 
@@ -1484,8 +1490,8 @@ mod tests {
         override_stubs: Option<&[(&str, &str)]>,
     ) -> NixosFixtureProject {
         let id = next_fixture_id();
-        let temp_dir = std::env::temp_dir()
-            .join(format!("tix_builtin_fixture_{}_{id}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("tix_builtin_fixture_{}_{id}", std::process::id()));
         std::fs::create_dir_all(&temp_dir).unwrap();
         let temp_dir = temp_dir.canonicalize().unwrap();
 
@@ -1533,10 +1539,7 @@ mod tests {
         }
 
         /// Run completions at all `# ^N` marker positions in the file.
-        fn complete_at_markers(
-            &self,
-            relative_path: &str,
-        ) -> BTreeMap<u32, Vec<CompletionItem>> {
+        fn complete_at_markers(&self, relative_path: &str) -> BTreeMap<u32, Vec<CompletionItem>> {
             let path = self.temp_dir.join(relative_path);
             let src = std::fs::read_to_string(&path).unwrap();
             let analysis = self.state.get_file(&path).expect("file not loaded");
@@ -1878,10 +1881,8 @@ mod tests {
             val lib :: { ... };
             val pkgs :: { ... };
         "};
-        let mut project = make_builtin_fixture(
-            &[("nixos", &["**/*.nix"])],
-            Some(&[("nixos", rich_stubs)]),
-        );
+        let mut project =
+            make_builtin_fixture(&[("nixos", &["**/*.nix"])], Some(&[("nixos", rich_stubs)]));
         project.add_file(
             "test.nix",
             indoc! {"
@@ -1892,11 +1893,16 @@ mod tests {
         let results = project.complete_at_markers("test.nix");
         let items = &results[&1];
         let steam = items.iter().find(|i| i.label == "steam");
-        assert!(steam.is_some(), "should complete steam, got: {:?}", labels(items));
+        assert!(
+            steam.is_some(),
+            "should complete steam, got: {:?}",
+            labels(items)
+        );
         assert_eq!(
             steam.unwrap().documentation,
-            Some(Documentation::MarkupContent(MarkupContent { kind: MarkupKind::Markdown, value:
-                "Whether to enable the steam game platform.".to_string()
+            Some(Documentation::MarkupContent(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: "Whether to enable the steam game platform.".to_string()
             })),
             "steam completion item should carry doc from override stubs"
         );

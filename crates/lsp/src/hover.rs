@@ -10,7 +10,6 @@
 use lang_ast::{AstPtr, Expr};
 use lang_check::aliases::DocIndex;
 use rowan::ast::AstNode;
-use smol_str::SmolStr;
 use tower_lsp::lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind, Position, Range};
 
 use crate::state::FileAnalysis;
@@ -77,11 +76,7 @@ pub fn hover(
                 // from stubs (e.g. hovering on `mkDerivation` shows its doc).
                 if let Expr::Reference(ref_name) = &analysis.module[expr_id] {
                     let doc = docs.decl_doc(ref_name.as_str());
-                    return Some(make_hover(
-                        format!("{ty}"),
-                        doc.map(|d| d.as_str()),
-                        range,
-                    ));
+                    return Some(make_hover(format!("{ty}"), doc.map(|d| d.as_str()), range));
                 }
 
                 // For Select expressions, try to find field-level docs by
@@ -131,10 +126,7 @@ fn try_attrpath_key_hover(
     let _apv = rnix::ast::AttrpathValue::cast(parent)?;
 
     // Find the enclosing AttrSet.
-    let attrset_node = _apv
-        .syntax()
-        .parent()
-        .and_then(rnix::ast::AttrSet::cast)?;
+    let attrset_node = _apv.syntax().parent().and_then(rnix::ast::AttrSet::cast)?;
 
     // Collect all segments from this attrpath, up to and including the
     // hovered token.
@@ -154,7 +146,7 @@ fn try_attrpath_key_hover(
 
     // Find the config type from the root lambda's pattern.
     let first_segment = full_path.first()?;
-    let config_ty = get_module_config_type(analysis, &inference, first_segment)?;
+    let config_ty = get_module_config_type(analysis, inference, first_segment)?;
 
     let alias = extract_alias_name(&config_ty).cloned();
 
@@ -212,7 +204,7 @@ fn try_attrpath_key_field_doc(
     full_path.extend(current_segments);
 
     let first_segment = full_path.first()?;
-    let config_ty = get_module_config_type(analysis, &inference, first_segment)?;
+    let config_ty = get_module_config_type(analysis, inference, first_segment)?;
     let alias = extract_alias_name(&config_ty)?;
 
     docs.field_doc(alias.as_str(), &full_path)

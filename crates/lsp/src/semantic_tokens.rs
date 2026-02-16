@@ -404,10 +404,7 @@ mod tests {
             .iter()
             .find(|t| t.3 == 7)
             .expect("should have a COMMENT token");
-        assert_eq!(
-            comment.0, 0,
-            "comment should start on line 0: {tokens:?}"
-        );
+        assert_eq!(comment.0, 0, "comment should start on line 0: {tokens:?}");
         assert_eq!(
             comment.2, 11,
             "multi-line comment length should be chars to first newline: {tokens:?}"
