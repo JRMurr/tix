@@ -335,7 +335,12 @@ fn try_attrpath_key_completion(
     // Find the module config type: scan the root lambda's pattern fields for
     // one whose type contains the first path segment as a field.
     let first_segment = full_path.first()?;
-    let config_ty = get_module_config_type(analysis, inference, first_segment)?;
+    let config_ty = get_module_config_type(
+        analysis,
+        inference,
+        first_segment,
+        &analysis.context_arg_types,
+    )?;
 
     // Extract the alias name before unwrap_or moves config_ty.
     let alias = extract_alias_name(&config_ty).cloned();
@@ -1253,6 +1258,27 @@ mod tests {
         assert!(
             !names.contains(&"steam"),
             "should NOT suggest steam for plain lambda param, got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn attrpath_key_without_destructured_config() {
+        // Regression: modules that don't destructure `config` (e.g.
+        // `{ pkgs, ... }:`) should still get attrpath key completion via
+        // the context_arg_types fallback from tix.toml.
+        let src = indoc! {"
+            { pkgs, ... }: { programs. }
+            #                         ^1
+        "};
+        let results = complete_at_markers_with_context(src, TEST_CONTEXT_STUBS);
+        let names = labels(&results[&1]);
+        assert!(
+            names.contains(&"steam"),
+            "should complete steam via context_arg_types fallback, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"firefox"),
+            "should complete firefox via context_arg_types fallback, got: {names:?}"
         );
     }
 

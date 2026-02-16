@@ -17,6 +17,8 @@ use lang_ast::{
 use lang_check::aliases::TypeAliasRegistry;
 use lang_check::imports::resolve_imports;
 use lang_check::{CheckResult, InferenceResult};
+use lang_ty::OutputTy;
+use smol_str::SmolStr;
 
 use crate::convert::LineIndex;
 use crate::project_config::ProjectConfig;
@@ -41,6 +43,12 @@ pub struct FileAnalysis {
     /// Maps NameIds bound to import expressions to the target path.
     /// For jumping through Selects: `x.child` where `x = import ./foo.nix`.
     pub name_to_import: HashMap<NameId, PathBuf>,
+    /// Resolved context arg types from tix.toml, converted to OutputTy.
+    /// Used as a fallback by `get_module_config_type` when the root lambda's
+    /// pattern doesn't explicitly destructure a name (e.g. `{ pkgs, ... }:`
+    /// without `config` — the `config :: NixosConfig` context arg still
+    /// provides field information for attrpath key hover/completion).
+    pub context_arg_types: HashMap<SmolStr, OutputTy>,
 }
 
 impl FileAnalysis {
@@ -135,6 +143,16 @@ impl AnalysisState {
                 HashMap::new()
             };
 
+        // Pre-convert context args to OutputTy for the LSP to use as a fallback
+        // when the root lambda doesn't explicitly destructure a name.
+        let context_arg_types: HashMap<SmolStr, OutputTy> = context_args
+            .iter()
+            .map(|(name, parsed_ty)| {
+                let output_ty = crate::ty_nav::parsed_ty_to_output_ty(parsed_ty, &self.registry, 0);
+                (name.clone(), output_ty)
+            })
+            .collect();
+
         let check_result = lang_check::check_file_collecting(
             &self.db,
             nix_file,
@@ -157,6 +175,7 @@ impl AnalysisState {
                 check_result,
                 import_targets,
                 name_to_import,
+                context_arg_types,
             },
         );
 

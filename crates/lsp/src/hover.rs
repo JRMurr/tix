@@ -146,7 +146,12 @@ fn try_attrpath_key_hover(
 
     // Find the config type from the root lambda's pattern.
     let first_segment = full_path.first()?;
-    let config_ty = get_module_config_type(analysis, inference, first_segment)?;
+    let config_ty = get_module_config_type(
+        analysis,
+        inference,
+        first_segment,
+        &analysis.context_arg_types,
+    )?;
 
     let alias = extract_alias_name(&config_ty).cloned();
 
@@ -204,7 +209,12 @@ fn try_attrpath_key_field_doc(
     full_path.extend(current_segments);
 
     let first_segment = full_path.first()?;
-    let config_ty = get_module_config_type(analysis, inference, first_segment)?;
+    let config_ty = get_module_config_type(
+        analysis,
+        inference,
+        first_segment,
+        &analysis.context_arg_types,
+    )?;
     let alias = extract_alias_name(&config_ty)?;
 
     docs.field_doc(alias.as_str(), &full_path)
@@ -703,6 +713,61 @@ mod tests {
         assert!(
             ty3.contains("bool"),
             "hover on `enable` should show bool type, got: {ty3}"
+        );
+    }
+
+    #[test]
+    fn hover_attrpath_key_without_destructured_config() {
+        // Regression: modules that don't destructure `config` (e.g.
+        // `{ pkgs, ... }:`) should still get hover info on attrpath keys
+        // via the context_arg_types fallback from tix.toml.
+        let stubs = indoc! {"
+            type TestConfig = {
+                ## System-wide packages.
+                environment: {
+                    ## Packages available system-wide.
+                    systemPackages: [string],
+                    ...
+                },
+                ...
+            };
+            type Pkgs = { hello: string, ... };
+            val config :: TestConfig;
+            val pkgs :: Pkgs;
+        "};
+        // No `config` in the pattern — only `pkgs` is destructured.
+        let src = indoc! {"
+            { pkgs, ... }: {
+              environment.systemPackages = [];
+            # ^1          ^2
+            }
+        "};
+        let results = hover_at_markers_with_context(src, stubs);
+
+        // Hover on `environment` — should resolve via context_arg_types fallback.
+        let h1 = results[&1].as_ref().expect("hover on environment");
+        let (ty1, doc1) = hover_parts(h1);
+        assert!(
+            ty1.contains("environment"),
+            "hover on `environment` should show type, got: {ty1}"
+        );
+        assert_eq!(
+            doc1.as_deref(),
+            Some("System-wide packages."),
+            "hover on `environment` should show field doc"
+        );
+
+        // Hover on `systemPackages` — nested field should also resolve.
+        let h2 = results[&2].as_ref().expect("hover on systemPackages");
+        let (ty2, doc2) = hover_parts(h2);
+        assert!(
+            ty2.contains("systemPackages"),
+            "hover on `systemPackages` should show type, got: {ty2}"
+        );
+        assert_eq!(
+            doc2.as_deref(),
+            Some("Packages available system-wide."),
+            "hover on `systemPackages` should show field doc"
         );
     }
 }

@@ -6,10 +6,12 @@
 // Used by both completion and hover to resolve attrset fields, walk through
 // type aliases, and extract lambda parameter types.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
+use comment_parser::{ParsedTy, TypeVarValue};
 use lang_ast::Expr;
-use lang_ty::{OutputTy, TyRef};
+use lang_check::aliases::TypeAliasRegistry;
+use lang_ty::{AttrSetTy, OutputTy, TyRef};
 use rowan::ast::AstNode;
 use smol_str::SmolStr;
 
@@ -42,14 +44,20 @@ pub(crate) fn resolve_through_segments(ty: &OutputTy, segments: &[SmolStr]) -> O
 /// Find the module config type (e.g. NixosConfig) from the root lambda's
 /// pattern fields, based on the first attrpath segment.
 ///
+/// First checks explicitly destructured pattern fields (e.g. `config` in
+/// `{ config, ... }:`). If no match is found and the pattern has `...`,
+/// falls back to checking `context_arg_types` — these are the resolved types
+/// from tix.toml context args that weren't explicitly named in the pattern
+/// (e.g. `config :: NixosConfig` when the module only writes `{ pkgs, ... }:`).
+///
 /// Returns `None` when:
 /// - The root expression isn't a lambda with pattern params
-/// - No pattern field's type contains the given segment (e.g. not a NixOS module,
-///   or context stubs aren't loaded)
+/// - No pattern field or context arg type contains the given segment
 pub(crate) fn get_module_config_type(
     analysis: &FileAnalysis,
     inference: &lang_check::InferenceResult,
     first_segment: &SmolStr,
+    context_arg_types: &HashMap<SmolStr, OutputTy>,
 ) -> Option<OutputTy> {
     let root_expr_id = analysis.module.entry_expr;
 
@@ -61,6 +69,19 @@ pub(crate) fn get_module_config_type(
     for (name_id, _default) in pat.fields.iter() {
         let Some(name_id) = name_id else { continue };
         if let Some(ty) = inference.name_ty_map.get(*name_id) {
+            let fields = collect_attrset_fields(ty);
+            if fields.contains_key(first_segment) {
+                return Some(ty.clone());
+            }
+        }
+    }
+
+    // Fallback: if the pattern has `...`, check context arg types for one
+    // whose fields contain the first segment. This handles modules like
+    // `{ pkgs, ... }:` where `config` isn't destructured but is available
+    // via the tix.toml context.
+    if pat.ellipsis {
+        for ty in context_arg_types.values() {
             let fields = collect_attrset_fields(ty);
             if fields.contains_key(first_segment) {
                 return Some(ty.clone());
@@ -187,6 +208,90 @@ pub(crate) fn extract_alias_name(ty: &OutputTy) -> Option<&SmolStr> {
     match ty {
         OutputTy::Named(name, _) => Some(name),
         _ => None,
+    }
+}
+
+/// Convert a `ParsedTy` (from .tix stub files) to an `OutputTy`, resolving alias
+/// references through the `TypeAliasRegistry`.
+///
+/// This is needed because context args are stored as `ParsedTy` but the LSP
+/// works with `OutputTy` for field lookups and hover display.
+pub(crate) fn parsed_ty_to_output_ty(
+    ty: &ParsedTy,
+    registry: &TypeAliasRegistry,
+    depth: usize,
+) -> OutputTy {
+    // Prevent infinite recursion on self-referential aliases.
+    if depth > 20 {
+        return OutputTy::TyVar(0);
+    }
+
+    match ty {
+        // comment_parser uses lang_ty::PrimitiveTy directly, so clone is safe.
+        ParsedTy::Primitive(p) => OutputTy::Primitive(*p),
+
+        ParsedTy::TyVar(TypeVarValue::Reference(name)) => {
+            // Look up alias in registry and wrap in Named.
+            if let Some(alias_body) = registry.get(name) {
+                let inner = parsed_ty_to_output_ty(alias_body, registry, depth + 1);
+                OutputTy::Named(name.clone(), TyRef::from(inner))
+            } else {
+                // Unresolved reference — treat as opaque type variable.
+                OutputTy::TyVar(0)
+            }
+        }
+
+        ParsedTy::TyVar(TypeVarValue::Generic(_)) => {
+            // Generics don't matter for field lookup — placeholder.
+            OutputTy::TyVar(0)
+        }
+
+        ParsedTy::List(inner) => OutputTy::List(TyRef::from(parsed_ty_to_output_ty(
+            &inner.0,
+            registry,
+            depth + 1,
+        ))),
+
+        ParsedTy::Lambda { param, body } => OutputTy::Lambda {
+            param: TyRef::from(parsed_ty_to_output_ty(&param.0, registry, depth + 1)),
+            body: TyRef::from(parsed_ty_to_output_ty(&body.0, registry, depth + 1)),
+        },
+
+        ParsedTy::AttrSet(attr) => {
+            let fields = attr
+                .fields
+                .iter()
+                .map(|(name, ty_ref)| {
+                    (
+                        name.clone(),
+                        TyRef::from(parsed_ty_to_output_ty(&ty_ref.0, registry, depth + 1)),
+                    )
+                })
+                .collect();
+            let dyn_ty = attr
+                .dyn_ty
+                .as_ref()
+                .map(|d| TyRef::from(parsed_ty_to_output_ty(&d.0, registry, depth + 1)));
+            OutputTy::AttrSet(AttrSetTy {
+                fields,
+                dyn_ty,
+                open: attr.open,
+            })
+        }
+
+        ParsedTy::Union(members) => OutputTy::Union(
+            members
+                .iter()
+                .map(|m| TyRef::from(parsed_ty_to_output_ty(&m.0, registry, depth + 1)))
+                .collect(),
+        ),
+
+        ParsedTy::Intersection(members) => OutputTy::Intersection(
+            members
+                .iter()
+                .map(|m| TyRef::from(parsed_ty_to_output_ty(&m.0, registry, depth + 1)))
+                .collect(),
+        ),
     }
 }
 
