@@ -274,6 +274,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smol_str",
+ "tempfile",
  "thiserror 2.0.9",
  "toml",
 ]

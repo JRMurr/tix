@@ -80,6 +80,27 @@
             # rust-docker = rustAttrs.docker;
           };
 
+          checks = {
+            # Verify the with-stubs wrapper (TIX_BUILTIN_STUBS baked in via
+            # makeWrapper) can type-check files that use @nixos and
+            # @home-manager contexts end-to-end.
+            with-stubs = pkgs.runCommand "tix-check-with-stubs" {
+              nativeBuildInputs = [ tix-with-stubs ];
+            } ''
+              cp -r ${./test} test_files
+              chmod -R u+w test_files
+
+              # Test @nixos context: test/tix.toml maps nixos_module.nix to @nixos
+              tix-cli test_files/nixos_module.nix --config test_files/tix.toml
+
+              # Test @home-manager context: nixos_fixture/tix.toml maps home/*.nix to @home-manager
+              tix-cli test_files/nixos_fixture/home/shell.nix \
+                --config test_files/nixos_fixture/tix.toml
+
+              touch $out
+            '';
+          };
+
         }
       )
       // {
