@@ -453,7 +453,8 @@ impl CheckCtx<'_> {
         let lhs_concrete = self.find_concrete(c.lhs);
         let rhs_concrete = self.find_concrete(c.rhs);
 
-        // Full resolution: both operands are concrete.
+        // ---- Phase 1: Full Resolution — both operands concrete ----
+
         if let (Some(lhs_ty), Some(rhs_ty)) = (&lhs_concrete, &rhs_concrete) {
             let ret_ty = self
                 .solve_bin_op_types(ov.op, lhs_ty, rhs_ty)
@@ -467,15 +468,19 @@ impl CheckCtx<'_> {
             return Ok(OverloadProgress::FullyResolved);
         }
 
-        // Track the constrain_cache size to detect whether partial resolution
-        // actually added new constraints. If all constraints were already cached,
-        // no real progress was made and we should report NoProgress to avoid an
+        // ---- Phase 2: Partial Resolution — at least one operand unknown ----
+        //
+        // Track the constrain_cache size so we can detect whether partial
+        // resolution actually added new constraints. If the cache didn't grow,
+        // the constraints were all redundant and re-iterating would produce an
         // infinite loop.
         let cache_size_before = self.constrain_cache.len();
 
-        // Partial resolution: when one operand is a known numeric type,
-        // constrain the unknown side and result to Number (upper bound only).
-        // This gives e.g. `add 1` → `number -> number` instead of `a -> b`.
+        // --- 2a: Numeric operand → constrain unknown side to Number ---
+        //
+        // When one operand is a known numeric type, bound the unknown side and
+        // result by Number. This gives e.g. `add 1` → `number -> number`
+        // instead of `a -> b`.
         let lhs_numeric = lhs_concrete
             .as_ref()
             .is_some_and(|t| matches!(t, Ty::Primitive(p) if p.is_number()));
@@ -494,12 +499,13 @@ impl CheckCtx<'_> {
             }
             // Result bounded above by Number. We only add upper bound (not lower)
             // so that later full resolution can pin to a more specific type like Int.
-            // constrain(Int, Number) succeeds because Int <: Number.
             self.constrain(c.ret, number)?;
         }
 
-        // Partial resolution for + with string/path lhs: the return type of
-        // Nix's + is always the lhs type when lhs is string or path.
+        // --- 2b: String/path lhs with + → pin return type ---
+        //
+        // In Nix, the return type of `+` is always the lhs type when lhs is
+        // string or path. We can pin ret early without waiting for the rhs.
         if ov.op.is_add() {
             let lhs_is_string = matches!(&lhs_concrete, Some(Ty::Primitive(PrimitiveTy::String)));
             let lhs_is_path = matches!(&lhs_concrete, Some(Ty::Primitive(PrimitiveTy::Path)));
@@ -511,16 +517,15 @@ impl CheckCtx<'_> {
                     PrimitiveTy::Path
                 };
                 let ret_id = self.alloc_prim(ret_prim);
-                // Pin ret to the lhs type in both directions — full resolution
-                // will produce the same type, so this is safe.
                 self.constrain(ret_id, c.ret)?;
                 self.constrain(c.ret, ret_id)?;
             }
         }
 
-        // Only report partial progress if new constraint cache entries were
-        // actually created. If the cache didn't grow, the constraints were all
-        // redundant and re-iterating would produce an infinite loop.
+        // ---- Progress detection ----
+        //
+        // If no new constraints were added, report NoProgress to prevent
+        // infinite re-iteration of the deferred overload loop.
         if self.constrain_cache.len() > cache_size_before {
             Ok(OverloadProgress::PartialProgress)
         } else {
