@@ -6,7 +6,7 @@
 
 [context.nixos]
 paths = ["hosts/**/*.nix", "common/*.nix"]
-stubs = ["stubs/nixos.tix"]
+stubs = ["@nixos"]
 
 [context.home]
 paths = ["common/homemanager/**/*.nix", "home/**/*.nix"]

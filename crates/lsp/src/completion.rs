@@ -30,7 +30,10 @@ use lang_ast::{AstPtr, Expr, ExprId, NameKind};
 use lang_ty::{OutputTy, TyRef};
 use rowan::ast::AstNode;
 use smol_str::SmolStr;
-use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind, CompletionResponse, Position};
+use lang_check::aliases::DocIndex;
+use tower_lsp::lsp_types::{
+    CompletionItem, CompletionItemKind, CompletionResponse, Documentation, Position,
+};
 
 use crate::state::FileAnalysis;
 
@@ -39,6 +42,7 @@ pub fn completion(
     analysis: &FileAnalysis,
     pos: Position,
     root: &rnix::Root,
+    docs: &DocIndex,
 ) -> Option<CompletionResponse> {
     let inference = analysis.inference()?;
     let offset = analysis.line_index.offset(pos);
@@ -56,7 +60,7 @@ pub fn completion(
     );
 
     // Try dot completion first (cursor right after `.` in a Select).
-    if let Some(items) = try_dot_completion(analysis, inference, &token) {
+    if let Some(items) = try_dot_completion(analysis, inference, &token, docs) {
         if !items.is_empty() {
             return Some(CompletionResponse::Array(items));
         }
@@ -64,14 +68,14 @@ pub fn completion(
 
     // Try attrpath key completion (cursor after `.` in an attrset key like
     // `programs.` inside a NixOS module return body).
-    if let Some(items) = try_attrpath_key_completion(analysis, inference, &token) {
+    if let Some(items) = try_attrpath_key_completion(analysis, inference, &token, docs) {
         if !items.is_empty() {
             return Some(CompletionResponse::Array(items));
         }
     }
 
     // Try callsite attrset completion (cursor inside `{ }` argument).
-    if let Some(items) = try_callsite_completion(analysis, inference, &token) {
+    if let Some(items) = try_callsite_completion(analysis, inference, &token, docs) {
         if !items.is_empty() {
             return Some(CompletionResponse::Array(items));
         }
@@ -102,6 +106,7 @@ fn try_dot_completion(
     analysis: &FileAnalysis,
     inference: &lang_check::InferenceResult,
     token: &rowan::SyntaxToken<rnix::NixLanguage>,
+    docs: &DocIndex,
 ) -> Option<Vec<CompletionItem>> {
     // Walk ancestors from the token's parent to find a Select node.
     let node = token.parent()?;
@@ -128,15 +133,24 @@ fn try_dot_completion(
 
     log::debug!("dot_completion: base_ty={base_ty}, typed_segments={typed_segments:?}");
 
+    // Extract the alias name from the base type for doc lookups (e.g.
+    // "NixosConfig" from Named("NixosConfig", {...})). Must happen before
+    // the unwrap_or below moves base_ty.
+    let alias = extract_alias_name(&base_ty).cloned();
+
     // Walk through the typed segments to resolve the nested type.
     // If segment resolution fails (e.g. the type doesn't have the expected
     // field, or error-recovery injected a bogus segment), fall back to just
     // showing the base type's fields.
     let resolved_ty = resolve_through_segments(&base_ty, &typed_segments).unwrap_or(base_ty);
 
+    let doc_ctx = alias
+        .as_ref()
+        .map(|a| (docs, a.as_str(), typed_segments.as_slice()));
+
     // Extract fields from the resolved type and build completion items.
     let fields = collect_attrset_fields(&resolved_ty);
-    Some(fields_to_completion_items(&fields))
+    Some(fields_to_completion_items(&fields, doc_ctx))
 }
 
 /// Resolve the type of a base expression for dot completion.
@@ -313,6 +327,7 @@ fn try_attrpath_key_completion(
     analysis: &FileAnalysis,
     inference: &lang_check::InferenceResult,
     token: &rowan::SyntaxToken<rnix::NixLanguage>,
+    docs: &DocIndex,
 ) -> Option<Vec<CompletionItem>> {
     use rnix::SyntaxKind;
 
@@ -359,12 +374,19 @@ fn try_attrpath_key_completion(
     let first_segment = full_path.first()?;
     let config_ty = get_module_config_type(analysis, inference, first_segment)?;
 
+    // Extract the alias name before unwrap_or moves config_ty.
+    let alias = extract_alias_name(&config_ty).cloned();
+
     // Walk the config type through the full path.
     let resolved_ty = resolve_through_segments(&config_ty, &full_path).unwrap_or(config_ty);
 
+    let doc_ctx = alias
+        .as_ref()
+        .map(|a| (docs, a.as_str(), full_path.as_slice()));
+
     // Extract fields and return completion items.
     let fields = collect_attrset_fields(&resolved_ty);
-    Some(fields_to_completion_items(&fields))
+    Some(fields_to_completion_items(&fields, doc_ctx))
 }
 
 /// Get the module config type from the root lambda's pattern fields.
@@ -498,6 +520,7 @@ fn try_callsite_completion(
     analysis: &FileAnalysis,
     inference: &lang_check::InferenceResult,
     token: &rowan::SyntaxToken<rnix::NixLanguage>,
+    docs: &DocIndex,
 ) -> Option<Vec<CompletionItem>> {
     let node = token.parent()?;
 
@@ -543,7 +566,11 @@ fn try_callsite_completion(
         .filter(|(k, _)| !existing.contains(k))
         .collect();
 
-    Some(fields_to_completion_items(&remaining))
+    // Try to surface docs for the parameter type's alias (e.g. Derivation fields).
+    let alias = extract_alias_name(&param_ty);
+    let doc_ctx = alias.map(|a| (docs, a.as_str(), &[] as &[SmolStr]));
+
+    Some(fields_to_completion_items(&remaining, doc_ctx))
 }
 
 /// Collect field names already present in an attrset literal, using the lowered
@@ -867,16 +894,44 @@ fn extract_lambda_param(ty: &OutputTy) -> Option<OutputTy> {
 // CompletionItem construction
 // ==============================================================================
 
-fn fields_to_completion_items(fields: &BTreeMap<SmolStr, TyRef>) -> Vec<CompletionItem> {
+/// Build completion items from attrset fields, optionally enriching each item
+/// with doc comments from the DocIndex.
+///
+/// `doc_ctx` is `Some((docs, alias_name, path_prefix))` when we know which type
+/// alias the fields belong to and the path prefix leading to them. For example,
+/// completing `programs.` in a NixOS module gives alias "NixosConfig" with
+/// prefix `["programs"]`, so field "steam" looks up
+/// `field_doc("NixosConfig", &["programs", "steam"])`.
+fn fields_to_completion_items(
+    fields: &BTreeMap<SmolStr, TyRef>,
+    doc_ctx: Option<(&DocIndex, &str, &[SmolStr])>,
+) -> Vec<CompletionItem> {
     fields
         .iter()
-        .map(|(name, ty)| CompletionItem {
-            label: name.to_string(),
-            kind: Some(CompletionItemKind::FIELD),
-            detail: Some(format!("{ty}")),
-            ..Default::default()
+        .map(|(name, ty)| {
+            let documentation = doc_ctx.and_then(|(docs, alias, prefix)| {
+                let mut path: Vec<SmolStr> = prefix.to_vec();
+                path.push(name.clone());
+                docs.field_doc(alias, &path)
+                    .map(|d| Documentation::String(d.to_string()))
+            });
+            CompletionItem {
+                label: name.to_string(),
+                kind: Some(CompletionItemKind::FIELD),
+                detail: Some(format!("{ty}")),
+                documentation,
+                ..Default::default()
+            }
         })
         .collect()
+}
+
+/// Extract the type alias name from an OutputTy, if it's a Named type.
+fn extract_alias_name(ty: &OutputTy) -> Option<&SmolStr> {
+    match ty {
+        OutputTy::Named(name, _) => Some(name),
+        _ => None,
+    }
 }
 
 // ==============================================================================
@@ -899,8 +954,9 @@ mod tests {
         let t = TestAnalysis::new(src);
         let analysis = t.analysis();
         let pos = analysis.line_index.position(offset);
+        let docs = DocIndex::new();
 
-        match completion(analysis, pos, &t.root) {
+        match completion(analysis, pos, &t.root, &docs) {
             Some(CompletionResponse::Array(items)) => items,
             _ => Vec::new(),
         }
@@ -917,12 +973,13 @@ mod tests {
 
         let t = TestAnalysis::new(src);
         let analysis = t.analysis();
+        let docs = DocIndex::new();
 
         markers
             .into_iter()
             .map(|(num, offset)| {
                 let pos = analysis.line_index.position(offset);
-                let items = match completion(analysis, pos, &t.root) {
+                let items = match completion(analysis, pos, &t.root, &docs) {
                     Some(CompletionResponse::Array(items)) => items,
                     _ => Vec::new(),
                 };
@@ -1318,12 +1375,13 @@ mod tests {
         state.update_file(nix_path.clone(), src.to_string());
         let analysis = state.get_file(&nix_path).unwrap();
         let root = rnix::Root::parse(src).tree();
+        let docs = state.registry.docs.clone();
 
         let results = markers
             .into_iter()
             .map(|(num, offset)| {
                 let pos = analysis.line_index.position(offset);
-                let items = match completion(analysis, pos, &root) {
+                let items = match completion(analysis, pos, &root, &docs) {
                     Some(CompletionResponse::Array(items)) => items,
                     _ => Vec::new(),
                 };
@@ -1456,6 +1514,86 @@ mod tests {
             !names.contains(&"steam"),
             "should NOT suggest steam for plain lambda param, got: {names:?}"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Completion items include doc comments from stubs
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn dot_completion_includes_docs() {
+        // Dot completion on `config.` in a value position (Select expression).
+        // Fields with `##` doc comments should have documentation set.
+        let stubs = indoc! {"
+            type TestConfig = {
+                ## Enable the steam game launcher.
+                steam: { enable: bool, ... },
+                firefox: { enable: bool, ... },
+                ...
+            };
+            val config :: TestConfig;
+        "};
+        let src = indoc! {"
+            { config, ... }:
+            let x = config.
+            #              ^1
+            in x
+        "};
+        let results = complete_at_markers_with_context(src, stubs);
+        let items = &results[&1];
+        let steam = items.iter().find(|i| i.label == "steam");
+        assert!(steam.is_some(), "should complete steam, got: {:?}", labels(items));
+        assert_eq!(
+            steam.unwrap().documentation,
+            Some(Documentation::String(
+                "Enable the steam game launcher.".to_string()
+            )),
+            "steam should have doc comment from stubs"
+        );
+        // firefox has no doc comment — documentation should be None.
+        let firefox = items.iter().find(|i| i.label == "firefox");
+        assert!(firefox.is_some(), "should complete firefox");
+        assert_eq!(
+            firefox.unwrap().documentation, None,
+            "firefox should have no documentation"
+        );
+    }
+
+    #[test]
+    fn attrpath_key_completion_includes_docs() {
+        // Attrpath key completion on `programs.` — fields with `##` doc
+        // comments should have documentation set on the CompletionItem.
+        let stubs = indoc! {"
+            type TestConfig = {
+                programs: {
+                    ## Enable the steam game launcher.
+                    steam: { enable: bool, ... },
+                    firefox: { enable: bool, ... },
+                    ...
+                },
+                ...
+            };
+            val config :: TestConfig;
+        "};
+        let src = indoc! {"
+            { config, ... }: { programs.
+            #                           ^1
+            }
+        "};
+        let results = complete_at_markers_with_context(src, stubs);
+        let items = &results[&1];
+        let steam = items.iter().find(|i| i.label == "steam");
+        assert!(steam.is_some(), "should complete steam, got: {:?}", labels(items));
+        assert_eq!(
+            steam.unwrap().documentation,
+            Some(Documentation::String(
+                "Enable the steam game launcher.".to_string()
+            )),
+        );
+        // firefox has no doc comment.
+        let firefox = items.iter().find(|i| i.label == "firefox");
+        assert!(firefox.is_some(), "should complete firefox");
+        assert_eq!(firefox.unwrap().documentation, None);
     }
 
     // ==================================================================
@@ -1659,13 +1797,14 @@ mod tests {
             let analysis = self.state.get_file(&path).expect("file not loaded");
             let root = rnix::Root::parse(&src).tree();
             let markers = parse_markers(&src);
+            let docs = &self.state.registry.docs;
             assert!(!markers.is_empty(), "no markers found in {relative_path}");
 
             markers
                 .into_iter()
                 .map(|(num, offset)| {
                     let pos = analysis.line_index.position(offset);
-                    let items = match completion(analysis, pos, &root) {
+                    let items = match completion(analysis, pos, &root, docs) {
                         Some(CompletionResponse::Array(items)) => items,
                         _ => Vec::new(),
                     };
@@ -1975,6 +2114,136 @@ mod tests {
         );
     }
 
+    #[test]
+    fn builtin_override_stubs_surface_docs_in_completion() {
+        // When TIX_BUILTIN_STUBS overrides the compiled-in stubs with richer
+        // stubs that include `##` doc comments, the DocIndex gets populated
+        // and completion items carry the documentation field.
+        let rich_stubs = indoc! {"
+            type NixosConfig = {
+                programs: {
+                    ## Whether to enable the steam game platform.
+                    steam: { enable: bool, ... },
+                    firefox: { enable: bool, ... },
+                    ...
+                },
+                ...
+            };
+            val config :: NixosConfig;
+            val lib :: { ... };
+            val pkgs :: { ... };
+        "};
+        let mut project = make_builtin_fixture(
+            &[("nixos", &["**/*.nix"])],
+            Some(&[("nixos", rich_stubs)]),
+        );
+        project.add_file(
+            "test.nix",
+            indoc! {"
+                { config, ... }: { programs. }
+                #                           ^1
+            "},
+        );
+        let results = project.complete_at_markers("test.nix");
+        let items = &results[&1];
+        let steam = items.iter().find(|i| i.label == "steam");
+        assert!(steam.is_some(), "should complete steam, got: {:?}", labels(items));
+        assert_eq!(
+            steam.unwrap().documentation,
+            Some(Documentation::String(
+                "Whether to enable the steam game platform.".to_string()
+            )),
+            "steam completion item should carry doc from override stubs"
+        );
+        // firefox has no doc comment — should be None.
+        let firefox = items.iter().find(|i| i.label == "firefox");
+        assert!(firefox.is_some(), "should complete firefox");
+        assert_eq!(firefox.unwrap().documentation, None);
+    }
+
+    #[test]
+    fn generated_stubs_surface_docs_in_completion() {
+        // End-to-end: load the real generated stubs from stubs/generated/
+        // (produced by `just gen-stubs`) as an override, and verify that
+        // doc comments appear on completion items.
+        let generated_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../stubs/generated")
+            .canonicalize();
+        let generated_dir = match generated_dir {
+            Ok(dir) if dir.join("nixos.tix").is_file() => dir,
+            _ => {
+                // Generated stubs don't exist (CI or fresh clone without
+                // `just gen-stubs`). Skip rather than fail.
+                eprintln!("skipping: stubs/generated/nixos.tix not found (run `just gen-stubs`)");
+                return;
+            }
+        };
+        let mut registry = TypeAliasRegistry::default();
+        registry.set_builtin_stubs_dir(generated_dir);
+
+        let mut context_map = std::collections::HashMap::new();
+        context_map.insert(
+            "nixos".to_string(),
+            ContextConfig {
+                paths: vec!["**/*.nix".to_string()],
+                stubs: vec!["@nixos".to_string()],
+            },
+        );
+        let temp_dir = std::env::temp_dir().join(format!(
+            "tix_gen_stubs_doc_test_{}_{}",
+            std::process::id(),
+            next_fixture_id(),
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let temp_dir = temp_dir.canonicalize().unwrap();
+
+        let mut state = AnalysisState::new(registry);
+        state.project_config = Some(ProjectConfig {
+            stubs: vec![],
+            context: context_map,
+        });
+        state.config_dir = Some(temp_dir.clone());
+
+        let src = indoc! {"
+            { config, ... }: { programs. }
+            #                           ^1
+        "};
+        let nix_path = temp_dir.join("test.nix");
+        std::fs::write(&nix_path, src).unwrap();
+        state.update_file(nix_path.clone(), src.to_string());
+
+        let analysis = state.get_file(&nix_path).unwrap();
+        let root = rnix::Root::parse(src).tree();
+        let docs = &state.registry.docs;
+        let markers = parse_markers(src);
+        let pos = analysis.line_index.position(markers[&1]);
+        let items = match completion(analysis, pos, &root, docs) {
+            Some(CompletionResponse::Array(items)) => items,
+            _ => Vec::new(),
+        };
+
+        // The generated stubs should produce completions.
+        assert!(
+            !items.is_empty(),
+            "generated stubs should produce completions"
+        );
+
+        // At least some fields under `programs` should have doc comments.
+        let with_docs: Vec<_> = items
+            .iter()
+            .filter(|i| i.documentation.is_some())
+            .map(|i| i.label.as_str())
+            .collect();
+        assert!(
+            !with_docs.is_empty(),
+            "expected some completion items with docs from generated stubs, but none had documentation. \
+             First 5 items: {:?}",
+            items.iter().take(5).map(|i| (&i.label, &i.documentation)).collect::<Vec<_>>()
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
     // ======================================================================
     // On-disk fixture tests (test/nixos_fixture/)
     // ======================================================================
@@ -2019,12 +2288,13 @@ mod tests {
         state.update_file(file_path.clone(), src.clone());
         let analysis = state.get_file(&file_path).unwrap();
         let root = rnix::Root::parse(&src).tree();
+        let docs = &state.registry.docs;
 
         markers
             .into_iter()
             .map(|(num, offset)| {
                 let pos = analysis.line_index.position(offset);
-                let items = match completion(analysis, pos, &root) {
+                let items = match completion(analysis, pos, &root, docs) {
                     Some(CompletionResponse::Array(items)) => items,
                     _ => Vec::new(),
                 };

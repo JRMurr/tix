@@ -5,6 +5,9 @@ result
 # Generated stubs (regenerate with: tix-cli gen-stubs nixos/home-manager)
 stubs/generated/
 
+# Generated VS Code settings for test fixtures
+test/nixos_fixture/.vscode/
+
 # Added by cargo
 
 /target

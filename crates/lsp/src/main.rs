@@ -58,6 +58,15 @@ async fn main() {
         log::info!("Built-in stubs: enabled");
         TypeAliasRegistry::with_builtins()
     };
+
+    // Allow overriding built-in context stubs via env var. When set, @nixos
+    // and @home-manager resolve from this directory instead of the compiled-in
+    // minimal stubs, enabling richer stubs with doc comments.
+    if let Ok(dir) = std::env::var("TIX_BUILTIN_STUBS") {
+        log::info!("TIX_BUILTIN_STUBS override: {dir}");
+        registry.set_builtin_stubs_dir(PathBuf::from(dir));
+    }
+
     for stub_path in &args.stub_paths {
         match load_stubs(&mut registry, stub_path) {
             Ok(()) => log::info!("Loaded CLI stubs from {}", stub_path.display()),

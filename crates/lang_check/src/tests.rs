@@ -1855,6 +1855,57 @@ fn file_level_context_overrides_doc_comment_for_root() {
     }
 }
 
+/// Context args should preserve alias provenance on pattern fields.
+/// Without this, `config` would be inferred as a plain attrset instead of
+/// `Named("NixosConfig", ...)`, breaking doc lookups by alias name.
+#[test]
+fn context_args_preserve_alias_provenance() {
+    // Load context stubs into a registry so the NixosConfig alias is
+    // available during type inference (mirrors what the LSP does — the
+    // registry must contain both the type aliases and val declarations).
+    let mut registry = TypeAliasRegistry::with_builtins();
+    let ctx = registry.load_context_by_name("nixos").unwrap().unwrap();
+
+    let nix_src = indoc! { "
+        { config, ... }: config
+    " };
+    let (db, file) = TestDatabase::single_file(nix_src).unwrap();
+    let module = module(&db, file);
+    let result = crate::check_file_collecting(
+        &db,
+        file,
+        &registry,
+        HashMap::new(),
+        ctx,
+    );
+    let inference = result.inference.expect("inference should succeed");
+
+    // The `config` pattern field should be typed as Named("NixosConfig", ...)
+    // thanks to the context arg `val config :: NixosConfig` and alias provenance.
+    let config_name_id = module
+        .names()
+        .find(|(_, n)| n.text == "config")
+        .map(|(id, _)| id)
+        .expect("config name should exist");
+    let config_ty = inference
+        .name_ty_map
+        .get(config_name_id)
+        .expect("config should have an inferred type");
+
+    match config_ty {
+        OutputTy::Named(name, _) => {
+            assert_eq!(
+                name.as_str(),
+                "NixosConfig",
+                "config should be Named(\"NixosConfig\", ...), got Named(\"{name}\", ...)"
+            );
+        }
+        other => panic!(
+            "config should be Named(\"NixosConfig\", ...), got: {other}"
+        ),
+    }
+}
+
 /// Context args should type `config` as an open attrset.
 #[test]
 fn context_args_config_is_open_attrset() {
