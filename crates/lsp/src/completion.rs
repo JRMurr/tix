@@ -1282,6 +1282,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn attrpath_key_plain_attrset_module() {
+        // Plain attrset modules (no lambda wrapper) should get attrpath key
+        // completion from context_arg_types.
+        let src = indoc! {"
+            { programs. }
+            #          ^1
+        "};
+        let results = complete_at_markers_with_context(src, TEST_CONTEXT_STUBS);
+        let names = labels(&results[&1]);
+        assert!(
+            names.contains(&"steam"),
+            "should complete steam in plain attrset module, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"firefox"),
+            "should complete firefox in plain attrset module, got: {names:?}"
+        );
+    }
+
     // ------------------------------------------------------------------
     // Completion items include doc comments from stubs
     // ------------------------------------------------------------------

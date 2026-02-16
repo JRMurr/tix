@@ -770,4 +770,40 @@ mod tests {
             "hover on `systemPackages` should show field doc"
         );
     }
+
+    #[test]
+    fn hover_attrpath_key_plain_attrset_module() {
+        // Plain attrset modules (no lambda) should also get hover info
+        // from context_arg_types when tix.toml provides context stubs.
+        let stubs = indoc! {"
+            type TestConfig = {
+                ## Network configuration.
+                networking: {
+                    hostName: string,
+                    ...
+                },
+                ...
+            };
+            val config :: TestConfig;
+        "};
+        let src = indoc! {"
+            {
+              networking.hostName = \"myhost\";
+            # ^1
+            }
+        "};
+        let results = hover_at_markers_with_context(src, stubs);
+
+        let h1 = results[&1].as_ref().expect("hover on networking");
+        let (ty1, doc1) = hover_parts(h1);
+        assert!(
+            ty1.contains("networking"),
+            "hover on `networking` in plain attrset module should show type, got: {ty1}"
+        );
+        assert_eq!(
+            doc1.as_deref(),
+            Some("Network configuration."),
+            "hover on `networking` in plain attrset module should show field doc"
+        );
+    }
 }

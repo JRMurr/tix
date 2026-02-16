@@ -50,9 +50,12 @@ pub(crate) fn resolve_through_segments(ty: &OutputTy, segments: &[SmolStr]) -> O
 /// from tix.toml context args that weren't explicitly named in the pattern
 /// (e.g. `config :: NixosConfig` when the module only writes `{ pkgs, ... }:`).
 ///
-/// Returns `None` when:
-/// - The root expression isn't a lambda with pattern params
-/// - No pattern field or context arg type contains the given segment
+/// Also handles plain attrset modules (no lambda wrapper at all) by checking
+/// context_arg_types directly — NixOS modules can be `{ services.foo = ...; }`
+/// without any function.
+///
+/// Returns `None` when no pattern field or context arg type contains the
+/// given segment.
 pub(crate) fn get_module_config_type(
     analysis: &FileAnalysis,
     inference: &lang_check::InferenceResult,
@@ -61,31 +64,45 @@ pub(crate) fn get_module_config_type(
 ) -> Option<OutputTy> {
     let root_expr_id = analysis.module.entry_expr;
 
-    let Expr::Lambda { pat: Some(pat), .. } = &analysis.module[root_expr_id] else {
-        return None;
-    };
+    match &analysis.module[root_expr_id] {
+        // Pattern lambda: check destructured fields first, then fall through
+        // to context_arg_types if the pattern has `...`.
+        Expr::Lambda { pat: Some(pat), .. } => {
+            for (name_id, _default) in pat.fields.iter() {
+                let Some(name_id) = name_id else { continue };
+                if let Some(ty) = inference.name_ty_map.get(*name_id) {
+                    let fields = collect_attrset_fields(ty);
+                    if fields.contains_key(first_segment) {
+                        return Some(ty.clone());
+                    }
+                }
+            }
 
-    // Search each pattern field for a type that has the first segment.
-    for (name_id, _default) in pat.fields.iter() {
-        let Some(name_id) = name_id else { continue };
-        if let Some(ty) = inference.name_ty_map.get(*name_id) {
-            let fields = collect_attrset_fields(ty);
-            if fields.contains_key(first_segment) {
-                return Some(ty.clone());
+            // Only fall through to context_arg_types if the pattern has `...`
+            // (i.e. it accepts extra args beyond those listed).
+            if !pat.ellipsis {
+                return None;
             }
         }
+
+        // Plain lambda (no pattern, e.g. `config: body`) is not a NixOS module
+        // convention — don't use context_arg_types.
+        Expr::Lambda { pat: None, .. } => return None,
+
+        // Non-lambda root (plain attrset, etc.): fall through to
+        // context_arg_types. NixOS modules can be plain `{ services.foo = ...; }`.
+        _ => {}
     }
 
-    // Fallback: if the pattern has `...`, check context arg types for one
-    // whose fields contain the first segment. This handles modules like
-    // `{ pkgs, ... }:` where `config` isn't destructured but is available
-    // via the tix.toml context.
-    if pat.ellipsis {
-        for ty in context_arg_types.values() {
-            let fields = collect_attrset_fields(ty);
-            if fields.contains_key(first_segment) {
-                return Some(ty.clone());
-            }
+    // Fallback: check context arg types. Covers two cases:
+    // 1. Lambda with `...` where `config` isn't destructured
+    //    (e.g. `{ pkgs, ... }:`)
+    // 2. Plain attrset module with no lambda wrapper
+    //    (e.g. `{ services.openssh.enable = true; }`)
+    for ty in context_arg_types.values() {
+        let fields = collect_attrset_fields(ty);
+        if fields.contains_key(first_segment) {
+            return Some(ty.clone());
         }
     }
 
