@@ -163,9 +163,20 @@ impl TypeAliasRegistry {
                     // Convert the module into an attrset type and register it
                     // as a type alias with the capitalized module name.
                     // e.g. `module lib { val id :: a -> a; }` -> alias "Lib" = { id: a -> a, ... }
-                    let attrset_ty = module_to_attrset(declarations);
+                    let new_attrset = module_to_attrset(declarations);
                     let alias_name = capitalize(name);
-                    self.aliases.insert(alias_name.clone(), attrset_ty);
+
+                    // If the alias already exists as an attrset (from a previous
+                    // stub file declaring the same module), merge fields instead
+                    // of silently overwriting. This allows splitting large module
+                    // declarations across multiple .tix files.
+                    let merged = match (self.aliases.get(&alias_name), &new_attrset) {
+                        (Some(ParsedTy::AttrSet(existing)), ParsedTy::AttrSet(new)) => {
+                            ParsedTy::AttrSet(merge_parsed_attrsets(existing, new))
+                        }
+                        _ => new_attrset,
+                    };
+                    self.aliases.insert(alias_name.clone(), merged);
 
                     if let Some(doc) = doc {
                         self.docs.insert_decl_doc(alias_name.clone(), doc.clone());
@@ -389,6 +400,48 @@ fn module_to_attrset(declarations: &[TixDeclaration]) -> ParsedTy {
         dyn_ty: None,
         open: true,
     })
+}
+
+/// Recursively merge two parsed attrsets. For each field in `new`:
+/// - If both old and new have a field and both are `AttrSet`, recurse (nested module merge).
+/// - Otherwise, the new field overwrites (last-wins).
+///
+/// The result is open if either input is open. `dyn_ty` takes new if present, else keeps old.
+fn merge_parsed_attrsets(
+    old: &AttrSetTy<ParsedTyRef>,
+    new: &AttrSetTy<ParsedTyRef>,
+) -> AttrSetTy<ParsedTyRef> {
+    let mut merged_fields = old.fields.clone();
+
+    for (name, new_ref) in &new.fields {
+        let merged_val = match merged_fields.get(name) {
+            // Both sides are attrsets — recurse to merge nested modules.
+            Some(existing_ref)
+                if matches!(existing_ref.0.as_ref(), ParsedTy::AttrSet(_))
+                    && matches!(new_ref.0.as_ref(), ParsedTy::AttrSet(_)) =>
+            {
+                let ParsedTy::AttrSet(existing_inner) = existing_ref.0.as_ref() else {
+                    unreachable!()
+                };
+                let ParsedTy::AttrSet(new_inner) = new_ref.0.as_ref() else {
+                    unreachable!()
+                };
+                ParsedTyRef::from(ParsedTy::AttrSet(merge_parsed_attrsets(
+                    existing_inner,
+                    new_inner,
+                )))
+            }
+            // Otherwise, new overwrites old.
+            _ => new_ref.clone(),
+        };
+        merged_fields.insert(name.clone(), merged_val);
+    }
+
+    AttrSetTy {
+        fields: merged_fields,
+        dyn_ty: new.dyn_ty.clone().or_else(|| old.dyn_ty.clone()),
+        open: old.open || new.open,
+    }
 }
 
 /// Collect all `TypeVarValue::Reference` names from a ParsedTy.
@@ -647,6 +700,159 @@ mod tests {
         assert_eq!(
             registry.docs.field_doc("Lib", &path).map(|s| s.as_str()),
             Some("Identity function.")
+        );
+    }
+
+    // =========================================================================
+    // Module merging tests
+    // =========================================================================
+
+    #[test]
+    fn module_merge_across_files() {
+        let file1 = parse_tix_file(
+            r#"
+            module lib {
+                val id :: a -> a;
+            }
+            "#,
+        )
+        .expect("parse file1");
+        let file2 = parse_tix_file(
+            r#"
+            module lib {
+                val const :: a -> b -> a;
+            }
+            "#,
+        )
+        .expect("parse file2");
+
+        let mut registry = TypeAliasRegistry::new();
+        registry.load_tix_file(&file1);
+        registry.load_tix_file(&file2);
+
+        let lib_ty = registry.get("Lib").expect("Lib alias should exist");
+        match lib_ty {
+            ParsedTy::AttrSet(attr) => {
+                assert!(attr.fields.contains_key("id"), "should keep field from first file");
+                assert!(
+                    attr.fields.contains_key("const"),
+                    "should have field from second file"
+                );
+                assert!(attr.open);
+            }
+            other => panic!("expected AttrSet, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn module_merge_nested() {
+        let file1 = parse_tix_file(
+            r#"
+            module lib {
+                module strings {
+                    val concatStringsSep :: string -> [string] -> string;
+                }
+            }
+            "#,
+        )
+        .expect("parse file1");
+        let file2 = parse_tix_file(
+            r#"
+            module lib {
+                module strings {
+                    val splitString :: string -> string -> [string];
+                }
+            }
+            "#,
+        )
+        .expect("parse file2");
+
+        let mut registry = TypeAliasRegistry::new();
+        registry.load_tix_file(&file1);
+        registry.load_tix_file(&file2);
+
+        let lib_ty = registry.get("Lib").expect("Lib alias should exist");
+        let ParsedTy::AttrSet(lib_attr) = lib_ty else {
+            panic!("expected AttrSet, got: {lib_ty:?}")
+        };
+
+        let strings_ref = lib_attr.fields.get("strings").expect("strings field should exist");
+        let ParsedTy::AttrSet(strings_attr) = strings_ref.0.as_ref() else {
+            panic!("expected nested AttrSet for strings")
+        };
+
+        assert!(
+            strings_attr.fields.contains_key("concatStringsSep"),
+            "should keep field from first file"
+        );
+        assert!(
+            strings_attr.fields.contains_key("splitString"),
+            "should have field from second file"
+        );
+    }
+
+    #[test]
+    fn module_merge_field_override() {
+        let file1 = parse_tix_file(
+            r#"
+            module lib {
+                val id :: a -> a;
+            }
+            "#,
+        )
+        .expect("parse file1");
+        let file2 = parse_tix_file(
+            r#"
+            module lib {
+                val id :: int -> int;
+            }
+            "#,
+        )
+        .expect("parse file2");
+
+        let mut registry = TypeAliasRegistry::new();
+        registry.load_tix_file(&file1);
+        registry.load_tix_file(&file2);
+
+        let lib_ty = registry.get("Lib").expect("Lib alias should exist");
+        let ParsedTy::AttrSet(attr) = lib_ty else {
+            panic!("expected AttrSet")
+        };
+
+        // The second file's type should win (last-wins for non-attrset fields).
+        let id_ref = attr.fields.get("id").expect("id field should exist");
+        match id_ref.0.as_ref() {
+            ParsedTy::Lambda { param, .. } => {
+                assert!(
+                    matches!(param.0.as_ref(), ParsedTy::Primitive(_)),
+                    "second file's `int -> int` should overwrite first file's `a -> a`"
+                );
+            }
+            other => panic!("expected Lambda for id, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn module_merge_over_type_alias() {
+        let file1 = parse_tix_file("type Lib = int;").expect("parse file1");
+        let file2 = parse_tix_file(
+            r#"
+            module lib {
+                val id :: a -> a;
+            }
+            "#,
+        )
+        .expect("parse file2");
+
+        let mut registry = TypeAliasRegistry::new();
+        registry.load_tix_file(&file1);
+        registry.load_tix_file(&file2);
+
+        // Module should overwrite the non-attrset alias entirely.
+        let lib_ty = registry.get("Lib").expect("Lib alias should exist");
+        assert!(
+            matches!(lib_ty, ParsedTy::AttrSet(_)),
+            "module should overwrite non-attrset alias, got: {lib_ty:?}"
         );
     }
 }
