@@ -82,7 +82,9 @@ impl TypeStorage {
     pub fn add_lower_bound(&mut self, var: TyId, bound: TyId) {
         match self.get_mut(var) {
             TypeEntry::Variable(v) => v.lower_bounds.push(bound),
-            TypeEntry::Concrete(_) => panic!("add_lower_bound called on concrete type {var:?}"),
+            TypeEntry::Concrete(_) => {
+                debug_assert!(false, "add_lower_bound called on concrete type {var:?}");
+            }
         }
     }
 
@@ -90,7 +92,9 @@ impl TypeStorage {
     pub fn add_upper_bound(&mut self, var: TyId, bound: TyId) {
         match self.get_mut(var) {
             TypeEntry::Variable(v) => v.upper_bounds.push(bound),
-            TypeEntry::Concrete(_) => panic!("add_upper_bound called on concrete type {var:?}"),
+            TypeEntry::Concrete(_) => {
+                debug_assert!(false, "add_upper_bound called on concrete type {var:?}");
+            }
         }
     }
 
@@ -99,7 +103,9 @@ impl TypeStorage {
     pub fn set_var_level(&mut self, id: TyId, level: u32) {
         match self.get_mut(id) {
             TypeEntry::Variable(v) => v.level = level,
-            TypeEntry::Concrete(_) => panic!("set_var_level called on concrete type {id:?}"),
+            TypeEntry::Concrete(_) => {
+                debug_assert!(false, "set_var_level called on concrete type {id:?}");
+            }
         }
     }
 
