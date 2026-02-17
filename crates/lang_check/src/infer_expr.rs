@@ -303,8 +303,17 @@ impl CheckCtx<'_> {
                 }
             }
 
-            Expr::HasAttr { set, attrpath: _ } => {
+            Expr::HasAttr { set, attrpath } => {
                 let set_ty = self.infer_expr(set)?;
+
+                // Infer attrpath elements so their expr→type slots are
+                // populated (needed for LSP hover/completions on the key).
+                for &attr in attrpath.iter() {
+                    let attr_ty = self.infer_expr(attr)?;
+                    let str_ty = self.alloc_prim(PrimitiveTy::String);
+                    self.constrain(attr_ty, str_ty)
+                        .map_err(|err| self.locate_err(err))?;
+                }
 
                 // Constrain set_ty to be an (open) attrset.
                 let any_attr = self.alloc_concrete(Ty::AttrSet(AttrSetTy {
@@ -464,6 +473,29 @@ impl CheckCtx<'_> {
                         // access). The fresh variable is not linked to the
                         // original, so null doesn't contaminate it.
                         self.new_var()
+                    }
+                    crate::narrow::NarrowPredicate::HasField(ref field_name) => {
+                        // In this branch, the variable is known to have the
+                        // given field (from `x ? field`). Create a fresh
+                        // variable disconnected from the original, and
+                        // constrain it to be an open attrset with that field.
+                        let fresh_var = self.new_var();
+                        let fresh_field_var = self.new_var();
+                        let attrset_with_field =
+                            self.alloc_concrete(Ty::AttrSet(AttrSetTy {
+                                fields: [(field_name.clone(), fresh_field_var)]
+                                    .into_iter()
+                                    .collect(),
+                                dyn_ty: None,
+                                open: true,
+                                optional_fields: BTreeSet::new(),
+                            }));
+                        // fresh_var <: { field: α, ... } — establishes the
+                        // field exists as an upper bound so that subsequent
+                        // field access in this branch succeeds.
+                        self.constrain(fresh_var, attrset_with_field)
+                            .map_err(|err| self.locate_err(err))?;
+                        fresh_var
                     }
                 };
 

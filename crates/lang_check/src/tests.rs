@@ -2409,3 +2409,111 @@ fn wrapper_foldl_like_nixpkgs() {
         other => panic!("expected attrset, got: {other}"),
     }
 }
+
+// ==============================================================================
+// Type narrowing — hasAttr (`?`) guards
+// ==============================================================================
+
+/// `if x ? name then x.name else "default"` — the then-branch narrows x to
+/// have the `name` field, so field access succeeds without error.
+#[test]
+fn narrow_hasattr_then_field_access() {
+    let nix = r#"x: if x ? name then x.name else "default""#;
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    // Then-branch: x.name (unconstrained field var → bottom in positive pos).
+    // Else-branch: "default" (string). Union collapses to string.
+    assert_eq!(*body, arc_ty!(String), "body should be string");
+}
+
+/// Chained hasattr: `if x ? a then x.a else if x ? b then x.b else null`.
+/// Each branch narrows x independently.
+#[test]
+fn narrow_hasattr_chained() {
+    let nix = r#"x: if x ? a then x.a else if x ? b then x.b else null"#;
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    // All field vars are unconstrained → bottom. The else-else is null.
+    // Union of bottom | bottom | null = null.
+    assert_eq!(*body, arc_ty!(Null), "chained hasattr body should be null");
+}
+
+/// `if !(x ? name) then "default" else x.name` — negation flips narrowing,
+/// so the else-branch gets the HasField narrowing.
+#[test]
+fn narrow_hasattr_negated() {
+    let nix = r#"x: if !(x ? name) then "default" else x.name"#;
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(*body, arc_ty!(String), "negated hasattr body should be string");
+}
+
+/// `assert x ? name; x.name` — assert narrows the body so field access
+/// on x succeeds.
+#[test]
+fn narrow_hasattr_assert() {
+    let nix = "x: assert x ? name; x.name";
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    // Assert applies then-branch narrowing. x.name produces a type var.
+    assert!(
+        matches!(body, OutputTy::TyVar(_)),
+        "assert-narrowed hasattr body should be a type variable, got: {body}"
+    );
+}
+
+/// Dynamic key like `x ? ${k}` should not crash — it just produces no
+/// narrowing (the condition is analyzed but returns None for dynamic keys).
+#[test]
+fn narrow_hasattr_dynamic_key_no_narrowing() {
+    let nix = r#"x: k: if x ? ${k} then x else null"#;
+    let ty = get_inferred_root(nix);
+    // Should not crash; just verify it infers a lambda.
+    assert!(
+        matches!(ty, OutputTy::Lambda { .. }),
+        "dynamic hasattr should still produce a lambda, got: {ty}"
+    );
+}
+
+/// Multi-element attrpath like `x ? a.b` should not crash — narrowing
+/// only handles single-key paths and falls back gracefully.
+#[test]
+fn narrow_hasattr_multi_key_no_narrowing() {
+    let nix = "x: if x ? a.b then 1 else 0";
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    // No narrowing applied, but both branches return int.
+    assert_eq!(*body, arc_ty!(Int), "multi-key hasattr body should be int");
+}
+
+/// Narrowing + field access with arithmetic: `if x ? count then x.count + 1 else 0`.
+/// The field access in the then-branch is narrowed, and arithmetic constrains
+/// the result to a numeric type.
+#[test]
+fn narrow_hasattr_field_access_then_arithmetic() {
+    let nix = indoc! {"
+        x:
+        if x ? count then x.count + 1
+        else 0
+    "};
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    match body {
+        OutputTy::Primitive(PrimitiveTy::Int) => {}
+        OutputTy::Primitive(PrimitiveTy::Number) => {}
+        OutputTy::Union(members) => {
+            for m in members {
+                assert!(
+                    matches!(
+                        &*m.0,
+                        OutputTy::Primitive(PrimitiveTy::Int)
+                            | OutputTy::Primitive(PrimitiveTy::Number)
+                            | OutputTy::Primitive(PrimitiveTy::Float)
+                    ),
+                    "all union members should be numeric, got: {body}"
+                );
+            }
+        }
+        _ => panic!("expected numeric body type, got: {body}"),
+    }
+}

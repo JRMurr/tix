@@ -16,6 +16,7 @@
 use lang_ast::{
     nameres::ResolveResult, BinOP, Expr, ExprBinOp, ExprId, Literal, NameId, NormalBinOp,
 };
+use smol_str::SmolStr;
 
 use super::CheckCtx;
 
@@ -26,6 +27,8 @@ pub(crate) enum NarrowPredicate {
     IsNull,
     /// The variable is known to be non-null.
     IsNotNull,
+    /// The variable is known to have a field with this name (from `x ? field`).
+    HasField(SmolStr),
 }
 
 /// A narrowing derived from a condition expression — binds a name to a
@@ -79,6 +82,21 @@ impl CheckCtx<'_> {
                         name: binding,
                         predicate: else_pred,
                     }],
+                })
+            }
+
+            // ── x ? field — hasAttr narrows x to have that field ────────
+            Expr::HasAttr { set, attrpath } => {
+                let name = self.expr_as_local_name(*set)?;
+                let field = self.single_static_attrpath_key(attrpath)?;
+                Some(NarrowInfo {
+                    then_branch: vec![NarrowBinding {
+                        name,
+                        predicate: NarrowPredicate::HasField(field),
+                    }],
+                    // No useful narrowing for else-branch — knowing a field
+                    // is absent doesn't constrain the type in a useful way.
+                    else_branch: vec![],
                 })
             }
 
@@ -150,6 +168,19 @@ impl CheckCtx<'_> {
                 ResolveResult::Definition(name) => Some(*name),
                 _ => None,
             },
+            _ => None,
+        }
+    }
+
+    /// Extract a single static string key from an attrpath. Returns `None`
+    /// for multi-element paths or paths containing dynamic (interpolated) keys
+    /// — we only narrow on simple `x ? fieldName` patterns.
+    fn single_static_attrpath_key(&self, attrpath: &[ExprId]) -> Option<SmolStr> {
+        if attrpath.len() != 1 {
+            return None;
+        }
+        match &self.module[attrpath[0]] {
+            Expr::Literal(Literal::String(key)) => Some(key.clone()),
             _ => None,
         }
     }

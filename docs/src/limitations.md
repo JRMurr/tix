@@ -25,11 +25,14 @@ Tix doesn't have literal types. `"circle"` is typed as `string`, not as the lite
 
 ### Type narrowing
 
-Tix supports **null narrowing**: when a condition checks `x == null`, `x != null`, or `isNull x`, the type of `x` is narrowed in each branch. This eliminates false positives from the common Nix pattern:
+Tix supports **null narrowing** and **hasAttr narrowing**. Null narrowing: when a condition checks `x == null`, `x != null`, or `isNull x`, the type of `x` is narrowed in each branch. HasAttr narrowing: `x ? field` narrows `x` to have that field in the then-branch (single-key attrpaths only).
 
 ```nix
 x: if x == null then "default" else x.name
 # x is null in then-branch, non-null in else-branch — no error
+
+x: if x ? name then x.name else "fallback"
+# x is narrowed to have `name` in then-branch — no error
 ```
 
 Narrowing also works with `assert`:
@@ -41,7 +44,7 @@ x: assert x != null; x.name
 
 **Not yet supported:**
 - Type predicates beyond null: `isAttrs`, `isFunction`, `isList`, etc.
-- Field existence checks: `x ? attr` / `hasAttr`
+- Multi-element attrpaths in `?`: `x ? a.b.c` doesn't narrow
 - Compound conditions: `&&`, `||`
 - Value equality narrowing: `if x == "foo"` doesn't narrow `x` to the literal `"foo"` (tix has no literal types)
 

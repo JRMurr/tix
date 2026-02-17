@@ -46,9 +46,11 @@ xs = [ 1 "two" null ];
 
 Unlike Rust enums or Haskell sum types, unions don't need to be declared upfront — they're inferred automatically from the code.
 
-## Type narrowing (null guards)
+## Type narrowing
 
-When a condition checks whether a variable is `null`, tix narrows the variable's type in each branch. This prevents false errors from idiomatic null-guard patterns:
+When a condition checks whether a variable is `null` or has a specific field, tix narrows the variable's type in each branch. This prevents false errors from idiomatic guard patterns.
+
+### Null guards
 
 ```nix
 getName = drv:
@@ -58,11 +60,25 @@ getName = drv:
 # drv is null in then-branch, non-null in else-branch
 ```
 
-Supported narrowing conditions:
+### HasAttr (`?`) guards
+
+```nix
+getField = arg:
+  if arg ? escaped then arg.escaped
+  else if arg ? unescaped then arg.unescaped
+  else null;
+# each branch narrows arg to have the checked field
+```
+
+In the then-branch, tix creates a fresh variable constrained to have the checked field. This prevents field access errors from cross-branch constraint contamination. Only single-key attrpaths are supported (`x ? field`, not `x ? a.b.c`).
+
+### Supported narrowing conditions
+
 - `x == null` / `null == x` / `x != null` / `null != x`
 - `isNull x` / `builtins.isNull x`
+- `x ? field` (then-branch narrows x to have the field)
 - `!cond` (flips the narrowing)
-- `assert x != null; body` (narrows in the body)
+- `assert cond; body` (narrows in the body)
 
 ## Row polymorphism (open attrsets)
 

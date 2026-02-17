@@ -128,8 +128,9 @@
 
 - Full intersection-type-based operator overloading (replace pragmatic deferred
   overload list with proper intersection types for overloaded functions)
-- Type narrowing: Phase 1 (null narrowing) is implemented. Phase 2: isAttrs,
-  isFunction, isList, primitive predicates, `?`/hasAttr, `&&`/`||` combinators.
+- Type narrowing: Phase 1 (null narrowing) and Phase 2a (`?`/hasAttr, single-key
+  only) are implemented. Remaining: isAttrs, isFunction, isList, primitive
+  predicates, multi-key `?` paths, `&&`/`||` combinators.
 - The `==` operator uses bidirectional constraints (`constrain(a,b); constrain(b,a)`),
   which means `x == null` forces x's type to include null as both a lower AND upper
   bound. This is too restrictive — equality comparison doesn't imply type equality
