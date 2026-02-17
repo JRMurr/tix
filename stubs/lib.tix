@@ -50,6 +50,7 @@ module pkgs {
   # Common build tools available in scope
   val runCommand :: string -> { ... } -> string -> Derivation;
   val writeText :: string -> string -> Derivation;
+  val writeShellScript :: string -> string -> Derivation;
   val writeShellScriptBin :: string -> string -> Derivation;
   val symlinkJoin :: { name: string, paths: [Derivation], ... } -> Derivation;
   val callPackage :: (a -> Derivation) -> { ... } -> Derivation;
@@ -80,6 +81,7 @@ module lib {
     val splitString :: string -> string -> [string];
     val replaceStrings :: [string] -> [string] -> string -> string;
     val fileContents :: path -> string;
+    val concatMapStringsSep :: string -> (a -> string) -> [a] -> string;
     val escapeShellArg :: string -> string;
     val escapeShellArgs :: [string] -> string;
     val toShellVar :: string -> string -> string;
@@ -185,6 +187,11 @@ module lib {
     val splitVersion :: string -> [string];
     val majorMinor :: string -> string;
   }
+
+  # Re-exports — real nixpkgs lib re-exports these at the top level
+  val escapeShellArg :: string -> string;
+  val concatMapStringsSep :: string -> (a -> string) -> [a] -> string;
+  val findFirst :: (a -> bool) -> a -> [a] -> a;
 
   # Fixed-point
   val fix :: (a -> a) -> a;
