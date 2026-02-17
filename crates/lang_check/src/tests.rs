@@ -2058,3 +2058,124 @@ fn select_or_default_open_attrset() {
         _ => panic!("expected lambda type, got: {ty}"),
     }
 }
+
+// ==============================================================================
+// Type narrowing — null guards
+// ==============================================================================
+
+/// `if x == null then null else x` — the else-branch should not error.
+/// x is a lambda param. In the else branch, x.name should not error.
+#[test]
+fn narrow_null_eq_else_field_access() {
+    let nix = r#"x: if x == null then null else x.name"#;
+    let ty = get_inferred_root(nix);
+    // Should be a lambda that returns (null | a) — no type error.
+    match &ty {
+        OutputTy::Lambda { .. } => {}
+        _ => panic!("expected lambda type, got: {ty}"),
+    }
+}
+
+/// `if x != null then x.name else "default"` — should not error.
+#[test]
+fn narrow_null_neq_then_field_access() {
+    let nix = r#"x: if x != null then x.name else "default""#;
+    let ty = get_inferred_root(nix);
+    match &ty {
+        OutputTy::Lambda { .. } => {}
+        _ => panic!("expected lambda type, got: {ty}"),
+    }
+}
+
+/// `if isNull x then 0 else x.y` — isNull builtin narrowing.
+#[test]
+fn narrow_isnull_builtin() {
+    let nix = "x: if isNull x then 0 else x.y";
+    let ty = get_inferred_root(nix);
+    match &ty {
+        OutputTy::Lambda { .. } => {}
+        _ => panic!("expected lambda type, got: {ty}"),
+    }
+}
+
+/// `if builtins.isNull x then 0 else x.y` — qualified builtin.
+#[test]
+fn narrow_builtins_isnull() {
+    let nix = "x: if builtins.isNull x then 0 else x.y";
+    let ty = get_inferred_root(nix);
+    match &ty {
+        OutputTy::Lambda { .. } => {}
+        _ => panic!("expected lambda type, got: {ty}"),
+    }
+}
+
+/// `if !isNull x then x.y else 0` — negation flips narrowing.
+#[test]
+fn narrow_negated_isnull() {
+    let nix = "x: if !(isNull x) then x.y else 0";
+    let ty = get_inferred_root(nix);
+    match &ty {
+        OutputTy::Lambda { .. } => {}
+        _ => panic!("expected lambda type, got: {ty}"),
+    }
+}
+
+/// `assert x != null; x.name` — assert narrows body.
+#[test]
+fn narrow_assert_not_null() {
+    let nix = "x: assert x != null; x.name";
+    let ty = get_inferred_root(nix);
+    match &ty {
+        OutputTy::Lambda { .. } => {}
+        _ => panic!("expected lambda type, got: {ty}"),
+    }
+}
+
+/// Then-branch of `x == null` should narrow x to null.
+#[test]
+fn narrow_null_eq_then_is_null() {
+    let nix = indoc! {"
+        x: if x == null then x else 1
+    "};
+    let ty = get_inferred_root(nix);
+    // x in the then-branch is null, so the result is null | int.
+    match &ty {
+        OutputTy::Lambda { .. } => {}
+        _ => panic!("expected lambda type, got: {ty}"),
+    }
+}
+
+/// Regression: `if true then 1 else "hi"` should still produce a union
+/// (narrowing shouldn't interfere when condition isn't a type guard).
+#[test]
+fn narrow_no_interference_with_non_guard() {
+    let ty = get_inferred_root(r#"if true then 1 else "hi""#);
+    match &ty {
+        OutputTy::Union(members) => {
+            assert_eq!(members.len(), 2, "expected 2 union members, got: {ty}");
+        }
+        _ => panic!("expected union type, got: {ty}"),
+    }
+}
+
+/// Nested narrowing: inner if narrows same variable further.
+#[test]
+fn narrow_nested_same_var() {
+    let nix = r#"x: if x != null then (if x != null then x.y else 0) else 0"#;
+    let ty = get_inferred_root(nix);
+    match &ty {
+        OutputTy::Lambda { .. } => {}
+        _ => panic!("expected lambda type, got: {ty}"),
+    }
+}
+
+/// `null == x` — null on the left side should also work.
+#[test]
+fn narrow_null_on_lhs() {
+    let nix = "x: if null == x then 0 else x.y";
+    let ty = get_inferred_root(nix);
+    match &ty {
+        OutputTy::Lambda { .. } => {}
+        _ => panic!("expected lambda type, got: {ty}"),
+    }
+}

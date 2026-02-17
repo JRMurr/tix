@@ -3,6 +3,7 @@ mod builtins;
 pub(crate) mod collect;
 mod constrain;
 pub mod diagnostic;
+mod narrow;
 pub mod imports;
 mod infer;
 pub(crate) mod infer_expr;
@@ -275,6 +276,14 @@ pub struct CheckCtx<'db> {
     /// their declared types. Applied only to the module's entry expression
     /// when it's a lambda with a pattern parameter.
     context_args: HashMap<smol_str::SmolStr, ParsedTy>,
+
+    /// Type narrowing overrides for the current branch scope.
+    ///
+    /// When inside an if-then-else branch where the condition narrows a
+    /// variable's type (e.g. `if x == null`), this maps the variable's NameId
+    /// to a branch-local TyId. Consulted in `infer_reference` before the
+    /// normal name resolution path. Pushed/popped around branch inference.
+    narrow_overrides: HashMap<NameId, TyId>,
 }
 
 impl<'db> CheckCtx<'db> {
@@ -300,6 +309,7 @@ impl<'db> CheckCtx<'db> {
             import_types,
             alias_provenance: HashMap::new(),
             context_args,
+            narrow_overrides: HashMap::new(),
         }
     }
 

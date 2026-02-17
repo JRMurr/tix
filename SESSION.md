@@ -128,7 +128,14 @@
 
 - Full intersection-type-based operator overloading (replace pragmatic deferred
   overload list with proper intersection types for overloaded functions)
-- Type narrowing / flow-sensitive typing (TypeScript-style discriminated unions)
+- Type narrowing: Phase 1 (null narrowing) is implemented. Phase 2: isAttrs,
+  isFunction, isList, primitive predicates, `?`/hasAttr, `&&`/`||` combinators.
+- The `==` operator uses bidirectional constraints (`constrain(a,b); constrain(b,a)`),
+  which means `x == null` forces x's type to include null as both a lower AND upper
+  bound. This is too restrictive — equality comparison doesn't imply type equality
+  (Nix allows `1 == "hi"` → false). Relaxing `==` to not add bidirectional constraints
+  (or only constraining in one direction) would fix false positives in patterns like
+  `hydraJob` where field access via `or` default happens before the null guard.
 - Literal / singleton types (`"circle"` as a type, not just `string`)
 - Co-occurrence simplification: path-based co-occurrence grouping is strict —
   variables that appear at structurally different positions (e.g. different attrset

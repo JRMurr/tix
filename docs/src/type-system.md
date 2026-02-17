@@ -46,6 +46,24 @@ xs = [ 1 "two" null ];
 
 Unlike Rust enums or Haskell sum types, unions don't need to be declared upfront — they're inferred automatically from the code.
 
+## Type narrowing (null guards)
+
+When a condition checks whether a variable is `null`, tix narrows the variable's type in each branch. This prevents false errors from idiomatic null-guard patterns:
+
+```nix
+getName = drv:
+  if drv == null then "<none>"
+  else drv.name;
+# getName :: { name: a, ... } -> a | string
+# drv is null in then-branch, non-null in else-branch
+```
+
+Supported narrowing conditions:
+- `x == null` / `null == x` / `x != null` / `null != x`
+- `isNull x` / `builtins.isNull x`
+- `!cond` (flips the narrowing)
+- `assert x != null; body` (narrows in the body)
+
 ## Row polymorphism (open attrsets)
 
 Functions that access attrset fields get inferred types that are open — they accept any attrset that has the required fields.

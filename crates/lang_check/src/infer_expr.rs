@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::{CheckCtx, LocatedError, TyId};
 use lang_ast::{
     nameres::ResolveResult, BinOP, BindingValue, Bindings, Expr, ExprId, InterpolPart, Literal,
-    NormalBinOp, OverloadBinOp,
+    NameId, NormalBinOp, OverloadBinOp,
 };
 use lang_ty::{AttrSetTy, PrimitiveTy, Ty};
 use smol_str::SmolStr;
@@ -170,8 +170,11 @@ impl CheckCtx<'_> {
                 self.constrain(cond_ty, bool_ty)
                     .map_err(|err| self.locate_err(err))?;
 
-                let then_ty = self.infer_expr(then_body)?;
-                let else_ty = self.infer_expr(else_body)?;
+                // Analyze the condition for type narrowing opportunities.
+                let narrow_info = self.analyze_condition(cond);
+
+                let then_ty = self.infer_with_narrowing(then_body, &narrow_info, true)?;
+                let else_ty = self.infer_with_narrowing(else_body, &narrow_info, false)?;
 
                 // Both branches flow into a result variable — this is where
                 // union types naturally arise when branches have different types.
@@ -322,7 +325,11 @@ impl CheckCtx<'_> {
                 self.constrain(cond_ty, bool_ty)
                     .map_err(|err| self.locate_err(err))?;
 
-                self.infer_expr(body)
+                // Assert body only executes when the condition is true,
+                // so apply then-branch narrowings (e.g. `assert x != null;`
+                // narrows x to non-null in the body).
+                let narrow_info = self.analyze_condition(cond);
+                self.infer_with_narrowing(body, &narrow_info, true)
             }
 
             Expr::With { env, body } => {
@@ -376,6 +383,12 @@ impl CheckCtx<'_> {
             }
             Some(res) => match res {
                 &ResolveResult::Definition(name) => {
+                    // Type narrowing: if we're inside a branch that narrows
+                    // this name, return the branch-local override instead.
+                    if let Some(&narrowed_ty) = self.narrow_overrides.get(&name) {
+                        return Ok(narrowed_ty);
+                    }
+
                     // If the name is in poly_type_env, instantiate via extrude.
                     if let Some(&poly_ty) = self.poly_type_env.get(name) {
                         Ok(self.extrude(poly_ty, true))
@@ -412,6 +425,69 @@ impl CheckCtx<'_> {
                     .map_err(|err| self.locate_err(err)),
             },
         }
+    }
+
+    /// Infer a branch body with optional type narrowing overrides applied.
+    ///
+    /// If `narrow_info` contains narrowings, creates branch-local type
+    /// variables and temporarily installs them as overrides in
+    /// `narrow_overrides`. The overrides are removed after inference so
+    /// they don't leak into sibling branches.
+    fn infer_with_narrowing(
+        &mut self,
+        body: ExprId,
+        narrow_info: &Option<crate::narrow::NarrowInfo>,
+        is_then_branch: bool,
+    ) -> Result<TyId, LocatedError> {
+        let bindings = narrow_info.as_ref().map(|info| {
+            if is_then_branch {
+                &info.then_branch
+            } else {
+                &info.else_branch
+            }
+        });
+
+        // Collect names we'll override so we can restore them after.
+        let mut saved: Vec<(NameId, Option<TyId>)> = Vec::new();
+
+        if let Some(bindings) = bindings {
+            for binding in bindings.iter() {
+                let override_ty = match binding.predicate {
+                    crate::narrow::NarrowPredicate::IsNull => {
+                        // In this branch, the variable is known to be null.
+                        self.alloc_prim(PrimitiveTy::Null)
+                    }
+                    crate::narrow::NarrowPredicate::IsNotNull => {
+                        // In this branch, the variable is known to be non-null.
+                        // Create a fresh variable — the branch body will
+                        // constrain it based on how it's used (e.g. field
+                        // access). The fresh variable is not linked to the
+                        // original, so null doesn't contaminate it.
+                        self.new_var()
+                    }
+                };
+
+                // Save the previous override (if any) for restoration.
+                let prev = self.narrow_overrides.insert(binding.name, override_ty);
+                saved.push((binding.name, prev));
+            }
+        }
+
+        let result = self.infer_expr(body);
+
+        // Restore previous overrides (handles nested narrowing correctly).
+        for (name, prev) in saved.into_iter().rev() {
+            match prev {
+                Some(ty) => {
+                    self.narrow_overrides.insert(name, ty);
+                }
+                None => {
+                    self.narrow_overrides.remove(&name);
+                }
+            }
+        }
+
+        result
     }
 
     fn infer_bin_op(&mut self, lhs: ExprId, rhs: ExprId, op: &BinOP) -> Result<TyId, LocatedError> {

@@ -25,7 +25,25 @@ Tix doesn't have literal types. `"circle"` is typed as `string`, not as the lite
 
 ### Type narrowing
 
-No flow-sensitive typing. An `if x == "foo"` check doesn't narrow the type of `x` in the then-branch.
+Tix supports **null narrowing**: when a condition checks `x == null`, `x != null`, or `isNull x`, the type of `x` is narrowed in each branch. This eliminates false positives from the common Nix pattern:
+
+```nix
+x: if x == null then "default" else x.name
+# x is null in then-branch, non-null in else-branch — no error
+```
+
+Narrowing also works with `assert`:
+
+```nix
+x: assert x != null; x.name
+# x is non-null after the assert
+```
+
+**Not yet supported:**
+- Type predicates beyond null: `isAttrs`, `isFunction`, `isList`, etc.
+- Field existence checks: `x ? attr` / `hasAttr`
+- Compound conditions: `&&`, `||`
+- Value equality narrowing: `if x == "foo"` doesn't narrow `x` to the literal `"foo"` (tix has no literal types)
 
 ### `inherit (builtins)` and dynamic field access
 
