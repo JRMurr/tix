@@ -31,7 +31,14 @@ Communicates over stdin/stdout. Same stub flags as `tix-cli`.
 
 ### VS Code
 
-Install the tix extension (if published), or configure a generic LSP client to run `tix-lsp`.
+Install the [Nix IDE](https://marketplace.visualstudio.com/items?itemName=jnoortheen.nix-ide) extension, then point it at `tix-lsp` in your workspace or user settings:
+
+```json
+{
+  "nix.enableLanguageServer": true,
+  "nix.serverPath": "tix-lsp"
+}
+```
 
 ### Neovim (nvim-lspconfig)
 
