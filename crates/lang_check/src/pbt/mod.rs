@@ -468,3 +468,104 @@ proptest! {
         prop_assert_eq!(root_ty, ty.normalize_vars());
     }
 }
+
+// ==============================================================================
+// Optional fields PBT
+// ==============================================================================
+//
+// Generates lambda patterns with a mix of required and optional (defaulted)
+// fields, applies them to attrsets that omit the optional fields, and verifies
+// that inference succeeds and returns the expected type.
+
+/// Generate a pattern with required + optional fields and a call site that
+/// omits the optional fields. The body sums all fields with `+`, so the
+/// expected type is `Int`.
+fn arb_optional_field_pattern() -> impl Strategy<Value = NixTextStr> {
+    let required = prop::collection::vec(arb_smol_str_ident(), 1..=3);
+    let optional = prop::collection::vec(arb_smol_str_ident(), 1..=3);
+
+    (required, optional).prop_filter_map("duplicate field names", |(req, opt)| {
+        let mut all_names: HashSet<SmolStr> = HashSet::new();
+        for name in req.iter().chain(opt.iter()) {
+            if !all_names.insert(name.clone()) {
+                return None;
+            }
+        }
+
+        // Build pattern: `{ req1, req2, opt1 ? 0, opt2 ? 0 }`
+        let mut pat_parts: Vec<String> = req.iter().map(|n| n.to_string()).collect();
+        for n in &opt {
+            pat_parts.push(format!("{n} ? 0"));
+        }
+        let pattern = pat_parts.join(", ");
+
+        // Build body: sum all fields with `+`
+        let all_fields: Vec<String> = req
+            .iter()
+            .chain(opt.iter())
+            .map(|n| n.to_string())
+            .collect();
+        let body = all_fields.join(" + ");
+
+        // Build call-site attrset: only required fields provided
+        let call_fields: Vec<String> = req.iter().map(|n| format!("{n} = 0;")).collect();
+        let call_attrset = call_fields.join(" ");
+
+        Some(format!("({{ {pattern} }}: {body}) {{ {call_attrset} }}"))
+    })
+}
+
+/// Generate patterns where optional fields are provided in the call site
+/// (should also succeed).
+fn arb_optional_field_all_provided() -> impl Strategy<Value = NixTextStr> {
+    let required = prop::collection::vec(arb_smol_str_ident(), 1..=3);
+    let optional = prop::collection::vec(arb_smol_str_ident(), 1..=3);
+
+    (required, optional).prop_filter_map("duplicate field names", |(req, opt)| {
+        let mut all_names: HashSet<SmolStr> = HashSet::new();
+        for name in req.iter().chain(opt.iter()) {
+            if !all_names.insert(name.clone()) {
+                return None;
+            }
+        }
+
+        let mut pat_parts: Vec<String> = req.iter().map(|n| n.to_string()).collect();
+        for n in &opt {
+            pat_parts.push(format!("{n} ? 0"));
+        }
+        let pattern = pat_parts.join(", ");
+
+        let all_fields: Vec<String> = req
+            .iter()
+            .chain(opt.iter())
+            .map(|n| n.to_string())
+            .collect();
+        let body = all_fields.join(" + ");
+
+        // All fields provided
+        let call_fields: Vec<String> = all_fields.iter().map(|n| format!("{n} = 0;")).collect();
+        let call_attrset = call_fields.join(" ");
+
+        Some(format!("({{ {pattern} }}: {body}) {{ {call_attrset} }}"))
+    })
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: 256, .. ProptestConfig::default()
+    })]
+
+    /// Optional fields omitted: inference should succeed and return Int.
+    #[test]
+    fn test_optional_field_typing(text in arb_optional_field_pattern()) {
+        let root_ty = get_inferred_root(&text);
+        prop_assert_eq!(root_ty, OutputTy::Primitive(PrimitiveTy::Int));
+    }
+
+    /// Optional fields provided: inference should also succeed and return Int.
+    #[test]
+    fn test_optional_field_all_provided(text in arb_optional_field_all_provided()) {
+        let root_ty = get_inferred_root(&text);
+        prop_assert_eq!(root_ty, OutputTy::Primitive(PrimitiveTy::Int));
+    }
+}
