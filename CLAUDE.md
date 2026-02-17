@@ -29,7 +29,8 @@ cargo test --package lang_check -- test_name
 
 ## Must Do
 
-Whenever you fix a bug add a regression test for it
+- Whenever you fix a bug add a regression test for it
+- When changing user-facing behavior (new features, changed semantics, new CLI flags, new LSP capabilities, etc.), update the relevant pages in `docs/src/`. The mdbook is the primary user-facing documentation. Check `docs/src/SUMMARY.md` for the page list.
 
 ## Workspace Crates
 
