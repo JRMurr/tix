@@ -253,7 +253,10 @@ fn apply_simplification(
                 .collect();
 
             match simplified.len() {
-                0 => unreachable!("all union members removed during simplification"),
+                // All members were polar-only type variables. Keep the first
+                // member (after substitution) as a representative — it's
+                // unconstrained and effectively represents ⊥ in this position.
+                0 => apply_simplification(&members[0].0, substitution, &FxHashSet::default()),
                 1 => (*simplified.into_iter().next().unwrap().0).clone(),
                 _ => OutputTy::Union(simplified),
             }
@@ -279,7 +282,10 @@ fn apply_simplification(
                 .collect();
 
             match simplified.len() {
-                0 => unreachable!("all intersection members removed during simplification"),
+                // All members were polar-only type variables. Keep the first
+                // member (after substitution) as a representative — it's
+                // unconstrained and effectively represents ⊤ in this position.
+                0 => apply_simplification(&members[0].0, substitution, &FxHashSet::default()),
                 1 => (*simplified.into_iter().next().unwrap().0).clone(),
                 _ => OutputTy::Intersection(simplified),
             }
@@ -373,6 +379,32 @@ mod tests {
         // Co-occurrence only helps when the EXACT SAME set of paths is shared.
         // This is rare in practice — the main value of simplify is
         // polar-only variable removal. Skip merge test for now.
+    }
+
+    #[test]
+    fn simplify_all_intersection_members_removable() {
+        // Intersection(a, b) where both vars are negative-only (appear only in
+        // an intersection at top level). All members would be filtered out —
+        // this must not panic. Regression test for the crash in nixpkgs.
+        let ty = OutputTy::Intersection(vec![
+            TyRef::from(OutputTy::TyVar(10)),
+            TyRef::from(OutputTy::TyVar(11)),
+        ]);
+        let result = simplify(&ty);
+        // Should keep one representative variable rather than crashing.
+        assert_eq!(result, OutputTy::TyVar(10));
+    }
+
+    #[test]
+    fn simplify_all_union_members_removable() {
+        // Union(a, b) where both vars are positive-only. Same scenario as
+        // above but for unions.
+        let ty = OutputTy::Union(vec![
+            TyRef::from(OutputTy::TyVar(20)),
+            TyRef::from(OutputTy::TyVar(21)),
+        ]);
+        let result = simplify(&ty);
+        assert_eq!(result, OutputTy::TyVar(20));
     }
 
     #[test]
