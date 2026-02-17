@@ -66,6 +66,28 @@ The `...` in the inferred type means "and maybe other fields." This is how Nix's
 greet = { name, ... }: "hello ${name}";
 ```
 
+## Optional fields (pattern defaults)
+
+When a lambda pattern has fields with defaults (`? value`), those fields are marked as optional in the inferred type. Callers can omit optional fields without triggering a missing-field error.
+
+```nix
+# mkGreeting :: { name: string, greeting?: string } -> string
+mkGreeting = { name, greeting ? "hello" }: "${greeting} ${name}";
+
+mkGreeting { name = "alice"; }                    # "hello alice"
+mkGreeting { name = "bob"; greeting = "hey"; }    # "hey bob"
+```
+
+Optional fields are shown with a `?` suffix in the inferred type. Required fields (no default) still produce an error if omitted:
+
+```nix
+# This is fine — `y` is optional:
+({ x, y ? 0 }: x + y) { x = 1; }    # 1
+
+# This errors — `y` is required:
+({ x, y }: x + y) { x = 1; }         # error: missing field `y`
+```
+
 ## Attrset merge (`//`)
 
 The merge operator produces a type that combines both sides. The right side wins for overlapping fields.
