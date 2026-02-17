@@ -62,13 +62,6 @@ _ensure-stubs-dir:
 # Development
 # =============================================================================
 
-# Launch VS Code in nixos_fixture with the debug LSP build for manual testing.
-# Uses the rich generated stubs (with doc comments) via TIX_BUILTIN_STUBS.
-vscode-fixture: build gen-stubs
-    @mkdir -p test/nixos_fixture/.vscode
-    @printf '#!/bin/sh\nexport TIX_BUILTIN_STUBS="{{justfile_directory()}}/{{stubs_dir}}"\nexport RUST_LOG=tix_lsp=info\nexec "{{justfile_directory()}}/target/debug/tix-lsp" "$@" 2>"{{justfile_directory()}}/test/nixos_fixture/.vscode/tix-lsp.log"\n' \
-        > test/nixos_fixture/.vscode/tix-lsp-wrapper.sh
-    @chmod +x test/nixos_fixture/.vscode/tix-lsp-wrapper.sh
-    @echo '{ "nix.enableLanguageServer": true, "nix.serverPath": "{{justfile_directory()}}/test/nixos_fixture/.vscode/tix-lsp-wrapper.sh" }' \
-        > test/nixos_fixture/.vscode/settings.json
-    code --new-window test/nixos_fixture
+# Build and launch VS Code with tix-lsp (debug build) on a directory
+code dir="test/nixos_fixture": build
+    nix run .#tix-code-dev  -- {{ dir }}

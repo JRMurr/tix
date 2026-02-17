@@ -35,6 +35,15 @@
           pkgs = import nixpkgs { inherit system overlays; };
           rustAttrs = import ./rust.nix { inherit pkgs crane; };
           tix-lsp-dev = import ./lsp-dev.nix { inherit pkgs; };
+          tix-code = import ./vscode.nix {
+            inherit pkgs;
+            serverPath = "${tix-with-stubs}/bin/tix-lsp";
+          };
+          tix-code-dev = import ./vscode.nix {
+            inherit pkgs;
+            serverPath = "${tix-lsp-dev}/bin/tix-lsp-dev";
+            name = "tix-code-dev";
+          };
 
           tix-stubs = import ./stubs.nix {
             inherit pkgs;
@@ -78,6 +87,7 @@
             rust-bin = rustAttrs.binary;
             stubs = tix-stubs;
             with-stubs = tix-with-stubs;
+            inherit tix-code tix-code-dev;
             docs = pkgs.stdenv.mkDerivation {
               name = "tix-docs";
               src = ./docs;
@@ -92,21 +102,24 @@
             # Verify the with-stubs wrapper (TIX_BUILTIN_STUBS baked in via
             # makeWrapper) can type-check files that use @nixos and
             # @home-manager contexts end-to-end.
-            with-stubs = pkgs.runCommand "tix-check-with-stubs" {
-              nativeBuildInputs = [ tix-with-stubs ];
-            } ''
-              cp -r ${./test} test_files
-              chmod -R u+w test_files
+            with-stubs =
+              pkgs.runCommand "tix-check-with-stubs"
+                {
+                  nativeBuildInputs = [ tix-with-stubs ];
+                }
+                ''
+                  cp -r ${./test} test_files
+                  chmod -R u+w test_files
 
-              # Test @nixos context: test/tix.toml maps nixos_module.nix to @nixos
-              tix-cli test_files/nixos_module.nix --config test_files/tix.toml
+                  # Test @nixos context: test/tix.toml maps nixos_module.nix to @nixos
+                  tix-cli test_files/nixos_module.nix --config test_files/tix.toml
 
-              # Test @home-manager context: nixos_fixture/tix.toml maps home/*.nix to @home-manager
-              tix-cli test_files/nixos_fixture/home/shell.nix \
-                --config test_files/nixos_fixture/tix.toml
+                  # Test @home-manager context: nixos_fixture/tix.toml maps home/*.nix to @home-manager
+                  tix-cli test_files/nixos_fixture/home/shell.nix \
+                    --config test_files/nixos_fixture/tix.toml
 
-              touch $out
-            '';
+                  touch $out
+                '';
           };
 
         }
