@@ -2,7 +2,9 @@
 
 A type checker for Nix, built on [MLsub/SimpleSub](https://lptk.github.io/programming/2020/03/26/demystifying-mlsub.html) — Hindley-Milner extended with subtyping, union types, and intersection types.
 
-The ideology: do as much inference as is reasonable but defer to doc comment annotations when it would be too hard to infer.
+The goal is to have inference do as much of the work as possible but when it gets really nasty allow manually specified types through doc comments.
+
+TLDR: try to be typescript for nix
 
 ## Quick Start
 
