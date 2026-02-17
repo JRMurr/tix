@@ -44,7 +44,7 @@ xs = [ 1 "two" null ];
 # xs :: [int | string | null]
 ```
 
-Unions fall out naturally from the subtyping system — there's no special union syntax you need to use in your code.
+Unlike Rust enums or Haskell sum types, unions don't need to be declared upfront — they're inferred automatically from the code.
 
 ## Row polymorphism (open attrsets)
 
