@@ -39,6 +39,8 @@ lib = import ./lib.nix;
 
 /** type: add :: int -> int -> int */
 add = a: b: a + b;
+# Without the annotation, `+` is overloaded and tix infers: a -> b -> c
+# The annotation constrains it to integer addition only.
 ```
 
 The `type:` prefix distinguishes it from regular doc comments.

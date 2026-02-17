@@ -18,14 +18,17 @@
 Functions are inferred from usage. The parameter type comes from how it's used in the body, and the return type is whatever the body produces.
 
 ```nix
-# add :: int -> int -> int
-add = a: b: a + b;
-
 # id :: a -> a
 id = x: x;
+
+# apply :: (a -> b) -> a -> b
+apply = f: x: f x;
+
+# negate :: bool -> bool
+negate = x: !x;
 ```
 
-Nix functions are curried — `a: b: a + b` is a function that takes `a` and returns a function that takes `b`.
+Nix functions are curried — `f: x: f x` is a function that takes `f` and returns a function that takes `x`.
 
 ## Union types
 
