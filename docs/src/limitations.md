@@ -37,17 +37,6 @@ Dynamic attrset field access (`x.${name}`) uses the dynamic field type `{_: a}` 
 
 Overloaded operators (like `+` with free type variables) don't survive the `OutputTy` boundary between files. If a polymorphic function using `+` is imported from another file, the overload may not resolve correctly.
 
-### Co-occurrence simplification
-
-Not yet implemented. Some inferred types are more complex than necessary:
-
-```nix
-apply = fn: args: fn args;
-# Inferred: (int | string) -> a  (instead of a -> b)
-```
-
-The SimpleSub paper's Section 4.2 describes co-occurrence analysis that would fix this.
-
 ### Recursive attrsets
 
 `rec { ... }` works but equirecursive types (types that refer to themselves) can produce verbose output in some cases.
@@ -64,17 +53,3 @@ The built-in stubs cover common `lib` functions but not all of nixpkgs lib. Func
 - Home Manager flake mode is less tested
 - lib function stubs are hand-written (no auto-generation from nixpkgs lib source yet)
 - Enum option types become `string` (no literal type support)
-
-## LSP
-
-### Incomplete expressions
-
-rnix's error recovery on incomplete code (e.g. typing `pkgs.` with nothing after the dot) can cascade and mangle subsequent expressions. The LSP does its best but completion/hover may be wrong in partially-written code.
-
-### Multi-element attrpath hover
-
-Hovering over `a.foo.bar` shows the result type of the full chain, not intermediate types. You can't hover over just `a.foo` to see its type mid-chain.
-
-## Performance
-
-Tix is fast for individual files. Checking large multi-file projects with lots of imports may be slow since each import is re-analyzed (salsa caching helps for repeated checks in LSP mode).
