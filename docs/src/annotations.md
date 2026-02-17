@@ -6,7 +6,7 @@
 
 Most code doesn't need annotations — tix infers types from usage. Annotations help when:
 
-- You're importing external code that tix can't see into (e.g. `import ./lib.nix`)
+- You're importing code via a path tix can't resolve (e.g. `import <nixpkgs>`, dynamic paths)
 - You want to constrain a binding to a specific type
 - You want to document your API
 
@@ -35,7 +35,7 @@ For quick one-liners:
 
 ```nix
 /** type: lib :: Lib */
-lib = import ./lib.nix;
+lib = import <nixpkgs/lib>;
 
 /** type: add :: int -> int -> int */
 add = a: b: a + b;
@@ -51,7 +51,7 @@ When you import something typed by stubs, you assign it a type alias:
 
 ```nix
 /** type: lib :: Lib */
-lib = import ./lib.nix;
+lib = import <nixpkgs/lib>;
 
 /** type: pkgs :: Pkgs */
 pkgs = import <nixpkgs> {};

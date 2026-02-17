@@ -111,7 +111,7 @@ Assign stub types to imports via doc comments:
 ```nix
 let
   /** type: lib :: Lib */
-  lib = import ./lib.nix;
+  lib = import <nixpkgs/lib>;
 
   /** type: pkgs :: Pkgs */
   pkgs = import <nixpkgs> {};
