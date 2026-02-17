@@ -16,7 +16,7 @@ Most code doesn't need annotations — tix infers types from usage. Annotations 
 
 Follows the [nixdoc](https://github.com/nix-community/nixdoc) convention. The type goes in a fenced code block under a `# Type` heading:
 
-```nix
+````nix
 /**
   Concatenate a list of strings with a separator.
 
@@ -27,7 +27,7 @@ Follows the [nixdoc](https://github.com/nix-community/nixdoc) convention. The ty
   ```
 */
 concatStringsSep = sep: list: builtins.concatStringsSep sep list;
-```
+````
 
 ### Inline type annotation
 
