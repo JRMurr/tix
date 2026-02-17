@@ -176,6 +176,7 @@ impl OutputTy {
                     fields,
                     dyn_ty,
                     open: attr.open,
+                    optional_fields: attr.optional_fields.clone(),
                 })
             }
             OutputTy::Union(members) => {
@@ -327,7 +328,12 @@ impl fmt::Display for AttrSetTy<TyRef> {
                 write!(f, ", ")?;
             }
             first = false;
-            write!(f, "{k}: {v}")?;
+            let opt = if self.optional_fields.contains(k) {
+                "?"
+            } else {
+                ""
+            };
+            write!(f, "{k}{opt}: {v}")?;
         }
         if let Some(dyn_ty) = &self.dyn_ty {
             if !first {

@@ -346,6 +346,7 @@ impl CheckCtx<'_> {
                             fields: new_fields,
                             dyn_ty: new_dyn,
                             open: attr.open,
+                            optional_fields: attr.optional_fields.clone(),
                         }))
                     }
                     Ty::Primitive(_) => ty_id,

@@ -415,6 +415,7 @@ fn module_to_attrset(declarations: &[TixDeclaration]) -> ParsedTy {
         fields,
         dyn_ty: None,
         open: true,
+        optional_fields: std::collections::BTreeSet::new(),
     })
 }
 
@@ -457,6 +458,11 @@ fn merge_parsed_attrsets(
         fields: merged_fields,
         dyn_ty: new.dyn_ty.clone().or_else(|| old.dyn_ty.clone()),
         open: old.open || new.open,
+        optional_fields: old
+            .optional_fields
+            .union(&new.optional_fields)
+            .cloned()
+            .collect(),
     }
 }
 

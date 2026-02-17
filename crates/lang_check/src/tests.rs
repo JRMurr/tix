@@ -1922,3 +1922,67 @@ fn context_args_config_is_open_attrset() {
         _ => panic!("expected lambda type, got: {ty}"),
     }
 }
+
+// =============================================================================
+// Optional fields (pattern defaults)
+// =============================================================================
+
+// Calling a function with an optional field, omitting the optional field.
+test_case!(optional_field_omitted,
+    "({ x, y ? 0 }: x + y) { x = 1; }",
+    Int
+);
+
+// Calling a function with an optional field, providing the optional field.
+test_case!(optional_field_provided,
+    "({ x, y ? 0 }: x + y) { x = 1; y = 2; }",
+    Int
+);
+
+// Optional field combined with ellipsis.
+test_case!(optional_field_with_ellipsis,
+    "({ x, y ? 0, ... }: x + y) { x = 1; }",
+    Int
+);
+
+// Multiple optional fields, all omitted.
+test_case!(multiple_optional_fields_omitted,
+    "({ x, y ? 0, z ? 1 }: x + y + z) { x = 1; }",
+    Int
+);
+
+/// Optional field with null default.
+#[test]
+fn optional_field_default_null() {
+    let nix_src = r#"({ name ? null }: name) {}"#;
+    let ty = get_inferred_root(nix_src);
+    assert_eq!(ty, arc_ty!(Null));
+}
+
+/// Required fields still error when missing.
+#[test]
+fn required_field_still_errors() {
+    let nix_src = "({ x, y }: x + y) { x = 1; }";
+    let err = get_check_error(nix_src);
+    assert!(
+        matches!(err, TixDiagnosticKind::MissingField { ref field, .. } if field == "y"),
+        "expected MissingField error for 'y', got: {err:?}"
+    );
+}
+
+/// Display format shows `?` for optional fields.
+#[test]
+fn optional_field_display() {
+    let nix_src = "{ x, y ? 0 }: x + y";
+    let ty = get_inferred_root(nix_src);
+    let display = format!("{ty}");
+    assert!(
+        display.contains("y?:"),
+        "expected 'y?:' in display, got: {display}"
+    );
+    // `x` should NOT have `?`
+    assert!(
+        display.contains("x:") && !display.contains("x?:"),
+        "expected 'x:' without '?' in display, got: {display}"
+    );
+}

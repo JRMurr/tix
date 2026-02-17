@@ -328,6 +328,7 @@ pub(crate) fn parsed_ty_to_output_ty(
                 fields,
                 dyn_ty,
                 open: attr.open,
+                optional_fields: attr.optional_fields.clone(),
             })
         }
 

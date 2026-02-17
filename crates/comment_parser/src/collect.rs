@@ -202,6 +202,7 @@ fn collect_attrset(pairs: Pairs<Rule>) -> ParsedTy {
         fields,
         dyn_ty,
         open,
+        optional_fields: std::collections::BTreeSet::new(),
     })
 }
 

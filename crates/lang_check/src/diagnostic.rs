@@ -221,6 +221,7 @@ fn canonicalize_ty_structural(
                 fields,
                 dyn_ty,
                 open: attr.open,
+                optional_fields: attr.optional_fields.clone(),
             })
         }
     }

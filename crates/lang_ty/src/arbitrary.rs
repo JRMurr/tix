@@ -114,6 +114,7 @@ impl AttrSetTy<TyRef> {
             fields,
             dyn_ty: None, // TODO:
             open: false,
+            optional_fields: std::collections::BTreeSet::new(),
         }
     }
 }

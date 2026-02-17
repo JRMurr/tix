@@ -189,6 +189,7 @@ impl<'a> Canonicalizer<'a> {
                     fields: new_fields,
                     dyn_ty,
                     open: attr.open,
+                    optional_fields: attr.optional_fields.clone(),
                 })
             }
         }
@@ -308,10 +309,29 @@ fn merge_attrset_intersection(members: Vec<OutputTy>) -> Vec<OutputTy> {
         }
     }
 
+    // A field is optional in the intersection only if it's optional in ALL
+    // attrsets that contain it — intersection is the most restrictive.
+    let mut merged_optional: std::collections::BTreeSet<smol_str::SmolStr> =
+        std::collections::BTreeSet::new();
+    for key in merged_fields.keys() {
+        let optional_in_all = attrsets.iter().all(|attr| {
+            // If this attrset doesn't contain the field at all, it doesn't
+            // constrain its optionality — skip it.
+            if !attr.fields.contains_key(key) {
+                return true;
+            }
+            attr.optional_fields.contains(key)
+        });
+        if optional_in_all {
+            merged_optional.insert(key.clone());
+        }
+    }
+
     let merged = OutputTy::AttrSet(AttrSetTy {
         fields: merged_fields,
         dyn_ty: merged_dyn,
         open: all_open,
+        optional_fields: merged_optional,
     });
 
     others.push(merged);

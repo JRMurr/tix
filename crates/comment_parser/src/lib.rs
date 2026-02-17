@@ -241,6 +241,7 @@ macro_rules! known_ty {
             ].into_iter().collect(),
             dyn_ty: None,
             open: false,
+            optional_fields: std::collections::BTreeSet::new(),
         })
     }};
 
@@ -252,6 +253,7 @@ macro_rules! known_ty {
             ].into_iter().collect(),
             dyn_ty: None,
             open: true,
+            optional_fields: std::collections::BTreeSet::new(),
         })
     }};
 
@@ -261,6 +263,7 @@ macro_rules! known_ty {
             fields: std::collections::BTreeMap::new(),
             dyn_ty: Some($crate::ParsedTyRef::from($crate::known_ty!($dyn_ty))),
             open: false,
+            optional_fields: std::collections::BTreeSet::new(),
         })
     }};
 

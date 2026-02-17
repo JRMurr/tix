@@ -393,6 +393,7 @@ impl<'db> CheckCtx<'db> {
                     fields,
                     dyn_ty,
                     open: attr.open,
+                    optional_fields: attr.optional_fields.clone(),
                 }))
             }
             // Union: create a fresh variable with each member as a lower bound.
@@ -539,6 +540,7 @@ impl<'db> CheckCtx<'db> {
                     fields,
                     dyn_ty,
                     open: attr.open,
+                    optional_fields: attr.optional_fields.clone(),
                 }))
             }
             // Union annotations: create a fresh variable with each member as a lower bound.

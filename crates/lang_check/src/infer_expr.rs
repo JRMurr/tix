@@ -6,7 +6,7 @@
 // in a single walk, calling constrain() inline. This is the SimpleSub approach
 // where constraints are immediately propagated through the bounds graph.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::{CheckCtx, LocatedError, TyId};
 use lang_ast::{
@@ -99,6 +99,7 @@ impl CheckCtx<'_> {
                         };
 
                     let mut fields = BTreeMap::new();
+                    let mut optional = BTreeSet::new();
 
                     for &(name, default_expr) in pat.fields.iter() {
                         let default_ty = default_expr.map(|e| self.infer_expr(e)).transpose()?;
@@ -129,6 +130,11 @@ impl CheckCtx<'_> {
                             }
                         }
 
+                        // Track fields with defaults as optional — callers may omit them.
+                        if default_expr.is_some() {
+                            optional.insert(field_text.clone());
+                        }
+
                         fields.insert(field_text, name_ty);
                     }
 
@@ -136,6 +142,7 @@ impl CheckCtx<'_> {
                         fields,
                         dyn_ty: None,
                         open: pat.ellipsis,
+                        optional_fields: optional,
                     }));
 
                     self.constrain(param_ty, attr)
@@ -213,6 +220,7 @@ impl CheckCtx<'_> {
                                 fields: BTreeMap::new(),
                                 dyn_ty: Some(dyn_ty),
                                 open: true,
+                                optional_fields: BTreeSet::new(),
                             }));
                             self.constrain(set_ty, dyn_attr)
                                 .map_err(|err| self.locate_err(err))?;
@@ -226,6 +234,7 @@ impl CheckCtx<'_> {
                         fields: [(opt_key, value_ty)].into_iter().collect(),
                         dyn_ty: None,
                         open: true, // there may be more fields
+                        optional_fields: BTreeSet::new(),
                     }));
                     self.constrain(set_ty, field_attr)
                         .map_err(|err| self.locate_err(err))?;
@@ -290,6 +299,7 @@ impl CheckCtx<'_> {
                     fields: BTreeMap::new(),
                     dyn_ty: None,
                     open: true,
+                    optional_fields: BTreeSet::new(),
                 }));
                 self.constrain(set_ty, any_attr)
                     .map_err(|err| self.locate_err(err))?;
@@ -382,6 +392,7 @@ impl CheckCtx<'_> {
                         fields: [(var_name.clone(), value_ty)].into_iter().collect(),
                         dyn_ty: None,
                         open: true,
+                        optional_fields: BTreeSet::new(),
                     }));
                     self.constrain(env_ty, field_attr)
                         .map_err(|err| self.locate_err(err))?;
@@ -590,6 +601,7 @@ impl CheckCtx<'_> {
             fields,
             dyn_ty,
             open: false,
+            optional_fields: BTreeSet::new(),
         })
     }
 

@@ -127,7 +127,9 @@ impl CheckCtx<'_> {
             match sub_attr.fields.get(key) {
                 Some(sub_field) => self.constrain(*sub_field, *sup_field)?,
                 None => {
-                    if !sub_attr.open {
+                    // Skip the error if the field is optional in the supertype
+                    // (it has a default value in the lambda pattern).
+                    if !sub_attr.open && !sup_attr.optional_fields.contains(key) {
                         return Err(InferenceError::MissingField {
                             field: key.clone(),
                             available: sub_attr.fields.keys().cloned().collect(),

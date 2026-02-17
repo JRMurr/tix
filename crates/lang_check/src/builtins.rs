@@ -7,7 +7,7 @@
 // pre-generalization or extrusion — the vars are at the current level, and if
 // the builtin is bound in a `let`, normal SCC generalization handles polymorphism.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use lang_ty::{AttrSetTy, PrimitiveTy, Ty};
 use smol_str::SmolStr;
@@ -116,6 +116,7 @@ macro_rules! synth_ty {
     (@ty $ctx:expr; { .. }) => {
         $ctx.alloc_concrete(Ty::AttrSet(AttrSetTy {
             fields: BTreeMap::new(), dyn_ty: None, open: true,
+            optional_fields: BTreeSet::new(),
         }))
     };
     // Open attrset with dynamic field type
@@ -123,6 +124,7 @@ macro_rules! synth_ty {
         let dyn_ty = synth_ty!(@ty $ctx; $($inner)+);
         $ctx.alloc_concrete(Ty::AttrSet(AttrSetTy {
             fields: BTreeMap::new(), dyn_ty: Some(dyn_ty), open: true,
+            optional_fields: BTreeSet::new(),
         }))
     }};
     // Primitives
@@ -223,6 +225,7 @@ impl CheckCtx<'_> {
             fields,
             dyn_ty: Some(dyn_var),
             open: true,
+            optional_fields: BTreeSet::new(),
         })))
     }
 
@@ -246,6 +249,7 @@ impl CheckCtx<'_> {
             fields: result_fields,
             dyn_ty: None,
             open: false,
+            optional_fields: BTreeSet::new(),
         }));
         let inner = self.alloc_concrete(Ty::Lambda {
             param: list_a,
@@ -268,6 +272,7 @@ impl CheckCtx<'_> {
             fields,
             dyn_ty: None,
             open: false,
+            optional_fields: BTreeSet::new(),
         }));
         Ok(self.alloc_concrete(Ty::Lambda {
             param: a,
@@ -286,12 +291,14 @@ impl CheckCtx<'_> {
             fields: elem_fields,
             dyn_ty: None,
             open: false,
+            optional_fields: BTreeSet::new(),
         }));
         let list_elems = self.alloc_concrete(Ty::List(elem_attr));
         let result = self.alloc_concrete(Ty::AttrSet(AttrSetTy {
             fields: BTreeMap::new(),
             dyn_ty: Some(a),
             open: true,
+            optional_fields: BTreeSet::new(),
         }));
         Ok(self.alloc_concrete(Ty::Lambda {
             param: list_elems,

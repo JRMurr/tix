@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use derive_more::Debug;
 use smol_str::SmolStr;
@@ -18,6 +18,11 @@ pub struct AttrSetTy<RefType> {
     /// Replaces the old row-polymorphism `rest` field — with structural subtyping,
     /// width subtyping handles the cases that row variables used to cover.
     pub open: bool,
+
+    /// Fields that may be omitted by the caller because they have default values.
+    /// Only meaningful for attrsets derived from lambda pattern parameters
+    /// (e.g. `{ x, y ? 0 }: ...` marks `y` as optional).
+    pub optional_fields: BTreeSet<SmolStr>,
 }
 
 impl<RefType> AttrSetTy<RefType> {
@@ -26,6 +31,7 @@ impl<RefType> AttrSetTy<RefType> {
             fields: Default::default(),
             dyn_ty: None,
             open: false,
+            optional_fields: BTreeSet::new(),
         }
     }
 
@@ -34,6 +40,7 @@ impl<RefType> AttrSetTy<RefType> {
             fields,
             dyn_ty: None,
             open: false,
+            optional_fields: BTreeSet::new(),
         }
     }
 
@@ -55,6 +62,17 @@ impl<RefType: Clone + Debug> AttrSetTy<RefType> {
             fields.insert(k.clone(), v.clone());
         }
 
+        // Right-biased merge for optional_fields: start with self's optional set,
+        // remove keys that are concretely provided in `other` (they become required
+        // in the merged result), then union with other's optional set.
+        let mut optional = self.optional_fields.clone();
+        for key in other.fields.keys() {
+            if !other.optional_fields.contains(key) {
+                optional.remove(key);
+            }
+        }
+        optional.extend(other.optional_fields.iter().cloned());
+
         Self {
             fields,
             // Right-biased merge: Nix `//` gives priority to the right-hand side.
@@ -62,22 +80,28 @@ impl<RefType: Clone + Debug> AttrSetTy<RefType> {
             // so right-biased is the correct approximation.
             dyn_ty: other.dyn_ty.or(self.dyn_ty),
             open: self.open || other.open,
+            optional_fields: optional,
         }
     }
 
     pub fn get_sub_set(&self, keys: impl Iterator<Item = SmolStr>) -> Self {
         let mut fields = BTreeMap::new();
+        let mut optional = BTreeSet::new();
         for key in keys {
             let value = self
                 .get(&key)
                 .unwrap_or_else(|| panic!("Missing key {key}"));
-            fields.insert(key, value.clone());
+            fields.insert(key.clone(), value.clone());
+            if self.optional_fields.contains(&key) {
+                optional.insert(key);
+            }
         }
 
         Self {
             fields,
             dyn_ty: self.dyn_ty.clone(),
             open: self.open,
+            optional_fields: optional,
         }
     }
 }
@@ -95,6 +119,7 @@ impl AttrSetTy<TyRef> {
             fields,
             open,
             dyn_ty: None,
+            optional_fields: BTreeSet::new(),
         }
     }
 }

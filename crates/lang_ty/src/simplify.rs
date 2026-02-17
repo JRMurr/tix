@@ -230,6 +230,7 @@ fn apply_simplification(
                 fields,
                 dyn_ty,
                 open: attr.open,
+                optional_fields: attr.optional_fields.clone(),
             })
         }
         OutputTy::Union(members) => {

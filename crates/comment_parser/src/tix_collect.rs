@@ -325,6 +325,7 @@ fn collect_attrset(pairs: Pairs<Rule>, ctx: &mut CollectCtx) -> ParsedTy {
         fields,
         dyn_ty,
         open,
+        optional_fields: std::collections::BTreeSet::new(),
     })
 }
 
