@@ -137,6 +137,13 @@
   (or only constraining in one direction) would fix false positives in patterns like
   `hydraJob` where field access via `or` default happens before the null guard.
 - Literal / singleton types (`"circle"` as a type, not just `string`)
+- Type narrowing + arithmetic in narrowed branches: `x: if x == null then x else x - 1`
+  produces body type `null` rather than `null | number`. The narrowed else-branch creates
+  a fresh variable for x; arithmetic on that fresh variable produces a result whose
+  lower bounds don't survive canonicalization in the union with null. The unconstrained
+  result var in positive position is bottom, so `null | bottom = null`. This may be
+  correct from the type system's perspective but is surprising. Worth investigating
+  whether the arithmetic constraints should propagate lower bounds more eagerly.
 - Co-occurrence simplification: path-based co-occurrence grouping is strict —
   variables that appear at structurally different positions (e.g. different attrset
   fields) won't be merged. This could be relaxed to use "occurrence signature"

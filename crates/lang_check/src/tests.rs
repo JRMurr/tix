@@ -2063,85 +2063,113 @@ fn select_or_default_open_attrset() {
 // Type narrowing — null guards
 // ==============================================================================
 
-/// `if x == null then null else x` — the else-branch should not error.
-/// x is a lambda param. In the else branch, x.name should not error.
+/// Helper: extract param and body from a lambda OutputTy, panicking otherwise.
+fn unwrap_lambda(ty: &OutputTy) -> (&OutputTy, &OutputTy) {
+    match ty {
+        OutputTy::Lambda { param, body } => (&param.0, &body.0),
+        _ => panic!("expected lambda type, got: {ty}"),
+    }
+}
+
+/// `if x == null then null else x.name` — the else-branch narrows x to
+/// non-null (fresh var), so field access succeeds. The body should be
+/// null (the else-branch's field access produces an unconstrained var
+/// that collapses to bottom in positive position, leaving just null).
 #[test]
 fn narrow_null_eq_else_field_access() {
     let nix = r#"x: if x == null then null else x.name"#;
     let ty = get_inferred_root(nix);
-    // Should be a lambda that returns (null | a) — no type error.
-    match &ty {
-        OutputTy::Lambda { .. } => {}
-        _ => panic!("expected lambda type, got: {ty}"),
-    }
+    let (_param, body) = unwrap_lambda(&ty);
+    // The unconstrained field var from x.name has no lower bounds, so
+    // in positive position it's bottom and `null | bottom = null`.
+    assert_eq!(*body, arc_ty!(Null), "body should be null");
 }
 
-/// `if x != null then x.name else "default"` — should not error.
+/// `if x != null then x.name else "default"` — then-branch narrows x to
+/// non-null, so field access succeeds. The unconstrained field var
+/// collapses, leaving just string from the else-branch.
 #[test]
 fn narrow_null_neq_then_field_access() {
     let nix = r#"x: if x != null then x.name else "default""#;
     let ty = get_inferred_root(nix);
-    match &ty {
-        OutputTy::Lambda { .. } => {}
-        _ => panic!("expected lambda type, got: {ty}"),
-    }
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(*body, arc_ty!(String), "body should be string");
 }
 
 /// `if isNull x then 0 else x.y` — isNull builtin narrowing.
+/// Then-branch returns int, else-branch's unconstrained var collapses.
 #[test]
 fn narrow_isnull_builtin() {
     let nix = "x: if isNull x then 0 else x.y";
     let ty = get_inferred_root(nix);
-    match &ty {
-        OutputTy::Lambda { .. } => {}
-        _ => panic!("expected lambda type, got: {ty}"),
-    }
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(*body, arc_ty!(Int), "body should be int");
 }
 
 /// `if builtins.isNull x then 0 else x.y` — qualified builtin.
+/// Same as isNull, just accessed through `builtins.`.
 #[test]
 fn narrow_builtins_isnull() {
     let nix = "x: if builtins.isNull x then 0 else x.y";
     let ty = get_inferred_root(nix);
-    match &ty {
-        OutputTy::Lambda { .. } => {}
-        _ => panic!("expected lambda type, got: {ty}"),
-    }
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(*body, arc_ty!(Int), "body should be int");
 }
 
 /// `if !isNull x then x.y else 0` — negation flips narrowing.
+/// Same result as isNull but with branches swapped.
 #[test]
 fn narrow_negated_isnull() {
     let nix = "x: if !(isNull x) then x.y else 0";
     let ty = get_inferred_root(nix);
-    match &ty {
-        OutputTy::Lambda { .. } => {}
-        _ => panic!("expected lambda type, got: {ty}"),
-    }
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(*body, arc_ty!(Int), "body should be int");
 }
 
-/// `assert x != null; x.name` — assert narrows body.
+/// `assert x != null; x.name` — assert narrows body so field access on
+/// the non-null branch succeeds. The body type comes from x.name only
+/// (assert doesn't produce a union — it just constrains the body).
 #[test]
 fn narrow_assert_not_null() {
     let nix = "x: assert x != null; x.name";
     let ty = get_inferred_root(nix);
-    match &ty {
-        OutputTy::Lambda { .. } => {}
-        _ => panic!("expected lambda type, got: {ty}"),
-    }
+    let (_param, body) = unwrap_lambda(&ty);
+    // Assert narrows x to non-null in the body. The result is whatever
+    // x.name resolves to — a free type variable (no union with null).
+    assert!(
+        !matches!(body, OutputTy::Primitive(PrimitiveTy::Null)),
+        "assert-narrowed body should not be null, got: {body}"
+    );
+    // Should be a single type (TyVar from the field access), not a union.
+    assert!(
+        matches!(body, OutputTy::TyVar(_)),
+        "assert-narrowed body should be a type variable (from field access), got: {body}"
+    );
 }
 
 /// Then-branch of `x == null` should narrow x to null.
+/// `x: if x == null then x else 1` → body is null | int.
 #[test]
 fn narrow_null_eq_then_is_null() {
     let nix = indoc! {"
         x: if x == null then x else 1
     "};
     let ty = get_inferred_root(nix);
-    // x in the then-branch is null, so the result is null | int.
-    match &ty {
-        OutputTy::Lambda { .. } => {}
-        _ => panic!("expected lambda type, got: {ty}"),
+    let (_param, body) = unwrap_lambda(&ty);
+    // x in the then-branch is narrowed to null, else-branch returns int.
+    match body {
+        OutputTy::Union(members) => {
+            assert!(
+                members.iter().any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::Null))),
+                "body should contain null, got: {body}"
+            );
+            assert!(
+                members.iter().any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::Int))),
+                "body should contain int, got: {body}"
+            );
+            assert_eq!(members.len(), 2, "expected null | int, got: {body}");
+        }
+        _ => panic!("expected union (null | int), got: {body}"),
     }
 }
 
@@ -2159,23 +2187,143 @@ fn narrow_no_interference_with_non_guard() {
 }
 
 /// Nested narrowing: inner if narrows same variable further.
+/// Both branches of the inner if access x.y, so the field access must
+/// succeed in both narrowed scopes.
 #[test]
 fn narrow_nested_same_var() {
     let nix = r#"x: if x != null then (if x != null then x.y else 0) else 0"#;
     let ty = get_inferred_root(nix);
-    match &ty {
-        OutputTy::Lambda { .. } => {}
-        _ => panic!("expected lambda type, got: {ty}"),
+    let (_param, body) = unwrap_lambda(&ty);
+    // Outer else: 0 (int). Outer then: inner if with x.y | 0.
+    // The overall body should contain int.
+    match body {
+        OutputTy::Union(members) => {
+            assert!(
+                members.iter().any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::Int))),
+                "nested narrowing body should contain int, got: {body}"
+            );
+        }
+        // If the checker resolves everything to int, that's also fine.
+        OutputTy::Primitive(PrimitiveTy::Int) => {}
+        _ => panic!("expected body containing int, got: {body}"),
     }
 }
 
 /// `null == x` — null on the left side should also work.
+/// `x: if null == x then 0 else x.y` — same as isNull test.
 #[test]
 fn narrow_null_on_lhs() {
     let nix = "x: if null == x then 0 else x.y";
     let ty = get_inferred_root(nix);
-    match &ty {
-        OutputTy::Lambda { .. } => {}
-        _ => panic!("expected lambda type, got: {ty}"),
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(*body, arc_ty!(Int), "body should be int");
+}
+
+/// Both branches produce concrete types: `if x == null then "was null" else 42`.
+/// Body should be a union of string and int.
+#[test]
+fn narrow_null_guard_concrete_branches() {
+    let nix = r#"x: if x == null then "was null" else 42"#;
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    match body {
+        OutputTy::Union(members) => {
+            assert!(
+                members
+                    .iter()
+                    .any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::String))),
+                "body should contain string, got: {body}"
+            );
+            assert!(
+                members
+                    .iter()
+                    .any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::Int))),
+                "body should contain int, got: {body}"
+            );
+        }
+        _ => panic!("expected union (string | int), got: {body}"),
+    }
+}
+
+/// Narrowing is essential: without it, `x.name` on a potentially-null x
+/// would be a type error. Verify the un-narrowed version actually errors.
+#[test]
+fn narrow_without_guard_errors() {
+    // No null guard — this should error because x could be anything
+    // including null (the comparison sets up the null possibility).
+    let nix = "x: (x == null) && x.name";
+    let err = get_check_error(nix);
+    // The error should be about accessing a field on a non-attrset type
+    // or a type mismatch. The key point: without narrowing, field access
+    // on a potentially-null value fails.
+    assert!(
+        matches!(
+            err,
+            TixDiagnosticKind::TypeMismatch { .. } | TixDiagnosticKind::MissingField { .. }
+        ),
+        "field access without null guard should error, got: {err:?}"
+    );
+}
+
+/// `if x == null then x else "not null"` — then-branch narrows x to
+/// null, else-branch returns a string literal. Body should be null | string.
+#[test]
+fn narrow_null_eq_then_narrowed_else_concrete() {
+    let nix = r#"x: if x == null then x else "not null""#;
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    // Then: x is narrowed to null. Else: string literal.
+    match body {
+        OutputTy::Union(members) => {
+            assert!(
+                members
+                    .iter()
+                    .any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::Null))),
+                "body should contain null from then-branch, got: {body}"
+            );
+            assert!(
+                members
+                    .iter()
+                    .any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::String))),
+                "body should contain string from else-branch, got: {body}"
+            );
+            assert_eq!(members.len(), 2, "expected null | string, got: {body}");
+        }
+        _ => panic!("expected union (null | string), got: {body}"),
+    }
+}
+
+/// Narrowing + field access with a concrete result: else-branch accesses
+/// a field and adds 1, giving a concrete type in the union.
+#[test]
+fn narrow_field_access_then_arithmetic() {
+    let nix = indoc! {"
+        x:
+        if x == null then 0
+        else x.count + 1
+    "};
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    // Then: 0 (int). Else: x.count + 1 — the + resolves with int on the
+    // right, so x.count is constrained to Number. Result is Number.
+    // The union of int and Number should simplify.
+    match body {
+        OutputTy::Primitive(PrimitiveTy::Int) => {}
+        OutputTy::Primitive(PrimitiveTy::Number) => {}
+        OutputTy::Union(members) => {
+            // All members should be numeric.
+            for m in members {
+                assert!(
+                    matches!(
+                        &*m.0,
+                        OutputTy::Primitive(PrimitiveTy::Int)
+                            | OutputTy::Primitive(PrimitiveTy::Number)
+                            | OutputTy::Primitive(PrimitiveTy::Float)
+                    ),
+                    "all union members should be numeric, got: {body}"
+                );
+            }
+        }
+        _ => panic!("expected numeric body type, got: {body}"),
     }
 }
