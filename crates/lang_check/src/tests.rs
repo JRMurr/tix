@@ -1928,25 +1928,29 @@ fn context_args_config_is_open_attrset() {
 // =============================================================================
 
 // Calling a function with an optional field, omitting the optional field.
-test_case!(optional_field_omitted,
+test_case!(
+    optional_field_omitted,
     "({ x, y ? 0 }: x + y) { x = 1; }",
     Int
 );
 
 // Calling a function with an optional field, providing the optional field.
-test_case!(optional_field_provided,
+test_case!(
+    optional_field_provided,
     "({ x, y ? 0 }: x + y) { x = 1; y = 2; }",
     Int
 );
 
 // Optional field combined with ellipsis.
-test_case!(optional_field_with_ellipsis,
+test_case!(
+    optional_field_with_ellipsis,
     "({ x, y ? 0, ... }: x + y) { x = 1; }",
     Int
 );
 
 // Multiple optional fields, all omitted.
-test_case!(multiple_optional_fields_omitted,
+test_case!(
+    multiple_optional_fields_omitted,
     "({ x, y ? 0, z ? 1 }: x + y + z) { x = 1; }",
     Int
 );
@@ -2160,11 +2164,15 @@ fn narrow_null_eq_then_is_null() {
     match body {
         OutputTy::Union(members) => {
             assert!(
-                members.iter().any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::Null))),
+                members
+                    .iter()
+                    .any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::Null))),
                 "body should contain null, got: {body}"
             );
             assert!(
-                members.iter().any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::Int))),
+                members
+                    .iter()
+                    .any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::Int))),
                 "body should contain int, got: {body}"
             );
             assert_eq!(members.len(), 2, "expected null | int, got: {body}");
@@ -2199,7 +2207,9 @@ fn narrow_nested_same_var() {
     match body {
         OutputTy::Union(members) => {
             assert!(
-                members.iter().any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::Int))),
+                members
+                    .iter()
+                    .any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::Int))),
                 "nested narrowing body should contain int, got: {body}"
             );
         }
@@ -2325,5 +2335,77 @@ fn narrow_field_access_then_arithmetic() {
             }
         }
         _ => panic!("expected numeric body type, got: {body}"),
+    }
+}
+
+// ==========================================================================
+// Regression: polymorphic builtin wrappers
+// ==========================================================================
+//
+// When a user-defined function wraps a builtin (passing multiple arguments
+// through), each call site must get an independent instantiation. Previously,
+// pre-allocated expression-slot TyIds at level 0 created a back-channel
+// through which use-site constraints leaked back to the original polymorphic
+// variables, causing type contamination between call sites.
+
+test_case!(
+    wrapper_foldl_int_and_list,
+    "
+        let
+          myFoldl = op: acc: builtins.foldl' op acc;
+          intResult = myFoldl (c: x: c + 1) 0 [1 2 3];
+          listResult = myFoldl (acc: e: acc ++ [ e ]) [ ] [1 2 3];
+        in
+          { inherit intResult listResult; }
+    ",
+    {
+        "intResult": (Int),
+        "listResult": [Int]
+    }
+);
+
+test_case!(
+    wrapper_map_int_and_string,
+    "
+        let
+          myMap = f: xs: builtins.map f xs;
+          a = myMap (x: x + 1) [1 2 3];
+          b = myMap (x: x + \"!\") [\"hi\" \"bye\"];
+        in
+          { inherit a b; }
+    ",
+    {
+        "a": [Int],
+        "b": [String]
+    }
+);
+
+/// Regression test: nixpkgs lib/lists.nix defines `foldl'` as a wrapper
+/// around `builtins.foldl'` (with a `builtins.seq` call). Both `count`
+/// (with int accumulator) and `unique` (with list accumulator) call this
+/// wrapper. The type of `count` must not contaminate `unique` or vice versa.
+#[test]
+fn wrapper_foldl_like_nixpkgs() {
+    let src = indoc! {"
+        let
+          foldl' = op: acc: builtins.seq acc (builtins.foldl' op acc);
+          count = pred: foldl' (c: x: if pred x then c + 1 else c) 0;
+          unique = foldl' (acc: e: if builtins.elem e acc then acc else acc ++ [ e ]) [ ];
+        in
+          { inherit count unique; }
+    "};
+    let (module, result) = check_str(src);
+    let inference = result.expect("should not produce a type error");
+    let root = inference
+        .expr_ty_map
+        .get(module.entry_expr)
+        .expect("root type");
+
+    // Verify the root is an attrset — the key assertion is that inference
+    // succeeds without the "expected [X], got int" errors that occurred
+    // before the fix.
+    match root {
+        OutputTy::AttrSet { .. } => {}
+        other => panic!("expected attrset, got: {other}"),
     }
 }

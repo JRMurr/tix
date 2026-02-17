@@ -106,6 +106,15 @@ impl CheckCtx<'_> {
             self.table.set_var_level(name_ty, self.table.current_level);
         }
 
+        // Also lift pre-allocated expression slots for all sub-expressions
+        // within this group's definitions. Without this, expression slots
+        // remain at level 0 and aren't extruded during instantiation,
+        // creating a back-channel through which use-site constraints leak
+        // back to the original polymorphic type variables.
+        for def in &group {
+            self.lift_expr_slots(def.expr());
+        }
+
         let (inferred, error) = self.infer_scc_group_inner(&group);
 
         // --- Cleanup always runs, even on error ---
@@ -605,6 +614,17 @@ impl CheckCtx<'_> {
             }
         }
         None
+    }
+
+    /// Recursively lift all pre-allocated expression TyId slots under `expr`
+    /// to the current level. This ensures that during extrusion, these slots
+    /// are treated as polymorphic and get fresh copies — preventing use-site
+    /// constraints from leaking back through shared expression slots.
+    fn lift_expr_slots(&mut self, expr: lang_ast::ExprId) {
+        let slot = self.ty_for_expr(expr);
+        self.table.set_var_level(slot, self.table.current_level);
+        let e = self.module[expr].clone();
+        e.walk_child_exprs(|child| self.lift_expr_slots(child));
     }
 
     /// Walk lower bounds transitively to find a Concrete entry and return its

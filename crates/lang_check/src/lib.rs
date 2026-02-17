@@ -3,10 +3,10 @@ mod builtins;
 pub(crate) mod collect;
 mod constrain;
 pub mod diagnostic;
-mod narrow;
 pub mod imports;
 mod infer;
 pub(crate) mod infer_expr;
+mod narrow;
 pub(crate) mod storage;
 
 #[cfg(test)]
