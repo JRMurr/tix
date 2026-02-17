@@ -86,6 +86,9 @@ impl TempProject {
         std::fs::create_dir_all(&dir).expect("create temp dir");
         for (name, contents) in files {
             let path = dir.join(name);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).expect("create parent dirs");
+            }
             std::fs::write(&path, contents).expect("write temp file");
         }
         TempProject { dir }

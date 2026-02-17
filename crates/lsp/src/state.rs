@@ -8,11 +8,11 @@
 // (via spawn_blocking).
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use lang_ast::{
-    module_and_source_maps, Expr, ExprId, Module, ModuleIndices, ModuleScopes, ModuleSourceMap,
-    NameId, NameResolution, NixFile, RootDatabase,
+    module_and_source_maps, Expr, ExprId, Literal, Module, ModuleIndices, ModuleScopes,
+    ModuleSourceMap, NameId, NameResolution, NixFile, RootDatabase,
 };
 use lang_check::aliases::TypeAliasRegistry;
 use lang_check::imports::resolve_imports;
@@ -117,10 +117,20 @@ impl AnalysisState {
         // to Apply(Apply(import, ./foo.nix), { ... }) — the outer Apply isn't in
         // import_targets, but its inner function is.
         let grouped = lang_ast::group_def(&self.db, nix_file);
+        let file_dir = path.parent().map(|p| p.to_path_buf());
         let mut name_to_import = HashMap::new();
         for group in grouped.iter() {
             for typedef in group {
-                if let Some(path) = chase_import_target(&module, &import_targets, typedef.expr()) {
+                // First try the recognized `import ./path` pattern via Apply chain.
+                let target = chase_import_target(&module, &import_targets, typedef.expr())
+                    // Fallback: scan the binding's expression subtree for a path literal.
+                    // This covers patterns like `pkgs.callPackage ./foo.nix { }` where the
+                    // path literal appears as an argument but isn't a direct `import`.
+                    .or_else(|| {
+                        let dir = file_dir.as_deref()?;
+                        find_path_literal_target(&module, typedef.expr(), dir)
+                    });
+                if let Some(path) = target {
                     log::debug!(
                         "name_to_import: {} -> {}",
                         module[typedef.name()].text,
@@ -223,6 +233,76 @@ fn chase_import_target(
         return chase_import_target(module, import_targets, *fun);
     }
     None
+}
+
+/// Scan an expression subtree for a single path literal that resolves to a Nix file.
+///
+/// This is a heuristic fallback for patterns like `pkgs.callPackage ./foo.nix { }`:
+/// the path literal `./foo.nix` isn't part of an `import` expression that we track,
+/// but it's still the most likely navigation target for the binding's fields.
+///
+/// Returns the resolved path only if exactly one Nix-file path literal is found
+/// in the subtree, to avoid ambiguity.
+fn find_path_literal_target(module: &Module, expr_id: ExprId, base_dir: &Path) -> Option<PathBuf> {
+    let mut paths = Vec::new();
+    collect_path_literals(module, expr_id, base_dir, &mut paths);
+
+    if paths.len() == 1 {
+        Some(paths.remove(0))
+    } else {
+        None
+    }
+}
+
+/// Recursively collect resolved Nix-file path literals from an expression subtree.
+fn collect_path_literals(
+    module: &Module,
+    expr_id: ExprId,
+    base_dir: &Path,
+    out: &mut Vec<PathBuf>,
+) {
+    match &module[expr_id] {
+        Expr::Literal(Literal::Path(p)) => {
+            if let Some(resolved) = resolve_nix_path(base_dir, p) {
+                out.push(resolved);
+            }
+        }
+        // Recurse into child expressions. We only need to cover the variants
+        // that appear in typical `callPackage`-style expressions (Apply chains,
+        // Select, etc.), but covering all variants is cheap and more robust.
+        Expr::Apply { fun, arg } => {
+            collect_path_literals(module, *fun, base_dir, out);
+            collect_path_literals(module, *arg, base_dir, out);
+        }
+        Expr::Select { set, .. } => {
+            collect_path_literals(module, *set, base_dir, out);
+        }
+        // Don't recurse into lambdas, let-in bodies, attrsets, etc. — those are
+        // unlikely to contain the "source file" path for a callPackage-style call.
+        _ => {}
+    }
+}
+
+/// Resolve a Nix path string to an actual `.nix` file on disk.
+///
+/// Handles Nix's directory-import convention: if the path points to a directory,
+/// tries `<dir>/default.nix`. Returns `None` if no matching file exists.
+pub fn resolve_nix_path(base_dir: &Path, path_str: &str) -> Option<PathBuf> {
+    let resolved = base_dir.join(path_str);
+    let resolved = resolved.canonicalize().ok()?;
+
+    if resolved.is_file() {
+        Some(resolved)
+    } else if resolved.is_dir() {
+        let default = resolved.join("default.nix");
+        if default.is_file() {
+            Some(default.canonicalize().ok().unwrap_or(default))
+        } else {
+            None
+        }
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]

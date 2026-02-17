@@ -164,8 +164,15 @@ fn try_resolve_select_field(
         return None;
     };
 
+    // If the target path is a directory, Nix loads `default.nix` from it.
+    let resolved_target = if target_path.is_dir() {
+        target_path.join("default.nix")
+    } else {
+        target_path.clone()
+    };
+
     // Load the target file and find the field definition.
-    let target_file = state.db.load_file(target_path)?;
+    let target_file = state.db.load_file(&resolved_target)?;
     let (target_module, target_source_map) =
         lang_ast::module_and_source_maps(&state.db, target_file);
     let target_contents = target_file.contents(&state.db);
@@ -180,7 +187,7 @@ fn try_resolve_select_field(
     let target_node = target_ptr.to_node(target_root.syntax());
     let target_line_index = crate::convert::LineIndex::new(target_contents);
     let target_range = target_line_index.range(target_node.text_range());
-    let target_uri = Url::from_file_path(target_path).ok()?;
+    let target_uri = Url::from_file_path(&resolved_target).ok()?;
     Some(Location::new(target_uri, target_range))
 }
 
@@ -359,6 +366,83 @@ mod tests {
         let lib_line_index = crate::convert::LineIndex::new(&lib_contents);
         let expected_offset = find_offset(&lib_contents, "name = x");
         let expected_pos = lib_line_index.position(expected_offset);
+        assert_eq!(loc.range.start, expected_pos);
+    }
+
+    // ------------------------------------------------------------------
+    // Select through path-literal heuristic: x.field where
+    // x = pkgs.callPackage ./pkg.nix { }
+    // ------------------------------------------------------------------
+    #[test]
+    fn select_through_callpackage_path_literal() {
+        let src = indoc! {"
+            let x = someFn ./pkg.nix { a = 1; }; in x.name
+            #                                          ^1
+        "};
+        let markers = parse_markers(src);
+
+        let project = TempProject::new(&[
+            ("main.nix", src),
+            ("pkg.nix", "{ a }: { name = a; value = 2; }"),
+        ]);
+        let main_path = project.path("main.nix");
+        let pkg_path = project.path("pkg.nix");
+
+        let mut state = AnalysisState::new(TypeAliasRegistry::default());
+        let (uri, contents) = analyze(&mut state, &main_path);
+        let analysis = state.get_file(&main_path).unwrap();
+        let root = rnix::Root::parse(&contents).tree();
+
+        // Cursor on `name` in `x.name`.
+        let pos = analysis.line_index.position(markers[&1]);
+        let loc = goto_definition(&state, analysis, pos, &uri, &root);
+        let loc = loc.expect("should resolve select field via path literal heuristic");
+
+        let pkg_uri = Url::from_file_path(&pkg_path).unwrap();
+        assert_eq!(loc.uri, pkg_uri, "should jump to pkg.nix");
+
+        let pkg_contents = std::fs::read_to_string(&pkg_path).unwrap();
+        let pkg_line_index = crate::convert::LineIndex::new(&pkg_contents);
+        let expected_offset = find_offset(&pkg_contents, "name = a");
+        let expected_pos = pkg_line_index.position(expected_offset);
+        assert_eq!(loc.range.start, expected_pos);
+    }
+
+    // ------------------------------------------------------------------
+    // Select through path-literal with directory → default.nix
+    // ------------------------------------------------------------------
+    #[test]
+    fn select_through_callpackage_directory() {
+        let src = indoc! {"
+            let x = someFn ./pkg { a = 1; }; in x.name
+            #                                      ^1
+        "};
+        let markers = parse_markers(src);
+
+        let project = TempProject::new(&[
+            ("main.nix", src),
+            ("pkg/default.nix", "{ a }: { name = a; value = 2; }"),
+        ]);
+        let main_path = project.path("main.nix");
+        let pkg_path = project.path("pkg/default.nix");
+
+        let mut state = AnalysisState::new(TypeAliasRegistry::default());
+        let (uri, contents) = analyze(&mut state, &main_path);
+        let analysis = state.get_file(&main_path).unwrap();
+        let root = rnix::Root::parse(&contents).tree();
+
+        // Cursor on `name` in `x.name`.
+        let pos = analysis.line_index.position(markers[&1]);
+        let loc = goto_definition(&state, analysis, pos, &uri, &root);
+        let loc = loc.expect("should resolve select field via directory path literal");
+
+        let pkg_uri = Url::from_file_path(&pkg_path).unwrap();
+        assert_eq!(loc.uri, pkg_uri, "should jump to pkg/default.nix");
+
+        let pkg_contents = std::fs::read_to_string(&pkg_path).unwrap();
+        let pkg_line_index = crate::convert::LineIndex::new(&pkg_contents);
+        let expected_offset = find_offset(&pkg_contents, "name = a");
+        let expected_pos = pkg_line_index.position(expected_offset);
         assert_eq!(loc.range.start, expected_pos);
     }
 
