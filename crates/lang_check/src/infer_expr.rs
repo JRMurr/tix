@@ -204,6 +204,11 @@ impl CheckCtx<'_> {
             } => {
                 let set_ty = self.infer_expr(set)?;
 
+                // When a default expression is present (`x.field or default`),
+                // mark each field access as optional so that missing fields
+                // don't produce errors — the `or` fallback handles them.
+                let has_default = default_expr.is_some();
+
                 let ret_ty = attrpath.iter().try_fold(set_ty, |set_ty, &attr| {
                     let attr_ty = self.infer_expr(attr)?;
                     let str_ty = self.alloc_prim(PrimitiveTy::String);
@@ -229,12 +234,16 @@ impl CheckCtx<'_> {
                     };
 
                     let value_ty = self.new_var();
+                    let mut optional_fields = BTreeSet::new();
+                    if has_default {
+                        optional_fields.insert(opt_key.clone());
+                    }
                     // Constrain set_ty to have the field we're selecting.
                     let field_attr = self.alloc_concrete(Ty::AttrSet(AttrSetTy {
                         fields: [(opt_key, value_ty)].into_iter().collect(),
                         dyn_ty: None,
                         open: true, // there may be more fields
-                        optional_fields: BTreeSet::new(),
+                        optional_fields,
                     }));
                     self.constrain(set_ty, field_attr)
                         .map_err(|err| self.locate_err(err))?;

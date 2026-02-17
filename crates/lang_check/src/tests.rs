@@ -1986,3 +1986,75 @@ fn optional_field_display() {
         "expected 'x:' without '?' in display, got: {display}"
     );
 }
+
+// =============================================================================
+// Select-or-default (`x.field or default`)
+// =============================================================================
+
+/// `x.field or default` on a closed attrset missing the field should succeed.
+#[test]
+fn select_or_default_missing_field() {
+    let nix_src = r#"let s = { x = 1; }; in s.y or "fallback""#;
+    let ty = get_inferred_root(nix_src);
+    // `y` is provably absent, so only the default contributes.
+    assert_eq!(ty, arc_ty!(String));
+}
+
+/// `x.field or default` on a closed attrset where the field IS present.
+#[test]
+fn select_or_default_field_present() {
+    let nix_src = r#"let s = { x = 1; }; in s.x or "fallback""#;
+    let ty = get_inferred_root(nix_src);
+    // Both the field type (int) and default type (string) contribute.
+    assert_eq!(ty, arc_ty!(union!(Int, String)));
+}
+
+/// Multi-segment path with `or`: `x.a.b or default` where x = {}.
+#[test]
+fn select_or_default_deep_path_missing() {
+    let nix_src = "let s = {}; in s.a.b or 0";
+    let ty = get_inferred_root(nix_src);
+    assert_eq!(ty, arc_ty!(Int));
+}
+
+/// `builtins.tryEval` pattern: accessing a field that doesn't exist in the
+/// return type, with `or` fallback.
+#[test]
+fn select_or_default_tryeval_absent_field() {
+    // tryEval returns { success: bool, value: a } — no `error` field.
+    let nix_src = r#"let r = builtins.tryEval 1; in r.error or "no error""#;
+    let ty = get_inferred_root(nix_src);
+    assert_eq!(ty, arc_ty!(String));
+}
+
+/// `builtins.tryEval` pattern: accessing `.value` with `or` fallback.
+#[test]
+fn select_or_default_tryeval_present_field() {
+    let nix_src = "let r = builtins.tryEval 1; in r.value or null";
+    let ty = get_inferred_root(nix_src);
+    assert_eq!(ty, arc_ty!(union!(Int, Null)));
+}
+
+/// Select WITHOUT `or` on a closed attrset missing the field should still error.
+#[test]
+fn select_no_default_missing_field_errors() {
+    let nix_src = "let s = { x = 1; }; in s.y";
+    let err = get_check_error(nix_src);
+    assert!(
+        matches!(err, TixDiagnosticKind::MissingField { ref field, .. } if field == "y"),
+        "expected MissingField error for 'y', got: {err:?}"
+    );
+}
+
+/// `or` on an open attrset — should always succeed, field type is a variable.
+#[test]
+fn select_or_default_open_attrset() {
+    let nix_src = r#"x: x.missing or "default""#;
+    let ty = get_inferred_root(nix_src);
+    // The function should infer without error. The parameter is open
+    // (field access makes it { missing?: a, ... }) and result is a | string.
+    match &ty {
+        OutputTy::Lambda { .. } => {} // success — no error
+        _ => panic!("expected lambda type, got: {ty}"),
+    }
+}
