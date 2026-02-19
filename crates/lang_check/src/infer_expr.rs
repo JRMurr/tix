@@ -10,8 +10,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::{CheckCtx, LocatedError, TyId};
 use lang_ast::{
-    nameres::ResolveResult, BinOP, BindingValue, Bindings, Expr, ExprId, InterpolPart, Literal,
-    NameId, NormalBinOp, OverloadBinOp,
+    nameres::ResolveResult, BinOP, BindingValue, Bindings, Expr, ExprBinOp, ExprId, InterpolPart,
+    Literal, NameId, NormalBinOp, OverloadBinOp,
 };
 use lang_ty::{AttrSetTy, PrimitiveTy, Ty};
 use smol_str::SmolStr;
@@ -483,9 +483,9 @@ impl CheckCtx<'_> {
                         self.table.add_upper_bound(fresh, original_ty);
 
                         // Add ¬PrimType as upper bound so that canonicalization
-                        // produces `a & ~null` instead of bare `a`. The equality
-                        // handler guards against false `Null <: ¬Null` contradictions
-                        // from nested redundant guards (see has_neg_conflict).
+                        // produces `a & ~null` instead of bare `a`. Equality
+                        // comparisons generate no type constraints, so `¬T`
+                        // upper bounds can't cause contradictions there.
                         let prim_ty = self.alloc_prim(prim);
                         let neg_ty = self.alloc_concrete(Ty::Neg(prim_ty));
                         self.table.add_upper_bound(fresh, neg_ty);
@@ -582,41 +582,20 @@ impl CheckCtx<'_> {
                 Ok(bool_ty)
             }
 
+            // Equality/inequality — Nix's `==` is a total function that works
+            // across types (`1 == "hi"` → false), so no type constraints are
+            // imposed on the operands.
+            BinOP::Normal(NormalBinOp::Expr(
+                ExprBinOp::Equal | ExprBinOp::NotEqual,
+            )) => Ok(self.alloc_prim(PrimitiveTy::Bool)),
+
+            // Ordering — runtime errors on cross-type comparisons, so
+            // bidirectional constraints are correct.
             BinOP::Normal(NormalBinOp::Expr(_)) => {
-                // Comparison/equality — both sides should be same type, returns Bool.
-                //
-                // Skip bidirectional constraints when one operand is a narrowed
-                // variable whose ¬T upper bound conflicts with the other operand's
-                // concrete type. The comparison is valid at runtime (Nix allows
-                // `1 == "hi"` → false) but would cause a false `Null <: ¬Null`
-                // contradiction from lower-bound propagation.
-                let has_conflict = self.has_neg_conflict(lhs_ty, rhs_ty)
-                    || self.has_neg_conflict(rhs_ty, lhs_ty);
-
-                if !has_conflict {
-                    self.constrain(lhs_ty, rhs_ty)
-                        .map_err(|err| self.locate_err(err))?;
-                    self.constrain(rhs_ty, lhs_ty)
-                        .map_err(|err| self.locate_err(err))?;
-
-                    // After equality, explicitly propagate concrete types as upper bounds.
-                    // The bidirectional constraint creates variable-to-variable links, but
-                    // if one side's concrete type is behind an intermediary (e.g. attrset
-                    // select result), the constrain_cache may prevent it from reaching the
-                    // other side's upper bounds. We fix this by explicitly adding any
-                    // discovered concrete type as an upper bound of the other operand.
-                    if let Some(concrete) = self.find_concrete(rhs_ty) {
-                        let c_id = self.alloc_concrete(concrete);
-                        self.constrain(lhs_ty, c_id)
-                            .map_err(|err| self.locate_err(err))?;
-                    }
-                    if let Some(concrete) = self.find_concrete(lhs_ty) {
-                        let c_id = self.alloc_concrete(concrete);
-                        self.constrain(rhs_ty, c_id)
-                            .map_err(|err| self.locate_err(err))?;
-                    }
-                }
-
+                self.constrain(lhs_ty, rhs_ty)
+                    .map_err(|err| self.locate_err(err))?;
+                self.constrain(rhs_ty, lhs_ty)
+                    .map_err(|err| self.locate_err(err))?;
                 Ok(self.alloc_prim(PrimitiveTy::Bool))
             }
 

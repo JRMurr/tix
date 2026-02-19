@@ -133,17 +133,11 @@
   `¬T` output display are implemented. `Neg(R)` type variant is wired through
   the full pipeline (Ty, OutputTy, constrain, extrude, canonicalize, Display)
   and emitted as upper bounds on narrowed variables. Nested redundant guards
-  (e.g. `if x != null then (if x != null then ...)`) are handled by skipping
-  bidirectional equality constraints when one operand has a conflicting `¬T`
-  upper bound (see `has_neg_conflict`). Remaining: `isAttrs`, `isFunction`,
+  (e.g. `if x != null then (if x != null then ...)`) are handled because
+  equality comparisons (`==`/`!=`) generate no type constraints — they just
+  return bool. Remaining: `isAttrs`, `isFunction`,
   `isList` (structural constructors), multi-key `?` paths, `&&`/`||`
   combinators.
-- The `==` operator uses bidirectional constraints (`constrain(a,b); constrain(b,a)`),
-  which means `x == null` forces x's type to include null as both a lower AND upper
-  bound. This is too restrictive — equality comparison doesn't imply type equality
-  (Nix allows `1 == "hi"` → false). Relaxing `==` to not add bidirectional constraints
-  (or only constraining in one direction) would fix false positives in patterns like
-  `hydraJob` where field access via `or` default happens before the null guard.
 - Literal / singleton types (`"circle"` as a type, not just `string`)
 - Type narrowing + arithmetic in narrowed branches: `x: if x == null then x else x - 1`
   produces body type `null` rather than `null | number`. The narrowed else-branch creates

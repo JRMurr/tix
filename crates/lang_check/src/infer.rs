@@ -688,31 +688,6 @@ impl CheckCtx<'_> {
         }
     }
 
-    /// Check whether `var_ty` is a variable with a `¬T` upper bound where
-    /// `T` matches the concrete type of `value_ty`. Used to avoid false
-    /// contradictions from equality comparisons on narrowed variables —
-    /// e.g. `if x != null then (if x != null then ...)` would otherwise
-    /// add Null as a lower bound of the narrowed var, triggering
-    /// `Null <: ¬Null`.
-    pub(crate) fn has_neg_conflict(&self, var_ty: TyId, value_ty: TyId) -> bool {
-        let TypeEntry::Variable(var_info) = self.table.get(var_ty) else {
-            return false;
-        };
-        let TypeEntry::Concrete(Ty::Primitive(value_prim)) = self.table.get(value_ty) else {
-            return false;
-        };
-        for ub in &var_info.upper_bounds {
-            if let TypeEntry::Concrete(Ty::Neg(inner)) = self.table.get(*ub) {
-                if let TypeEntry::Concrete(Ty::Primitive(neg_prim)) = self.table.get(*inner) {
-                    if value_prim == neg_prim || value_prim.is_subtype_of(neg_prim) {
-                        return true;
-                    }
-                }
-            }
-        }
-        false
-    }
-
     fn solve_bin_op_types(
         &self,
         op: OverloadBinOp,

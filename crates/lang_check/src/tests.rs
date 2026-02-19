@@ -304,10 +304,12 @@ test_case!(
 // With subtyping, row polymorphism is replaced by width subtyping.
 // An open attrset pattern (`{ ..., ... }`) means the function accepts
 // records with at least the specified fields.
+// Ordering operators constrain both sides to the same type, so `arg.foo < 10`
+// forces foo to Int and `arg.bar < ./test.nix` forces bar to Path.
 test_case!(
     row_poly,
     "
-        arg: (arg.foo == 10) && (arg.bar == ./test.nix)
+        arg: (arg.foo < 10) && (arg.bar < ./test.nix)
     ",
     (({
         "bar": (Path),
@@ -2255,23 +2257,56 @@ fn narrow_null_guard_concrete_branches() {
     }
 }
 
-/// Narrowing is essential: without it, `x.name` on a potentially-null x
-/// would be a type error. Verify the un-narrowed version actually errors.
+/// `==` is a total function in Nix — it doesn't constrain operand types.
+/// So `x == null` doesn't force null into x's bounds, and `x.name` succeeds
+/// (x is unconstrained, field access just constrains it to an open attrset).
 #[test]
-fn narrow_without_guard_errors() {
-    // No null guard — this should error because x could be anything
-    // including null (the comparison sets up the null possibility).
+fn equality_does_not_constrain_operands() {
     let nix = "x: (x == null) && x.name";
-    let err = get_check_error(nix);
-    // The error should be about accessing a field on a non-attrset type
-    // or a type mismatch. The key point: without narrowing, field access
-    // on a potentially-null value fails.
+    let ty = get_inferred_root(nix);
+    // x is unconstrained by ==, so x.name constrains x to { name: a, ... }
+    // and && returns bool.
+    let (_, body) = unwrap_lambda(&ty);
     assert!(
-        matches!(
-            err,
-            TixDiagnosticKind::TypeMismatch { .. } | TixDiagnosticKind::MissingField { .. }
-        ),
-        "field access without null guard should error, got: {err:?}"
+        matches!(body, OutputTy::Primitive(PrimitiveTy::Bool)),
+        "equality should not constrain operands, got: {ty}"
+    );
+}
+
+/// Cross-type equality is valid in Nix: `1 == "hi"` → false.
+/// The type checker should accept it and infer bool.
+#[test]
+fn cross_type_equality_succeeds() {
+    let ty = get_inferred_root(r#"1 == "hi""#);
+    assert!(
+        matches!(&ty, OutputTy::Primitive(PrimitiveTy::Bool)),
+        "cross-type equality should infer bool, got: {ty}"
+    );
+}
+
+/// Equality doesn't constrain a variable: `let _ = x == null; in x.name`
+/// should succeed because `==` imposes no type relationship.
+#[test]
+fn equality_leaves_variable_unconstrained() {
+    let nix = "x: let _ = x == null; in x.name";
+    let ty = get_inferred_root(nix);
+    let (_, body) = unwrap_lambda(&ty);
+    // x.name succeeds — x gets constrained to { name: a, ... } by the
+    // field access, not by the equality comparison.
+    assert!(
+        !matches!(body, OutputTy::Primitive(PrimitiveTy::Null)),
+        "x should not be constrained to null by ==, got: {ty}"
+    );
+}
+
+/// Ordering operators DO error on cross-type comparisons at runtime,
+/// so the type checker should reject them.
+#[test]
+fn ordering_constrains_cross_type_error() {
+    let err = get_check_error(r#"1 < "hi""#);
+    assert!(
+        matches!(err, TixDiagnosticKind::TypeMismatch { .. }),
+        "ordering cross-type should error, got: {err:?}"
     );
 }
 
