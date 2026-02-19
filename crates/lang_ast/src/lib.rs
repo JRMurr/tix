@@ -61,8 +61,13 @@ pub fn module_indices(db: &dyn crate::AstDb, file: NixFile) -> ModuleIndices {
         match expr {
             Expr::LetIn { bindings, .. } | Expr::AttrSet { bindings, .. } => {
                 for &(name_id, ref value) in bindings.statics.iter() {
-                    if let BindingValue::Expr(e) = value {
-                        binding_expr.insert(name_id, *e);
+                    match value {
+                        BindingValue::Expr(e) | BindingValue::InheritFrom(e) => {
+                            binding_expr.insert(name_id, *e);
+                        }
+                        // Plain `inherit x` — the value comes from the
+                        // enclosing scope, not a local expression.
+                        BindingValue::Inherit(_) => {}
                     }
                 }
             }

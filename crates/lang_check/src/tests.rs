@@ -2587,6 +2587,33 @@ fn narrow_builtins_isstring() {
     assert_eq!(*body, arc_ty!(Int), "body should be int");
 }
 
+/// Locally aliased builtin: `let isString = builtins.isString; in ...`
+/// The narrowing should trace through the local definition to recognize
+/// the builtin call. Regression test for nixpkgs patterns like
+/// `inherit (builtins) isString`.
+#[test]
+fn narrow_isstring_local_alias() {
+    let nix = r#"
+        let isString = builtins.isString;
+        in x: if isString x then builtins.stringLength x else 0
+    "#;
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(*body, arc_ty!(Int), "locally-aliased isString should narrow");
+}
+
+/// `inherit (builtins) isString` — same as local alias but via inherit.
+#[test]
+fn narrow_isstring_inherit_from_builtins() {
+    let nix = r#"
+        let inherit (builtins) isString;
+        in x: if isString x then builtins.stringLength x else 0
+    "#;
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(*body, arc_ty!(Int), "inherit-from-builtins isString should narrow");
+}
+
 /// `isInt x` — then-branch narrows x to int.
 #[test]
 fn narrow_isint_then_is_int() {

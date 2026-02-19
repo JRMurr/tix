@@ -51,10 +51,12 @@ pub fn check_file_with_imports(
 ) -> Result<InferenceResult, TixDiagnostic> {
     let module = lang_ast::module(db, file);
     let name_res = lang_ast::name_resolution(db, file);
+    let indices = lang_ast::module_indices(db, file);
     let grouped_defs = lang_ast::group_def(db, file);
     let check = CheckCtx::new(
         &module,
         &name_res,
+        &indices.binding_expr,
         aliases.clone(),
         import_types,
         HashMap::new(),
@@ -190,10 +192,12 @@ pub fn check_file_collecting(
 ) -> CheckResult {
     let module = lang_ast::module(db, file);
     let name_res = lang_ast::name_resolution(db, file);
+    let indices = lang_ast::module_indices(db, file);
     let grouped_defs = lang_ast::group_def(db, file);
     let check = CheckCtx::new(
         &module,
         &name_res,
+        &indices.binding_expr,
         aliases.clone(),
         import_types,
         context_args,
@@ -221,6 +225,12 @@ pub struct DeferredConstraints {
 pub struct CheckCtx<'db> {
     module: &'db Module,
     name_res: &'db NameResolution,
+
+    /// Maps names to their binding expressions (RHS of `let x = expr`,
+    /// `inherit (env) x`, etc.). Used by narrowing analysis to trace
+    /// through local aliases to recognize builtin calls like
+    /// `let isString = builtins.isString`.
+    binding_exprs: &'db HashMap<NameId, ExprId>,
 
     /// The expression currently being inferred. Updated at the top of
     /// `infer_expr` so that errors from `constrain()` or sub-calls are
@@ -290,6 +300,7 @@ impl<'db> CheckCtx<'db> {
     pub fn new(
         module: &'db Module,
         name_res: &'db NameResolution,
+        binding_exprs: &'db HashMap<NameId, ExprId>,
         type_aliases: TypeAliasRegistry,
         import_types: HashMap<ExprId, OutputTy>,
         context_args: HashMap<smol_str::SmolStr, ParsedTy>,
@@ -297,6 +308,7 @@ impl<'db> CheckCtx<'db> {
         Self {
             module,
             name_res,
+            binding_exprs,
             current_expr: module.entry_expr,
             warnings: Vec::new(),
             table: TypeStorage::new(),

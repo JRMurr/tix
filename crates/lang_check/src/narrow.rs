@@ -248,25 +248,45 @@ impl CheckCtx<'_> {
     }
 
     /// Check if `fun_expr` is a reference to a specific builtin function.
-    /// Handles both direct builtin references (`isNull`) and qualified access
-    /// (`builtins.isNull`).
+    /// Handles three cases:
+    ///   1. Direct builtin reference: `isNull x`
+    ///   2. Qualified access: `builtins.isNull x`
+    ///   3. Local alias: `let isNull = builtins.isNull; in ... isNull x`
+    ///      (includes `inherit (builtins) isNull`)
     fn is_builtin_call(&self, fun_expr: ExprId, builtin_name: &str) -> bool {
-        match &self.module[fun_expr] {
+        self.is_builtin_expr(fun_expr, builtin_name, 0)
+    }
+
+    /// Recursive helper for `is_builtin_call`. The `depth` parameter prevents
+    /// infinite loops through pathological alias chains.
+    fn is_builtin_expr(&self, expr: ExprId, builtin_name: &str, depth: u8) -> bool {
+        if depth > 3 {
+            return false;
+        }
+
+        match &self.module[expr] {
             // Direct reference: `isNull x`
             Expr::Reference(name) if name == builtin_name => {
-                matches!(
-                    self.name_res.get(fun_expr),
-                    Some(ResolveResult::Builtin(b)) if *b == builtin_name
-                )
+                match self.name_res.get(expr) {
+                    // Case 1: direct builtin reference
+                    Some(ResolveResult::Builtin(b)) if *b == builtin_name => true,
+                    // Case 3: local alias — trace through the definition
+                    Some(ResolveResult::Definition(name_id)) => {
+                        if let Some(&binding_expr) = self.binding_exprs.get(name_id) {
+                            self.is_builtin_expr(binding_expr, builtin_name, depth + 1)
+                        } else {
+                            false
+                        }
+                    }
+                    _ => false,
+                }
             }
-            // Qualified access: `builtins.isNull x`
+            // Case 2: qualified access: `builtins.isNull x`
             Expr::Select {
                 set,
                 attrpath,
                 default_expr: None,
             } => {
-                // set must be `builtins`, attrpath must be a single literal
-                // key matching builtin_name.
                 if attrpath.len() != 1 {
                     return false;
                 }
@@ -277,8 +297,6 @@ impl CheckCtx<'_> {
                 if !is_builtins_ref {
                     return false;
                 }
-                // The attrpath element is an ExprId that should be a string
-                // literal matching the builtin name.
                 matches!(
                     &self.module[attrpath[0]],
                     Expr::Literal(Literal::String(s)) if s == builtin_name
