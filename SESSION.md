@@ -129,16 +129,15 @@
 - Full intersection-type-based operator overloading (replace pragmatic deferred
   overload list with proper intersection types for overloaded functions)
 - Type narrowing: Phase 1 (null narrowing), Phase 2a (`?`/hasAttr, single-key
-  only), and Phase 2b (all `is*` primitive predicates, `builtins.hasAttr`) are
-  implemented. `Neg(R)` type variant is wired through the full pipeline (Ty,
-  OutputTy, constrain, extrude, canonicalize, Display) but not yet emitted
-  as a solver upper bound during inference — nested redundant guards (e.g.
-  `if x != null then (if x != null then ...)`) cause `Null <: ¬Null`
-  contradictions via bidirectional equality constraints. Fix by producing
-  negation types during canonicalization via side-channel, or relaxing
-  equality constraints when one operand has negation bounds. Remaining:
-  `isAttrs`, `isFunction`, `isList` (structural constructors), multi-key
-  `?` paths, `&&`/`||` combinators, `~T` output display.
+  only), Phase 2b (all `is*` primitive predicates, `builtins.hasAttr`), and
+  `¬T` output display are implemented. `Neg(R)` type variant is wired through
+  the full pipeline (Ty, OutputTy, constrain, extrude, canonicalize, Display)
+  and emitted as upper bounds on narrowed variables. Nested redundant guards
+  (e.g. `if x != null then (if x != null then ...)`) are handled by skipping
+  bidirectional equality constraints when one operand has a conflicting `¬T`
+  upper bound (see `has_neg_conflict`). Remaining: `isAttrs`, `isFunction`,
+  `isList` (structural constructors), multi-key `?` paths, `&&`/`||`
+  combinators.
 - The `==` operator uses bidirectional constraints (`constrain(a,b); constrain(b,a)`),
   which means `x == null` forces x's type to include null as both a lower AND upper
   bound. This is too restrictive — equality comparison doesn't imply type equality

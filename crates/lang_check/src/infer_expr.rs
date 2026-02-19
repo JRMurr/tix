@@ -473,7 +473,7 @@ impl CheckCtx<'_> {
                         // directly is correct.
                         self.alloc_prim(prim)
                     }
-                    crate::narrow::NarrowPredicate::IsNotType(_prim) => {
+                    crate::narrow::NarrowPredicate::IsNotType(prim) => {
                         // Else-branch: x is α ∧ ¬PrimType.
                         // Create a fresh variable linked to the original via
                         // one-way bounds (fresh ≤ α). Using table.add_upper_bound
@@ -482,15 +482,13 @@ impl CheckCtx<'_> {
                         let fresh = self.new_var();
                         self.table.add_upper_bound(fresh, original_ty);
 
-                        // TODO: add ¬PrimType as an upper bound for output display
-                        // (`a & ~null` instead of bare `a`). Currently omitted
-                        // because the negation upper bound conflicts with nested
-                        // redundant guards (e.g. `if x != null then (if x != null`)
-                        // where the equality comparison adds the negated type as a
-                        // lower bound, triggering `Null <: ¬Null` contradiction.
-                        // Fix: either relax equality constraints when one side has
-                        // negation bounds, or produce negation types during
-                        // canonicalization via a side-channel instead of solver bounds.
+                        // Add ¬PrimType as upper bound so that canonicalization
+                        // produces `a & ~null` instead of bare `a`. The equality
+                        // handler guards against false `Null <: ¬Null` contradictions
+                        // from nested redundant guards (see has_neg_conflict).
+                        let prim_ty = self.alloc_prim(prim);
+                        let neg_ty = self.alloc_concrete(Ty::Neg(prim_ty));
+                        self.table.add_upper_bound(fresh, neg_ty);
                         fresh
                     }
                     crate::narrow::NarrowPredicate::HasField(ref field_name) => {
@@ -586,26 +584,37 @@ impl CheckCtx<'_> {
 
             BinOP::Normal(NormalBinOp::Expr(_)) => {
                 // Comparison/equality — both sides should be same type, returns Bool.
-                self.constrain(lhs_ty, rhs_ty)
-                    .map_err(|err| self.locate_err(err))?;
-                self.constrain(rhs_ty, lhs_ty)
-                    .map_err(|err| self.locate_err(err))?;
+                //
+                // Skip bidirectional constraints when one operand is a narrowed
+                // variable whose ¬T upper bound conflicts with the other operand's
+                // concrete type. The comparison is valid at runtime (Nix allows
+                // `1 == "hi"` → false) but would cause a false `Null <: ¬Null`
+                // contradiction from lower-bound propagation.
+                let has_conflict = self.has_neg_conflict(lhs_ty, rhs_ty)
+                    || self.has_neg_conflict(rhs_ty, lhs_ty);
 
-                // After equality, explicitly propagate concrete types as upper bounds.
-                // The bidirectional constraint creates variable-to-variable links, but
-                // if one side's concrete type is behind an intermediary (e.g. attrset
-                // select result), the constrain_cache may prevent it from reaching the
-                // other side's upper bounds. We fix this by explicitly adding any
-                // discovered concrete type as an upper bound of the other operand.
-                if let Some(concrete) = self.find_concrete(rhs_ty) {
-                    let c_id = self.alloc_concrete(concrete);
-                    self.constrain(lhs_ty, c_id)
+                if !has_conflict {
+                    self.constrain(lhs_ty, rhs_ty)
                         .map_err(|err| self.locate_err(err))?;
-                }
-                if let Some(concrete) = self.find_concrete(lhs_ty) {
-                    let c_id = self.alloc_concrete(concrete);
-                    self.constrain(rhs_ty, c_id)
+                    self.constrain(rhs_ty, lhs_ty)
                         .map_err(|err| self.locate_err(err))?;
+
+                    // After equality, explicitly propagate concrete types as upper bounds.
+                    // The bidirectional constraint creates variable-to-variable links, but
+                    // if one side's concrete type is behind an intermediary (e.g. attrset
+                    // select result), the constrain_cache may prevent it from reaching the
+                    // other side's upper bounds. We fix this by explicitly adding any
+                    // discovered concrete type as an upper bound of the other operand.
+                    if let Some(concrete) = self.find_concrete(rhs_ty) {
+                        let c_id = self.alloc_concrete(concrete);
+                        self.constrain(lhs_ty, c_id)
+                            .map_err(|err| self.locate_err(err))?;
+                    }
+                    if let Some(concrete) = self.find_concrete(lhs_ty) {
+                        let c_id = self.alloc_concrete(concrete);
+                        self.constrain(rhs_ty, c_id)
+                            .map_err(|err| self.locate_err(err))?;
+                    }
                 }
 
                 Ok(self.alloc_prim(PrimitiveTy::Bool))

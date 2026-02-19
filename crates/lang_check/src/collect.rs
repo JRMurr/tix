@@ -109,21 +109,29 @@ impl<'a> Canonicalizer<'a> {
 
         match concrete.len() {
             0 => {
-                // No concrete lower bounds. If the variable has primitive-only upper
-                // bounds, use them: a value bounded above by Number IS a Number in
-                // output position. This turns `ret <: Number` into `number` instead
-                // of a free type variable.
+                // No concrete lower bounds. If the variable has atom-only upper
+                // bounds (primitives or negations of primitives), use them: a
+                // value bounded above by Number IS a Number in output position.
+                // This turns `ret <: Number` into `number` and `x <: ¬Null` into
+                // `a & ~null` instead of a bare type variable.
                 if let Some(v) = self.table.get_var(var_id) {
-                    let prim_uppers: Vec<TyId> = v
+                    let atom_uppers: Vec<TyId> = v
                         .upper_bounds
                         .iter()
                         .copied()
-                        .filter(|&ub| {
-                            matches!(self.table.get(ub), TypeEntry::Concrete(Ty::Primitive(_)))
+                        .filter(|&ub| match self.table.get(ub) {
+                            TypeEntry::Concrete(Ty::Primitive(_)) => true,
+                            TypeEntry::Concrete(Ty::Neg(inner)) => {
+                                matches!(
+                                    self.table.get(*inner),
+                                    TypeEntry::Concrete(Ty::Primitive(_))
+                                )
+                            }
+                            _ => false,
                         })
                         .collect();
-                    if !prim_uppers.is_empty() {
-                        return self.expand_bounds_as_intersection(&prim_uppers, var_id);
+                    if !atom_uppers.is_empty() {
+                        return self.expand_bounds_as_intersection(&atom_uppers, var_id);
                     }
                 }
                 OutputTy::TyVar(var_id.0)

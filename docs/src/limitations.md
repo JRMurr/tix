@@ -47,7 +47,6 @@ x: assert x != null; x.name
 - Multi-element attrpaths in `?`: `x ? a.b.c` doesn't narrow
 - Compound conditions: `&&`, `||`
 - Value equality narrowing: `if x == "foo"` doesn't narrow `x` to the literal `"foo"` (tix has no literal types)
-- Negation types in output: else-branches of type predicates currently show `a` instead of `a & ~null`
 
 ### `inherit (builtins)` and dynamic field access
 

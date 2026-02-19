@@ -2711,3 +2711,61 @@ fn neg_display_compound() {
     ])));
     assert_eq!(format!("{ty}"), "~(int | string)");
 }
+
+// ==============================================================================
+// Negation types — inference output (¬T upper bounds on narrowed variables)
+// ==============================================================================
+
+/// Else-branch of a null guard should display `~null` in the output type.
+/// Verifies the ¬PrimType upper bound produces visible negation in the
+/// canonicalized output. The narrowed var only shows `~null` when it
+/// flows into negative position (e.g. as a function argument), since in
+/// positive position an unconstrained var is bottom regardless of upper bounds.
+#[test]
+fn narrow_neg_displayed_in_output() {
+    let nix = "f: x: if isNull x then 0 else f x";
+    let ty = get_inferred_root(nix);
+    let formatted = format!("{ty}");
+    // f's parameter type should include ~null because the narrowed x
+    // (with ¬Null upper bound) flows into f's param in negative position.
+    assert!(
+        formatted.contains("~null"),
+        "narrowed var flowing to function param should show ~null, got: {formatted}"
+    );
+}
+
+/// Nested redundant `isString` guards should not error. The inner guard's
+/// equality comparison on an already-narrowed variable must not trigger
+/// `String <: ¬String`.
+#[test]
+fn narrow_nested_redundant_isstring() {
+    let nix = r#"x: if isString x then (if isString x then builtins.stringLength x else 0) else 0"#;
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(*body, arc_ty!(Int), "body should be int");
+}
+
+/// Nested different predicates: outer `!(isNull x)` adds ¬Null, inner
+/// `isString x` adds String. Both narrow the same variable without conflict.
+#[test]
+fn narrow_nested_different_pred() {
+    let nix = indoc! {"
+        x: if !(isNull x) then (if isString x then builtins.stringLength x else x) else 0
+    "};
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    // Then-then: int (stringLength). Then-else: x (narrowed var).
+    // Outer else: 0 (int). Body contains int at minimum.
+    match body {
+        OutputTy::Primitive(PrimitiveTy::Int) => {}
+        OutputTy::Union(members) => {
+            assert!(
+                members
+                    .iter()
+                    .any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::Int))),
+                "body should contain int, got: {body}"
+            );
+        }
+        _ => panic!("expected int or union containing int, got: {body}"),
+    }
+}

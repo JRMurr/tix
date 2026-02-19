@@ -74,7 +74,7 @@ In the then-branch, tix creates a fresh variable constrained to have the checked
 
 ### Type predicate guards
 
-All `is*` builtins are recognized as narrowing guards. In the then-branch, the variable is narrowed to the corresponding primitive type:
+All `is*` builtins are recognized as narrowing guards. In the then-branch, the variable is narrowed to the corresponding primitive type. In the else-branch, a negation type (`~T`) is added to exclude the checked type:
 
 ```nix
 dispatch = x:
@@ -82,6 +82,7 @@ dispatch = x:
   else if isInt x then x + 1
   else if isBool x then !x
   else null;
+# in the else-branch of isString, x has type a & ~string
 ```
 
 ### Supported narrowing conditions
