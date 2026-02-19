@@ -79,6 +79,39 @@ Nix source → [lang_ast::lower] Parse with rnix → Tix AST
 - `lang_check/src/storage.rs` — bounds-based type variable storage
 - `lang_check/src/builtins.rs` — Nix builtin type synthesis (uses `synth_ty!` macro)
 
+
+### Active Work: Boolean-Algebraic Subtyping + Type Narrowing
+
+Extending tix from SimpleSub to BAS (Boolean-Algebraic Subtyping) by adding negation types, then using them for precise type narrowing in if/else branches.
+
+**Design decisions (settled):**
+- Add `Neg(TypeId)` to the type algebra. Negation only on atoms (base types, type vars). Normalize via De Morgan.
+- Narrowing: then-branch gets `α ∧ GuardType`, else-branch gets `α ∧ ¬GuardType`. No separate proposition system.
+- Keep MLsub's arrow distribution rule — no inferred overloaded function types. Users annotate intersection types for dispatch.
+- "Annotation required" errors when solver can't make progress (co-NP blowup, ambiguous overloading).
+- Nix's purity makes narrowing unconditionally sound — no invalidation concerns.
+
+**Guards to recognize (pattern-match on if-conditions):**
+- `builtins.isString x` etc. → then: `α ∧ String`, else: `α ∧ ¬String`
+- `x == null` / `null == x` → then: `α ∧ Null`, else: `α ∧ ¬Null`
+- `x ? attr` / `builtins.hasAttr "attr" x` → then: `α ∧ {attr: β_fresh}`, else: `α ∧ ¬{attr: ⊤}`
+- Unrecognized conditions → no narrowing, both branches see original type
+
+**Implementation order:**
+1. Extend type repr with `Neg(TypeId)` + normalization in `lang_ty`
+2. Update `constrain.rs` biunification to handle negation (ref: sebas artifact)
+3. Add Guard enum + syntactic recognition pass
+4. Modify if-expression inference in `infer_expr.rs` to narrow per branch
+5. `? attr` record narrowing (field presence/absence on record type vars)
+6. Annotation checking for intersection types
+7. "Annotation required" diagnostics
+
+**Key references:**
+- `github.com/fo5for/sebas` — BAS reference impl (POPL 2026 artifact)
+- Parreaux & Chau, "MLstruct" (OOPSLA 2022) — negation + pattern matching
+- Chau & Parreaux, "Simple Essence of Boolean-Algebraic Subtyping" (POPL 2026)
+- See `narrowing-design.md` for full rationale and pseudocode
+
 ## `.tix` Declaration Files (Stubs)
 
 `.tix` files declare types for external Nix code (like TypeScript's `.d.ts`). They provide type information for things like nixpkgs lib functions that Tix can't infer on its own.
