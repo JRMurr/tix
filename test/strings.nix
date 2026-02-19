@@ -2,7 +2,12 @@
 /**
   String manipulation functions.
 */
-{ lib }:
+{
+  /**
+    type: lib :: Lib
+  */
+  lib,
+}:
 let
 
   inherit (builtins) length;

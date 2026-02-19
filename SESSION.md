@@ -36,6 +36,14 @@
   `"builtins"`. This is correct but potentially expensive if `builtins` is
   referenced many times. Could cache the attrset structure and extrude it.
 
+- `test/strings.nix` still has 4 errors after adding the missing builtins:
+  - Lines 2031/2066 (`getName`/`getVersion`): `if isString x then parse x else x.pname`
+    needs `isString` narrowing to avoid conflicting string + attrset constraints on `x`.
+  - Line 2108 (`nameFromURL`): `head (splitString sep filename)` inferred as
+    `string -> string` instead of `string`. Root cause unclear — may be SCC
+    grouping or overload resolution interaction in the large rec block.
+  - Lines 5-3168: cascading error from the above.
+
 ### Missing Features
 
 - Multi-`with` fallthrough: only the innermost `with` env is constrained for
