@@ -19,6 +19,7 @@ cargo clippy                         # Lint
 ./pbt.sh 100000                      # PBT with custom case count
 ./cov.sh                             # Coverage report (cargo-tarpaulin)
 nix build .#                         # Build with nix
+echo 'let x = 1; in x' | ./tixc.sh  # Type-check Nix from stdin (debug build)
 ```
 
 Run a single test:
