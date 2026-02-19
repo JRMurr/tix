@@ -48,6 +48,13 @@ pub enum OutputTy {
     /// structural transparency (e.g. field access on a Named attrset).
     #[debug("Named({_0:?}, {_1:?})")]
     Named(SmolStr, TyRef),
+
+    /// Negation type — `~T`. Used in Boolean-Algebraic Subtyping (BAS) for
+    /// precise else-branch narrowing. For example, when `isNull x` is false,
+    /// x gets type `a & ~null`. Only produced on atoms (primitives); compound
+    /// negation is not needed.
+    #[debug("Neg({_0:?})")]
+    Neg(TyRef),
 }
 
 /// Arc-wrapped OutputTy for recursive type structures.
@@ -186,6 +193,7 @@ impl OutputTy {
                 OutputTy::Intersection(members.iter().map(|m| f(&m.0).into()).collect())
             }
             OutputTy::Named(name, inner) => OutputTy::Named(name.clone(), f(&inner.0).into()),
+            OutputTy::Neg(inner) => OutputTy::Neg(f(&inner.0).into()),
         }
     }
 
@@ -213,6 +221,7 @@ impl OutputTy {
                 }
             }
             OutputTy::Named(_, inner) => f(&inner.0),
+            OutputTy::Neg(inner) => f(&inner.0),
         }
     }
 }
@@ -291,6 +300,18 @@ impl fmt::Display for OutputTy {
                 Ok(())
             }
             OutputTy::Named(name, _) => write!(f, "{name}"),
+            OutputTy::Neg(inner) => {
+                // Parenthesize compound types inside negation for clarity.
+                let needs_parens = matches!(
+                    &*inner.0,
+                    OutputTy::Union(_) | OutputTy::Intersection(_) | OutputTy::Lambda { .. }
+                );
+                if needs_parens {
+                    write!(f, "~({inner})")
+                } else {
+                    write!(f, "~{inner}")
+                }
+            }
         }
     }
 }

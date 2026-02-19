@@ -433,6 +433,11 @@ impl<'db> CheckCtx<'db> {
                 self.alias_provenance.insert(ty_id, name.clone());
                 ty_id
             }
+            // Negation: intern the inner type and wrap in Ty::Neg.
+            OutputTy::Neg(inner) => {
+                let inner_id = self.intern_output_ty_inner(&inner.0, var_map);
+                self.alloc_concrete(Ty::Neg(inner_id))
+            }
         }
     }
 
@@ -575,6 +580,19 @@ impl<'db> CheckCtx<'db> {
                 }
                 var
             }
+        }
+    }
+
+    /// Get the current type for a name — either a narrowing override (if we're
+    /// inside a narrowed branch) or the name's original pre-allocated TyId slot.
+    /// Used by narrowing to link fresh branch variables to the original α.
+    fn name_slot_or_override(&self, name: NameId) -> TyId {
+        if let Some(&overridden) = self.narrow_overrides.get(&name) {
+            overridden
+        } else if let Some(&poly_ty) = self.poly_type_env.get(name) {
+            poly_ty
+        } else {
+            self.ty_for_name_direct(name)
         }
     }
 

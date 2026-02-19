@@ -144,6 +144,10 @@ fn analyze(
         OutputTy::Named(_, inner) => {
             analyze(&inner.0, positive, path, vars);
         }
+        // Negation flips polarity, like Lambda param.
+        OutputTy::Neg(inner) => {
+            analyze(&inner.0, !positive, path, vars);
+        }
     }
 }
 
@@ -295,6 +299,11 @@ fn apply_simplification(
             let simplified_inner = apply_simplification(&inner.0, substitution, removable);
             OutputTy::Named(name.clone(), TyRef::from(simplified_inner))
         }
+        OutputTy::Neg(inner) => OutputTy::Neg(TyRef::from(apply_simplification(
+            &inner.0,
+            substitution,
+            removable,
+        ))),
     }
 }
 

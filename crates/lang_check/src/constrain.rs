@@ -111,6 +111,29 @@ impl CheckCtx<'_> {
             // Primitive subtyping: Int <: Number, Float <: Number.
             (Ty::Primitive(p1), Ty::Primitive(p2)) if p1.is_subtype_of(p2) => Ok(()),
 
+            // ── Negation rules (BAS) ────────────────────────────────────────
+            //
+            // Neg(A) <: Neg(B) iff B <: A (contravariant flip).
+            (Ty::Neg(a), Ty::Neg(b)) => self.constrain(*b, *a),
+
+            // Primitive <: Neg(inner): succeeds when the primitive is disjoint
+            // from what's negated. E.g. Int <: ¬Null succeeds because Int ≠ Null.
+            (Ty::Primitive(p1), Ty::Neg(inner)) => {
+                match self.table.get(*inner).clone() {
+                    TypeEntry::Concrete(Ty::Primitive(p2)) => {
+                        if p1 == &p2 || p1.is_subtype_of(&p2) {
+                            // Contradiction: e.g. Null <: ¬Null, or Int <: ¬Number.
+                            Err(InferenceError::TypeMismatch(sub.clone(), sup.clone()))
+                        } else {
+                            // Disjoint atoms: Int <: ¬Null is fine.
+                            Ok(())
+                        }
+                    }
+                    // Inner is a variable or non-primitive — conservatively fail.
+                    _ => Err(InferenceError::TypeMismatch(sub.clone(), sup.clone())),
+                }
+            }
+
             // Type mismatch.
             _ => Err(InferenceError::TypeMismatch(sub.clone(), sup.clone())),
         }

@@ -360,6 +360,11 @@ impl CheckCtx<'_> {
                     }
                     Ty::Primitive(_) => ty_id,
                     Ty::TyVar(_) => ty_id,
+                    // Negation flips polarity, same as Lambda param.
+                    Ty::Neg(inner) => {
+                        let e = self.extrude_inner(inner, !polarity, cache);
+                        self.alloc_concrete(Ty::Neg(e))
+                    }
                 };
 
                 // Propagate alias provenance through extrusion so that

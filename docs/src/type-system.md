@@ -72,11 +72,28 @@ getField = arg:
 
 In the then-branch, tix creates a fresh variable constrained to have the checked field. This prevents field access errors from cross-branch constraint contamination. Only single-key attrpaths are supported (`x ? field`, not `x ? a.b.c`).
 
+### Type predicate guards
+
+All `is*` builtins are recognized as narrowing guards. In the then-branch, the variable is narrowed to the corresponding primitive type:
+
+```nix
+dispatch = x:
+  if isString x then builtins.stringLength x
+  else if isInt x then x + 1
+  else if isBool x then !x
+  else null;
+```
+
 ### Supported narrowing conditions
 
 - `x == null` / `null == x` / `x != null` / `null != x`
 - `isNull x` / `builtins.isNull x`
-- `x ? field` (then-branch narrows x to have the field)
+- `isString x` / `builtins.isString x`
+- `isInt x` / `builtins.isInt x`
+- `isFloat x` / `builtins.isFloat x`
+- `isBool x` / `builtins.isBool x`
+- `isPath x` / `builtins.isPath x`
+- `x ? field` / `builtins.hasAttr "field" x` (then-branch narrows x to have the field)
 - `!cond` (flips the narrowing)
 - `assert cond; body` (narrows in the body)
 

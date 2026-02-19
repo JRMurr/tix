@@ -25,7 +25,7 @@ Tix doesn't have literal types. `"circle"` is typed as `string`, not as the lite
 
 ### Type narrowing
 
-Tix supports **null narrowing** and **hasAttr narrowing**. Null narrowing: when a condition checks `x == null`, `x != null`, or `isNull x`, the type of `x` is narrowed in each branch. HasAttr narrowing: `x ? field` narrows `x` to have that field in the then-branch (single-key attrpaths only).
+Tix supports **type predicate narrowing** and **hasAttr narrowing**. Type predicate narrowing: when a condition checks `isNull x`, `isString x`, `isInt x`, `isFloat x`, `isBool x`, or `isPath x` (or `x == null`), the type of `x` is narrowed to the corresponding primitive in the then-branch. HasAttr narrowing: `x ? field` or `builtins.hasAttr "field" x` narrows `x` to have that field in the then-branch (single-key attrpaths only).
 
 ```nix
 x: if x == null then "default" else x.name
@@ -43,10 +43,11 @@ x: assert x != null; x.name
 ```
 
 **Not yet supported:**
-- Type predicates beyond null: `isAttrs`, `isFunction`, `isList`, etc.
+- Structural type predicates: `isAttrs`, `isFunction`, `isList` (these map to type constructors, not primitives — more complex to narrow)
 - Multi-element attrpaths in `?`: `x ? a.b.c` doesn't narrow
 - Compound conditions: `&&`, `||`
 - Value equality narrowing: `if x == "foo"` doesn't narrow `x` to the literal `"foo"` (tix has no literal types)
+- Negation types in output: else-branches of type predicates currently show `a` instead of `a & ~null`
 
 ### `inherit (builtins)` and dynamic field access
 

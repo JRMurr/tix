@@ -192,6 +192,12 @@ impl<'a> Canonicalizer<'a> {
                     optional_fields: attr.optional_fields.clone(),
                 })
             }
+            // Negation flips polarity: ¬T in positive position means T
+            // appears in negative position (and vice versa).
+            Ty::Neg(inner) => {
+                let c_inner = self.canonicalize(*inner, !positive);
+                OutputTy::Neg(TyRef::from(c_inner))
+            }
         }
     }
 }

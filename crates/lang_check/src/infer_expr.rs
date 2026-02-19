@@ -461,41 +461,57 @@ impl CheckCtx<'_> {
 
         if let Some(bindings) = bindings {
             for binding in bindings.iter() {
+                // Get the original type for this name (the α in α ∧ guard_type).
+                let original_ty = self.name_slot_or_override(binding.name);
+
                 let override_ty = match binding.predicate {
-                    crate::narrow::NarrowPredicate::IsNull => {
-                        // In this branch, the variable is known to be null.
-                        self.alloc_prim(PrimitiveTy::Null)
+                    crate::narrow::NarrowPredicate::IsType(prim) => {
+                        // Then-branch: x is α ∧ PrimType.
+                        // For primitives, α ∧ Null = Null, α ∧ String = String, etc.
+                        // The intersection of a type variable with a base type
+                        // collapses to just the base type, so using the primitive
+                        // directly is correct.
+                        self.alloc_prim(prim)
                     }
-                    crate::narrow::NarrowPredicate::IsNotNull => {
-                        // In this branch, the variable is known to be non-null.
-                        // Create a fresh variable — the branch body will
-                        // constrain it based on how it's used (e.g. field
-                        // access). The fresh variable is not linked to the
-                        // original, so null doesn't contaminate it.
-                        self.new_var()
+                    crate::narrow::NarrowPredicate::IsNotType(_prim) => {
+                        // Else-branch: x is α ∧ ¬PrimType.
+                        // Create a fresh variable linked to the original via
+                        // one-way bounds (fresh ≤ α). Using table.add_upper_bound
+                        // directly avoids constrain()'s bidirectional propagation —
+                        // same technique as link_extruded_var.
+                        let fresh = self.new_var();
+                        self.table.add_upper_bound(fresh, original_ty);
+
+                        // TODO: add ¬PrimType as an upper bound for output display
+                        // (`a & ~null` instead of bare `a`). Currently omitted
+                        // because the negation upper bound conflicts with nested
+                        // redundant guards (e.g. `if x != null then (if x != null`)
+                        // where the equality comparison adds the negated type as a
+                        // lower bound, triggering `Null <: ¬Null` contradiction.
+                        // Fix: either relax equality constraints when one side has
+                        // negation bounds, or produce negation types during
+                        // canonicalization via a side-channel instead of solver bounds.
+                        fresh
                     }
                     crate::narrow::NarrowPredicate::HasField(ref field_name) => {
-                        // In this branch, the variable is known to have the
-                        // given field (from `x ? field`). Create a fresh
-                        // variable disconnected from the original, and
-                        // constrain it to be an open attrset with that field.
-                        let fresh_var = self.new_var();
+                        // Then-branch: x is α ∧ {field: β}.
+                        // Create a fresh variable linked to the original, and
+                        // constrain it to have the checked field.
+                        let fresh = self.new_var();
+                        // Link to original: fresh ≤ α (one-way).
+                        self.table.add_upper_bound(fresh, original_ty);
+                        // Add field constraint: fresh ≤ { field: β, ... }.
                         let fresh_field_var = self.new_var();
-                        let attrset_with_field =
-                            self.alloc_concrete(Ty::AttrSet(AttrSetTy {
-                                fields: [(field_name.clone(), fresh_field_var)]
-                                    .into_iter()
-                                    .collect(),
-                                dyn_ty: None,
-                                open: true,
-                                optional_fields: BTreeSet::new(),
-                            }));
-                        // fresh_var <: { field: α, ... } — establishes the
-                        // field exists as an upper bound so that subsequent
-                        // field access in this branch succeeds.
-                        self.constrain(fresh_var, attrset_with_field)
-                            .map_err(|err| self.locate_err(err))?;
-                        fresh_var
+                        let attrset_with_field = self.alloc_concrete(Ty::AttrSet(AttrSetTy {
+                            fields: [(field_name.clone(), fresh_field_var)]
+                                .into_iter()
+                                .collect(),
+                            dyn_ty: None,
+                            open: true,
+                            optional_fields: BTreeSet::new(),
+                        }));
+                        self.table.add_upper_bound(fresh, attrset_with_field);
+                        fresh
                     }
                 };
 

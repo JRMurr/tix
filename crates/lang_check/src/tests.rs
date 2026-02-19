@@ -2445,7 +2445,11 @@ fn narrow_hasattr_negated() {
     let nix = r#"x: if !(x ? name) then "default" else x.name"#;
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
-    assert_eq!(*body, arc_ty!(String), "negated hasattr body should be string");
+    assert_eq!(
+        *body,
+        arc_ty!(String),
+        "negated hasattr body should be string"
+    );
 }
 
 /// `assert x ? name; x.name` — assert narrows the body so field access
@@ -2516,4 +2520,194 @@ fn narrow_hasattr_field_access_then_arithmetic() {
         }
         _ => panic!("expected numeric body type, got: {body}"),
     }
+}
+
+// ==============================================================================
+// Type narrowing — type predicate builtins (isString, isInt, etc.)
+// ==============================================================================
+
+/// `isString x` — then-branch narrows x to string.
+#[test]
+fn narrow_isstring_then_is_string() {
+    let nix = r#"x: if isString x then builtins.stringLength x else 0"#;
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(*body, arc_ty!(Int), "body should be int");
+}
+
+/// `builtins.isString x` — qualified form should also work.
+#[test]
+fn narrow_builtins_isstring() {
+    let nix = r#"x: if builtins.isString x then builtins.stringLength x else 0"#;
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(*body, arc_ty!(Int), "body should be int");
+}
+
+/// `isInt x` — then-branch narrows x to int.
+#[test]
+fn narrow_isint_then_is_int() {
+    let nix = "x: if isInt x then x + 1 else 0";
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(*body, arc_ty!(Int), "body should be int");
+}
+
+/// `isBool x` — then-branch narrows x to bool.
+#[test]
+fn narrow_isbool_then_is_bool() {
+    let nix = "x: if isBool x then !x else false";
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(*body, arc_ty!(Bool), "body should be bool");
+}
+
+/// `isFloat x` — then-branch narrows x to float.
+#[test]
+fn narrow_isfloat_then_is_float() {
+    let nix = "x: if isFloat x then x + 1.0 else 0.0";
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(*body, arc_ty!(Float), "body should be float");
+}
+
+/// `!isString x` — negation flips narrowing.
+#[test]
+fn narrow_negated_isstring() {
+    let nix = r#"x: if !(isString x) then 0 else builtins.stringLength x"#;
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(*body, arc_ty!(Int), "body should be int");
+}
+
+/// Else-branch of `isString x` should produce a fresh variable linked to
+/// the original. The else-branch can still access fields from the original.
+#[test]
+fn narrow_isstring_else_preserves_original() {
+    // The else-branch's fresh var is linked to the original, so field access
+    // should succeed if the original has the field.
+    let nix = indoc! {"
+        x: if isString x then builtins.stringLength x
+        else x.name
+    "};
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    // Then: int. Else: unconstrained var from field access.
+    // The union should contain int (the unconstrained var may simplify away).
+    match body {
+        OutputTy::Primitive(PrimitiveTy::Int) => {}
+        OutputTy::Union(members) => {
+            assert!(
+                members
+                    .iter()
+                    .any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::Int))),
+                "body should contain int, got: {body}"
+            );
+        }
+        _ => panic!("expected int or union containing int, got: {body}"),
+    }
+}
+
+/// `isString x` then `isInt x` nested — demonstrates narrowing with different
+/// predicates doesn't conflict.
+#[test]
+fn narrow_isstring_then_isint_nested() {
+    let nix = indoc! {"
+        x: if isString x then builtins.stringLength x
+        else if isInt x then x + 1
+        else 0
+    "};
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(*body, arc_ty!(Int), "body should be int");
+}
+
+// ==============================================================================
+// Type narrowing — builtins.hasAttr "field" x
+// ==============================================================================
+
+/// `builtins.hasAttr "name" x` — equivalent to `x ? name`.
+#[test]
+fn narrow_builtins_hasattr() {
+    let nix = r#"x: if builtins.hasAttr "name" x then x.name else "default""#;
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    // Then-branch: x.name (unconstrained var). Else-branch: string.
+    // The union should contain string.
+    match body {
+        OutputTy::Primitive(PrimitiveTy::String) => {}
+        OutputTy::Union(members) => {
+            assert!(
+                members
+                    .iter()
+                    .any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::String))),
+                "body should contain string, got: {body}"
+            );
+        }
+        _ => panic!("expected string or union containing string, got: {body}"),
+    }
+}
+
+/// `!(builtins.hasAttr "name" x)` — negation flips narrowing.
+#[test]
+fn narrow_builtins_hasattr_negated() {
+    let nix = r#"x: if !(builtins.hasAttr "name" x) then "default" else x.name"#;
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    match body {
+        OutputTy::Primitive(PrimitiveTy::String) => {}
+        OutputTy::Union(members) => {
+            assert!(
+                members
+                    .iter()
+                    .any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::String))),
+                "body should contain string, got: {body}"
+            );
+        }
+        _ => panic!("expected string or union containing string, got: {body}"),
+    }
+}
+
+// ==============================================================================
+// Type narrowing — one-way linking to original variable
+// ==============================================================================
+
+/// HasField narrowing preserves original constraints: if x is known to
+/// have field `name` from the outer scope, the narrowed variable in the
+/// then-branch should also know about it.
+#[test]
+fn narrow_hasfield_preserves_original_constraints() {
+    // x.name in the then-branch succeeds because the narrowed fresh var
+    // is linked to the original which is constrained to have `name`.
+    let nix = indoc! {"
+        f: let x = f 1; in
+        if x ? extra then x.name
+        else x.name
+    "};
+    let ty = get_inferred_root(nix);
+    // Should succeed without type error — both branches access x.name.
+    let _ = unwrap_lambda(&ty);
+}
+
+// ==============================================================================
+// Negation types — Ty representation and constraint engine
+// ==============================================================================
+
+/// OutputTy::Neg displays as `~null`, `~string`, etc.
+#[test]
+fn neg_display_primitive() {
+    assert_eq!(format!("{}", arc_ty!(neg!(Null))), "~null");
+    assert_eq!(format!("{}", arc_ty!(neg!(String))), "~string");
+    assert_eq!(format!("{}", arc_ty!(neg!(Int))), "~int");
+    assert_eq!(format!("{}", arc_ty!(neg!(Bool))), "~bool");
+}
+
+/// Compound negation parenthesizes the inner type.
+#[test]
+fn neg_display_compound() {
+    let ty = OutputTy::Neg(lang_ty::TyRef::from(OutputTy::Union(vec![
+        lang_ty::TyRef::from(OutputTy::Primitive(PrimitiveTy::Int)),
+        lang_ty::TyRef::from(OutputTy::Primitive(PrimitiveTy::String)),
+    ])));
+    assert_eq!(format!("{ty}"), "~(int | string)");
 }

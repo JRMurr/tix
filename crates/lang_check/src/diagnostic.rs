@@ -224,6 +224,10 @@ fn canonicalize_ty_structural(
                 optional_fields: attr.optional_fields.clone(),
             })
         }
+        lang_ty::Ty::Neg(inner) => {
+            let c_inner = canonicalize_standalone(table, provenance, *inner, true);
+            OutputTy::Neg(lang_ty::TyRef::from(c_inner))
+        }
     }
 }
 

@@ -218,6 +218,9 @@ fn text_from_ty(ty: &OutputTy) -> impl Strategy<Value = NixTextStr> {
             // is complex — for now skip in PBT
             unreachable!("Union/Intersection should not appear in PBT type generation yet")
         }
+        // Negation types don't arise in PBT — they're only produced by
+        // narrowing guards which PBT doesn't generate.
+        OutputTy::Neg(_) => unreachable!("Neg should not appear in PBT type generation"),
         // Named is just a display wrapper — delegate to the inner type.
         OutputTy::Named(_, inner) => text_from_ty(&inner.0).boxed(),
     };
