@@ -36,9 +36,11 @@
   `"builtins"`. This is correct but potentially expensive if `builtins` is
   referenced many times. Could cache the attrset structure and extrude it.
 
-- `test/strings.nix` still has 4 errors after adding the missing builtins:
-  - Lines 2031/2066 (`getName`/`getVersion`): `if isString x then parse x else x.pname`
-    needs `isString` narrowing to avoid conflicting string + attrset constraints on `x`.
+- `test/strings.nix` still has 4 errors (isString narrowing is now implemented
+  but didn't resolve them — the root causes are elsewhere):
+  - Lines 2031/2066 (`getName`/`getVersion`): `if isString x then parse x else x.pname or (parse x.name)`.
+    The then-branch narrows correctly, but the else-branch errors because `parse x.name`
+    returns a derivation-like attrset that flows where `string` is expected via the `or` operator.
   - Line 2108 (`nameFromURL`): `head (splitString sep filename)` inferred as
     `string -> string` instead of `string`. Root cause unclear — may be SCC
     grouping or overload resolution interaction in the large rec block.

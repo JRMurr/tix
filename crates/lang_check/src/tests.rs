@@ -2570,6 +2570,14 @@ fn narrow_isstring_then_is_string() {
     assert_eq!(*body, arc_ty!(Int), "body should be int");
 }
 
+#[test]
+fn narrow_isstring_then_is_string_ret() {
+    let nix = r#"x: if isString x then x else "else case""#;
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(*body, arc_ty!(String), "body should be string");
+}
+
 /// `builtins.isString x` — qualified form should also work.
 #[test]
 fn narrow_builtins_isstring() {
