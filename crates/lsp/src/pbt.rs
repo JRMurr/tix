@@ -190,11 +190,19 @@ fn arb_nix_source() -> impl Strategy<Value = String> {
 // Crash-freedom properties
 // ==============================================================================
 
+/// Default case count for LSP PBT. Override with `PROPTEST_CASES=N`.
+fn pbt_config() -> ProptestConfig {
+    ProptestConfig {
+        cases: std::env::var("PROPTEST_CASES")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(128),
+        ..ProptestConfig::default()
+    }
+}
+
 proptest! {
-    #![proptest_config(ProptestConfig {
-        cases: 128,
-        .. ProptestConfig::default()
-    })]
+    #![proptest_config(pbt_config())]
 
     // -------------------------------------------------------------------------
     // Position-probing tests: for each generated source, enumerate all
