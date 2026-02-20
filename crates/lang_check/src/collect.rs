@@ -631,40 +631,28 @@ mod tests {
     #[test]
     fn contradiction_exact_match() {
         // Int ∧ ¬Int → contradiction
-        let members = vec![
-            arc_ty!(Int),
-            OutputTy::Neg(TyRef::from(arc_ty!(Int))),
-        ];
+        let members = vec![arc_ty!(Int), OutputTy::Neg(TyRef::from(arc_ty!(Int)))];
         assert!(has_primitive_contradiction(&members));
     }
 
     #[test]
     fn contradiction_subtype() {
         // Int ∧ ¬Number → contradiction (Int <: Number)
-        let members = vec![
-            arc_ty!(Int),
-            OutputTy::Neg(TyRef::from(arc_ty!(Number))),
-        ];
+        let members = vec![arc_ty!(Int), OutputTy::Neg(TyRef::from(arc_ty!(Number)))];
         assert!(has_primitive_contradiction(&members));
     }
 
     #[test]
     fn contradiction_float_subtype() {
         // Float ∧ ¬Number → contradiction (Float <: Number)
-        let members = vec![
-            arc_ty!(Float),
-            OutputTy::Neg(TyRef::from(arc_ty!(Number))),
-        ];
+        let members = vec![arc_ty!(Float), OutputTy::Neg(TyRef::from(arc_ty!(Number)))];
         assert!(has_primitive_contradiction(&members));
     }
 
     #[test]
     fn no_contradiction_different_types() {
         // Int ∧ ¬String — no contradiction
-        let members = vec![
-            arc_ty!(Int),
-            OutputTy::Neg(TyRef::from(arc_ty!(String))),
-        ];
+        let members = vec![arc_ty!(Int), OutputTy::Neg(TyRef::from(arc_ty!(String)))];
         assert!(!has_primitive_contradiction(&members));
     }
 
@@ -680,10 +668,7 @@ mod tests {
     #[test]
     fn tautology_exact_match() {
         // Int ∨ ¬Int → empty (both removed)
-        let members = vec![
-            arc_ty!(Int),
-            OutputTy::Neg(TyRef::from(arc_ty!(Int))),
-        ];
+        let members = vec![arc_ty!(Int), OutputTy::Neg(TyRef::from(arc_ty!(Int)))];
         let result = remove_tautological_pairs(members);
         assert!(result.is_empty());
     }
@@ -703,10 +688,7 @@ mod tests {
     #[test]
     fn no_tautology_different_types() {
         // Int ∨ ¬String — no tautology, kept as-is
-        let members = vec![
-            arc_ty!(Int),
-            OutputTy::Neg(TyRef::from(arc_ty!(String))),
-        ];
+        let members = vec![arc_ty!(Int), OutputTy::Neg(TyRef::from(arc_ty!(String)))];
         let result = remove_tautological_pairs(members.clone());
         assert_eq!(result, members);
     }

@@ -625,9 +625,9 @@ impl CheckCtx<'_> {
             // Equality/inequality — Nix's `==` is a total function that works
             // across types (`1 == "hi"` → false), so no type constraints are
             // imposed on the operands.
-            BinOP::Normal(NormalBinOp::Expr(
-                ExprBinOp::Equal | ExprBinOp::NotEqual,
-            )) => Ok(self.alloc_prim(PrimitiveTy::Bool)),
+            BinOP::Normal(NormalBinOp::Expr(ExprBinOp::Equal | ExprBinOp::NotEqual)) => {
+                Ok(self.alloc_prim(PrimitiveTy::Bool))
+            }
 
             // Ordering — runtime errors on cross-type comparisons, so
             // bidirectional constraints are correct.
@@ -724,7 +724,9 @@ impl CheckCtx<'_> {
 
             if let Some(&poly_ty) = self.poly_type_env.get(name) {
                 // Attribute any constraint propagation errors to this binding's value.
-                let (BindingValue::Inherit(e) | BindingValue::Expr(e) | BindingValue::InheritFrom(e)) = value;
+                let (BindingValue::Inherit(e)
+                | BindingValue::Expr(e)
+                | BindingValue::InheritFrom(e)) = value;
                 self.current_expr = e;
                 let instantiated = self.extrude(poly_ty, true);
                 fields.insert(name_text, instantiated);

@@ -53,6 +53,10 @@ pub enum TixDiagnosticKind {
         annotation_arity: usize,
         expression_arity: usize,
     },
+    AnnotationUnchecked {
+        name: SmolStr,
+        reason: SmolStr,
+    },
 }
 
 impl fmt::Display for TixDiagnosticKind {
@@ -102,6 +106,12 @@ impl fmt::Display for TixDiagnosticKind {
                 write!(
                     f,
                     "annotation for `{name}` has arity {annotation_arity} but expression has {expression_arity} parameters; skipping"
+                )
+            }
+            TixDiagnosticKind::AnnotationUnchecked { name, reason } => {
+                write!(
+                    f,
+                    "annotation for `{name}` accepted but not verified: {reason}"
                 )
             }
         }
@@ -301,6 +311,10 @@ fn warning_to_diagnostic(warning: &LocatedWarning) -> TixDiagnostic {
             annotation_arity: *annotation_arity,
             expression_arity: *expression_arity,
         },
+        Warning::AnnotationUnchecked { name, reason } => TixDiagnosticKind::AnnotationUnchecked {
+            name: name.clone(),
+            reason: reason.clone(),
+        },
     };
 
     TixDiagnostic {
@@ -444,5 +458,16 @@ mod tests {
     fn unresolved_name_display() {
         let kind = TixDiagnosticKind::UnresolvedName { name: "foo".into() };
         assert_eq!(kind.to_string(), "unresolved name `foo`");
+    }
+
+    #[test]
+    fn annotation_unchecked_display() {
+        let kind = TixDiagnosticKind::AnnotationUnchecked {
+            name: "dispatch".into(),
+            reason: "intersection-of-function annotations are accepted as declared types but not verified against the body".into(),
+        };
+        let msg = kind.to_string();
+        assert!(msg.contains("dispatch"));
+        assert!(msg.contains("not verified"));
     }
 }

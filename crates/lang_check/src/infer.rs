@@ -39,7 +39,7 @@ impl CheckCtx<'_> {
                 diag.kind,
                 crate::diagnostic::TixDiagnosticKind::UnresolvedName { .. }
                     | crate::diagnostic::TixDiagnosticKind::AnnotationArityMismatch { .. }
-
+                    | crate::diagnostic::TixDiagnosticKind::AnnotationUnchecked { .. }
             ) {
                 return Err(diag);
             }

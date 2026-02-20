@@ -299,7 +299,7 @@ fn run_check(
             diag.kind,
             TixDiagnosticKind::UnresolvedName { .. }
                 | TixDiagnosticKind::AnnotationArityMismatch { .. }
-
+                | TixDiagnosticKind::AnnotationUnchecked { .. }
         );
         if !is_warning {
             has_errors = true;

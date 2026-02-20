@@ -165,6 +165,12 @@ pub enum Warning {
         annotation_arity: usize,
         expression_arity: usize,
     },
+    /// Annotation present but body not verified against it. The declared
+    /// type is trusted for callers.
+    AnnotationUnchecked {
+        name: smol_str::SmolStr,
+        reason: smol_str::SmolStr,
+    },
 }
 
 impl std::fmt::Display for Warning {
@@ -179,6 +185,9 @@ impl std::fmt::Display for Warning {
                 f,
                 "annotation for `{name}` has arity {annotation_arity} but expression has {expression_arity} parameters; skipping"
             ),
+            Warning::AnnotationUnchecked { name, reason } => {
+                write!(f, "annotation for `{name}` accepted but not verified: {reason}")
+            }
         }
     }
 }
@@ -551,6 +560,27 @@ impl<'db> CheckCtx<'db> {
             });
 
         if let Some(known_ty) = type_annotation {
+            // Intersection-of-lambda annotations declare overloaded function types.
+            // Verifying each component against the body separately requires
+            // re-inference (not yet supported). Accept the annotation as the
+            // declared type for callers without constraining the body.
+            // This check runs before the arity guard because an intersection's
+            // top-level arity is 0 (it's not a Lambda node), which would
+            // incorrectly trigger the arity mismatch.
+            if known_ty.is_intersection_of_lambdas() {
+                let annotation_ty = self.intern_fresh_ty(known_ty);
+                if let Some(name) = self.alias_provenance.get(&annotation_ty).cloned() {
+                    self.alias_provenance.insert(ty, name);
+                }
+                self.emit_warning(Warning::AnnotationUnchecked {
+                    name: self.module[name_id].text.clone(),
+                    reason: "intersection-of-function annotations are accepted as declared types \
+                             but not verified against the body"
+                        .into(),
+                });
+                return Ok(());
+            }
+
             // Guard: skip annotations whose arity is LESS than the expression's
             // visible lambda depth. This means the doc comment claims fewer
             // arguments than the function actually has (e.g. `foo :: a -> a` on

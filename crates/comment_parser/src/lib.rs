@@ -190,17 +190,24 @@ impl ParsedTy {
             ParsedTy::Union(_) => true,
             ParsedTy::TyVar(_) | ParsedTy::Primitive(_) => false,
             ParsedTy::List(inner) => inner.0.contains_union(),
-            ParsedTy::Lambda { param, body } => {
-                param.0.contains_union() || body.0.contains_union()
-            }
+            ParsedTy::Lambda { param, body } => param.0.contains_union() || body.0.contains_union(),
             ParsedTy::AttrSet(attr) => {
                 attr.fields.values().any(|v| v.0.contains_union())
-                    || attr
-                        .dyn_ty
-                        .as_ref()
-                        .map_or(false, |d| d.0.contains_union())
+                    || attr.dyn_ty.as_ref().map_or(false, |d| d.0.contains_union())
             }
             ParsedTy::Intersection(members) => members.iter().any(|m| m.0.contains_union()),
+        }
+    }
+
+    /// Returns true if this type is an intersection where every member is a
+    /// lambda. Such annotations declare overloaded function types that can't
+    /// be verified against a single lambda body with bidirectional constraints.
+    pub fn is_intersection_of_lambdas(&self) -> bool {
+        match self {
+            ParsedTy::Intersection(members) => members
+                .iter()
+                .all(|m| matches!(&*m.0, ParsedTy::Lambda { .. })),
+            _ => false,
         }
     }
 }

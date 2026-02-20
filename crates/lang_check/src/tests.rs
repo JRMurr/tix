@@ -2599,7 +2599,11 @@ fn narrow_isstring_local_alias() {
     "#;
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
-    assert_eq!(*body, arc_ty!(Int), "locally-aliased isString should narrow");
+    assert_eq!(
+        *body,
+        arc_ty!(Int),
+        "locally-aliased isString should narrow"
+    );
 }
 
 /// `inherit (builtins) isString` — same as local alias but via inherit.
@@ -2611,7 +2615,11 @@ fn narrow_isstring_inherit_from_builtins() {
     "#;
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
-    assert_eq!(*body, arc_ty!(Int), "inherit-from-builtins isString should narrow");
+    assert_eq!(
+        *body,
+        arc_ty!(Int),
+        "inherit-from-builtins isString should narrow"
+    );
 }
 
 /// `isInt x` — then-branch narrows x to int.
@@ -3018,7 +3026,9 @@ fn annotation_arity_mismatch_skipped_with_warning() {
     );
 
     // Inference should succeed (the wrong-arity annotation is skipped).
-    let inference = result.inference.expect("inference should succeed despite arity mismatch");
+    let inference = result
+        .inference
+        .expect("inference should succeed despite arity mismatch");
 
     // Root should be string (string + string = string).
     let root_ty = inference
@@ -3088,7 +3098,9 @@ fn annotation_with_union_skipped() {
     );
 
     // Inference should succeed — the union annotation is skipped.
-    let inference = result.inference.expect("inference should succeed with union annotation");
+    let inference = result
+        .inference
+        .expect("inference should succeed with union annotation");
 
     let root_ty = inference
         .expr_ty_map
@@ -3106,11 +3118,13 @@ fn annotation_with_union_skipped() {
     let errors: Vec<_> = result
         .diagnostics
         .iter()
-        .filter(|d| !matches!(
-            d.kind,
-            TixDiagnosticKind::UnresolvedName { .. }
-                | TixDiagnosticKind::AnnotationArityMismatch { .. }
-        ))
+        .filter(|d| {
+            !matches!(
+                d.kind,
+                TixDiagnosticKind::UnresolvedName { .. }
+                    | TixDiagnosticKind::AnnotationArityMismatch { .. }
+            )
+        })
         .collect();
     assert!(
         errors.is_empty(),
@@ -3132,7 +3146,11 @@ fn narrow_lib_types_isstring() {
     "#};
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
-    assert_eq!(*body, arc_ty!(String), "lib.types.isString should narrow to string");
+    assert_eq!(
+        *body,
+        arc_ty!(String),
+        "lib.types.isString should narrow to string"
+    );
 }
 
 /// `lib.trivial.isFunction x` narrows x to a function, allowing application.
@@ -3156,7 +3174,11 @@ fn narrow_lib_isattrs() {
     "#};
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
-    assert_eq!(*body, arc_ty!(String), "lib.isAttrs should narrow to attrset");
+    assert_eq!(
+        *body,
+        arc_ty!(String),
+        "lib.isAttrs should narrow to attrset"
+    );
 }
 
 /// `lib.types.isList x` narrows x to a list.
@@ -3168,7 +3190,11 @@ fn narrow_lib_types_islist() {
     "#};
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
-    assert_eq!(*body, arc_ty!(Int), "lib.types.isList should narrow to list");
+    assert_eq!(
+        *body,
+        arc_ty!(Int),
+        "lib.types.isList should narrow to list"
+    );
 }
 
 /// `!(lib.types.isString x)` flips narrowing — else-branch gets string.
@@ -3180,7 +3206,11 @@ fn narrow_negated_lib_types_isstring() {
     "#};
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
-    assert_eq!(*body, arc_ty!(String), "negated lib.types.isString should narrow else to string");
+    assert_eq!(
+        *body,
+        arc_ty!(String),
+        "negated lib.types.isString should narrow else to string"
+    );
 }
 
 // ==============================================================================
@@ -3223,4 +3253,125 @@ fn narrow_contradictory_different_preds_no_crash() {
     let (_param, _body) = unwrap_lambda(&ty);
     // Should not crash. The contradictory branch's result doesn't matter
     // much — the key assertion is that inference completes.
+}
+
+// ==============================================================================
+// Intersection-of-lambda annotation handling
+// ==============================================================================
+
+/// An intersection-of-lambda annotation should not produce a type error.
+/// The body is type-checked via normal inference; the annotation is stored
+/// for callers without bidirectional constraints.
+#[test]
+fn intersection_annotation_accepted() {
+    let nix_src = indoc! { "
+        let
+            /** type: dispatch :: (int -> int) & (string -> string) */
+            dispatch = x:
+                if builtins.isInt x then x + 1
+                else x;
+        in
+        dispatch 42
+    " };
+    let (db, file) = TestDatabase::single_file(nix_src).unwrap();
+    let mod_ = module(&db, file);
+    let result = crate::check_file_collecting(
+        &db,
+        file,
+        &TypeAliasRegistry::default(),
+        HashMap::new(),
+        HashMap::new(),
+    );
+
+    // Inference should succeed — the intersection annotation is accepted.
+    let inference = result
+        .inference
+        .expect("inference should succeed with intersection annotation");
+
+    let root_ty = inference
+        .expr_ty_map
+        .get(mod_.entry_expr)
+        .expect("root should have a type");
+    // The call `dispatch 42` infers from the body: isInt narrows to int,
+    // x + 1 produces int.
+    assert_eq!(*root_ty, arc_ty!(Int), "root should be int, got: {root_ty}");
+}
+
+/// The AnnotationUnchecked warning should be emitted for intersection-of-lambda
+/// annotations.
+#[test]
+fn intersection_annotation_warning_emitted() {
+    let nix_src = indoc! { "
+        let
+            /** type: f :: (int -> int) & (string -> string) */
+            f = x: x;
+        in
+        f 1
+    " };
+    let (db, file) = TestDatabase::single_file(nix_src).unwrap();
+    let _mod_ = module(&db, file);
+    let result = crate::check_file_collecting(
+        &db,
+        file,
+        &TypeAliasRegistry::default(),
+        HashMap::new(),
+        HashMap::new(),
+    );
+
+    result.inference.expect("inference should succeed");
+
+    assert!(
+        result.diagnostics.iter().any(|d| matches!(
+            &d.kind,
+            TixDiagnosticKind::AnnotationUnchecked { name, .. }
+            if name == "f"
+        )),
+        "expected AnnotationUnchecked warning, diagnostics: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|d| &d.kind)
+            .collect::<Vec<_>>()
+    );
+}
+
+/// An intersection of non-lambda types (e.g. `int & string`) should NOT
+/// trigger the intersection-of-lambda guard; it falls through to the
+/// normal intern + constrain path.
+#[test]
+fn non_lambda_intersection_falls_through() {
+    // `int & string` as an annotation is contradictory — it should
+    // either error or produce a constrained type, not be silently
+    // skipped via the intersection-of-lambda path.
+    let nix_src = indoc! { "
+        let
+            /** type: x :: int & string */
+            x = 42;
+        in
+        x
+    " };
+    let (db, file) = TestDatabase::single_file(nix_src).unwrap();
+    let _mod_ = module(&db, file);
+    let result = crate::check_file_collecting(
+        &db,
+        file,
+        &TypeAliasRegistry::default(),
+        HashMap::new(),
+        HashMap::new(),
+    );
+
+    // The intersection-of-lambda guard should NOT have fired, so there
+    // should be no AnnotationUnchecked warning.
+    assert!(
+        !result
+            .diagnostics
+            .iter()
+            .any(|d| matches!(&d.kind, TixDiagnosticKind::AnnotationUnchecked { .. })),
+        "non-lambda intersection should not produce AnnotationUnchecked, diagnostics: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|d| &d.kind)
+            .collect::<Vec<_>>()
+    );
 }

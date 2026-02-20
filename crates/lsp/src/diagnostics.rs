@@ -32,9 +32,7 @@ pub fn to_lsp_diagnostics(
             let severity = match &diag.kind {
                 TixDiagnosticKind::UnresolvedName { .. }
                 | TixDiagnosticKind::AnnotationArityMismatch { .. }
-                => {
-                    DiagnosticSeverity::WARNING
-                }
+                | TixDiagnosticKind::AnnotationUnchecked { .. } => DiagnosticSeverity::WARNING,
                 _ => DiagnosticSeverity::ERROR,
             };
 

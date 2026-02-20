@@ -1,5 +1,13 @@
 ## Known Issues & Future Work
 
+### Intersection Annotation Body Verification
+
+- Per-component verification of intersection-of-function annotations is deferred.
+  Currently, `(int -> int) & (string -> string)` is accepted as a declared type
+  (store-and-trust), but the body is not checked against each component separately.
+  Full verification would require either re-inferring the body once per component
+  or adding a check-mode to the inference engine.
+
 ### Overload Resolution + Extrusion
 
 - `find_pinned_concrete`: a targeted fix for variables that were fully resolved by
