@@ -565,7 +565,7 @@ impl<'db> Collector<'db> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lang_ty::{arc_ty, PrimitiveTy};
+    use lang_ty::arc_ty;
 
     // -- negate_output_ty tests -----------------------------------------------
 
