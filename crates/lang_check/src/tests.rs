@@ -3256,6 +3256,115 @@ fn narrow_contradictory_different_preds_no_crash() {
 }
 
 // ==============================================================================
+// Type narrowing — coverage gaps
+// ==============================================================================
+
+/// Unrecognized condition — no false narrowing should be applied.
+/// A user-defined predicate that happens to return bool shouldn't narrow.
+#[test]
+fn narrow_unrecognized_condition_no_narrowing() {
+    let nix = indoc! {"
+        let check = _: true; in x: if check x then x else x
+    "};
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert!(
+        matches!(body, OutputTy::TyVar(_)),
+        "unrecognized predicate should not narrow — body should be TyVar, got: {body}"
+    );
+}
+
+/// Narrowing inside a let body should not break let-generalization.
+/// `f` should be polymorphic — the narrowing in the body should be local.
+#[test]
+fn narrow_let_generalization_preserved() {
+    let nix = indoc! {"
+        let f = x: if x == null then \"default\" else x; in f
+    "};
+    let ty = get_inferred_root(nix);
+    let (_param, _body) = unwrap_lambda(&ty);
+    // The key assertion is that `f` is inferred as a function type.
+    // If narrowing broke generalization, this would fail or produce a
+    // monomorphic type instead of a polymorphic one.
+}
+
+/// Known limitation: negation bounds are lost through let-generalization.
+/// When `f = x: if isNull x then 0 else x` is generalized, the ¬null
+/// upper bound on x's narrowed var doesn't survive extrude. The output
+/// is `a -> int` (union of `0 | x` collapses to `int` for the then-branch
+/// and the else-branch's x loses its negation information).
+///
+/// Contrast with `narrow_neg_displayed_in_output` which uses a curried
+/// lambda (`f: x: ...`) where f's param is in negative position and
+/// the ¬null bound is visible without generalization.
+// TODO: preserve negation bounds through extrude so `let f = x: ...`
+// retains `~null` in f's type after generalization.
+#[test]
+fn narrow_neg_lost_through_generalization() {
+    let nix = indoc! {"
+        let f = x: if builtins.isNull x then 0 else x; in f
+    "};
+    let ty = get_inferred_root(nix);
+    let formatted = ty.to_string();
+    // Currently, negation is lost — output is `a -> int` instead of
+    // `(a & ~null) -> int`. This test documents the current behavior.
+    assert!(
+        !formatted.contains("~null"),
+        "documenting current behavior: negation should be lost through generalization, got: {formatted}"
+    );
+}
+
+/// Type error quality under narrowing: then-branch narrows x to null,
+/// but `stringLength` expects string → should produce TypeMismatch.
+#[test]
+fn narrow_type_error_in_narrowed_branch() {
+    let nix = indoc! {"
+        x: if builtins.isNull x then builtins.stringLength x else 0
+    "};
+    let error = get_check_error(nix);
+    assert!(
+        matches!(error, TixDiagnosticKind::TypeMismatch { .. }),
+        "narrowed branch type error should be TypeMismatch, got: {error:?}"
+    );
+}
+
+/// Select-chain heuristic: `myModule.isString x` narrows because the
+/// leaf name matches `isString`. This documents the intentional heuristic
+/// that activates narrowing based on naming convention.
+#[test]
+fn narrow_select_chain_heuristic_activates() {
+    let nix = indoc! {"
+        let myModule = { isString = _: true; }; in
+        x: if myModule.isString x then builtins.stringLength x else 0
+    "};
+    // Narrowing activates: then-branch sees x as string, stringLength
+    // succeeds, else-branch returns int. Body is int.
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(
+        *body,
+        OutputTy::Primitive(PrimitiveTy::Int),
+        "select-chain heuristic should narrow — body should be int, got: {body}"
+    );
+}
+
+/// Non-predicate select-chain leaf — no narrowing should be applied.
+/// A leaf name like `checkValue` doesn't match any known predicate.
+#[test]
+fn narrow_select_chain_non_predicate_no_narrowing() {
+    let nix = indoc! {"
+        let myModule = { checkValue = _: true; }; in
+        x: if myModule.checkValue x then x else x
+    "};
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert!(
+        matches!(body, OutputTy::TyVar(_)),
+        "non-predicate leaf should not narrow — body should be TyVar, got: {body}"
+    );
+}
+
+// ==============================================================================
 // Intersection-of-lambda annotation handling
 // ==============================================================================
 

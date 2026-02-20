@@ -157,6 +157,12 @@
   a separate concern from normalization. Currently only primitive-vs-negated-primitive
   contradictions are detected.
 
+- Negation bounds (`¬T` upper bounds on narrowed variables) don't survive
+  let-generalization. `let f = x: if isNull x then 0 else x; in f` produces
+  `a -> int` — the `¬null` on x's narrowed else-branch var is lost during extrude.
+  The non-let form (`f: x: if isNull x then 0 else f x`) preserves it because the
+  narrowed var flows directly into `f`'s param without generalization/extrusion.
+
 ### Future Enhancements
 
 - Full intersection-type-based operator overloading (replace pragmatic deferred
