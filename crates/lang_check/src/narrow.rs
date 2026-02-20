@@ -185,7 +185,43 @@ impl CheckCtx<'_> {
                 // Also check for `builtins.hasAttr "field" x` — a curried
                 // two-arg call pattern where the outer Apply has arg=x and
                 // fun is itself Apply { fun: hasAttr_ref, arg: string_literal }.
-                self.try_hasattr_builtin_call(*fun, *arg)
+                if let Some(info) = self.try_hasattr_builtin_call(*fun, *arg) {
+                    return Some(info);
+                }
+
+                // Fallback: recognize `lib.*.isString x` etc. by leaf name.
+                // This handles nixpkgs patterns like `lib.types.isString`,
+                // `lib.trivial.isFunction`, `lib.isAttrs` where the function
+                // is a Select chain that doesn't resolve to a builtin.
+                if let Some((leaf, name)) = self.try_select_chain_predicate(*fun, *arg) {
+                    for &(pred_name, prim) in TYPE_PREDICATES {
+                        if leaf == pred_name {
+                            return Some(NarrowInfo {
+                                then_branch: vec![NarrowBinding {
+                                    name,
+                                    predicate: NarrowPredicate::IsType(prim),
+                                }],
+                                else_branch: vec![NarrowBinding {
+                                    name,
+                                    predicate: NarrowPredicate::IsNotType(prim),
+                                }],
+                            });
+                        }
+                    }
+                    for &(pred_name, ref pred) in COMPOUND_PREDICATES {
+                        if leaf == pred_name {
+                            return Some(NarrowInfo {
+                                then_branch: vec![NarrowBinding {
+                                    name,
+                                    predicate: pred.clone(),
+                                }],
+                                else_branch: vec![],
+                            });
+                        }
+                    }
+                }
+
+                None
             }
 
             _ => None,
@@ -277,6 +313,38 @@ impl CheckCtx<'_> {
             // No useful narrowing for else-branch (field absence).
             else_branch: vec![],
         })
+    }
+
+    /// Check if `fun_expr` is a Select chain whose **leaf** segment matches a
+    /// known type predicate name (e.g. `lib.types.isString x` → leaf "isString"),
+    /// and `arg_expr` is a local name reference. Returns the leaf name and NameId.
+    ///
+    /// This is the fallback for `lib.*.is*` patterns that can't be traced to a
+    /// builtin — we rely on the naming convention instead. The bare-name and
+    /// `builtins.*` paths are already handled by `is_builtin_call`, so this only
+    /// fires for multi-segment Selects rooted on something other than `builtins`.
+    fn try_select_chain_predicate(
+        &self,
+        fun_expr: ExprId,
+        arg_expr: ExprId,
+    ) -> Option<(SmolStr, NameId)> {
+        let Expr::Select {
+            set: _,
+            attrpath,
+            default_expr: None,
+        } = &self.module[fun_expr]
+        else {
+            return None;
+        };
+
+        // Extract the leaf (last) segment of the attrpath.
+        let leaf_expr = attrpath.last()?;
+        let Expr::Literal(Literal::String(leaf_name)) = &self.module[*leaf_expr] else {
+            return None;
+        };
+
+        let name = self.expr_as_local_name(arg_expr)?;
+        Some((leaf_name.clone(), name))
     }
 
     /// Check if `fun_expr` is a reference to a specific builtin function.

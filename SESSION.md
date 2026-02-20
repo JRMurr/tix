@@ -148,9 +148,11 @@
   and emitted as upper bounds on narrowed variables. Nested redundant guards
   (e.g. `if x != null then (if x != null then ...)`) are handled because
   equality comparisons (`==`/`!=`) generate no type constraints — they just
-  return bool. Remaining: `isAttrs`, `isFunction`,
-  `isList` (structural constructors), multi-key `?` paths, `&&`/`||`
-  combinators.
+  return bool. `isAttrs`, `isFunction`, `isList` now have then-branch
+  narrowing (constraining to `{..}`, `[α]`, `α → β` respectively).
+  Else-branch narrowing for compound types is skipped (no `¬{..}`).
+  Remaining: else-branch for `HasField` (field absence), multi-key `?`
+  paths, `&&`/`||` combinators.
 - Literal / singleton types (`"circle"` as a type, not just `string`)
 - Type narrowing + arithmetic in narrowed branches: `x: if x == null then x else x - 1`
   produces body type `null` rather than `null | number`. The narrowed else-branch creates

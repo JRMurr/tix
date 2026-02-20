@@ -74,7 +74,7 @@ In the then-branch, tix creates a fresh variable constrained to have the checked
 
 ### Type predicate guards
 
-All `is*` builtins are recognized as narrowing guards. In the then-branch, the variable is narrowed to the corresponding primitive type. In the else-branch, a negation type (`~T`) is added to exclude the checked type:
+All `is*` builtins are recognized as narrowing guards, whether called directly (`isString x`), qualified (`builtins.isString x`), or through a select chain (`lib.types.isString x`, `lib.isAttrs x`). In the then-branch, the variable is narrowed to the corresponding primitive type. In the else-branch, a negation type (`~T`) is added to exclude the checked type:
 
 ```nix
 dispatch = x:
@@ -89,11 +89,14 @@ dispatch = x:
 
 - `x == null` / `null == x` / `x != null` / `null != x`
 - `isNull x` / `builtins.isNull x`
-- `isString x` / `builtins.isString x`
-- `isInt x` / `builtins.isInt x`
-- `isFloat x` / `builtins.isFloat x`
-- `isBool x` / `builtins.isBool x`
-- `isPath x` / `builtins.isPath x`
+- `isString x` / `builtins.isString x` / `lib.types.isString x`
+- `isInt x` / `builtins.isInt x` / `lib.isInt x`
+- `isFloat x` / `builtins.isFloat x` / `lib.isFloat x`
+- `isBool x` / `builtins.isBool x` / `lib.isBool x`
+- `isPath x` / `builtins.isPath x` / `lib.isPath x`
+- `isAttrs x` / `builtins.isAttrs x` / `lib.isAttrs x` (then-branch only)
+- `isList x` / `builtins.isList x` / `lib.isList x` (then-branch only)
+- `isFunction x` / `builtins.isFunction x` / `lib.isFunction x` (then-branch only)
 - `x ? field` / `builtins.hasAttr "field" x` (then-branch narrows x to have the field)
 - `!cond` (flips the narrowing)
 - `assert cond; body` (narrows in the body)

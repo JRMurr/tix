@@ -3118,3 +3118,67 @@ fn annotation_with_union_skipped() {
         errors.iter().map(|d| &d.kind).collect::<Vec<_>>()
     );
 }
+
+// ==============================================================================
+// Type narrowing — lib.*.is* select-chain predicates
+// ==============================================================================
+
+/// `lib.types.isString x` narrows x to string via leaf-name matching.
+#[test]
+fn narrow_lib_types_isstring() {
+    let nix = indoc! {r#"
+        let lib = { types = { isString = builtins.isString; }; };
+        in x: if lib.types.isString x then x else "default"
+    "#};
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(*body, arc_ty!(String), "lib.types.isString should narrow to string");
+}
+
+/// `lib.trivial.isFunction x` narrows x to a function, allowing application.
+#[test]
+fn narrow_lib_trivial_isfunction() {
+    let nix = indoc! {r#"
+        let lib = { trivial = { isFunction = builtins.isFunction; }; };
+        in x: if lib.trivial.isFunction x then x 42 else 0
+    "#};
+    let ty = get_inferred_root(nix);
+    let (_param, _body) = unwrap_lambda(&ty);
+    // Should not error — x is narrowed to a function.
+}
+
+/// `lib.isAttrs x` (single-level Select) narrows x to attrset.
+#[test]
+fn narrow_lib_isattrs() {
+    let nix = indoc! {r#"
+        let lib = { isAttrs = builtins.isAttrs; };
+        in x: if lib.isAttrs x then x.name else "default"
+    "#};
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(*body, arc_ty!(String), "lib.isAttrs should narrow to attrset");
+}
+
+/// `lib.types.isList x` narrows x to a list.
+#[test]
+fn narrow_lib_types_islist() {
+    let nix = indoc! {r#"
+        let lib = { types = { isList = builtins.isList; }; };
+        in x: if lib.types.isList x then builtins.length x else 0
+    "#};
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(*body, arc_ty!(Int), "lib.types.isList should narrow to list");
+}
+
+/// `!(lib.types.isString x)` flips narrowing — else-branch gets string.
+#[test]
+fn narrow_negated_lib_types_isstring() {
+    let nix = indoc! {r#"
+        let lib = { types = { isString = builtins.isString; }; };
+        in x: if !(lib.types.isString x) then "not a string" else x
+    "#};
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(*body, arc_ty!(String), "negated lib.types.isString should narrow else to string");
+}
