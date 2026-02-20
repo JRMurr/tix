@@ -25,6 +25,10 @@ impl CheckCtx<'_> {
 
         let ty = self.infer_expr_inner(e)?;
 
+        // Restore current_expr — infer_expr_inner may have moved it to a
+        // sub-expression. The slot-linking constraints below belong to `e`.
+        self.current_expr = e;
+
         // Record the inferred type for this expression.
         let expr_slot = self.ty_for_expr(e);
         self.constrain(ty, expr_slot)
@@ -568,6 +572,7 @@ impl CheckCtx<'_> {
                         lhs: lhs_ty,
                         rhs: rhs_ty,
                         ret: ret_ty,
+                        at_expr: self.current_expr,
                     },
                 });
                 Ok(ret_ty)
@@ -632,6 +637,7 @@ impl CheckCtx<'_> {
                     lhs: lhs_ty,
                     rhs: rhs_ty,
                     ret: ret_ty,
+                    at_expr: self.current_expr,
                 });
                 Ok(ret_ty)
             }
@@ -682,6 +688,9 @@ impl CheckCtx<'_> {
             let name_text = self.module[name].text.clone();
 
             if let Some(&poly_ty) = self.poly_type_env.get(name) {
+                // Attribute any constraint propagation errors to this binding's value.
+                let (BindingValue::Inherit(e) | BindingValue::Expr(e) | BindingValue::InheritFrom(e)) = value;
+                self.current_expr = e;
                 let instantiated = self.extrude(poly_ty, true);
                 fields.insert(name_text, instantiated);
                 continue;
@@ -762,6 +771,9 @@ pub struct BinConstraint {
     pub lhs: TyId,
     pub rhs: TyId,
     pub ret: TyId,
+    /// The expression that created this constraint, so resolution errors
+    /// can be attributed to the right source location.
+    pub at_expr: ExprId,
 }
 
 #[derive(Debug, Clone)]

@@ -270,6 +270,7 @@ impl CheckCtx<'_> {
                             lhs: new_lhs,
                             rhs: new_rhs,
                             ret: new_ret,
+                            at_expr: ov.constraint.at_expr,
                         },
                     });
 
@@ -438,6 +439,7 @@ impl CheckCtx<'_> {
             let overloads = std::mem::take(&mut self.deferred.overloads);
             let mut remaining_overloads = Vec::new();
             for ov in overloads {
+                self.current_expr = ov.constraint.at_expr;
                 match self
                     .try_resolve_overload(&ov)
                     .map_err(|err| self.locate_err(err))?
@@ -459,6 +461,7 @@ impl CheckCtx<'_> {
             let merges = std::mem::take(&mut self.deferred.merges);
             let mut remaining_merges = Vec::new();
             for mg in merges {
+                self.current_expr = mg.at_expr;
                 match self
                     .try_resolve_merge(&mg)
                     .map_err(|err| self.locate_err(err))?
