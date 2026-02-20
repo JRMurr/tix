@@ -30,7 +30,7 @@ use proptest::prelude::{
 };
 use smol_str::SmolStr;
 
-use crate::tests::get_inferred_root;
+use crate::tests::{check_str, get_inferred_root};
 
 type NixTextStr = String;
 
@@ -570,5 +570,80 @@ proptest! {
     fn test_optional_field_all_provided(text in arb_optional_field_all_provided()) {
         let root_ty = get_inferred_root(&text);
         prop_assert_eq!(root_ty, OutputTy::Primitive(PrimitiveTy::Int));
+    }
+}
+
+// ==============================================================================
+// Narrowing PBT
+// ==============================================================================
+//
+// Generates if-then-else expressions with type-predicate guards to verify
+// that narrowing doesn't crash on arbitrary combinations of guards and values.
+
+/// The type predicates available for narrowing, paired with their builtin names.
+const NARROWING_PREDICATES: &[&str] = &[
+    "isNull", "isString", "isInt", "isFloat", "isBool",
+];
+
+/// Generate a primitive value as Nix text, for use in narrowed branches.
+fn arb_narr_value() -> impl Strategy<Value = (PrimitiveTy, NixTextStr)> {
+    prop_oneof![
+        Just((PrimitiveTy::Null, "null".to_string())),
+        Just((PrimitiveTy::Bool, "true".to_string())),
+        any::<i32>().prop_map(|i| (PrimitiveTy::Int, i.to_string())),
+        arb_simple_float().prop_map(|f| (PrimitiveTy::Float, format!("{f:.4}"))),
+        arb_smol_str_ident().prop_map(|s| (PrimitiveTy::String, format!("''{s}''"))),
+    ]
+}
+
+/// C1: Narrowing never crashes — generate `x: if <pred> x then <val1> else <val2>`
+/// with random predicates and branch values.
+fn arb_narrowing_smoke() -> impl Strategy<Value = NixTextStr> {
+    let pred_idx = 0..NARROWING_PREDICATES.len();
+    (pred_idx, arb_narr_value(), arb_narr_value()).prop_map(
+        |(pred_idx, (_ty1, val1), (_ty2, val2))| {
+            let pred = NARROWING_PREDICATES[pred_idx];
+            format!("__narr_x: if {pred} __narr_x then {val1} else {val2}")
+        },
+    )
+}
+
+/// C2: Same-type branches — narrowing preserves the branch type. Both
+/// branches return a value of the same primitive type, so the result
+/// should be that primitive.
+fn arb_narrowing_same_type() -> impl Strategy<Value = (PrimitiveTy, NixTextStr)> {
+    let pred_idx = 0..NARROWING_PREDICATES.len();
+    (pred_idx, arb_narr_value()).prop_map(|(pred_idx, (prim, val))| {
+        let pred = NARROWING_PREDICATES[pred_idx];
+        // Both branches return the same value, so the result type is known.
+        // Parenthesize the argument to avoid `-1` being parsed as subtraction.
+        let text = format!(
+            "((__narr_x: if {pred} __narr_x then ({val}) else ({val})) ({val}))"
+        );
+        (prim, text)
+    })
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: 256, .. ProptestConfig::default()
+    })]
+
+    /// Narrowing smoke test: inference completes without panic for any
+    /// combination of type predicate and branch values.
+    #[test]
+    fn test_narrowing_no_crash(text in arb_narrowing_smoke()) {
+        // We only care that inference doesn't panic — the result may be
+        // Ok or Err (e.g. type mismatches from incompatible branch types).
+        let _ = check_str(&text);
+    }
+
+    /// Same-type branches: when both branches return the same primitive,
+    /// the inferred type should be that primitive regardless of which
+    /// predicate is used.
+    #[test]
+    fn test_narrowing_same_type_branches((prim, text) in arb_narrowing_same_type()) {
+        let root_ty = get_inferred_root(&text);
+        prop_assert_eq!(root_ty, OutputTy::Primitive(prim));
     }
 }
