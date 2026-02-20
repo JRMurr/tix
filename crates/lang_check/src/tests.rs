@@ -2841,6 +2841,113 @@ fn narrow_nested_different_pred() {
 }
 
 // ==============================================================================
+// Compound-type narrowing (isAttrs, isList, isFunction)
+// ==============================================================================
+
+/// `isAttrs x` narrows x to an attrset in the then-branch, allowing
+/// field access on a previously unconstrained variable.
+#[test]
+fn narrow_isattrs_then_field_access() {
+    let nix = r#"x: if isAttrs x then x.name else "default""#;
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(*body, arc_ty!(String), "body should be string");
+}
+
+/// `builtins.isAttrs x` — qualified form.
+#[test]
+fn narrow_builtins_isattrs() {
+    let nix = r#"x: if builtins.isAttrs x then x.name else "default""#;
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(*body, arc_ty!(String), "body should be string");
+}
+
+/// `isAttrs x` then-branch: returning x preserves the attrset constraint.
+#[test]
+fn narrow_isattrs_then_returns_attrset() {
+    let nix = r#"x: if isAttrs x then x else {}"#;
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    // Both branches produce attrsets, so the result should be an attrset.
+    assert!(
+        matches!(body, OutputTy::AttrSet(_)),
+        "expected attrset, got: {body}"
+    );
+}
+
+/// `isList x` narrows x to a list in the then-branch.
+#[test]
+fn narrow_islist_then_head() {
+    let nix = r#"x: if isList x then builtins.head x else 0"#;
+    let ty = get_inferred_root(nix);
+    let (_param, _body) = unwrap_lambda(&ty);
+    // Should not error — head requires a list, and isList narrows to one.
+}
+
+/// `builtins.isList x` — qualified form.
+#[test]
+fn narrow_builtins_islist() {
+    let nix = r#"x: if builtins.isList x then builtins.length x else 0"#;
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(*body, arc_ty!(Int), "length returns int");
+}
+
+/// `isFunction x` narrows x to a function in the then-branch, allowing
+/// it to be applied.
+#[test]
+fn narrow_isfunction_then_apply() {
+    let nix = r#"x: if isFunction x then x 42 else 0"#;
+    let ty = get_inferred_root(nix);
+    let (_param, _body) = unwrap_lambda(&ty);
+    // Should not error — x is narrowed to a function, so application succeeds.
+}
+
+/// `builtins.isFunction x` — qualified form.
+#[test]
+fn narrow_builtins_isfunction() {
+    let nix = r#"x: if builtins.isFunction x then x "hello" else "default""#;
+    let ty = get_inferred_root(nix);
+    let (_param, _body) = unwrap_lambda(&ty);
+    // Should not error.
+}
+
+/// Local alias for isAttrs should be traced through.
+#[test]
+fn narrow_isattrs_local_alias() {
+    let nix = r#"
+        let isAttrs = builtins.isAttrs;
+        in x: if isAttrs x then x.name else "default"
+    "#;
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(*body, arc_ty!(String), "body should be string");
+}
+
+/// `inherit (builtins) isList` alias.
+#[test]
+fn narrow_islist_inherit_alias() {
+    let nix = r#"
+        let inherit (builtins) isList;
+        in x: if isList x then builtins.length x else 0
+    "#;
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(*body, arc_ty!(Int), "body should be int");
+}
+
+/// Negated compound predicate: `!(isAttrs x)` — else-branch should get
+/// the attrset narrowing (since then/else are flipped).
+#[test]
+fn narrow_negated_isattrs() {
+    let nix = r#"x: if !(isAttrs x) then "not an attrset" else x.name"#;
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(*body, arc_ty!(String), "body should be string");
+}
+
+// ==============================================================================
 // Uppercase primitive aliases in annotations
 // ==============================================================================
 

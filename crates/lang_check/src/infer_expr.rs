@@ -515,6 +515,41 @@ impl CheckCtx<'_> {
                         self.table.add_upper_bound(fresh, attrset_with_field);
                         fresh
                     }
+                    crate::narrow::NarrowPredicate::IsAttrSet => {
+                        // Then-branch: x is α ∧ {..} (open empty attrset).
+                        let fresh = self.new_var();
+                        self.table.add_upper_bound(fresh, original_ty);
+                        let open_attrset = self.alloc_concrete(Ty::AttrSet(AttrSetTy {
+                            fields: BTreeMap::new(),
+                            dyn_ty: None,
+                            open: true,
+                            optional_fields: BTreeSet::new(),
+                        }));
+                        self.table.add_upper_bound(fresh, open_attrset);
+                        fresh
+                    }
+                    crate::narrow::NarrowPredicate::IsList => {
+                        // Then-branch: x is α ∧ [β].
+                        let fresh = self.new_var();
+                        self.table.add_upper_bound(fresh, original_ty);
+                        let elem_var = self.new_var();
+                        let list_ty = self.alloc_concrete(Ty::List(elem_var));
+                        self.table.add_upper_bound(fresh, list_ty);
+                        fresh
+                    }
+                    crate::narrow::NarrowPredicate::IsFunction => {
+                        // Then-branch: x is α ∧ (β → γ).
+                        let fresh = self.new_var();
+                        self.table.add_upper_bound(fresh, original_ty);
+                        let param_var = self.new_var();
+                        let body_var = self.new_var();
+                        let lambda_ty = self.alloc_concrete(Ty::Lambda {
+                            param: param_var,
+                            body: body_var,
+                        });
+                        self.table.add_upper_bound(fresh, lambda_ty);
+                        fresh
+                    }
                 };
 
                 // Save the previous override (if any) for restoration.

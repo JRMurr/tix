@@ -32,6 +32,12 @@ pub(crate) enum NarrowPredicate {
     IsNotType(PrimitiveTy),
     /// The variable is known to have a field with this name (from `x ? field`).
     HasField(SmolStr),
+    /// The variable is known to be an attrset (from `isAttrs x`).
+    IsAttrSet,
+    /// The variable is known to be a list (from `isList x`).
+    IsList,
+    /// The variable is known to be a function (from `isFunction x`).
+    IsFunction,
 }
 
 /// A narrowing derived from a condition expression — binds a name to a
@@ -146,6 +152,32 @@ impl CheckCtx<'_> {
                                 name,
                                 predicate: NarrowPredicate::IsNotType(prim),
                             }],
+                        });
+                    }
+                }
+
+                // Compound-type predicates: isAttrs, isList, isFunction.
+                // These narrow to compound types ({..}, [α], α → β) which
+                // don't have PrimitiveTy representations. Only the then-branch
+                // gets narrowing — negating compound types (¬{..}) is not yet
+                // supported in the solver.
+                const COMPOUND_PREDICATES: &[(&str, NarrowPredicate)] = &[
+                    ("isAttrs", NarrowPredicate::IsAttrSet),
+                    ("isList", NarrowPredicate::IsList),
+                    ("isFunction", NarrowPredicate::IsFunction),
+                ];
+
+                for &(builtin_name, ref pred) in COMPOUND_PREDICATES {
+                    if self.is_builtin_call(*fun, builtin_name) {
+                        let name = self.expr_as_local_name(*arg)?;
+                        return Some(NarrowInfo {
+                            then_branch: vec![NarrowBinding {
+                                name,
+                                predicate: pred.clone(),
+                            }],
+                            // No useful else-branch narrowing — negation of
+                            // compound types is not yet implemented.
+                            else_branch: vec![],
                         });
                     }
                 }
