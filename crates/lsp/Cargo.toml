@@ -26,6 +26,7 @@ globset = { workspace = true }
 
 [dev-dependencies]
 indoc = "2.0.5"
+proptest = { workspace = true }
 
 [[bin]]
 name = "tix-lsp"

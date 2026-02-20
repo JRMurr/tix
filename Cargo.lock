@@ -1754,6 +1754,7 @@ dependencies = [
  "lang_ty",
  "log",
  "parking_lot",
+ "proptest",
  "rnix",
  "rowan",
  "serde",

@@ -17,6 +17,8 @@ mod semantic_tokens;
 mod server;
 mod state;
 #[cfg(test)]
+mod pbt;
+#[cfg(test)]
 mod test_util;
 mod ty_nav;
 
