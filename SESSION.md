@@ -36,15 +36,18 @@
   `"builtins"`. This is correct but potentially expensive if `builtins` is
   referenced many times. Could cache the attrset structure and extrude it.
 
-- `test/strings.nix` still has 4 errors (isString narrowing is now implemented
-  but didn't resolve them — the root causes are elsewhere):
-  - Lines 2031/2066 (`getName`/`getVersion`): `if isString x then parse x else x.pname or (parse x.name)`.
-    The then-branch narrows correctly, but the else-branch errors because `parse x.name`
-    returns a derivation-like attrset that flows where `string` is expected via the `or` operator.
-  - Line 2108 (`nameFromURL`): `head (splitString sep filename)` inferred as
-    `string -> string` instead of `string`. Root cause unclear — may be SCC
-    grouping or overload resolution interaction in the large rec block.
-  - Lines 5-3168: cascading error from the above.
+- `test/strings.nix` has 1 remaining error + 1 annotation warning (down from 4):
+  - Lines 5-3168 (root expr): `lib.pipe` in `sanitizeDerivationName` (line 2904)
+    creates a heterogeneous function pipeline where intermediate types change
+    from `string` → `[a]` (via `split`) → `string` (via `concatMapStrings`).
+    Since `foldl'` requires a uniform accumulator type `b`, the type checker
+    produces `[...] vs string`. This is a fundamental limitation — `pipe` with
+    heterogeneous function types can't be typed in SimpleSub.
+  - `nameFromURL :: String -> String` annotation (line 2084): wrong arity
+    (1 arg, function takes 2). Detected and skipped with a warning.
+  - Previously fixed: `getName`/`getVersion` errors resolved by locally-aliased
+    builtin narrowing. `nameFromURL` body error resolved by annotation arity
+    check preventing type table corruption.
 
 ### Missing Features
 

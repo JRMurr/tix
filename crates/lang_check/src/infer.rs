@@ -38,6 +38,8 @@ impl CheckCtx<'_> {
             if !matches!(
                 diag.kind,
                 crate::diagnostic::TixDiagnosticKind::UnresolvedName { .. }
+                    | crate::diagnostic::TixDiagnosticKind::AnnotationArityMismatch { .. }
+
             ) {
                 return Err(diag);
             }

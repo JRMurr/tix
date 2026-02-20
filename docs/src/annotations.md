@@ -66,6 +66,7 @@ The same syntax works in doc comments and `.tix` stub files.
 | Syntax | Meaning |
 |--------|---------|
 | `int`, `string`, `bool`, `float`, `path`, `null` | Primitives |
+| `Int`, `String`, `Bool`, `Float`, `Path`, `Null` | Uppercase aliases (same as lowercase) |
 | `a`, `b` (lowercase) | Generic type variables |
 | `Foo` (uppercase) | Type alias reference |
 | `[a]` | List of `a` |
@@ -82,3 +83,15 @@ Precedence (low to high): `->` then `|` then `&` then atoms. Use parens to overr
 (int | string) -> bool        # function from union to bool
 (int -> int) & (string -> string)  # intersection of two function types
 ```
+
+### Uppercase primitives
+
+Nixpkgs doc comments conventionally use uppercase names like `String`, `Bool`, and `Int`. Tix recognizes these as aliases for the lowercase primitives, so both `string` and `String` work in annotations.
+
+## Annotation safety
+
+Tix applies annotations as bidirectional constraints — the inferred type must be compatible with the annotation and vice versa. Two situations cause annotations to be skipped with a warning instead of producing false errors:
+
+**Arity mismatch.** If the annotation has fewer arrows than the function's visible lambda parameters (e.g. `foo :: string -> string` on a two-argument function `x: y: ...`), the annotation is skipped. An annotation with *more* arrows than visible lambdas is fine — the body may return a function (eta-reduction).
+
+**Union types.** Annotations containing union types (e.g. `f :: string -> (string | [string]) -> string`) are currently skipped. Verifying union-typed parameters requires type narrowing for guards like `builtins.isList`, which is not yet fully implemented. The function is still type-checked based on its body alone.

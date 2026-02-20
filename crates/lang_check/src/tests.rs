@@ -2839,3 +2839,175 @@ fn narrow_nested_different_pred() {
         _ => panic!("expected int or union containing int, got: {body}"),
     }
 }
+
+// ==============================================================================
+// Uppercase primitive aliases in annotations
+// ==============================================================================
+
+// Nixpkgs doc comments use uppercase `String`, `Bool`, etc. These should be
+// recognized as the corresponding lowercase primitives, not as unresolved
+// type alias references (which would become fresh variables).
+test_case!(
+    annotation_uppercase_string,
+    "
+        let
+            /** type: f :: String -> String */
+            f = x: x;
+        in
+        f \"hello\"
+    ",
+    String
+);
+
+test_case!(
+    annotation_uppercase_int,
+    "
+        let
+            /** type: f :: Int -> Bool */
+            f = x: x == 0;
+        in
+        f 42
+    ",
+    Bool
+);
+
+// Mixed uppercase and lowercase primitives in the same annotation.
+test_case!(
+    annotation_mixed_case_primitives,
+    "
+        let
+            /** type: f :: String -> int */
+            f = x: builtins.stringLength x;
+        in
+        f \"hello\"
+    ",
+    Int
+);
+
+// ==============================================================================
+// Annotation arity mismatch detection
+// ==============================================================================
+
+/// When a doc comment annotation has fewer arrows than the function's visible
+/// lambda count, we skip the annotation and emit a warning rather than
+/// corrupting the type table. Regression test for nameFromURL in strings.nix.
+#[test]
+fn annotation_arity_mismatch_skipped_with_warning() {
+    let nix_src = indoc! { "
+        let
+            /** type: f :: string -> string */
+            f = x: y: x + y;
+        in
+        f \"hello\" \" world\"
+    " };
+    let (db, file) = TestDatabase::single_file(nix_src).unwrap();
+    let mod_ = module(&db, file);
+    let result = crate::check_file_collecting(
+        &db,
+        file,
+        &TypeAliasRegistry::default(),
+        HashMap::new(),
+        HashMap::new(),
+    );
+
+    // Inference should succeed (the wrong-arity annotation is skipped).
+    let inference = result.inference.expect("inference should succeed despite arity mismatch");
+
+    // Root should be string (string + string = string).
+    let root_ty = inference
+        .expr_ty_map
+        .get(mod_.entry_expr)
+        .expect("root should have a type");
+    assert_eq!(
+        *root_ty,
+        arc_ty!(String),
+        "root should be string, got: {root_ty}"
+    );
+
+    // Should have a warning diagnostic about the arity mismatch.
+    assert!(
+        result.diagnostics.iter().any(|d| matches!(
+            &d.kind,
+            TixDiagnosticKind::AnnotationArityMismatch { name, annotation_arity: 1, expression_arity: 2 }
+            if name == "f"
+        )),
+        "expected AnnotationArityMismatch warning, diagnostics: {:?}",
+        result.diagnostics.iter().map(|d| &d.kind).collect::<Vec<_>>()
+    );
+}
+
+// An annotation with MORE arrows than visible lambdas is allowed (eta-reduction).
+// E.g. `escape :: [string] -> string -> string` on `escape = list: replaceStrings ...`
+// where the body returns a function.
+test_case!(
+    annotation_more_arrows_than_lambdas_ok,
+    "
+        let
+            /** type: f :: int -> int -> int */
+            f = x: builtins.add x;
+        in
+        f 1 2
+    ",
+    Int
+);
+
+// ==============================================================================
+// Union annotation skip
+// ==============================================================================
+
+/// Annotations with union types in parameters are skipped because bidirectional
+/// constraints would push all union members as lower bounds into the inferred
+/// parameter, causing false errors in branch-specific code. The function should
+/// still type-check based on its body.
+#[test]
+fn annotation_with_union_skipped() {
+    let nix_src = indoc! { r#"
+        let
+            /** type: f :: string -> (string | [string]) -> string */
+            f = name: value:
+                if builtins.isList value then "list"
+                else value;
+        in
+        f "x" "hello"
+    "# };
+    let (db, file) = TestDatabase::single_file(nix_src).unwrap();
+    let mod_ = module(&db, file);
+    let result = crate::check_file_collecting(
+        &db,
+        file,
+        &TypeAliasRegistry::default(),
+        HashMap::new(),
+        HashMap::new(),
+    );
+
+    // Inference should succeed — the union annotation is skipped.
+    let inference = result.inference.expect("inference should succeed with union annotation");
+
+    let root_ty = inference
+        .expr_ty_map
+        .get(mod_.entry_expr)
+        .expect("root should have a type");
+    // The body returns "list" (string) or value; with the call f "x" "hello",
+    // the result should be string.
+    assert_eq!(
+        *root_ty,
+        arc_ty!(String),
+        "root should be string, got: {root_ty}"
+    );
+
+    // No type errors should be present (warnings are ok).
+    let errors: Vec<_> = result
+        .diagnostics
+        .iter()
+        .filter(|d| !matches!(
+            d.kind,
+            TixDiagnosticKind::UnresolvedName { .. }
+                | TixDiagnosticKind::AnnotationArityMismatch { .. }
+        ))
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "no type errors expected, got: {:?}",
+        errors.iter().map(|d| &d.kind).collect::<Vec<_>>()
+    );
+}

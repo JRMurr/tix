@@ -48,6 +48,11 @@ pub enum TixDiagnosticKind {
     UnresolvedName {
         name: SmolStr,
     },
+    AnnotationArityMismatch {
+        name: SmolStr,
+        annotation_arity: usize,
+        expression_arity: usize,
+    },
 }
 
 impl fmt::Display for TixDiagnosticKind {
@@ -88,6 +93,16 @@ impl fmt::Display for TixDiagnosticKind {
             }
             TixDiagnosticKind::UnresolvedName { name } => {
                 write!(f, "unresolved name `{name}`")
+            }
+            TixDiagnosticKind::AnnotationArityMismatch {
+                name,
+                annotation_arity,
+                expression_arity,
+            } => {
+                write!(
+                    f,
+                    "annotation for `{name}` has arity {annotation_arity} but expression has {expression_arity} parameters; skipping"
+                )
             }
         }
     }
@@ -277,6 +292,15 @@ fn error_to_diagnostic(
 fn warning_to_diagnostic(warning: &LocatedWarning) -> TixDiagnostic {
     let kind = match &warning.payload {
         Warning::UnresolvedName(name) => TixDiagnosticKind::UnresolvedName { name: name.clone() },
+        Warning::AnnotationArityMismatch {
+            name,
+            annotation_arity,
+            expression_arity,
+        } => TixDiagnosticKind::AnnotationArityMismatch {
+            name: name.clone(),
+            annotation_arity: *annotation_arity,
+            expression_arity: *expression_arity,
+        },
     };
 
     TixDiagnostic {

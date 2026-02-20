@@ -21,7 +21,7 @@ use derive_more::Debug;
 use diagnostic::TixDiagnostic;
 use infer_expr::{PendingMerge, PendingOverload};
 use la_arena::ArenaMap;
-use lang_ast::{AstDb, ExprId, Module, NameId, NameResolution, NixFile, OverloadBinOp};
+use lang_ast::{AstDb, Expr, ExprId, Module, NameId, NameResolution, NixFile, OverloadBinOp};
 use lang_ty::{OutputTy, PrimitiveTy, Ty};
 use std::collections::{HashMap, HashSet};
 use storage::TypeStorage;
@@ -157,12 +157,28 @@ pub type LocatedWarning = Located<Warning>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Warning {
     UnresolvedName(smol_str::SmolStr),
+    /// Doc comment annotation has a different number of arrows than the
+    /// function's visible lambda parameters. The annotation is likely wrong
+    /// (e.g. `foo :: string -> string` on a two-argument function).
+    AnnotationArityMismatch {
+        name: smol_str::SmolStr,
+        annotation_arity: usize,
+        expression_arity: usize,
+    },
 }
 
 impl std::fmt::Display for Warning {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Warning::UnresolvedName(name) => write!(f, "Unresolved name: {name}"),
+            Warning::AnnotationArityMismatch {
+                name,
+                annotation_arity,
+                expression_arity,
+            } => write!(
+                f,
+                "annotation for `{name}` has arity {annotation_arity} but expression has {expression_arity} parameters; skipping"
+            ),
         }
     }
 }
@@ -296,6 +312,33 @@ pub struct CheckCtx<'db> {
     narrow_overrides: HashMap<NameId, TyId>,
 }
 
+/// Count the function arity (number of arrows along the spine) of a ParsedTy.
+/// For example, `a -> b -> c` has arity 2, and `int` has arity 0.
+fn parsed_ty_arity(ty: &ParsedTy) -> usize {
+    match ty {
+        ParsedTy::Lambda { body, .. } => 1 + parsed_ty_arity(&body.0),
+        _ => 0,
+    }
+}
+
+/// Nixpkgs doc comments conventionally use uppercase primitive names
+/// (`String`, `Bool`, `Int`, etc.) while Tix's grammar only recognizes
+/// lowercase. Map the common uppercase variants to their primitive type
+/// so annotations like `foo :: String -> Bool` work without requiring
+/// explicit type aliases in stubs.
+fn uppercase_primitive_alias(name: &str) -> Option<PrimitiveTy> {
+    match name {
+        "String" => Some(PrimitiveTy::String),
+        "Bool" => Some(PrimitiveTy::Bool),
+        "Int" => Some(PrimitiveTy::Int),
+        "Float" => Some(PrimitiveTy::Float),
+        "Path" => Some(PrimitiveTy::Path),
+        "Null" => Some(PrimitiveTy::Null),
+        "Number" => Some(PrimitiveTy::Number),
+        _ => None,
+    }
+}
+
 impl<'db> CheckCtx<'db> {
     pub fn new(
         module: &'db Module,
@@ -343,6 +386,15 @@ impl<'db> CheckCtx<'db> {
         let id = self.alloc_concrete(Ty::Primitive(prim));
         self.prim_cache.insert(prim, id);
         id
+    }
+
+    /// Count the number of visible nested lambda parameters in an expression.
+    /// For `x: y: body`, this returns 2. For a non-lambda, returns 0.
+    fn expr_lambda_arity(&self, expr: ExprId) -> usize {
+        match &self.module[expr] {
+            Expr::Lambda { body, .. } => 1 + self.expr_lambda_arity(*body),
+            _ => 0,
+        }
     }
 
     /// Get the pre-allocated TyId for a name (used during inference of the name's
@@ -477,6 +529,47 @@ impl<'db> CheckCtx<'db> {
             });
 
         if let Some(known_ty) = type_annotation {
+            // Guard: skip annotations whose arity is LESS than the expression's
+            // visible lambda depth. This means the doc comment claims fewer
+            // arguments than the function actually has (e.g. `foo :: a -> a` on
+            // a two-argument function `x: y: ...`). Applying such an annotation
+            // would partially constrain the type table before failing, corrupting
+            // downstream inference. Emit a warning instead.
+            //
+            // An annotation with MORE arrows than visible lambdas is fine — the
+            // function body may return a function (eta-reduction), e.g.
+            // `escape :: [string] -> string -> string` on `escape = list: ...`
+            // where the body returns `string -> string`.
+            let annot_arity = parsed_ty_arity(&known_ty);
+            let expr_arity = self
+                .binding_exprs
+                .get(&name_id)
+                .map(|&e| self.expr_lambda_arity(e))
+                .unwrap_or(0);
+            if annot_arity < expr_arity && expr_arity > 0 {
+                self.emit_warning(Warning::AnnotationArityMismatch {
+                    name: self.module[name_id].text.clone(),
+                    annotation_arity: annot_arity,
+                    expression_arity: expr_arity,
+                });
+                return Ok(());
+            }
+
+            // Annotations that contain union types in function parameters can't
+            // be verified without full narrowing support (e.g. `isAttrs`/`isList`
+            // branching). Applying bidirectional constraints on such annotations
+            // pushes all union members as lower bounds into the inferred param,
+            // causing false type errors. Skip these with a warning.
+            if known_ty.contains_union() {
+                // Still intern and record provenance for display purposes,
+                // but don't apply constraints.
+                let annotation_ty = self.intern_fresh_ty(known_ty);
+                if let Some(name) = self.alias_provenance.get(&annotation_ty).cloned() {
+                    self.alias_provenance.insert(ty, name);
+                }
+                return Ok(());
+            }
+
             let annotation_ty = self.intern_fresh_ty(known_ty);
             self.constrain(ty, annotation_ty)
                 .map_err(|err| self.locate_err(err))?;
@@ -515,6 +608,11 @@ impl<'db> CheckCtx<'db> {
                             self.alias_provenance
                                 .insert(ty_id, smol_str::SmolStr::from(ref_name.as_str()));
                             ty_id
+                        } else if let Some(prim) = uppercase_primitive_alias(ref_name) {
+                            // Nixpkgs doc comments conventionally use uppercase
+                            // primitive names (String, Bool, Int, etc.). Map them
+                            // to the corresponding lowercase primitive type.
+                            self.alloc_prim(prim)
                         } else {
                             // Unknown reference — degrade to fresh variable.
                             self.new_var()
