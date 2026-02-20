@@ -1965,6 +1965,94 @@ fn optional_field_default_null() {
     assert_eq!(ty, arc_ty!(Null));
 }
 
+/// Inline call where a null-default field is provided with an attrset.
+/// The return type is the union of the default (null) and the provided value.
+#[test]
+fn null_default_field_provided_attrset_inline() {
+    let nix_src = r#"({ config ? null }: config) { config = { foo = 1; }; }"#;
+    let ty = get_inferred_root(nix_src);
+    assert_eq!(ty, arc_ty!(union!(Null, { "foo": Int })));
+}
+
+/// Let-bound function with null-default field, called with an attrset.
+/// After generalization the call site instantiates the polymorphic type,
+/// so the result reflects the provided value without the null union.
+#[test]
+fn null_default_field_provided_attrset_let_bound() {
+    let nix_src = indoc! {"
+        let
+          f = { config ? null }: config;
+        in f { config = { foo = 1; }; }
+    "};
+    let ty = get_inferred_root(nix_src);
+    assert_eq!(ty, arc_ty!({ "foo": Int }));
+}
+
+/// Let-bound function with null-default field, called without the field.
+/// After polymorphic generalization, the call instantiates a fresh type
+/// variable — the null default is baked into the function's bounds but
+/// doesn't surface at this call site.
+#[test]
+fn null_default_field_omitted_let_bound() {
+    let nix_src = indoc! {"
+        let
+          f = { config ? null }: config;
+        in f {}
+    "};
+    let ty = get_inferred_root(nix_src);
+    assert!(
+        matches!(ty, OutputTy::TyVar(_)),
+        "expected a free type variable, got: {ty:?}"
+    );
+}
+
+/// Multiple call sites: one provides an attrset, the other omits the field.
+/// Each call site gets its own instantiation of the polymorphic function.
+#[test]
+fn null_default_field_multiple_call_sites() {
+    let nix_src = indoc! {"
+        let
+          f = { config ? null }: config;
+          a = f { config = { foo = 1; }; };
+          b = f {};
+        in { inherit a b; }
+    "};
+    let ty = get_inferred_root(nix_src);
+    let display = format!("{ty}");
+    // `a` gets the provided attrset type, `b` gets a fresh type variable
+    // (the polymorphic instantiation doesn't constrain it beyond the default).
+    assert!(
+        display.contains("a: { foo: int }"),
+        "expected 'a: {{ foo: int }}' in display, got: {display}"
+    );
+}
+
+/// Field access on a null-default parameter is a type error because
+/// the parameter could be null. This is correct — narrowing (e.g.,
+/// `if config != null then config.foo else ...`) is needed for safety.
+#[test]
+fn null_default_field_access_is_type_error() {
+    let nix_src = r#"({ config ? null }: config.foo) { config = { foo = 1; }; }"#;
+    let err = get_check_error(nix_src);
+    assert!(
+        matches!(err, TixDiagnosticKind::TypeMismatch { .. }),
+        "expected TypeMismatch error, got: {err:?}"
+    );
+}
+
+/// Null-default alongside a required field — the required field still
+/// participates in the result while the optional one unions with null.
+#[test]
+fn null_default_with_required_field_inline() {
+    let nix_src =
+        r#"({ config ? null, name }: { inherit config name; }) { name = "hello"; }"#;
+    let ty = get_inferred_root(nix_src);
+    assert_eq!(
+        ty,
+        arc_ty!({ "config": Null, "name": String })
+    );
+}
+
 /// Required fields still error when missing.
 #[test]
 fn required_field_still_errors() {

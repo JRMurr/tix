@@ -163,6 +163,17 @@
   The non-let form (`f: x: if isNull x then 0 else f x`) preserves it because the
   narrowed var flows directly into `f`'s param without generalization/extrusion.
 
+### Null-Default Field: Polymorphic Return Type Loses Default
+
+- `let f = { config ? null }: config; in f {}` returns a free type variable
+  instead of `null`. After generalization, the null lower bound from the default
+  doesn't surface at call sites that omit the field. Contrast with the inline
+  (monomorphic) call `({ config ? null }: config) {}` which correctly returns
+  `null`. Similarly, the canonical type of `f` displays as `{ config?: a } -> null`
+  rather than `{ config?: a } -> (a | null)` — the return-position expansion
+  of the variable shows only the lower bound (null) without the type variable.
+  Likely an interaction between optional-field default handling and extrusion.
+
 ### Future Enhancements
 
 - Full intersection-type-based operator overloading (replace pragmatic deferred
