@@ -3365,6 +3365,152 @@ fn narrow_select_chain_non_predicate_no_narrowing() {
 }
 
 // ==============================================================================
+// Type narrowing — conditional library functions
+// ==============================================================================
+//
+// Functions like lib.optionalString, lib.optionalAttrs, lib.optional, and
+// lib.mkIf take a boolean guard as their first argument and only evaluate
+// the second argument when the guard is true. The checker detects these by
+// name and applies then-branch narrowing to the body argument.
+
+/// `lib.optionalString (x != null) x.name` — the body (x.name) should be
+/// inferred under narrowing from the null guard. Without narrowing, x.name
+/// would produce a false error because x might be null.
+/// Uses stubs so the function signature constrains the return type to string.
+#[test]
+fn narrow_optional_string_null_guard() {
+    let registry =
+        registry_from_tix("module lib { val optionalString :: bool -> string -> string; }");
+    let nix = indoc! {r#"
+        let
+            /** type: lib :: Lib */
+            lib = { optionalString = cond: str: if cond then str else ""; };
+        in x: lib.optionalString (x != null) x.name
+    "#};
+    let ty = get_inferred_root_with_aliases(nix, &registry);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(
+        *body,
+        arc_ty!(String),
+        "optionalString with null guard should return string"
+    );
+}
+
+/// `lib.optionalAttrs (x != null) { inherit (x) name; }` — the body attrset
+/// is inferred under narrowing. The inherit from x succeeds because x is
+/// narrowed to non-null.
+#[test]
+fn narrow_optional_attrs_null_guard() {
+    let nix = indoc! {r#"
+        let lib = { optionalAttrs = cond: attrs: if cond then attrs else {}; };
+        in x: lib.optionalAttrs (x != null) { y = x.name; }
+    "#};
+    // Should not error — x.name in the body is under null-guard narrowing.
+    let ty = get_inferred_root(nix);
+    let (_param, _body) = unwrap_lambda(&ty);
+}
+
+/// `lib.optional (x != null) x.field` — body is narrowed, returns a list.
+#[test]
+fn narrow_optional_null_guard() {
+    let nix = indoc! {r#"
+        let lib = { optional = cond: val: if cond then [val] else []; };
+        in x: lib.optional (x != null) x.field
+    "#};
+    // Should not error — x.field is under null-guard narrowing.
+    let ty = get_inferred_root(nix);
+    let (_param, _body) = unwrap_lambda(&ty);
+}
+
+/// `lib.mkIf (x != null) x.name` — mkIf is a conditional function too.
+#[test]
+fn narrow_mkif_null_guard() {
+    let nix = indoc! {r#"
+        let lib = { mkIf = cond: val: if cond then { value = val; } else {}; };
+        in x: lib.mkIf (x != null) x.name
+    "#};
+    // Should not error — x.name is under null-guard narrowing.
+    let ty = get_inferred_root(nix);
+    let (_param, _body) = unwrap_lambda(&ty);
+}
+
+/// `lib.optionalString true "hello"` — no narrowing condition (true is not
+/// a recognized guard pattern), but the call should still work normally.
+#[test]
+fn narrow_optional_string_no_guard() {
+    let nix = indoc! {r#"
+        let lib = { optionalString = cond: str: if cond then str else ""; };
+        in lib.optionalString true "hello"
+    "#};
+    let ty = get_inferred_root(nix);
+    assert_eq!(
+        ty,
+        arc_ty!(String),
+        "optionalString true \"hello\" should be string"
+    );
+}
+
+/// `lib.strings.optionalString (x != null) x.name` — nested module path
+/// should also be detected (leaf name is still "optionalString").
+/// Uses stubs for the function signature.
+#[test]
+fn narrow_optional_string_nested_select() {
+    let registry = registry_from_tix(indoc! {"
+        module lib {
+            module strings {
+                val optionalString :: bool -> string -> string;
+            }
+        }
+    "});
+    let nix = indoc! {r#"
+        let
+            /** type: lib :: Lib */
+            lib = { strings = { optionalString = cond: str: if cond then str else ""; }; };
+        in x: lib.strings.optionalString (x != null) x.name
+    "#};
+    let ty = get_inferred_root_with_aliases(nix, &registry);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(
+        *body,
+        arc_ty!(String),
+        "lib.strings.optionalString with null guard should return string"
+    );
+}
+
+/// Bare `optionalString` reference (from `with lib;` or local binding)
+/// should also be detected as a conditional function.
+/// Uses a global val stub so the bare name resolves with the right type.
+#[test]
+fn narrow_optional_string_bare_reference() {
+    let registry = registry_from_tix("val optionalString :: bool -> string -> string;");
+    let nix = "x: optionalString (x != null) x.name";
+    let ty = get_inferred_root_with_aliases(nix, &registry);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(
+        *body,
+        arc_ty!(String),
+        "bare optionalString with null guard should return string"
+    );
+}
+
+/// `lib.optionalString (isString x) (x + " suffix")` — isString guard
+/// narrows x to string, so string concatenation succeeds.
+#[test]
+fn narrow_optional_string_isstring_guard() {
+    let nix = indoc! {r#"
+        let lib = { optionalString = cond: str: if cond then str else ""; };
+        in x: lib.optionalString (builtins.isString x) (x + " suffix")
+    "#};
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(
+        *body,
+        arc_ty!(String),
+        "optionalString with isString guard should return string"
+    );
+}
+
+// ==============================================================================
 // Intersection-of-lambda annotation handling
 // ==============================================================================
 

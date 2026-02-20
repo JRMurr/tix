@@ -192,6 +192,9 @@ module lib {
   val escapeShellArg :: string -> string;
   val concatMapStringsSep :: string -> (a -> string) -> [a] -> string;
   val findFirst :: (a -> bool) -> a -> [a] -> a;
+  val optionalString :: bool -> string -> string;
+  val optionalAttrs :: bool -> { ... } -> { ... };
+  val optional :: bool -> a -> [a];
 
   # Fixed-point
   val fix :: (a -> a) -> a;

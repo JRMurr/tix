@@ -101,6 +101,26 @@ dispatch = x:
 - `!cond` (flips the narrowing)
 - `assert cond; body` (narrows in the body)
 
+### Conditional library functions
+
+Several nixpkgs `lib` functions take a boolean guard as their first argument and only evaluate the second argument when the guard is true. Tix recognizes these by name and applies then-branch narrowing to the guarded argument:
+
+```nix
+{ x }:
+let
+  # x.name is safe — tix narrows x to non-null in the second argument
+  name = lib.optionalString (x != null) x.name;
+in name
+```
+
+Recognized functions:
+- `lib.optionalString` / `lib.strings.optionalString`
+- `lib.optionalAttrs` / `lib.attrsets.optionalAttrs`
+- `lib.optional` / `lib.lists.optional`
+- `lib.mkIf`
+
+These work with any narrowing guard — null checks, `isString`, `? field`, etc. The detection is name-based (the leaf segment of the attribute path), so `lib.strings.optionalString`, `lib.optionalString`, and a bare `optionalString` from `with lib;` are all recognized.
+
 ### Negation normalization
 
 Negation types are normalized during canonicalization using standard Boolean algebra rules:

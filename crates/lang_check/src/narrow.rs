@@ -60,7 +60,72 @@ pub(crate) struct NarrowInfo {
     pub else_branch: Vec<NarrowBinding>,
 }
 
+/// Known library functions where the first argument is a boolean guard
+/// and the second argument is only evaluated when the guard is true.
+/// For type-narrowing purposes, the second argument is inferred as if
+/// it were the then-branch of `if guard then arg else <default>`.
+//
+// TODO(approach-B): Replace this hardcoded list with an `@inline` annotation
+// in .tix stubs. The stub would provide the function body, and the checker
+// would inline it to get a real if-then-else that the existing narrowing
+// handles. Key files for that:
+//   - comment_parser/src/tix_decl.pest  (add @inline + body grammar)
+//   - comment_parser/src/tix_collect.rs (parse annotation + body)
+//   - lang_check/src/aliases.rs         (store inline bodies in registry)
+//   - detect_conditional_fn becomes: lookup inline body → check if it's an
+//     if-then-else on the first param → extract narrowing from that
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConditionalFn {
+    /// lib.optionalString, lib.strings.optionalString
+    OptionalString,
+    /// lib.optionalAttrs, lib.attrsets.optionalAttrs
+    OptionalAttrs,
+    /// lib.optional, lib.lists.optional
+    Optional,
+    /// lib.mkIf
+    MkIf,
+}
+
+/// Leaf names that identify conditional library functions.
+const CONDITIONAL_FN_NAMES: &[(&str, ConditionalFn)] = &[
+    ("optionalString", ConditionalFn::OptionalString),
+    ("optionalAttrs", ConditionalFn::OptionalAttrs),
+    ("optional", ConditionalFn::Optional),
+    ("mkIf", ConditionalFn::MkIf),
+];
+
 impl CheckCtx<'_> {
+    /// Check whether an expression refers to a known conditional library function
+    /// (e.g. `lib.optionalString`, `optionalString`, `lib.strings.optionalString`).
+    ///
+    /// Detection uses the same leaf-name-of-Select approach as
+    /// `try_select_chain_predicate`: we match on the last segment of a Select
+    /// chain, or on a bare Reference name.
+    pub(crate) fn detect_conditional_fn(&self, expr: ExprId) -> Option<ConditionalFn> {
+        let leaf_name: &str = match &self.module[expr] {
+            // `lib.optionalString`, `lib.strings.optionalString`, etc.
+            Expr::Select {
+                attrpath,
+                default_expr: None,
+                ..
+            } => {
+                let leaf_expr = attrpath.last()?;
+                match &self.module[*leaf_expr] {
+                    Expr::Literal(Literal::String(name)) => name.as_str(),
+                    _ => return None,
+                }
+            }
+            // Bare reference: `optionalString` (from `with lib;` or local alias)
+            Expr::Reference(name) => name.as_str(),
+            _ => return None,
+        };
+
+        CONDITIONAL_FN_NAMES
+            .iter()
+            .find(|(name, _)| *name == leaf_name)
+            .map(|(_, cf)| *cf)
+    }
+
     /// Analyze a condition expression to extract type narrowing information.
     ///
     /// Returns a default (empty) `NarrowInfo` if the condition doesn't match

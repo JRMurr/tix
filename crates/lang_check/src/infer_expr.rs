@@ -62,8 +62,21 @@ impl CheckCtx<'_> {
                     return Ok(self.intern_output_ty(&import_ty));
                 }
 
+                // ── Conditional library function narrowing ────────────────
+                //
+                // Detect `Apply(Apply(conditional_fn, cond), body)` where
+                // conditional_fn is a known guard-like function (optionalString,
+                // optionalAttrs, optional, mkIf). The second argument (body)
+                // is only evaluated when the guard is true, so we infer it
+                // under then-branch narrowing from the condition.
+                let narrow_info = self.detect_conditional_apply_narrowing(fun);
+
                 let fun_ty = self.infer_expr(fun)?;
-                let arg_ty = self.infer_expr(arg)?;
+                let arg_ty = if let Some(ref info) = narrow_info {
+                    self.infer_with_narrowing(arg, info, true)?
+                } else {
+                    self.infer_expr(arg)?
+                };
                 let ret_ty = self.new_var();
 
                 // fun_ty <: (arg_ty -> ret_ty)
@@ -438,6 +451,35 @@ impl CheckCtx<'_> {
                     .map_err(|err| self.locate_err(err)),
             },
         }
+    }
+
+    /// Check if `fun_expr` is `Apply(conditional_fn, cond)` where
+    /// `conditional_fn` is a known conditional library function. If so,
+    /// analyze `cond` for narrowing and return the NarrowInfo to apply
+    /// to the body argument.
+    fn detect_conditional_apply_narrowing(
+        &self,
+        fun_expr: ExprId,
+    ) -> Option<crate::narrow::NarrowInfo> {
+        let Expr::Apply {
+            fun: inner_fn,
+            arg: cond_expr,
+        } = &self.module[fun_expr]
+        else {
+            return None;
+        };
+
+        // Is the inner function a known conditional function?
+        self.detect_conditional_fn(*inner_fn)?;
+
+        // Extract narrowing from the condition argument.
+        let info = self.analyze_condition(*cond_expr);
+        if info.then_branch.is_empty() {
+            // The condition didn't produce any narrowing — no point
+            // wrapping the body inference.
+            return None;
+        }
+        Some(info)
     }
 
     /// Create a fresh type variable for narrowing, linked to the original
