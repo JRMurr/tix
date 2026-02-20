@@ -421,6 +421,20 @@ impl<'db> CheckCtx<'db> {
         id
     }
 
+    /// Reverse of `ty_for_expr`: given a TyId, return the ExprId it was
+    /// pre-allocated for, or None if the TyId is outside the expression range
+    /// (i.e. it's a name slot or a dynamically created type).
+    fn expr_for_ty(&self, ty: TyId) -> Option<ExprId> {
+        let raw = ty.0;
+        let names_len = self.module.names().len() as u32;
+        let exprs_len = self.module.exprs().len() as u32;
+        if raw >= names_len && raw < names_len + exprs_len {
+            Some(ExprId::from_raw((raw - names_len).into()))
+        } else {
+            None
+        }
+    }
+
     // ==========================================================================
     // Type annotation interning (doc comment → internal types)
     // ==========================================================================

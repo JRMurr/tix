@@ -53,6 +53,13 @@ impl CheckCtx<'_> {
         match (&sub_entry, &sup_entry) {
             // sub is a variable — record sup as upper bound, propagate to existing lower bounds.
             (TypeEntry::Variable(_), _) => {
+                // If this variable was pre-allocated for an expression, update
+                // current_expr so that any mismatch discovered during propagation
+                // is attributed to a specific sub-expression rather than a distant
+                // ancestor (e.g. the root lambda).
+                if let Some(expr) = self.expr_for_ty(sub) {
+                    self.current_expr = expr;
+                }
                 self.table.add_upper_bound(sub, sup);
                 let lower_bounds = self.table.get_var(sub).unwrap().lower_bounds.clone();
                 for lb in lower_bounds {
@@ -62,6 +69,9 @@ impl CheckCtx<'_> {
             }
             // sup is a variable — record sub as lower bound, propagate to existing upper bounds.
             (_, TypeEntry::Variable(_)) => {
+                if let Some(expr) = self.expr_for_ty(sup) {
+                    self.current_expr = expr;
+                }
                 self.table.add_lower_bound(sup, sub);
                 let upper_bounds = self.table.get_var(sup).unwrap().upper_bounds.clone();
                 for ub in upper_bounds {
