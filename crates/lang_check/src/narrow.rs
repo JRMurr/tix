@@ -21,6 +21,11 @@ use smol_str::SmolStr;
 
 use super::CheckCtx;
 
+/// Maximum depth for tracing through local alias chains when resolving
+/// builtin references (e.g. `let isNull = builtins.isNull; in isNull x`).
+/// Prevents infinite loops through pathological alias chains.
+const MAX_ALIAS_TRACE_DEPTH: u8 = 3;
+
 /// What a condition tells us about a variable's type in a given branch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum NarrowPredicate {
@@ -58,10 +63,10 @@ pub(crate) struct NarrowInfo {
 impl CheckCtx<'_> {
     /// Analyze a condition expression to extract type narrowing information.
     ///
-    /// Returns `None` if the condition doesn't match any recognized narrowing
-    /// pattern. The analysis is purely syntactic — it pattern-matches on the
-    /// AST structure without evaluating anything.
-    pub(crate) fn analyze_condition(&self, cond: ExprId) -> Option<NarrowInfo> {
+    /// Returns a default (empty) `NarrowInfo` if the condition doesn't match
+    /// any recognized narrowing pattern. The analysis is purely syntactic — it
+    /// pattern-matches on the AST structure without evaluating anything.
+    pub(crate) fn analyze_condition(&self, cond: ExprId) -> NarrowInfo {
         let expr = &self.module[cond];
         match expr {
             // ── x == null / null == x / x != null / null != x ───────────
@@ -72,9 +77,12 @@ impl CheckCtx<'_> {
             } if matches!(op, ExprBinOp::Equal | ExprBinOp::NotEqual) => {
                 let is_eq = matches!(op, ExprBinOp::Equal);
                 // Try both orientations: x == null and null == x.
-                let binding = self
+                let Some(binding) = self
                     .try_null_comparison(*lhs, *rhs)
-                    .or_else(|| self.try_null_comparison(*rhs, *lhs))?;
+                    .or_else(|| self.try_null_comparison(*rhs, *lhs))
+                else {
+                    return NarrowInfo::default();
+                };
 
                 let (then_pred, else_pred) = if is_eq {
                     (
@@ -88,7 +96,7 @@ impl CheckCtx<'_> {
                     )
                 };
 
-                Some(NarrowInfo {
+                NarrowInfo {
                     then_branch: vec![NarrowBinding {
                         name: binding,
                         predicate: then_pred,
@@ -97,14 +105,18 @@ impl CheckCtx<'_> {
                         name: binding,
                         predicate: else_pred,
                     }],
-                })
+                }
             }
 
             // ── x ? field — hasAttr narrows x to have that field ────────
             Expr::HasAttr { set, attrpath } => {
-                let name = self.expr_as_local_name(*set)?;
-                let field = self.single_static_attrpath_key(attrpath)?;
-                Some(NarrowInfo {
+                let Some(name) = self.expr_as_local_name(*set) else {
+                    return NarrowInfo::default();
+                };
+                let Some(field) = self.single_static_attrpath_key(attrpath) else {
+                    return NarrowInfo::default();
+                };
+                NarrowInfo {
                     then_branch: vec![NarrowBinding {
                         name,
                         predicate: NarrowPredicate::HasField(field),
@@ -112,7 +124,7 @@ impl CheckCtx<'_> {
                     // No useful narrowing for else-branch — knowing a field
                     // is absent doesn't constrain the type in a useful way.
                     else_branch: vec![],
-                })
+                }
             }
 
             // ── !cond — flip the narrowing ──────────────────────────────
@@ -120,9 +132,9 @@ impl CheckCtx<'_> {
                 op: rnix::ast::UnaryOpKind::Invert,
                 expr: inner,
             } => {
-                let mut info = self.analyze_condition(*inner)?;
+                let mut info = self.analyze_condition(*inner);
                 std::mem::swap(&mut info.then_branch, &mut info.else_branch);
-                Some(info)
+                info
             }
 
             // ── is* builtins: isNull, isString, isInt, etc. ─────────────
@@ -142,8 +154,10 @@ impl CheckCtx<'_> {
 
                 for &(builtin_name, prim) in TYPE_PREDICATES {
                     if self.is_builtin_call(*fun, builtin_name) {
-                        let name = self.expr_as_local_name(*arg)?;
-                        return Some(NarrowInfo {
+                        let Some(name) = self.expr_as_local_name(*arg) else {
+                            return NarrowInfo::default();
+                        };
+                        return NarrowInfo {
                             then_branch: vec![NarrowBinding {
                                 name,
                                 predicate: NarrowPredicate::IsType(prim),
@@ -152,7 +166,7 @@ impl CheckCtx<'_> {
                                 name,
                                 predicate: NarrowPredicate::IsNotType(prim),
                             }],
-                        });
+                        };
                     }
                 }
 
@@ -169,8 +183,10 @@ impl CheckCtx<'_> {
 
                 for &(builtin_name, ref pred) in COMPOUND_PREDICATES {
                     if self.is_builtin_call(*fun, builtin_name) {
-                        let name = self.expr_as_local_name(*arg)?;
-                        return Some(NarrowInfo {
+                        let Some(name) = self.expr_as_local_name(*arg) else {
+                            return NarrowInfo::default();
+                        };
+                        return NarrowInfo {
                             then_branch: vec![NarrowBinding {
                                 name,
                                 predicate: pred.clone(),
@@ -178,7 +194,7 @@ impl CheckCtx<'_> {
                             // No useful else-branch narrowing — negation of
                             // compound types is not yet implemented.
                             else_branch: vec![],
-                        });
+                        };
                     }
                 }
 
@@ -186,7 +202,7 @@ impl CheckCtx<'_> {
                 // two-arg call pattern where the outer Apply has arg=x and
                 // fun is itself Apply { fun: hasAttr_ref, arg: string_literal }.
                 if let Some(info) = self.try_hasattr_builtin_call(*fun, *arg) {
-                    return Some(info);
+                    return info;
                 }
 
                 // Fallback: recognize `lib.*.isString x` etc. by leaf name.
@@ -196,7 +212,7 @@ impl CheckCtx<'_> {
                 if let Some((leaf, name)) = self.try_select_chain_predicate(*fun, *arg) {
                     for &(pred_name, prim) in TYPE_PREDICATES {
                         if leaf == pred_name {
-                            return Some(NarrowInfo {
+                            return NarrowInfo {
                                 then_branch: vec![NarrowBinding {
                                     name,
                                     predicate: NarrowPredicate::IsType(prim),
@@ -205,26 +221,26 @@ impl CheckCtx<'_> {
                                     name,
                                     predicate: NarrowPredicate::IsNotType(prim),
                                 }],
-                            });
+                            };
                         }
                     }
                     for &(pred_name, ref pred) in COMPOUND_PREDICATES {
                         if leaf == pred_name {
-                            return Some(NarrowInfo {
+                            return NarrowInfo {
                                 then_branch: vec![NarrowBinding {
                                     name,
                                     predicate: pred.clone(),
                                 }],
                                 else_branch: vec![],
-                            });
+                            };
                         }
                     }
                 }
 
-                None
+                NarrowInfo::default()
             }
 
-            _ => None,
+            _ => NarrowInfo::default(),
         }
     }
 
@@ -360,7 +376,7 @@ impl CheckCtx<'_> {
     /// Recursive helper for `is_builtin_call`. The `depth` parameter prevents
     /// infinite loops through pathological alias chains.
     fn is_builtin_expr(&self, expr: ExprId, builtin_name: &str, depth: u8) -> bool {
-        if depth > 3 {
+        if depth > MAX_ALIAS_TRACE_DEPTH {
             return false;
         }
 

@@ -440,122 +440,103 @@ impl CheckCtx<'_> {
         }
     }
 
-    /// Infer a branch body with optional type narrowing overrides applied.
+    /// Create a fresh type variable for narrowing, linked to the original
+    /// variable and a constraint via one-way upper bounds.
     ///
-    /// If `narrow_info` contains narrowings, creates branch-local type
-    /// variables and temporarily installs them as overrides in
-    /// `narrow_overrides`. The overrides are removed after inference so
+    /// Returns a fresh variable `β` where `β ≤ original` and `β ≤ constraint`.
+    /// Using `add_upper_bound` directly (instead of `constrain()`) avoids
+    /// bidirectional propagation — same technique as `link_extruded_var`.
+    fn narrow_fresh_var(&mut self, original: TyId, constraint: TyId) -> TyId {
+        let fresh = self.new_var();
+        self.table.add_upper_bound(fresh, original);
+        self.table.add_upper_bound(fresh, constraint);
+        fresh
+    }
+
+    /// Infer a branch body with type narrowing overrides applied.
+    ///
+    /// If `narrow_info` contains narrowings for the relevant branch, creates
+    /// branch-local type variables and temporarily installs them as overrides
+    /// in `narrow_overrides`. The overrides are removed after inference so
     /// they don't leak into sibling branches.
     fn infer_with_narrowing(
         &mut self,
         body: ExprId,
-        narrow_info: &Option<crate::narrow::NarrowInfo>,
+        narrow_info: &crate::narrow::NarrowInfo,
         is_then_branch: bool,
     ) -> Result<TyId, LocatedError> {
-        let bindings = narrow_info.as_ref().map(|info| {
-            if is_then_branch {
-                &info.then_branch
-            } else {
-                &info.else_branch
-            }
-        });
+        let bindings = if is_then_branch {
+            &narrow_info.then_branch
+        } else {
+            &narrow_info.else_branch
+        };
 
         // Collect names we'll override so we can restore them after.
         let mut saved: Vec<(NameId, Option<TyId>)> = Vec::new();
 
-        if let Some(bindings) = bindings {
-            for binding in bindings.iter() {
-                // Get the original type for this name (the α in α ∧ guard_type).
-                let original_ty = self.name_slot_or_override(binding.name);
+        for binding in bindings.iter() {
+            // Get the original type for this name (the α in α ∧ guard_type).
+            let original_ty = self.name_slot_or_override(binding.name);
 
-                let override_ty = match binding.predicate {
-                    crate::narrow::NarrowPredicate::IsType(prim) => {
-                        // Then-branch: x is α ∧ PrimType.
-                        // For primitives, α ∧ Null = Null, α ∧ String = String, etc.
-                        // The intersection of a type variable with a base type
-                        // collapses to just the base type, so using the primitive
-                        // directly is correct.
-                        self.alloc_prim(prim)
-                    }
-                    crate::narrow::NarrowPredicate::IsNotType(prim) => {
-                        // Else-branch: x is α ∧ ¬PrimType.
-                        // Create a fresh variable linked to the original via
-                        // one-way bounds (fresh ≤ α). Using table.add_upper_bound
-                        // directly avoids constrain()'s bidirectional propagation —
-                        // same technique as link_extruded_var.
-                        let fresh = self.new_var();
-                        self.table.add_upper_bound(fresh, original_ty);
+            let override_ty = match binding.predicate {
+                crate::narrow::NarrowPredicate::IsType(prim) => {
+                    // Then-branch: x is α ∧ PrimType.
+                    // For primitives, α ∧ Null = Null, α ∧ String = String, etc.
+                    // The intersection of a type variable with a base type
+                    // collapses to just the base type, so using the primitive
+                    // directly is correct.
+                    self.alloc_prim(prim)
+                }
+                crate::narrow::NarrowPredicate::IsNotType(prim) => {
+                    // Else-branch: x is α ∧ ¬PrimType.
+                    let prim_ty = self.alloc_prim(prim);
+                    let neg_ty = self.alloc_concrete(Ty::Neg(prim_ty));
+                    self.narrow_fresh_var(original_ty, neg_ty)
+                }
+                crate::narrow::NarrowPredicate::HasField(ref field_name) => {
+                    // Then-branch: x is α ∧ {field: β}.
+                    let fresh_field_var = self.new_var();
+                    let constraint = self.alloc_concrete(Ty::AttrSet(AttrSetTy {
+                        fields: [(field_name.clone(), fresh_field_var)]
+                            .into_iter()
+                            .collect(),
+                        dyn_ty: None,
+                        open: true,
+                        optional_fields: BTreeSet::new(),
+                    }));
+                    self.narrow_fresh_var(original_ty, constraint)
+                }
+                crate::narrow::NarrowPredicate::IsAttrSet => {
+                    // Then-branch: x is α ∧ {..} (open empty attrset).
+                    let constraint = self.alloc_concrete(Ty::AttrSet(AttrSetTy {
+                        fields: BTreeMap::new(),
+                        dyn_ty: None,
+                        open: true,
+                        optional_fields: BTreeSet::new(),
+                    }));
+                    self.narrow_fresh_var(original_ty, constraint)
+                }
+                crate::narrow::NarrowPredicate::IsList => {
+                    // Then-branch: x is α ∧ [β].
+                    let elem_var = self.new_var();
+                    let constraint = self.alloc_concrete(Ty::List(elem_var));
+                    self.narrow_fresh_var(original_ty, constraint)
+                }
+                crate::narrow::NarrowPredicate::IsFunction => {
+                    // Then-branch: x is α ∧ (β → γ).
+                    let param_var = self.new_var();
+                    let body_var = self.new_var();
+                    let constraint = self.alloc_concrete(Ty::Lambda {
+                        param: param_var,
+                        body: body_var,
+                    });
+                    self.narrow_fresh_var(original_ty, constraint)
+                }
+            };
 
-                        // Add ¬PrimType as upper bound so that canonicalization
-                        // produces `a & ~null` instead of bare `a`. Equality
-                        // comparisons generate no type constraints, so `¬T`
-                        // upper bounds can't cause contradictions there.
-                        let prim_ty = self.alloc_prim(prim);
-                        let neg_ty = self.alloc_concrete(Ty::Neg(prim_ty));
-                        self.table.add_upper_bound(fresh, neg_ty);
-                        fresh
-                    }
-                    crate::narrow::NarrowPredicate::HasField(ref field_name) => {
-                        // Then-branch: x is α ∧ {field: β}.
-                        // Create a fresh variable linked to the original, and
-                        // constrain it to have the checked field.
-                        let fresh = self.new_var();
-                        // Link to original: fresh ≤ α (one-way).
-                        self.table.add_upper_bound(fresh, original_ty);
-                        // Add field constraint: fresh ≤ { field: β, ... }.
-                        let fresh_field_var = self.new_var();
-                        let attrset_with_field = self.alloc_concrete(Ty::AttrSet(AttrSetTy {
-                            fields: [(field_name.clone(), fresh_field_var)]
-                                .into_iter()
-                                .collect(),
-                            dyn_ty: None,
-                            open: true,
-                            optional_fields: BTreeSet::new(),
-                        }));
-                        self.table.add_upper_bound(fresh, attrset_with_field);
-                        fresh
-                    }
-                    crate::narrow::NarrowPredicate::IsAttrSet => {
-                        // Then-branch: x is α ∧ {..} (open empty attrset).
-                        let fresh = self.new_var();
-                        self.table.add_upper_bound(fresh, original_ty);
-                        let open_attrset = self.alloc_concrete(Ty::AttrSet(AttrSetTy {
-                            fields: BTreeMap::new(),
-                            dyn_ty: None,
-                            open: true,
-                            optional_fields: BTreeSet::new(),
-                        }));
-                        self.table.add_upper_bound(fresh, open_attrset);
-                        fresh
-                    }
-                    crate::narrow::NarrowPredicate::IsList => {
-                        // Then-branch: x is α ∧ [β].
-                        let fresh = self.new_var();
-                        self.table.add_upper_bound(fresh, original_ty);
-                        let elem_var = self.new_var();
-                        let list_ty = self.alloc_concrete(Ty::List(elem_var));
-                        self.table.add_upper_bound(fresh, list_ty);
-                        fresh
-                    }
-                    crate::narrow::NarrowPredicate::IsFunction => {
-                        // Then-branch: x is α ∧ (β → γ).
-                        let fresh = self.new_var();
-                        self.table.add_upper_bound(fresh, original_ty);
-                        let param_var = self.new_var();
-                        let body_var = self.new_var();
-                        let lambda_ty = self.alloc_concrete(Ty::Lambda {
-                            param: param_var,
-                            body: body_var,
-                        });
-                        self.table.add_upper_bound(fresh, lambda_ty);
-                        fresh
-                    }
-                };
-
-                // Save the previous override (if any) for restoration.
-                let prev = self.narrow_overrides.insert(binding.name, override_ty);
-                saved.push((binding.name, prev));
-            }
+            // Save the previous override (if any) for restoration.
+            let prev = self.narrow_overrides.insert(binding.name, override_ty);
+            saved.push((binding.name, prev));
         }
 
         let result = self.infer_expr(body);
