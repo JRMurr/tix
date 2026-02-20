@@ -304,10 +304,12 @@ test_case!(
 // With subtyping, row polymorphism is replaced by width subtyping.
 // An open attrset pattern (`{ ..., ... }`) means the function accepts
 // records with at least the specified fields.
+// Ordering operators constrain both sides to the same type, so `arg.foo < 10`
+// forces foo to Int and `arg.bar < ./test.nix` forces bar to Path.
 test_case!(
     row_poly,
     "
-        arg: (arg.foo == 10) && (arg.bar == ./test.nix)
+        arg: (arg.foo < 10) && (arg.bar < ./test.nix)
     ",
     (({
         "bar": (Path),
@@ -2255,23 +2257,56 @@ fn narrow_null_guard_concrete_branches() {
     }
 }
 
-/// Narrowing is essential: without it, `x.name` on a potentially-null x
-/// would be a type error. Verify the un-narrowed version actually errors.
+/// `==` is a total function in Nix — it doesn't constrain operand types.
+/// So `x == null` doesn't force null into x's bounds, and `x.name` succeeds
+/// (x is unconstrained, field access just constrains it to an open attrset).
 #[test]
-fn narrow_without_guard_errors() {
-    // No null guard — this should error because x could be anything
-    // including null (the comparison sets up the null possibility).
+fn equality_does_not_constrain_operands() {
     let nix = "x: (x == null) && x.name";
-    let err = get_check_error(nix);
-    // The error should be about accessing a field on a non-attrset type
-    // or a type mismatch. The key point: without narrowing, field access
-    // on a potentially-null value fails.
+    let ty = get_inferred_root(nix);
+    // x is unconstrained by ==, so x.name constrains x to { name: a, ... }
+    // and && returns bool.
+    let (_, body) = unwrap_lambda(&ty);
     assert!(
-        matches!(
-            err,
-            TixDiagnosticKind::TypeMismatch { .. } | TixDiagnosticKind::MissingField { .. }
-        ),
-        "field access without null guard should error, got: {err:?}"
+        matches!(body, OutputTy::Primitive(PrimitiveTy::Bool)),
+        "equality should not constrain operands, got: {ty}"
+    );
+}
+
+/// Cross-type equality is valid in Nix: `1 == "hi"` → false.
+/// The type checker should accept it and infer bool.
+#[test]
+fn cross_type_equality_succeeds() {
+    let ty = get_inferred_root(r#"1 == "hi""#);
+    assert!(
+        matches!(&ty, OutputTy::Primitive(PrimitiveTy::Bool)),
+        "cross-type equality should infer bool, got: {ty}"
+    );
+}
+
+/// Equality doesn't constrain a variable: `let _ = x == null; in x.name`
+/// should succeed because `==` imposes no type relationship.
+#[test]
+fn equality_leaves_variable_unconstrained() {
+    let nix = "x: let _ = x == null; in x.name";
+    let ty = get_inferred_root(nix);
+    let (_, body) = unwrap_lambda(&ty);
+    // x.name succeeds — x gets constrained to { name: a, ... } by the
+    // field access, not by the equality comparison.
+    assert!(
+        !matches!(body, OutputTy::Primitive(PrimitiveTy::Null)),
+        "x should not be constrained to null by ==, got: {ty}"
+    );
+}
+
+/// Ordering operators DO error on cross-type comparisons at runtime,
+/// so the type checker should reject them.
+#[test]
+fn ordering_constrains_cross_type_error() {
+    let err = get_check_error(r#"1 < "hi""#);
+    assert!(
+        matches!(err, TixDiagnosticKind::TypeMismatch { .. }),
+        "ordering cross-type should error, got: {err:?}"
     );
 }
 
@@ -2445,7 +2480,11 @@ fn narrow_hasattr_negated() {
     let nix = r#"x: if !(x ? name) then "default" else x.name"#;
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
-    assert_eq!(*body, arc_ty!(String), "negated hasattr body should be string");
+    assert_eq!(
+        *body,
+        arc_ty!(String),
+        "negated hasattr body should be string"
+    );
 }
 
 /// `assert x ? name; x.name` — assert narrows the body so field access
@@ -2516,4 +2555,823 @@ fn narrow_hasattr_field_access_then_arithmetic() {
         }
         _ => panic!("expected numeric body type, got: {body}"),
     }
+}
+
+// ==============================================================================
+// Type narrowing — type predicate builtins (isString, isInt, etc.)
+// ==============================================================================
+
+/// `isString x` — then-branch narrows x to string.
+#[test]
+fn narrow_isstring_then_is_string() {
+    let nix = r#"x: if isString x then builtins.stringLength x else 0"#;
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(*body, arc_ty!(Int), "body should be int");
+}
+
+#[test]
+fn narrow_isstring_then_is_string_ret() {
+    let nix = r#"x: if isString x then x else "else case""#;
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(*body, arc_ty!(String), "body should be string");
+}
+
+/// `builtins.isString x` — qualified form should also work.
+#[test]
+fn narrow_builtins_isstring() {
+    let nix = r#"x: if builtins.isString x then builtins.stringLength x else 0"#;
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(*body, arc_ty!(Int), "body should be int");
+}
+
+/// Locally aliased builtin: `let isString = builtins.isString; in ...`
+/// The narrowing should trace through the local definition to recognize
+/// the builtin call. Regression test for nixpkgs patterns like
+/// `inherit (builtins) isString`.
+#[test]
+fn narrow_isstring_local_alias() {
+    let nix = r#"
+        let isString = builtins.isString;
+        in x: if isString x then builtins.stringLength x else 0
+    "#;
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(
+        *body,
+        arc_ty!(Int),
+        "locally-aliased isString should narrow"
+    );
+}
+
+/// `inherit (builtins) isString` — same as local alias but via inherit.
+#[test]
+fn narrow_isstring_inherit_from_builtins() {
+    let nix = r#"
+        let inherit (builtins) isString;
+        in x: if isString x then builtins.stringLength x else 0
+    "#;
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(
+        *body,
+        arc_ty!(Int),
+        "inherit-from-builtins isString should narrow"
+    );
+}
+
+/// `isInt x` — then-branch narrows x to int.
+#[test]
+fn narrow_isint_then_is_int() {
+    let nix = "x: if isInt x then x + 1 else 0";
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(*body, arc_ty!(Int), "body should be int");
+}
+
+/// `isBool x` — then-branch narrows x to bool.
+#[test]
+fn narrow_isbool_then_is_bool() {
+    let nix = "x: if isBool x then !x else false";
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(*body, arc_ty!(Bool), "body should be bool");
+}
+
+/// `isFloat x` — then-branch narrows x to float.
+#[test]
+fn narrow_isfloat_then_is_float() {
+    let nix = "x: if isFloat x then x + 1.0 else 0.0";
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(*body, arc_ty!(Float), "body should be float");
+}
+
+/// `!isString x` — negation flips narrowing.
+#[test]
+fn narrow_negated_isstring() {
+    let nix = r#"x: if !(isString x) then 0 else builtins.stringLength x"#;
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(*body, arc_ty!(Int), "body should be int");
+}
+
+/// Else-branch of `isString x` should produce a fresh variable linked to
+/// the original. The else-branch can still access fields from the original.
+#[test]
+fn narrow_isstring_else_preserves_original() {
+    // The else-branch's fresh var is linked to the original, so field access
+    // should succeed if the original has the field.
+    let nix = indoc! {"
+        x: if isString x then builtins.stringLength x
+        else x.name
+    "};
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    // Then: int. Else: unconstrained var from field access.
+    // The union should contain int (the unconstrained var may simplify away).
+    match body {
+        OutputTy::Primitive(PrimitiveTy::Int) => {}
+        OutputTy::Union(members) => {
+            assert!(
+                members
+                    .iter()
+                    .any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::Int))),
+                "body should contain int, got: {body}"
+            );
+        }
+        _ => panic!("expected int or union containing int, got: {body}"),
+    }
+}
+
+/// `isString x` then `isInt x` nested — demonstrates narrowing with different
+/// predicates doesn't conflict.
+#[test]
+fn narrow_isstring_then_isint_nested() {
+    let nix = indoc! {"
+        x: if isString x then builtins.stringLength x
+        else if isInt x then x + 1
+        else 0
+    "};
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(*body, arc_ty!(Int), "body should be int");
+}
+
+// ==============================================================================
+// Type narrowing — builtins.hasAttr "field" x
+// ==============================================================================
+
+/// `builtins.hasAttr "name" x` — equivalent to `x ? name`.
+#[test]
+fn narrow_builtins_hasattr() {
+    let nix = r#"x: if builtins.hasAttr "name" x then x.name else "default""#;
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    // Then-branch: x.name (unconstrained var). Else-branch: string.
+    // The union should contain string.
+    match body {
+        OutputTy::Primitive(PrimitiveTy::String) => {}
+        OutputTy::Union(members) => {
+            assert!(
+                members
+                    .iter()
+                    .any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::String))),
+                "body should contain string, got: {body}"
+            );
+        }
+        _ => panic!("expected string or union containing string, got: {body}"),
+    }
+}
+
+/// `!(builtins.hasAttr "name" x)` — negation flips narrowing.
+#[test]
+fn narrow_builtins_hasattr_negated() {
+    let nix = r#"x: if !(builtins.hasAttr "name" x) then "default" else x.name"#;
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    match body {
+        OutputTy::Primitive(PrimitiveTy::String) => {}
+        OutputTy::Union(members) => {
+            assert!(
+                members
+                    .iter()
+                    .any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::String))),
+                "body should contain string, got: {body}"
+            );
+        }
+        _ => panic!("expected string or union containing string, got: {body}"),
+    }
+}
+
+// ==============================================================================
+// Type narrowing — one-way linking to original variable
+// ==============================================================================
+
+/// HasField narrowing preserves original constraints: if x is known to
+/// have field `name` from the outer scope, the narrowed variable in the
+/// then-branch should also know about it.
+#[test]
+fn narrow_hasfield_preserves_original_constraints() {
+    // x.name in the then-branch succeeds because the narrowed fresh var
+    // is linked to the original which is constrained to have `name`.
+    let nix = indoc! {"
+        f: let x = f 1; in
+        if x ? extra then x.name
+        else x.name
+    "};
+    let ty = get_inferred_root(nix);
+    // Should succeed without type error — both branches access x.name.
+    let _ = unwrap_lambda(&ty);
+}
+
+// ==============================================================================
+// Negation types — Ty representation and constraint engine
+// ==============================================================================
+
+/// OutputTy::Neg displays as `~null`, `~string`, etc.
+#[test]
+fn neg_display_primitive() {
+    assert_eq!(format!("{}", arc_ty!(neg!(Null))), "~null");
+    assert_eq!(format!("{}", arc_ty!(neg!(String))), "~string");
+    assert_eq!(format!("{}", arc_ty!(neg!(Int))), "~int");
+    assert_eq!(format!("{}", arc_ty!(neg!(Bool))), "~bool");
+}
+
+/// Compound negation parenthesizes the inner type.
+#[test]
+fn neg_display_compound() {
+    let ty = OutputTy::Neg(lang_ty::TyRef::from(OutputTy::Union(vec![
+        lang_ty::TyRef::from(OutputTy::Primitive(PrimitiveTy::Int)),
+        lang_ty::TyRef::from(OutputTy::Primitive(PrimitiveTy::String)),
+    ])));
+    assert_eq!(format!("{ty}"), "~(int | string)");
+}
+
+// ==============================================================================
+// Negation types — inference output (¬T upper bounds on narrowed variables)
+// ==============================================================================
+
+/// Else-branch of a null guard should display `~null` in the output type.
+/// Verifies the ¬PrimType upper bound produces visible negation in the
+/// canonicalized output. The narrowed var only shows `~null` when it
+/// flows into negative position (e.g. as a function argument), since in
+/// positive position an unconstrained var is bottom regardless of upper bounds.
+#[test]
+fn narrow_neg_displayed_in_output() {
+    let nix = "f: x: if isNull x then 0 else f x";
+    let ty = get_inferred_root(nix);
+    let formatted = format!("{ty}");
+    // f's parameter type should include ~null because the narrowed x
+    // (with ¬Null upper bound) flows into f's param in negative position.
+    assert!(
+        formatted.contains("~null"),
+        "narrowed var flowing to function param should show ~null, got: {formatted}"
+    );
+}
+
+/// Nested redundant `isString` guards should not error. The inner guard's
+/// equality comparison on an already-narrowed variable must not trigger
+/// `String <: ¬String`.
+#[test]
+fn narrow_nested_redundant_isstring() {
+    let nix = r#"x: if isString x then (if isString x then builtins.stringLength x else 0) else 0"#;
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(*body, arc_ty!(Int), "body should be int");
+}
+
+/// Nested different predicates: outer `!(isNull x)` adds ¬Null, inner
+/// `isString x` adds String. Both narrow the same variable without conflict.
+#[test]
+fn narrow_nested_different_pred() {
+    let nix = indoc! {"
+        x: if !(isNull x) then (if isString x then builtins.stringLength x else x) else 0
+    "};
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    // Then-then: int (stringLength). Then-else: x (narrowed var).
+    // Outer else: 0 (int). Body contains int at minimum.
+    match body {
+        OutputTy::Primitive(PrimitiveTy::Int) => {}
+        OutputTy::Union(members) => {
+            assert!(
+                members
+                    .iter()
+                    .any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::Int))),
+                "body should contain int, got: {body}"
+            );
+        }
+        _ => panic!("expected int or union containing int, got: {body}"),
+    }
+}
+
+// ==============================================================================
+// Compound-type narrowing (isAttrs, isList, isFunction)
+// ==============================================================================
+
+/// `isAttrs x` narrows x to an attrset in the then-branch, allowing
+/// field access on a previously unconstrained variable.
+#[test]
+fn narrow_isattrs_then_field_access() {
+    let nix = r#"x: if isAttrs x then x.name else "default""#;
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(*body, arc_ty!(String), "body should be string");
+}
+
+/// `builtins.isAttrs x` — qualified form.
+#[test]
+fn narrow_builtins_isattrs() {
+    let nix = r#"x: if builtins.isAttrs x then x.name else "default""#;
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(*body, arc_ty!(String), "body should be string");
+}
+
+/// `isAttrs x` then-branch: returning x preserves the attrset constraint.
+#[test]
+fn narrow_isattrs_then_returns_attrset() {
+    let nix = r#"x: if isAttrs x then x else {}"#;
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    // Both branches produce attrsets, so the result should be an attrset.
+    assert!(
+        matches!(body, OutputTy::AttrSet(_)),
+        "expected attrset, got: {body}"
+    );
+}
+
+/// `isList x` narrows x to a list in the then-branch.
+#[test]
+fn narrow_islist_then_head() {
+    let nix = r#"x: if isList x then builtins.head x else 0"#;
+    let ty = get_inferred_root(nix);
+    let (_param, _body) = unwrap_lambda(&ty);
+    // Should not error — head requires a list, and isList narrows to one.
+}
+
+/// `builtins.isList x` — qualified form.
+#[test]
+fn narrow_builtins_islist() {
+    let nix = r#"x: if builtins.isList x then builtins.length x else 0"#;
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(*body, arc_ty!(Int), "length returns int");
+}
+
+/// `isFunction x` narrows x to a function in the then-branch, allowing
+/// it to be applied.
+#[test]
+fn narrow_isfunction_then_apply() {
+    let nix = r#"x: if isFunction x then x 42 else 0"#;
+    let ty = get_inferred_root(nix);
+    let (_param, _body) = unwrap_lambda(&ty);
+    // Should not error — x is narrowed to a function, so application succeeds.
+}
+
+/// `builtins.isFunction x` — qualified form.
+#[test]
+fn narrow_builtins_isfunction() {
+    let nix = r#"x: if builtins.isFunction x then x "hello" else "default""#;
+    let ty = get_inferred_root(nix);
+    let (_param, _body) = unwrap_lambda(&ty);
+    // Should not error.
+}
+
+/// Local alias for isAttrs should be traced through.
+#[test]
+fn narrow_isattrs_local_alias() {
+    let nix = r#"
+        let isAttrs = builtins.isAttrs;
+        in x: if isAttrs x then x.name else "default"
+    "#;
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(*body, arc_ty!(String), "body should be string");
+}
+
+/// `inherit (builtins) isList` alias.
+#[test]
+fn narrow_islist_inherit_alias() {
+    let nix = r#"
+        let inherit (builtins) isList;
+        in x: if isList x then builtins.length x else 0
+    "#;
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(*body, arc_ty!(Int), "body should be int");
+}
+
+/// Negated compound predicate: `!(isAttrs x)` — else-branch should get
+/// the attrset narrowing (since then/else are flipped).
+#[test]
+fn narrow_negated_isattrs() {
+    let nix = r#"x: if !(isAttrs x) then "not an attrset" else x.name"#;
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(*body, arc_ty!(String), "body should be string");
+}
+
+// ==============================================================================
+// Uppercase primitive aliases in annotations
+// ==============================================================================
+
+// Nixpkgs doc comments use uppercase `String`, `Bool`, etc. These should be
+// recognized as the corresponding lowercase primitives, not as unresolved
+// type alias references (which would become fresh variables).
+test_case!(
+    annotation_uppercase_string,
+    "
+        let
+            /** type: f :: String -> String */
+            f = x: x;
+        in
+        f \"hello\"
+    ",
+    String
+);
+
+test_case!(
+    annotation_uppercase_int,
+    "
+        let
+            /** type: f :: Int -> Bool */
+            f = x: x == 0;
+        in
+        f 42
+    ",
+    Bool
+);
+
+// Mixed uppercase and lowercase primitives in the same annotation.
+test_case!(
+    annotation_mixed_case_primitives,
+    "
+        let
+            /** type: f :: String -> int */
+            f = x: builtins.stringLength x;
+        in
+        f \"hello\"
+    ",
+    Int
+);
+
+// ==============================================================================
+// Annotation arity mismatch detection
+// ==============================================================================
+
+/// When a doc comment annotation has fewer arrows than the function's visible
+/// lambda count, we skip the annotation and emit a warning rather than
+/// corrupting the type table. Regression test for nameFromURL in strings.nix.
+#[test]
+fn annotation_arity_mismatch_skipped_with_warning() {
+    let nix_src = indoc! { "
+        let
+            /** type: f :: string -> string */
+            f = x: y: x + y;
+        in
+        f \"hello\" \" world\"
+    " };
+    let (db, file) = TestDatabase::single_file(nix_src).unwrap();
+    let mod_ = module(&db, file);
+    let result = crate::check_file_collecting(
+        &db,
+        file,
+        &TypeAliasRegistry::default(),
+        HashMap::new(),
+        HashMap::new(),
+    );
+
+    // Inference should succeed (the wrong-arity annotation is skipped).
+    let inference = result
+        .inference
+        .expect("inference should succeed despite arity mismatch");
+
+    // Root should be string (string + string = string).
+    let root_ty = inference
+        .expr_ty_map
+        .get(mod_.entry_expr)
+        .expect("root should have a type");
+    assert_eq!(
+        *root_ty,
+        arc_ty!(String),
+        "root should be string, got: {root_ty}"
+    );
+
+    // Should have a warning diagnostic about the arity mismatch.
+    assert!(
+        result.diagnostics.iter().any(|d| matches!(
+            &d.kind,
+            TixDiagnosticKind::AnnotationArityMismatch { name, annotation_arity: 1, expression_arity: 2 }
+            if name == "f"
+        )),
+        "expected AnnotationArityMismatch warning, diagnostics: {:?}",
+        result.diagnostics.iter().map(|d| &d.kind).collect::<Vec<_>>()
+    );
+}
+
+// An annotation with MORE arrows than visible lambdas is allowed (eta-reduction).
+// E.g. `escape :: [string] -> string -> string` on `escape = list: replaceStrings ...`
+// where the body returns a function.
+test_case!(
+    annotation_more_arrows_than_lambdas_ok,
+    "
+        let
+            /** type: f :: int -> int -> int */
+            f = x: builtins.add x;
+        in
+        f 1 2
+    ",
+    Int
+);
+
+// ==============================================================================
+// Union annotation skip
+// ==============================================================================
+
+/// Annotations with union types in parameters are skipped because bidirectional
+/// constraints would push all union members as lower bounds into the inferred
+/// parameter, causing false errors in branch-specific code. The function should
+/// still type-check based on its body.
+#[test]
+fn annotation_with_union_skipped() {
+    let nix_src = indoc! { r#"
+        let
+            /** type: f :: string -> (string | [string]) -> string */
+            f = name: value:
+                if builtins.isList value then "list"
+                else value;
+        in
+        f "x" "hello"
+    "# };
+    let (db, file) = TestDatabase::single_file(nix_src).unwrap();
+    let mod_ = module(&db, file);
+    let result = crate::check_file_collecting(
+        &db,
+        file,
+        &TypeAliasRegistry::default(),
+        HashMap::new(),
+        HashMap::new(),
+    );
+
+    // Inference should succeed — the union annotation is skipped.
+    let inference = result
+        .inference
+        .expect("inference should succeed with union annotation");
+
+    let root_ty = inference
+        .expr_ty_map
+        .get(mod_.entry_expr)
+        .expect("root should have a type");
+    // The body returns "list" (string) or value; with the call f "x" "hello",
+    // the result should be string.
+    assert_eq!(
+        *root_ty,
+        arc_ty!(String),
+        "root should be string, got: {root_ty}"
+    );
+
+    // No type errors should be present (warnings are ok).
+    let errors: Vec<_> = result
+        .diagnostics
+        .iter()
+        .filter(|d| {
+            !matches!(
+                d.kind,
+                TixDiagnosticKind::UnresolvedName { .. }
+                    | TixDiagnosticKind::AnnotationArityMismatch { .. }
+            )
+        })
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "no type errors expected, got: {:?}",
+        errors.iter().map(|d| &d.kind).collect::<Vec<_>>()
+    );
+}
+
+// ==============================================================================
+// Type narrowing — lib.*.is* select-chain predicates
+// ==============================================================================
+
+/// `lib.types.isString x` narrows x to string via leaf-name matching.
+#[test]
+fn narrow_lib_types_isstring() {
+    let nix = indoc! {r#"
+        let lib = { types = { isString = builtins.isString; }; };
+        in x: if lib.types.isString x then x else "default"
+    "#};
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(
+        *body,
+        arc_ty!(String),
+        "lib.types.isString should narrow to string"
+    );
+}
+
+/// `lib.trivial.isFunction x` narrows x to a function, allowing application.
+#[test]
+fn narrow_lib_trivial_isfunction() {
+    let nix = indoc! {r#"
+        let lib = { trivial = { isFunction = builtins.isFunction; }; };
+        in x: if lib.trivial.isFunction x then x 42 else 0
+    "#};
+    let ty = get_inferred_root(nix);
+    let (_param, _body) = unwrap_lambda(&ty);
+    // Should not error — x is narrowed to a function.
+}
+
+/// `lib.isAttrs x` (single-level Select) narrows x to attrset.
+#[test]
+fn narrow_lib_isattrs() {
+    let nix = indoc! {r#"
+        let lib = { isAttrs = builtins.isAttrs; };
+        in x: if lib.isAttrs x then x.name else "default"
+    "#};
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(
+        *body,
+        arc_ty!(String),
+        "lib.isAttrs should narrow to attrset"
+    );
+}
+
+/// `lib.types.isList x` narrows x to a list.
+#[test]
+fn narrow_lib_types_islist() {
+    let nix = indoc! {r#"
+        let lib = { types = { isList = builtins.isList; }; };
+        in x: if lib.types.isList x then builtins.length x else 0
+    "#};
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(
+        *body,
+        arc_ty!(Int),
+        "lib.types.isList should narrow to list"
+    );
+}
+
+/// `!(lib.types.isString x)` flips narrowing — else-branch gets string.
+#[test]
+fn narrow_negated_lib_types_isstring() {
+    let nix = indoc! {r#"
+        let lib = { types = { isString = builtins.isString; }; };
+        in x: if !(lib.types.isString x) then "not a string" else x
+    "#};
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(
+        *body,
+        arc_ty!(String),
+        "negated lib.types.isString should narrow else to string"
+    );
+}
+
+// ==============================================================================
+// Negation normalization — integration tests
+// ==============================================================================
+
+/// Nested contradictory guards: `isString x` then `!isString x` nested.
+/// The inner then-branch has x narrowed to `string ∧ ¬string` (⊥), so the
+/// body should still type-check without crashing.
+#[test]
+fn narrow_contradictory_guards_no_crash() {
+    let nix = indoc! {r#"
+        x: if isString x then
+            (if !(isString x) then 42 else 0)
+        else "default"
+    "#};
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    // The inner else returns 0 (int), the outer else returns "default" (string).
+    // The contradictory branch returns 42 (int). Union of int | string.
+    match body {
+        OutputTy::Union(_) => {}
+        OutputTy::Primitive(PrimitiveTy::Int) => {}
+        OutputTy::Primitive(PrimitiveTy::String) => {}
+        _ => panic!("expected union or primitive, got: {body}"),
+    }
+}
+
+/// `isString x` then `isInt x` nested — the inner then-branch narrows
+/// x to `string ∧ int` which is contradictory (different types). The
+/// test verifies inference doesn't crash.
+#[test]
+fn narrow_contradictory_different_preds_no_crash() {
+    let nix = indoc! {"
+        x: if isString x then
+            (if isInt x then x + 1 else 0)
+        else 0
+    "};
+    let ty = get_inferred_root(nix);
+    let (_param, _body) = unwrap_lambda(&ty);
+    // Should not crash. The contradictory branch's result doesn't matter
+    // much — the key assertion is that inference completes.
+}
+
+// ==============================================================================
+// Intersection-of-lambda annotation handling
+// ==============================================================================
+
+/// An intersection-of-lambda annotation should not produce a type error.
+/// The body is type-checked via normal inference; the annotation is stored
+/// for callers without bidirectional constraints.
+#[test]
+fn intersection_annotation_accepted() {
+    let nix_src = indoc! { "
+        let
+            /** type: dispatch :: (int -> int) & (string -> string) */
+            dispatch = x:
+                if builtins.isInt x then x + 1
+                else x;
+        in
+        dispatch 42
+    " };
+    let (db, file) = TestDatabase::single_file(nix_src).unwrap();
+    let mod_ = module(&db, file);
+    let result = crate::check_file_collecting(
+        &db,
+        file,
+        &TypeAliasRegistry::default(),
+        HashMap::new(),
+        HashMap::new(),
+    );
+
+    // Inference should succeed — the intersection annotation is accepted.
+    let inference = result
+        .inference
+        .expect("inference should succeed with intersection annotation");
+
+    let root_ty = inference
+        .expr_ty_map
+        .get(mod_.entry_expr)
+        .expect("root should have a type");
+    // The call `dispatch 42` infers from the body: isInt narrows to int,
+    // x + 1 produces int.
+    assert_eq!(*root_ty, arc_ty!(Int), "root should be int, got: {root_ty}");
+}
+
+/// The AnnotationUnchecked warning should be emitted for intersection-of-lambda
+/// annotations.
+#[test]
+fn intersection_annotation_warning_emitted() {
+    let nix_src = indoc! { "
+        let
+            /** type: f :: (int -> int) & (string -> string) */
+            f = x: x;
+        in
+        f 1
+    " };
+    let (db, file) = TestDatabase::single_file(nix_src).unwrap();
+    let _mod_ = module(&db, file);
+    let result = crate::check_file_collecting(
+        &db,
+        file,
+        &TypeAliasRegistry::default(),
+        HashMap::new(),
+        HashMap::new(),
+    );
+
+    result.inference.expect("inference should succeed");
+
+    assert!(
+        result.diagnostics.iter().any(|d| matches!(
+            &d.kind,
+            TixDiagnosticKind::AnnotationUnchecked { name, .. }
+            if name == "f"
+        )),
+        "expected AnnotationUnchecked warning, diagnostics: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|d| &d.kind)
+            .collect::<Vec<_>>()
+    );
+}
+
+/// An intersection of non-lambda types (e.g. `int & string`) should NOT
+/// trigger the intersection-of-lambda guard; it falls through to the
+/// normal intern + constrain path.
+#[test]
+fn non_lambda_intersection_falls_through() {
+    // `int & string` as an annotation is contradictory — it should
+    // either error or produce a constrained type, not be silently
+    // skipped via the intersection-of-lambda path.
+    let nix_src = indoc! { "
+        let
+            /** type: x :: int & string */
+            x = 42;
+        in
+        x
+    " };
+    let (db, file) = TestDatabase::single_file(nix_src).unwrap();
+    let _mod_ = module(&db, file);
+    let result = crate::check_file_collecting(
+        &db,
+        file,
+        &TypeAliasRegistry::default(),
+        HashMap::new(),
+        HashMap::new(),
+    );
+
+    // The intersection-of-lambda guard should NOT have fired, so there
+    // should be no AnnotationUnchecked warning.
+    assert!(
+        !result
+            .diagnostics
+            .iter()
+            .any(|d| matches!(&d.kind, TixDiagnosticKind::AnnotationUnchecked { .. })),
+        "non-lambda intersection should not produce AnnotationUnchecked, diagnostics: {:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|d| &d.kind)
+            .collect::<Vec<_>>()
+    );
 }

@@ -10,8 +10,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::{CheckCtx, LocatedError, TyId};
 use lang_ast::{
-    nameres::ResolveResult, BinOP, BindingValue, Bindings, Expr, ExprId, InterpolPart, Literal,
-    NameId, NormalBinOp, OverloadBinOp,
+    nameres::ResolveResult, BinOP, BindingValue, Bindings, Expr, ExprBinOp, ExprId, InterpolPart,
+    Literal, NameId, NormalBinOp, OverloadBinOp,
 };
 use lang_ty::{AttrSetTy, PrimitiveTy, Ty};
 use smol_str::SmolStr;
@@ -24,6 +24,10 @@ impl CheckCtx<'_> {
         self.current_expr = e;
 
         let ty = self.infer_expr_inner(e)?;
+
+        // Restore current_expr — infer_expr_inner may have moved it to a
+        // sub-expression. The slot-linking constraints below belong to `e`.
+        self.current_expr = e;
 
         // Record the inferred type for this expression.
         let expr_slot = self.ty_for_expr(e);
@@ -461,41 +465,90 @@ impl CheckCtx<'_> {
 
         if let Some(bindings) = bindings {
             for binding in bindings.iter() {
+                // Get the original type for this name (the α in α ∧ guard_type).
+                let original_ty = self.name_slot_or_override(binding.name);
+
                 let override_ty = match binding.predicate {
-                    crate::narrow::NarrowPredicate::IsNull => {
-                        // In this branch, the variable is known to be null.
-                        self.alloc_prim(PrimitiveTy::Null)
+                    crate::narrow::NarrowPredicate::IsType(prim) => {
+                        // Then-branch: x is α ∧ PrimType.
+                        // For primitives, α ∧ Null = Null, α ∧ String = String, etc.
+                        // The intersection of a type variable with a base type
+                        // collapses to just the base type, so using the primitive
+                        // directly is correct.
+                        self.alloc_prim(prim)
                     }
-                    crate::narrow::NarrowPredicate::IsNotNull => {
-                        // In this branch, the variable is known to be non-null.
-                        // Create a fresh variable — the branch body will
-                        // constrain it based on how it's used (e.g. field
-                        // access). The fresh variable is not linked to the
-                        // original, so null doesn't contaminate it.
-                        self.new_var()
+                    crate::narrow::NarrowPredicate::IsNotType(prim) => {
+                        // Else-branch: x is α ∧ ¬PrimType.
+                        // Create a fresh variable linked to the original via
+                        // one-way bounds (fresh ≤ α). Using table.add_upper_bound
+                        // directly avoids constrain()'s bidirectional propagation —
+                        // same technique as link_extruded_var.
+                        let fresh = self.new_var();
+                        self.table.add_upper_bound(fresh, original_ty);
+
+                        // Add ¬PrimType as upper bound so that canonicalization
+                        // produces `a & ~null` instead of bare `a`. Equality
+                        // comparisons generate no type constraints, so `¬T`
+                        // upper bounds can't cause contradictions there.
+                        let prim_ty = self.alloc_prim(prim);
+                        let neg_ty = self.alloc_concrete(Ty::Neg(prim_ty));
+                        self.table.add_upper_bound(fresh, neg_ty);
+                        fresh
                     }
                     crate::narrow::NarrowPredicate::HasField(ref field_name) => {
-                        // In this branch, the variable is known to have the
-                        // given field (from `x ? field`). Create a fresh
-                        // variable disconnected from the original, and
-                        // constrain it to be an open attrset with that field.
-                        let fresh_var = self.new_var();
+                        // Then-branch: x is α ∧ {field: β}.
+                        // Create a fresh variable linked to the original, and
+                        // constrain it to have the checked field.
+                        let fresh = self.new_var();
+                        // Link to original: fresh ≤ α (one-way).
+                        self.table.add_upper_bound(fresh, original_ty);
+                        // Add field constraint: fresh ≤ { field: β, ... }.
                         let fresh_field_var = self.new_var();
-                        let attrset_with_field =
-                            self.alloc_concrete(Ty::AttrSet(AttrSetTy {
-                                fields: [(field_name.clone(), fresh_field_var)]
-                                    .into_iter()
-                                    .collect(),
-                                dyn_ty: None,
-                                open: true,
-                                optional_fields: BTreeSet::new(),
-                            }));
-                        // fresh_var <: { field: α, ... } — establishes the
-                        // field exists as an upper bound so that subsequent
-                        // field access in this branch succeeds.
-                        self.constrain(fresh_var, attrset_with_field)
-                            .map_err(|err| self.locate_err(err))?;
-                        fresh_var
+                        let attrset_with_field = self.alloc_concrete(Ty::AttrSet(AttrSetTy {
+                            fields: [(field_name.clone(), fresh_field_var)]
+                                .into_iter()
+                                .collect(),
+                            dyn_ty: None,
+                            open: true,
+                            optional_fields: BTreeSet::new(),
+                        }));
+                        self.table.add_upper_bound(fresh, attrset_with_field);
+                        fresh
+                    }
+                    crate::narrow::NarrowPredicate::IsAttrSet => {
+                        // Then-branch: x is α ∧ {..} (open empty attrset).
+                        let fresh = self.new_var();
+                        self.table.add_upper_bound(fresh, original_ty);
+                        let open_attrset = self.alloc_concrete(Ty::AttrSet(AttrSetTy {
+                            fields: BTreeMap::new(),
+                            dyn_ty: None,
+                            open: true,
+                            optional_fields: BTreeSet::new(),
+                        }));
+                        self.table.add_upper_bound(fresh, open_attrset);
+                        fresh
+                    }
+                    crate::narrow::NarrowPredicate::IsList => {
+                        // Then-branch: x is α ∧ [β].
+                        let fresh = self.new_var();
+                        self.table.add_upper_bound(fresh, original_ty);
+                        let elem_var = self.new_var();
+                        let list_ty = self.alloc_concrete(Ty::List(elem_var));
+                        self.table.add_upper_bound(fresh, list_ty);
+                        fresh
+                    }
+                    crate::narrow::NarrowPredicate::IsFunction => {
+                        // Then-branch: x is α ∧ (β → γ).
+                        let fresh = self.new_var();
+                        self.table.add_upper_bound(fresh, original_ty);
+                        let param_var = self.new_var();
+                        let body_var = self.new_var();
+                        let lambda_ty = self.alloc_concrete(Ty::Lambda {
+                            param: param_var,
+                            body: body_var,
+                        });
+                        self.table.add_upper_bound(fresh, lambda_ty);
+                        fresh
                     }
                 };
 
@@ -554,6 +607,7 @@ impl CheckCtx<'_> {
                         lhs: lhs_ty,
                         rhs: rhs_ty,
                         ret: ret_ty,
+                        at_expr: self.current_expr,
                     },
                 });
                 Ok(ret_ty)
@@ -568,30 +622,20 @@ impl CheckCtx<'_> {
                 Ok(bool_ty)
             }
 
+            // Equality/inequality — Nix's `==` is a total function that works
+            // across types (`1 == "hi"` → false), so no type constraints are
+            // imposed on the operands.
+            BinOP::Normal(NormalBinOp::Expr(ExprBinOp::Equal | ExprBinOp::NotEqual)) => {
+                Ok(self.alloc_prim(PrimitiveTy::Bool))
+            }
+
+            // Ordering — runtime errors on cross-type comparisons, so
+            // bidirectional constraints are correct.
             BinOP::Normal(NormalBinOp::Expr(_)) => {
-                // Comparison/equality — both sides should be same type, returns Bool.
                 self.constrain(lhs_ty, rhs_ty)
                     .map_err(|err| self.locate_err(err))?;
                 self.constrain(rhs_ty, lhs_ty)
                     .map_err(|err| self.locate_err(err))?;
-
-                // After equality, explicitly propagate concrete types as upper bounds.
-                // The bidirectional constraint creates variable-to-variable links, but
-                // if one side's concrete type is behind an intermediary (e.g. attrset
-                // select result), the constrain_cache may prevent it from reaching the
-                // other side's upper bounds. We fix this by explicitly adding any
-                // discovered concrete type as an upper bound of the other operand.
-                if let Some(concrete) = self.find_concrete(rhs_ty) {
-                    let c_id = self.alloc_concrete(concrete);
-                    self.constrain(lhs_ty, c_id)
-                        .map_err(|err| self.locate_err(err))?;
-                }
-                if let Some(concrete) = self.find_concrete(lhs_ty) {
-                    let c_id = self.alloc_concrete(concrete);
-                    self.constrain(rhs_ty, c_id)
-                        .map_err(|err| self.locate_err(err))?;
-                }
-
                 Ok(self.alloc_prim(PrimitiveTy::Bool))
             }
 
@@ -628,6 +672,7 @@ impl CheckCtx<'_> {
                     lhs: lhs_ty,
                     rhs: rhs_ty,
                     ret: ret_ty,
+                    at_expr: self.current_expr,
                 });
                 Ok(ret_ty)
             }
@@ -678,6 +723,11 @@ impl CheckCtx<'_> {
             let name_text = self.module[name].text.clone();
 
             if let Some(&poly_ty) = self.poly_type_env.get(name) {
+                // Attribute any constraint propagation errors to this binding's value.
+                let (BindingValue::Inherit(e)
+                | BindingValue::Expr(e)
+                | BindingValue::InheritFrom(e)) = value;
+                self.current_expr = e;
                 let instantiated = self.extrude(poly_ty, true);
                 fields.insert(name_text, instantiated);
                 continue;
@@ -758,6 +808,9 @@ pub struct BinConstraint {
     pub lhs: TyId,
     pub rhs: TyId,
     pub ret: TyId,
+    /// The expression that created this constraint, so resolution errors
+    /// can be attributed to the right source location.
+    pub at_expr: ExprId,
 }
 
 #[derive(Debug, Clone)]

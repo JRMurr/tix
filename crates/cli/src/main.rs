@@ -295,7 +295,12 @@ fn run_check(
     let mut has_errors = false;
 
     for diag in &result.diagnostics {
-        let is_warning = matches!(diag.kind, TixDiagnosticKind::UnresolvedName { .. });
+        let is_warning = matches!(
+            diag.kind,
+            TixDiagnosticKind::UnresolvedName { .. }
+                | TixDiagnosticKind::AnnotationArityMismatch { .. }
+                | TixDiagnosticKind::AnnotationUnchecked { .. }
+        );
         if !is_warning {
             has_errors = true;
         }

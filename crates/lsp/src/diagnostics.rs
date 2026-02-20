@@ -30,7 +30,9 @@ pub fn to_lsp_diagnostics(
                 .unwrap_or_else(|| Range::new(Default::default(), Default::default()));
 
             let severity = match &diag.kind {
-                TixDiagnosticKind::UnresolvedName { .. } => DiagnosticSeverity::WARNING,
+                TixDiagnosticKind::UnresolvedName { .. }
+                | TixDiagnosticKind::AnnotationArityMismatch { .. }
+                | TixDiagnosticKind::AnnotationUnchecked { .. } => DiagnosticSeverity::WARNING,
                 _ => DiagnosticSeverity::ERROR,
             };
 

@@ -1,5 +1,13 @@
 ## Known Issues & Future Work
 
+### Intersection Annotation Body Verification
+
+- Per-component verification of intersection-of-function annotations is deferred.
+  Currently, `(int -> int) & (string -> string)` is accepted as a declared type
+  (store-and-trust), but the body is not checked against each component separately.
+  Full verification would require either re-inferring the body once per component
+  or adding a check-mode to the inference engine.
+
 ### Overload Resolution + Extrusion
 
 - `find_pinned_concrete`: a targeted fix for variables that were fully resolved by
@@ -35,6 +43,19 @@
 - The `builtins` attrset is synthesized fresh on every reference to the name
   `"builtins"`. This is correct but potentially expensive if `builtins` is
   referenced many times. Could cache the attrset structure and extrude it.
+
+- `test/strings.nix` has 1 remaining error + 1 annotation warning (down from 4):
+  - Lines 5-3168 (root expr): `lib.pipe` in `sanitizeDerivationName` (line 2904)
+    creates a heterogeneous function pipeline where intermediate types change
+    from `string` → `[a]` (via `split`) → `string` (via `concatMapStrings`).
+    Since `foldl'` requires a uniform accumulator type `b`, the type checker
+    produces `[...] vs string`. This is a fundamental limitation — `pipe` with
+    heterogeneous function types can't be typed in SimpleSub.
+  - `nameFromURL :: String -> String` annotation (line 2084): wrong arity
+    (1 arg, function takes 2). Detected and skipped with a warning.
+  - Previously fixed: `getName`/`getVersion` errors resolved by locally-aliased
+    builtin narrowing. `nameFromURL` body error resolved by annotation arity
+    check preventing type table corruption.
 
 ### Missing Features
 
@@ -124,19 +145,34 @@
   most entries. Could hoist the `enable` option's description up to the
   parent namespace, or synthesize a summary from child options.
 
+### Negation Normalization
+
+- `OutputTy::Top` / `OutputTy::Bottom` variants would allow proper representation
+  of contradictions and tautologies instead of falling back to `TyVar`. Currently
+  contradictions (`A ∧ ¬A`) produce a bare type variable as a stand-in for ⊥,
+  and tautologies (`A ∨ ¬A`) simply remove both members. Adding explicit Top/Bottom
+  would be more principled but touches every `match` on `OutputTy`.
+
+- Cross-type disjointness in `constrain.rs` (e.g., `AttrSet <: Neg(Primitive)`) is
+  a separate concern from normalization. Currently only primitive-vs-negated-primitive
+  contradictions are detected.
+
 ### Future Enhancements
 
 - Full intersection-type-based operator overloading (replace pragmatic deferred
   overload list with proper intersection types for overloaded functions)
-- Type narrowing: Phase 1 (null narrowing) and Phase 2a (`?`/hasAttr, single-key
-  only) are implemented. Remaining: isAttrs, isFunction, isList, primitive
-  predicates, multi-key `?` paths, `&&`/`||` combinators.
-- The `==` operator uses bidirectional constraints (`constrain(a,b); constrain(b,a)`),
-  which means `x == null` forces x's type to include null as both a lower AND upper
-  bound. This is too restrictive — equality comparison doesn't imply type equality
-  (Nix allows `1 == "hi"` → false). Relaxing `==` to not add bidirectional constraints
-  (or only constraining in one direction) would fix false positives in patterns like
-  `hydraJob` where field access via `or` default happens before the null guard.
+- Type narrowing: Phase 1 (null narrowing), Phase 2a (`?`/hasAttr, single-key
+  only), Phase 2b (all `is*` primitive predicates, `builtins.hasAttr`), and
+  `¬T` output display are implemented. `Neg(R)` type variant is wired through
+  the full pipeline (Ty, OutputTy, constrain, extrude, canonicalize, Display)
+  and emitted as upper bounds on narrowed variables. Nested redundant guards
+  (e.g. `if x != null then (if x != null then ...)`) are handled because
+  equality comparisons (`==`/`!=`) generate no type constraints — they just
+  return bool. `isAttrs`, `isFunction`, `isList` now have then-branch
+  narrowing (constraining to `{..}`, `[α]`, `α → β` respectively).
+  Else-branch narrowing for compound types is skipped (no `¬{..}`).
+  Remaining: else-branch for `HasField` (field absence), multi-key `?`
+  paths, `&&`/`||` combinators.
 - Literal / singleton types (`"circle"` as a type, not just `string`)
 - Type narrowing + arithmetic in narrowed branches: `x: if x == null then x else x - 1`
   produces body type `null` rather than `null | number`. The narrowed else-branch creates

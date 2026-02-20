@@ -25,7 +25,7 @@ Tix doesn't have literal types. `"circle"` is typed as `string`, not as the lite
 
 ### Type narrowing
 
-Tix supports **null narrowing** and **hasAttr narrowing**. Null narrowing: when a condition checks `x == null`, `x != null`, or `isNull x`, the type of `x` is narrowed in each branch. HasAttr narrowing: `x ? field` narrows `x` to have that field in the then-branch (single-key attrpaths only).
+Tix supports **type predicate narrowing** and **hasAttr narrowing**. Type predicate narrowing: when a condition checks `isNull x`, `isString x`, `isInt x`, `isFloat x`, `isBool x`, or `isPath x` (or `x == null`), the type of `x` is narrowed to the corresponding primitive in the then-branch. HasAttr narrowing: `x ? field` or `builtins.hasAttr "field" x` narrows `x` to have that field in the then-branch (single-key attrpaths only).
 
 ```nix
 x: if x == null then "default" else x.name
@@ -42,11 +42,14 @@ x: assert x != null; x.name
 # x is non-null after the assert
 ```
 
+Structural type predicates (`isAttrs`, `isFunction`, `isList`) have then-branch narrowing — `isAttrs x` narrows `x` to an attrset, `isList x` narrows to a list, and `isFunction x` narrows to a function. Else-branch narrowing for these compound types is not yet supported (no `¬{..}` / `¬[..]` / `¬(a → b)`).
+
 **Not yet supported:**
-- Type predicates beyond null: `isAttrs`, `isFunction`, `isList`, etc.
+- Else-branch narrowing for structural predicates (`isAttrs`, `isList`, `isFunction`)
 - Multi-element attrpaths in `?`: `x ? a.b.c` doesn't narrow
 - Compound conditions: `&&`, `||`
 - Value equality narrowing: `if x == "foo"` doesn't narrow `x` to the literal `"foo"` (tix has no literal types)
+- Per-component verification of intersection-of-function annotations (the declared overloaded type is trusted, not checked against each branch of the body)
 
 ### `inherit (builtins)` and dynamic field access
 

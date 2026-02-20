@@ -38,6 +38,8 @@ impl CheckCtx<'_> {
             if !matches!(
                 diag.kind,
                 crate::diagnostic::TixDiagnosticKind::UnresolvedName { .. }
+                    | crate::diagnostic::TixDiagnosticKind::AnnotationArityMismatch { .. }
+                    | crate::diagnostic::TixDiagnosticKind::AnnotationUnchecked { .. }
             ) {
                 return Err(diag);
             }
@@ -268,6 +270,7 @@ impl CheckCtx<'_> {
                             lhs: new_lhs,
                             rhs: new_rhs,
                             ret: new_ret,
+                            at_expr: ov.constraint.at_expr,
                         },
                     });
 
@@ -360,6 +363,11 @@ impl CheckCtx<'_> {
                     }
                     Ty::Primitive(_) => ty_id,
                     Ty::TyVar(_) => ty_id,
+                    // Negation flips polarity, same as Lambda param.
+                    Ty::Neg(inner) => {
+                        let e = self.extrude_inner(inner, !polarity, cache);
+                        self.alloc_concrete(Ty::Neg(e))
+                    }
                 };
 
                 // Propagate alias provenance through extrusion so that
@@ -431,6 +439,7 @@ impl CheckCtx<'_> {
             let overloads = std::mem::take(&mut self.deferred.overloads);
             let mut remaining_overloads = Vec::new();
             for ov in overloads {
+                self.current_expr = ov.constraint.at_expr;
                 match self
                     .try_resolve_overload(&ov)
                     .map_err(|err| self.locate_err(err))?
@@ -452,6 +461,7 @@ impl CheckCtx<'_> {
             let merges = std::mem::take(&mut self.deferred.merges);
             let mut remaining_merges = Vec::new();
             for mg in merges {
+                self.current_expr = mg.at_expr;
                 match self
                     .try_resolve_merge(&mg)
                     .map_err(|err| self.locate_err(err))?

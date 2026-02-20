@@ -72,13 +72,46 @@ getField = arg:
 
 In the then-branch, tix creates a fresh variable constrained to have the checked field. This prevents field access errors from cross-branch constraint contamination. Only single-key attrpaths are supported (`x ? field`, not `x ? a.b.c`).
 
+### Type predicate guards
+
+All `is*` builtins are recognized as narrowing guards, whether called directly (`isString x`), qualified (`builtins.isString x`), or through a select chain (`lib.types.isString x`, `lib.isAttrs x`). In the then-branch, the variable is narrowed to the corresponding primitive type. In the else-branch, a negation type (`~T`) is added to exclude the checked type:
+
+```nix
+dispatch = x:
+  if isString x then builtins.stringLength x
+  else if isInt x then x + 1
+  else if isBool x then !x
+  else null;
+# in the else-branch of isString, x has type a & ~string
+```
+
 ### Supported narrowing conditions
 
 - `x == null` / `null == x` / `x != null` / `null != x`
 - `isNull x` / `builtins.isNull x`
-- `x ? field` (then-branch narrows x to have the field)
+- `isString x` / `builtins.isString x` / `lib.types.isString x`
+- `isInt x` / `builtins.isInt x` / `lib.isInt x`
+- `isFloat x` / `builtins.isFloat x` / `lib.isFloat x`
+- `isBool x` / `builtins.isBool x` / `lib.isBool x`
+- `isPath x` / `builtins.isPath x` / `lib.isPath x`
+- `isAttrs x` / `builtins.isAttrs x` / `lib.isAttrs x` (then-branch only)
+- `isList x` / `builtins.isList x` / `lib.isList x` (then-branch only)
+- `isFunction x` / `builtins.isFunction x` / `lib.isFunction x` (then-branch only)
+- `x ? field` / `builtins.hasAttr "field" x` (then-branch narrows x to have the field)
 - `!cond` (flips the narrowing)
 - `assert cond; body` (narrows in the body)
+
+### Negation normalization
+
+Negation types are normalized during canonicalization using standard Boolean algebra rules:
+
+- **Double negation**: `~~T` simplifies to `T`
+- **De Morgan (union)**: `~(A | B)` becomes `~A & ~B`
+- **De Morgan (intersection)**: `~(A & B)` becomes `~A | ~B`
+- **Contradiction**: `T & ~T` in an intersection is detected as uninhabited (bottom)
+- **Tautology**: `T | ~T` in a union is detected as universal (top) and both members are removed
+
+These rules keep inferred types readable and prevent redundant negations from accumulating through nested guards.
 
 ## Row polymorphism (open attrsets)
 

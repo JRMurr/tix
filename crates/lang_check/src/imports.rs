@@ -205,9 +205,11 @@ pub fn resolve_imports(
         // Infer the target file with its own resolved imports.
         // Imported files don't get context args — those only apply to the
         // root file being type-checked (or via per-lambda doc comments).
+        let target_indices = lang_ast::module_indices(db, target_file);
         let check = crate::CheckCtx::new(
             &target_module,
             &target_name_res,
+            &target_indices.binding_expr,
             aliases.clone(),
             target_imports.types,
             std::collections::HashMap::new(),

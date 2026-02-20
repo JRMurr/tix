@@ -48,6 +48,15 @@ pub enum TixDiagnosticKind {
     UnresolvedName {
         name: SmolStr,
     },
+    AnnotationArityMismatch {
+        name: SmolStr,
+        annotation_arity: usize,
+        expression_arity: usize,
+    },
+    AnnotationUnchecked {
+        name: SmolStr,
+        reason: SmolStr,
+    },
 }
 
 impl fmt::Display for TixDiagnosticKind {
@@ -88,6 +97,22 @@ impl fmt::Display for TixDiagnosticKind {
             }
             TixDiagnosticKind::UnresolvedName { name } => {
                 write!(f, "unresolved name `{name}`")
+            }
+            TixDiagnosticKind::AnnotationArityMismatch {
+                name,
+                annotation_arity,
+                expression_arity,
+            } => {
+                write!(
+                    f,
+                    "annotation for `{name}` has arity {annotation_arity} but expression has {expression_arity} parameters; skipping"
+                )
+            }
+            TixDiagnosticKind::AnnotationUnchecked { name, reason } => {
+                write!(
+                    f,
+                    "annotation for `{name}` accepted but not verified: {reason}"
+                )
             }
         }
     }
@@ -224,6 +249,10 @@ fn canonicalize_ty_structural(
                 optional_fields: attr.optional_fields.clone(),
             })
         }
+        lang_ty::Ty::Neg(inner) => {
+            let c_inner = canonicalize_standalone(table, provenance, *inner, true);
+            OutputTy::Neg(lang_ty::TyRef::from(c_inner))
+        }
     }
 }
 
@@ -273,6 +302,19 @@ fn error_to_diagnostic(
 fn warning_to_diagnostic(warning: &LocatedWarning) -> TixDiagnostic {
     let kind = match &warning.payload {
         Warning::UnresolvedName(name) => TixDiagnosticKind::UnresolvedName { name: name.clone() },
+        Warning::AnnotationArityMismatch {
+            name,
+            annotation_arity,
+            expression_arity,
+        } => TixDiagnosticKind::AnnotationArityMismatch {
+            name: name.clone(),
+            annotation_arity: *annotation_arity,
+            expression_arity: *expression_arity,
+        },
+        Warning::AnnotationUnchecked { name, reason } => TixDiagnosticKind::AnnotationUnchecked {
+            name: name.clone(),
+            reason: reason.clone(),
+        },
     };
 
     TixDiagnostic {
@@ -416,5 +458,16 @@ mod tests {
     fn unresolved_name_display() {
         let kind = TixDiagnosticKind::UnresolvedName { name: "foo".into() };
         assert_eq!(kind.to_string(), "unresolved name `foo`");
+    }
+
+    #[test]
+    fn annotation_unchecked_display() {
+        let kind = TixDiagnosticKind::AnnotationUnchecked {
+            name: "dispatch".into(),
+            reason: "intersection-of-function annotations are accepted as declared types but not verified against the body".into(),
+        };
+        let msg = kind.to_string();
+        assert!(msg.contains("dispatch"));
+        assert!(msg.contains("not verified"));
     }
 }

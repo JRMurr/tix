@@ -37,6 +37,14 @@ where
     Lambda { param: R, body: R },
     #[debug("{_0:?}")]
     AttrSet(AttrSetTy<R>),
+
+    /// Negation type — `¬T`. Used in Boolean-Algebraic Subtyping (BAS) for
+    /// precise else-branch narrowing: when `isNull x` is false, x gets type
+    /// `α ∧ ¬Null` instead of a bare fresh variable. Only produced on atoms
+    /// (primitives, type vars); compound negation (¬(A∨B)) is not needed
+    /// since guards only produce primitive negations.
+    #[debug("Neg({_0:?})")]
+    Neg(R),
 }
 
 /// Macro for constructing `OutputTy` values conveniently in tests.
@@ -123,6 +131,11 @@ macro_rules! arc_ty {
             smol_str::SmolStr::new($name),
             $crate::TyRef::from($crate::arc_ty!($inner)),
         )
+    }};
+
+    // -- Negation: neg!(ty)
+    (neg!($($inner:tt)*)) => {{
+        $crate::OutputTy::Neg($crate::TyRef::from($crate::arc_ty!($($inner)*)))
     }};
 
     ($arg:tt -> $($ret:tt)*) => {

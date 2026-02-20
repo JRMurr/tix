@@ -16,6 +16,7 @@
 use lang_ast::{
     nameres::ResolveResult, BinOP, Expr, ExprBinOp, ExprId, Literal, NameId, NormalBinOp,
 };
+use lang_ty::PrimitiveTy;
 use smol_str::SmolStr;
 
 use super::CheckCtx;
@@ -23,12 +24,20 @@ use super::CheckCtx;
 /// What a condition tells us about a variable's type in a given branch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum NarrowPredicate {
-    /// The variable is known to be null.
-    IsNull,
-    /// The variable is known to be non-null.
-    IsNotNull,
+    /// The variable is known to be a specific primitive type.
+    /// Covers `isNull x` (IsType(Null)), `isString x` (IsType(String)), etc.
+    IsType(PrimitiveTy),
+    /// The variable is known to NOT be a specific primitive type.
+    /// Covers else-branches of type predicates.
+    IsNotType(PrimitiveTy),
     /// The variable is known to have a field with this name (from `x ? field`).
     HasField(SmolStr),
+    /// The variable is known to be an attrset (from `isAttrs x`).
+    IsAttrSet,
+    /// The variable is known to be a list (from `isList x`).
+    IsList,
+    /// The variable is known to be a function (from `isFunction x`).
+    IsFunction,
 }
 
 /// A narrowing derived from a condition expression — binds a name to a
@@ -68,9 +77,15 @@ impl CheckCtx<'_> {
                     .or_else(|| self.try_null_comparison(*rhs, *lhs))?;
 
                 let (then_pred, else_pred) = if is_eq {
-                    (NarrowPredicate::IsNull, NarrowPredicate::IsNotNull)
+                    (
+                        NarrowPredicate::IsType(PrimitiveTy::Null),
+                        NarrowPredicate::IsNotType(PrimitiveTy::Null),
+                    )
                 } else {
-                    (NarrowPredicate::IsNotNull, NarrowPredicate::IsNull)
+                    (
+                        NarrowPredicate::IsNotType(PrimitiveTy::Null),
+                        NarrowPredicate::IsType(PrimitiveTy::Null),
+                    )
                 };
 
                 Some(NarrowInfo {
@@ -110,26 +125,103 @@ impl CheckCtx<'_> {
                 Some(info)
             }
 
-            // ── isNull x / builtins.isNull x ───────────────────────────
+            // ── is* builtins: isNull, isString, isInt, etc. ─────────────
             //
             // In the AST this is Apply { fun, arg } where fun resolves to
-            // the builtin "isNull" and arg is a reference to a local name.
+            // a builtin type predicate and arg is a reference to a local name.
             Expr::Apply { fun, arg } => {
-                if self.is_builtin_call(*fun, "isNull") {
-                    let name = self.expr_as_local_name(*arg)?;
-                    Some(NarrowInfo {
-                        then_branch: vec![NarrowBinding {
-                            name,
-                            predicate: NarrowPredicate::IsNull,
-                        }],
-                        else_branch: vec![NarrowBinding {
-                            name,
-                            predicate: NarrowPredicate::IsNotNull,
-                        }],
-                    })
-                } else {
-                    None
+                // All recognized type predicates and their corresponding primitive.
+                const TYPE_PREDICATES: &[(&str, PrimitiveTy)] = &[
+                    ("isNull", PrimitiveTy::Null),
+                    ("isString", PrimitiveTy::String),
+                    ("isInt", PrimitiveTy::Int),
+                    ("isFloat", PrimitiveTy::Float),
+                    ("isBool", PrimitiveTy::Bool),
+                    ("isPath", PrimitiveTy::Path),
+                ];
+
+                for &(builtin_name, prim) in TYPE_PREDICATES {
+                    if self.is_builtin_call(*fun, builtin_name) {
+                        let name = self.expr_as_local_name(*arg)?;
+                        return Some(NarrowInfo {
+                            then_branch: vec![NarrowBinding {
+                                name,
+                                predicate: NarrowPredicate::IsType(prim),
+                            }],
+                            else_branch: vec![NarrowBinding {
+                                name,
+                                predicate: NarrowPredicate::IsNotType(prim),
+                            }],
+                        });
+                    }
                 }
+
+                // Compound-type predicates: isAttrs, isList, isFunction.
+                // These narrow to compound types ({..}, [α], α → β) which
+                // don't have PrimitiveTy representations. Only the then-branch
+                // gets narrowing — negating compound types (¬{..}) is not yet
+                // supported in the solver.
+                const COMPOUND_PREDICATES: &[(&str, NarrowPredicate)] = &[
+                    ("isAttrs", NarrowPredicate::IsAttrSet),
+                    ("isList", NarrowPredicate::IsList),
+                    ("isFunction", NarrowPredicate::IsFunction),
+                ];
+
+                for &(builtin_name, ref pred) in COMPOUND_PREDICATES {
+                    if self.is_builtin_call(*fun, builtin_name) {
+                        let name = self.expr_as_local_name(*arg)?;
+                        return Some(NarrowInfo {
+                            then_branch: vec![NarrowBinding {
+                                name,
+                                predicate: pred.clone(),
+                            }],
+                            // No useful else-branch narrowing — negation of
+                            // compound types is not yet implemented.
+                            else_branch: vec![],
+                        });
+                    }
+                }
+
+                // Also check for `builtins.hasAttr "field" x` — a curried
+                // two-arg call pattern where the outer Apply has arg=x and
+                // fun is itself Apply { fun: hasAttr_ref, arg: string_literal }.
+                if let Some(info) = self.try_hasattr_builtin_call(*fun, *arg) {
+                    return Some(info);
+                }
+
+                // Fallback: recognize `lib.*.isString x` etc. by leaf name.
+                // This handles nixpkgs patterns like `lib.types.isString`,
+                // `lib.trivial.isFunction`, `lib.isAttrs` where the function
+                // is a Select chain that doesn't resolve to a builtin.
+                if let Some((leaf, name)) = self.try_select_chain_predicate(*fun, *arg) {
+                    for &(pred_name, prim) in TYPE_PREDICATES {
+                        if leaf == pred_name {
+                            return Some(NarrowInfo {
+                                then_branch: vec![NarrowBinding {
+                                    name,
+                                    predicate: NarrowPredicate::IsType(prim),
+                                }],
+                                else_branch: vec![NarrowBinding {
+                                    name,
+                                    predicate: NarrowPredicate::IsNotType(prim),
+                                }],
+                            });
+                        }
+                    }
+                    for &(pred_name, ref pred) in COMPOUND_PREDICATES {
+                        if leaf == pred_name {
+                            return Some(NarrowInfo {
+                                then_branch: vec![NarrowBinding {
+                                    name,
+                                    predicate: pred.clone(),
+                                }],
+                                else_branch: vec![],
+                            });
+                        }
+                    }
+                }
+
+                None
             }
 
             _ => None,
@@ -185,26 +277,116 @@ impl CheckCtx<'_> {
         }
     }
 
+    /// Check for the curried `builtins.hasAttr "field" x` call pattern.
+    ///
+    /// In the AST this is:
+    ///   Apply { fun: Apply { fun: hasAttr_ref, arg: string_literal }, arg: x }
+    /// where hasAttr_ref resolves to the `hasAttr` builtin.
+    fn try_hasattr_builtin_call(&self, fun_expr: ExprId, arg_expr: ExprId) -> Option<NarrowInfo> {
+        // fun_expr must itself be an Apply: `hasAttr "field"`
+        let Expr::Apply {
+            fun: hasattr_ref,
+            arg: field_arg,
+        } = &self.module[fun_expr]
+        else {
+            return None;
+        };
+
+        // The inner function must be the `hasAttr` builtin.
+        if !self.is_builtin_call(*hasattr_ref, "hasAttr") {
+            return None;
+        }
+
+        // The first argument must be a string literal (the field name).
+        let Expr::Literal(Literal::String(field_name)) = &self.module[*field_arg] else {
+            return None;
+        };
+
+        // The outer argument (arg_expr) must be a local name reference.
+        let name = self.expr_as_local_name(arg_expr)?;
+
+        Some(NarrowInfo {
+            then_branch: vec![NarrowBinding {
+                name,
+                predicate: NarrowPredicate::HasField(field_name.clone()),
+            }],
+            // No useful narrowing for else-branch (field absence).
+            else_branch: vec![],
+        })
+    }
+
+    /// Check if `fun_expr` is a Select chain whose **leaf** segment matches a
+    /// known type predicate name (e.g. `lib.types.isString x` → leaf "isString"),
+    /// and `arg_expr` is a local name reference. Returns the leaf name and NameId.
+    ///
+    /// This is the fallback for `lib.*.is*` patterns that can't be traced to a
+    /// builtin — we rely on the naming convention instead. The bare-name and
+    /// `builtins.*` paths are already handled by `is_builtin_call`, so this only
+    /// fires for multi-segment Selects rooted on something other than `builtins`.
+    fn try_select_chain_predicate(
+        &self,
+        fun_expr: ExprId,
+        arg_expr: ExprId,
+    ) -> Option<(SmolStr, NameId)> {
+        let Expr::Select {
+            set: _,
+            attrpath,
+            default_expr: None,
+        } = &self.module[fun_expr]
+        else {
+            return None;
+        };
+
+        // Extract the leaf (last) segment of the attrpath.
+        let leaf_expr = attrpath.last()?;
+        let Expr::Literal(Literal::String(leaf_name)) = &self.module[*leaf_expr] else {
+            return None;
+        };
+
+        let name = self.expr_as_local_name(arg_expr)?;
+        Some((leaf_name.clone(), name))
+    }
+
     /// Check if `fun_expr` is a reference to a specific builtin function.
-    /// Handles both direct builtin references (`isNull`) and qualified access
-    /// (`builtins.isNull`).
+    /// Handles three cases:
+    ///   1. Direct builtin reference: `isNull x`
+    ///   2. Qualified access: `builtins.isNull x`
+    ///   3. Local alias: `let isNull = builtins.isNull; in ... isNull x`
+    ///      (includes `inherit (builtins) isNull`)
     fn is_builtin_call(&self, fun_expr: ExprId, builtin_name: &str) -> bool {
-        match &self.module[fun_expr] {
+        self.is_builtin_expr(fun_expr, builtin_name, 0)
+    }
+
+    /// Recursive helper for `is_builtin_call`. The `depth` parameter prevents
+    /// infinite loops through pathological alias chains.
+    fn is_builtin_expr(&self, expr: ExprId, builtin_name: &str, depth: u8) -> bool {
+        if depth > 3 {
+            return false;
+        }
+
+        match &self.module[expr] {
             // Direct reference: `isNull x`
             Expr::Reference(name) if name == builtin_name => {
-                matches!(
-                    self.name_res.get(fun_expr),
-                    Some(ResolveResult::Builtin(b)) if *b == builtin_name
-                )
+                match self.name_res.get(expr) {
+                    // Case 1: direct builtin reference
+                    Some(ResolveResult::Builtin(b)) if *b == builtin_name => true,
+                    // Case 3: local alias — trace through the definition
+                    Some(ResolveResult::Definition(name_id)) => {
+                        if let Some(&binding_expr) = self.binding_exprs.get(name_id) {
+                            self.is_builtin_expr(binding_expr, builtin_name, depth + 1)
+                        } else {
+                            false
+                        }
+                    }
+                    _ => false,
+                }
             }
-            // Qualified access: `builtins.isNull x`
+            // Case 2: qualified access: `builtins.isNull x`
             Expr::Select {
                 set,
                 attrpath,
                 default_expr: None,
             } => {
-                // set must be `builtins`, attrpath must be a single literal
-                // key matching builtin_name.
                 if attrpath.len() != 1 {
                     return false;
                 }
@@ -215,8 +397,6 @@ impl CheckCtx<'_> {
                 if !is_builtins_ref {
                     return false;
                 }
-                // The attrpath element is an ExprId that should be a string
-                // literal matching the builtin name.
                 matches!(
                     &self.module[attrpath[0]],
                     Expr::Literal(Literal::String(s)) if s == builtin_name

@@ -51,6 +51,18 @@ const ALL_BUILTIN_NAMES: &[&str] = &[
     "getEnv",
     "pathExists",
     "readFile",
+    // String operations
+    "substring",
+    "split",
+    "match",
+    "replaceStrings",
+    "concatStringsSep",
+    "compareVersions",
+    "parseDrvName",
+    "unsafeDiscardStringContext",
+    "appendContext",
+    // Attrset access
+    "getAttr",
     // Priority 2 — higher-order list/attrset operations
     "map",
     "filter",
@@ -172,10 +184,28 @@ impl CheckCtx<'_> {
             "scopedImport" => synth_ty!(self; a, b, c => a -> b -> c),
 
             // =================================================================
+            // String operations
+            // =================================================================
+            "substring" => synth_ty!(self; => Int -> Int -> String -> String),
+            // split returns alternating strings and lists of captured groups;
+            // we use [a] since unions aren't available during inference.
+            "split" => synth_ty!(self; a => String -> String -> [a]),
+            // match returns null (no match) or [string] (captured groups);
+            // we use a since unions aren't available during inference.
+            "match" => synth_ty!(self; a => String -> String -> a),
+            "replaceStrings" => synth_ty!(self; => [String] -> [String] -> String -> String),
+            "concatStringsSep" => synth_ty!(self; => String -> [String] -> String),
+            "compareVersions" => synth_ty!(self; => String -> String -> Int),
+            "parseDrvName" => self.synth_parse_drv_name(),
+            "unsafeDiscardStringContext" => synth_ty!(self; => String -> String),
+            "appendContext" => synth_ty!(self; => String -> {..} -> String),
+
+            // =================================================================
             // {..} builtins
             // =================================================================
             "attrNames" => synth_ty!(self; => {..} -> [String]),
             "hasAttr" => synth_ty!(self; => String -> {..} -> Bool),
+            "getAttr" => synth_ty!(self; a => String -> { _ : a } -> a),
             "removeAttrs" => synth_ty!(self; => {..} -> [String] -> {..}),
 
             // =================================================================
@@ -232,6 +262,24 @@ impl CheckCtx<'_> {
     // =========================================================================
     // Manual signature builders (named attrset fields)
     // =========================================================================
+
+    /// string -> {"name": string, "version": string}
+    fn synth_parse_drv_name(&mut self) -> Result<TyId, InferenceError> {
+        let string_ty = self.alloc_prim(PrimitiveTy::String);
+        let mut fields = BTreeMap::new();
+        fields.insert(SmolStr::from("name"), string_ty);
+        fields.insert(SmolStr::from("version"), string_ty);
+        let result = self.alloc_concrete(Ty::AttrSet(AttrSetTy {
+            fields,
+            dyn_ty: None,
+            open: false,
+            optional_fields: BTreeSet::new(),
+        }));
+        Ok(self.alloc_concrete(Ty::Lambda {
+            param: string_ty,
+            body: result,
+        }))
+    }
 
     /// (a -> bool) -> [a] -> {"right": [a], "wrong": [a]}
     fn synth_partition(&mut self) -> Result<TyId, InferenceError> {
