@@ -9,6 +9,8 @@ mod formatting;
 mod goto_def;
 mod hover;
 mod inlay_hint;
+#[cfg(test)]
+mod pbt;
 pub(crate) mod project_config;
 mod references;
 mod rename;
@@ -16,8 +18,6 @@ mod selection_range;
 mod semantic_tokens;
 mod server;
 mod state;
-#[cfg(test)]
-mod pbt;
 #[cfg(test)]
 mod test_util;
 mod ty_nav;

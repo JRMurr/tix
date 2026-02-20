@@ -79,9 +79,7 @@ fn arb_lambda_simple() -> impl Strategy<Value = String> {
 
 /// `{ <id>, ... }: <body>` — pattern lambda
 fn arb_lambda_pattern() -> impl Strategy<Value = String> {
-    (arb_ident(), arb_ident()).prop_map(|(p1, p2)| {
-        format!("{{ {p1}, {p2} ? 0, ... }}: {p1}")
-    })
+    (arb_ident(), arb_ident()).prop_map(|(p1, p2)| format!("{{ {p1}, {p2} ? 0, ... }}: {p1}"))
 }
 
 fn arb_lambda_expr() -> impl Strategy<Value = String> {
@@ -91,26 +89,20 @@ fn arb_lambda_expr() -> impl Strategy<Value = String> {
 /// `{ <id> = <val>; ... }`
 fn arb_attrset_expr() -> impl Strategy<Value = String> {
     proptest::collection::vec((arb_ident(), arb_literal()), 1..=4).prop_map(|fields| {
-        let body: String = fields
-            .iter()
-            .map(|(k, v)| format!("{k} = {v}; "))
-            .collect();
+        let body: String = fields.iter().map(|(k, v)| format!("{k} = {v}; ")).collect();
         format!("{{ {body}}}")
     })
 }
 
 /// `if <cond> then <then> else <else>`
 fn arb_if_expr() -> impl Strategy<Value = String> {
-    (arb_literal(), arb_literal()).prop_map(|(then_val, else_val)| {
-        format!("if true then {then_val} else {else_val}")
-    })
+    (arb_literal(), arb_literal())
+        .prop_map(|(then_val, else_val)| format!("if true then {then_val} else {else_val}"))
 }
 
 /// `(<attrset>).<key>` — select expression
 fn arb_select_expr() -> impl Strategy<Value = String> {
-    (arb_ident(), arb_literal()).prop_map(|(key, val)| {
-        format!("({{ {key} = {val}; }}).{key}")
-    })
+    (arb_ident(), arb_literal()).prop_map(|(key, val)| format!("({{ {key} = {val}; }}).{key}"))
 }
 
 /// `[ <vals> ]` — list expression
@@ -121,9 +113,8 @@ fn arb_list_expr() -> impl Strategy<Value = String> {
 
 /// `with <attrset>; <body>`
 fn arb_with_expr() -> impl Strategy<Value = String> {
-    (arb_ident(), arb_literal()).prop_map(|(name, val)| {
-        format!("with {{ {name} = {val}; }}; {name}")
-    })
+    (arb_ident(), arb_literal())
+        .prop_map(|(name, val)| format!("with {{ {name} = {val}; }}; {name}"))
 }
 
 /// `let <id> = <val>; in if <cond> then <id> else <id>` — tests narrowing paths
@@ -135,9 +126,8 @@ fn arb_narrowing_expr() -> impl Strategy<Value = String> {
 
 /// `rec { <id> = <val>; <id2> = <id>; }` — recursive attrset
 fn arb_rec_attrset_expr() -> impl Strategy<Value = String> {
-    (arb_ident(), arb_ident(), arb_literal()).prop_map(|(id1, id2, val)| {
-        format!("rec {{ {id1} = {val}; {id2} = {id1}; }}")
-    })
+    (arb_ident(), arb_ident(), arb_literal())
+        .prop_map(|(id1, id2, val)| format!("rec {{ {id1} = {val}; {id2} = {id1}; }}"))
 }
 
 /// `assert <cond>; <body>`
@@ -152,9 +142,8 @@ fn arb_interpolation_expr() -> impl Strategy<Value = String> {
 
 /// `let <id> = <val>; in <id> + <val>` — binary operations
 fn arb_binop_expr() -> impl Strategy<Value = String> {
-    (arb_ident(), arb_int(), arb_int()).prop_map(|(id, v1, v2)| {
-        format!("let {id} = {v1}; in {id} + {v2}")
-    })
+    (arb_ident(), arb_int(), arb_int())
+        .prop_map(|(id, v1, v2)| format!("let {id} = {v1}; in {id} + {v2}"))
 }
 
 /// Combine all generators with optional nesting. Each leaf form gets
