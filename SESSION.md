@@ -137,6 +137,18 @@
   most entries. Could hoist the `enable` option's description up to the
   parent namespace, or synthesize a summary from child options.
 
+### Negation Normalization
+
+- `OutputTy::Top` / `OutputTy::Bottom` variants would allow proper representation
+  of contradictions and tautologies instead of falling back to `TyVar`. Currently
+  contradictions (`A ∧ ¬A`) produce a bare type variable as a stand-in for ⊥,
+  and tautologies (`A ∨ ¬A`) simply remove both members. Adding explicit Top/Bottom
+  would be more principled but touches every `match` on `OutputTy`.
+
+- Cross-type disjointness in `constrain.rs` (e.g., `AttrSet <: Neg(Primitive)`) is
+  a separate concern from normalization. Currently only primitive-vs-negated-primitive
+  contradictions are detected.
+
 ### Future Enhancements
 
 - Full intersection-type-based operator overloading (replace pragmatic deferred

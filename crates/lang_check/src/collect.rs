@@ -107,6 +107,10 @@ impl<'a> Canonicalizer<'a> {
             .filter(|m| !matches!(m, OutputTy::TyVar(_)))
             .collect();
 
+        // Tautology detection: remove complementary pairs Primitive(P) + Neg(Primitive(P)).
+        // A ∨ ¬A = ⊤, so the pair contributes no information and can be dropped.
+        let concrete = remove_tautological_pairs(concrete);
+
         match concrete.len() {
             0 => {
                 // No concrete lower bounds. If the variable has atom-only upper
@@ -161,6 +165,14 @@ impl<'a> Canonicalizer<'a> {
         // Merge multiple attrsets into one (intersection of records = record with all fields).
         let concrete = merge_attrset_intersection(concrete);
 
+        // Contradiction detection: if the intersection contains both
+        // Primitive(P) and Neg(Primitive(Q)) where P == Q or P <: Q,
+        // the entire intersection is uninhabited (⊥). Return a bare type
+        // variable as a stand-in rather than introducing OutputTy::Bottom.
+        if has_primitive_contradiction(&concrete) {
+            return OutputTy::TyVar(var_id.0);
+        }
+
         match concrete.len() {
             0 => OutputTy::TyVar(var_id.0),
             1 => concrete.into_iter().next().unwrap(),
@@ -201,10 +213,12 @@ impl<'a> Canonicalizer<'a> {
                 })
             }
             // Negation flips polarity: ¬T in positive position means T
-            // appears in negative position (and vice versa).
+            // appears in negative position (and vice versa). After
+            // canonicalization the inner type may be a Union or Intersection
+            // (from variable bound expansion), so we normalize via De Morgan.
             Ty::Neg(inner) => {
                 let c_inner = self.canonicalize(*inner, !positive);
-                OutputTy::Neg(TyRef::from(c_inner))
+                negate_output_ty(c_inner)
             }
         }
     }
@@ -226,6 +240,122 @@ pub fn canonicalize_standalone(
 // ==============================================================================
 // Shared helpers
 // ==============================================================================
+
+/// Negate an OutputTy, applying normalization rules:
+///
+/// 1. `¬(¬A)`        → `A`                              (double negation)
+/// 2. `¬(A ∨ B ∨ …)` → `¬A ∧ ¬B ∧ …`                   (De Morgan)
+/// 3. `¬(A ∧ B ∧ …)` → `¬A ∨ ¬B ∨ …`                   (De Morgan)
+/// 4. Anything else   → `Neg(inner)`                     (wrap as-is)
+///
+/// Recurses on each member so nested structures are fully normalized.
+fn negate_output_ty(inner: OutputTy) -> OutputTy {
+    match inner {
+        // ¬(¬A) → A
+        OutputTy::Neg(a) => (*a.0).clone(),
+
+        // ¬(A ∨ B ∨ …) → ¬A ∧ ¬B ∧ …
+        OutputTy::Union(members) => OutputTy::Intersection(
+            members
+                .into_iter()
+                .map(|m| TyRef::from(negate_output_ty((*m.0).clone())))
+                .collect(),
+        ),
+
+        // ¬(A ∧ B ∧ …) → ¬A ∨ ¬B ∨ …
+        OutputTy::Intersection(members) => OutputTy::Union(
+            members
+                .into_iter()
+                .map(|m| TyRef::from(negate_output_ty((*m.0).clone())))
+                .collect(),
+        ),
+
+        // Leaf or compound type that isn't union/intersection/neg — just wrap.
+        other => OutputTy::Neg(TyRef::from(other)),
+    }
+}
+
+/// Remove tautological pairs from a union: `Primitive(P) ∨ Neg(Primitive(P))` = ⊤.
+/// When both a primitive and its negation appear, both are dropped since their
+/// union is the top type and adds no information to the overall union.
+fn remove_tautological_pairs(members: Vec<OutputTy>) -> Vec<OutputTy> {
+    use lang_ty::PrimitiveTy;
+
+    // Collect which primitives appear positively and negatively.
+    let positives: HashSet<PrimitiveTy> = members
+        .iter()
+        .filter_map(|m| match m {
+            OutputTy::Primitive(p) => Some(*p),
+            _ => None,
+        })
+        .collect();
+
+    let negatives: HashSet<PrimitiveTy> = members
+        .iter()
+        .filter_map(|m| match m {
+            OutputTy::Neg(inner) => match &*inner.0 {
+                OutputTy::Primitive(p) => Some(*p),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+
+    // Find primitives that appear in both positive and negative form.
+    let tautologies: HashSet<PrimitiveTy> = positives.intersection(&negatives).copied().collect();
+
+    if tautologies.is_empty() {
+        return members;
+    }
+
+    // Remove both P and ~P for each tautological primitive.
+    members
+        .into_iter()
+        .filter(|m| match m {
+            OutputTy::Primitive(p) => !tautologies.contains(p),
+            OutputTy::Neg(inner) => match &*inner.0 {
+                OutputTy::Primitive(p) => !tautologies.contains(p),
+                _ => true,
+            },
+            _ => true,
+        })
+        .collect()
+}
+
+/// Check whether an intersection contains a contradictory pair:
+/// `Primitive(P)` and `Neg(Primitive(Q))` where `P == Q` or `P.is_subtype_of(Q)`.
+/// For example, `int & ~int` or `int & ~number` are contradictions (⊥).
+fn has_primitive_contradiction(members: &[OutputTy]) -> bool {
+    use lang_ty::PrimitiveTy;
+
+    // Collect positive primitives and negated primitives separately.
+    let mut positives: Vec<&PrimitiveTy> = Vec::new();
+    let mut negatives: Vec<&PrimitiveTy> = Vec::new();
+
+    for m in members {
+        match m {
+            OutputTy::Primitive(p) => positives.push(p),
+            OutputTy::Neg(inner) => {
+                if let OutputTy::Primitive(p) = &*inner.0 {
+                    negatives.push(p);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // A contradiction exists when a positive primitive is equal to or a
+    // subtype of a negated primitive: e.g. `int & ~number` is ⊥ because
+    // Int <: Number, so Int ∧ ¬Number = ⊥.
+    for pos in &positives {
+        for neg in &negatives {
+            if pos == neg || pos.is_subtype_of(neg) {
+                return true;
+            }
+        }
+    }
+    false
+}
 
 /// Flatten a nested composite type (union or intersection) and deduplicate members.
 /// `extract_nested` returns the inner members if the OutputTy is the matching
@@ -425,5 +555,159 @@ impl<'db> Collector<'db> {
             name_ty_map,
             expr_ty_map,
         }
+    }
+}
+
+// ==============================================================================
+// Tests — normalization helpers
+// ==============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lang_ty::{arc_ty, PrimitiveTy};
+
+    // -- negate_output_ty tests -----------------------------------------------
+
+    #[test]
+    fn negate_double_neg() {
+        // ¬(¬Int) → Int
+        let inner = OutputTy::Neg(TyRef::from(arc_ty!(Int)));
+        let negated = negate_output_ty(inner);
+        // Double negation in negate_output_ty: Neg(Neg(x)) matches the Neg arm,
+        // but the input is Neg(Int) — the outer negate_output_ty sees Neg(Int)
+        // and returns the inner Int.
+        assert_eq!(negated, arc_ty!(Int));
+    }
+
+    #[test]
+    fn negate_union_de_morgan() {
+        // ¬(Int ∨ String) → ¬Int ∧ ¬String
+        let input = arc_ty!(union!(Int, String));
+        let result = negate_output_ty(input);
+        let expected = OutputTy::Intersection(vec![
+            TyRef::from(OutputTy::Neg(TyRef::from(arc_ty!(Int)))),
+            TyRef::from(OutputTy::Neg(TyRef::from(arc_ty!(String)))),
+        ]);
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn negate_intersection_de_morgan() {
+        // ¬(Int ∧ String) → ¬Int ∨ ¬String
+        let input = arc_ty!(isect!(Int, String));
+        let result = negate_output_ty(input);
+        let expected = OutputTy::Union(vec![
+            TyRef::from(OutputTy::Neg(TyRef::from(arc_ty!(Int)))),
+            TyRef::from(OutputTy::Neg(TyRef::from(arc_ty!(String)))),
+        ]);
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn negate_nested_de_morgan() {
+        // ¬(¬Int ∨ String) → ¬(¬Int) ∧ ¬String → Int ∧ ¬String
+        let input = OutputTy::Union(vec![
+            TyRef::from(OutputTy::Neg(TyRef::from(arc_ty!(Int)))),
+            TyRef::from(arc_ty!(String)),
+        ]);
+        let result = negate_output_ty(input);
+        let expected = OutputTy::Intersection(vec![
+            TyRef::from(arc_ty!(Int)),
+            TyRef::from(OutputTy::Neg(TyRef::from(arc_ty!(String)))),
+        ]);
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn negate_primitive_wraps() {
+        // ¬Int → Neg(Int)
+        let result = negate_output_ty(arc_ty!(Int));
+        assert_eq!(result, OutputTy::Neg(TyRef::from(arc_ty!(Int))));
+    }
+
+    // -- has_primitive_contradiction tests -------------------------------------
+
+    #[test]
+    fn contradiction_exact_match() {
+        // Int ∧ ¬Int → contradiction
+        let members = vec![
+            arc_ty!(Int),
+            OutputTy::Neg(TyRef::from(arc_ty!(Int))),
+        ];
+        assert!(has_primitive_contradiction(&members));
+    }
+
+    #[test]
+    fn contradiction_subtype() {
+        // Int ∧ ¬Number → contradiction (Int <: Number)
+        let members = vec![
+            arc_ty!(Int),
+            OutputTy::Neg(TyRef::from(arc_ty!(Number))),
+        ];
+        assert!(has_primitive_contradiction(&members));
+    }
+
+    #[test]
+    fn contradiction_float_subtype() {
+        // Float ∧ ¬Number → contradiction (Float <: Number)
+        let members = vec![
+            arc_ty!(Float),
+            OutputTy::Neg(TyRef::from(arc_ty!(Number))),
+        ];
+        assert!(has_primitive_contradiction(&members));
+    }
+
+    #[test]
+    fn no_contradiction_different_types() {
+        // Int ∧ ¬String — no contradiction
+        let members = vec![
+            arc_ty!(Int),
+            OutputTy::Neg(TyRef::from(arc_ty!(String))),
+        ];
+        assert!(!has_primitive_contradiction(&members));
+    }
+
+    #[test]
+    fn no_contradiction_no_negation() {
+        // Int ∧ String — no negation, no contradiction
+        let members = vec![arc_ty!(Int), arc_ty!(String)];
+        assert!(!has_primitive_contradiction(&members));
+    }
+
+    // -- remove_tautological_pairs tests --------------------------------------
+
+    #[test]
+    fn tautology_exact_match() {
+        // Int ∨ ¬Int → empty (both removed)
+        let members = vec![
+            arc_ty!(Int),
+            OutputTy::Neg(TyRef::from(arc_ty!(Int))),
+        ];
+        let result = remove_tautological_pairs(members);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn tautology_preserves_other_members() {
+        // Int ∨ ¬Int ∨ String → String
+        let members = vec![
+            arc_ty!(Int),
+            OutputTy::Neg(TyRef::from(arc_ty!(Int))),
+            arc_ty!(String),
+        ];
+        let result = remove_tautological_pairs(members);
+        assert_eq!(result, vec![arc_ty!(String)]);
+    }
+
+    #[test]
+    fn no_tautology_different_types() {
+        // Int ∨ ¬String — no tautology, kept as-is
+        let members = vec![
+            arc_ty!(Int),
+            OutputTy::Neg(TyRef::from(arc_ty!(String))),
+        ];
+        let result = remove_tautological_pairs(members.clone());
+        assert_eq!(result, members);
     }
 }

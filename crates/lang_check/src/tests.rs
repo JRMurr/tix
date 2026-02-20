@@ -3182,3 +3182,45 @@ fn narrow_negated_lib_types_isstring() {
     let (_param, body) = unwrap_lambda(&ty);
     assert_eq!(*body, arc_ty!(String), "negated lib.types.isString should narrow else to string");
 }
+
+// ==============================================================================
+// Negation normalization — integration tests
+// ==============================================================================
+
+/// Nested contradictory guards: `isString x` then `!isString x` nested.
+/// The inner then-branch has x narrowed to `string ∧ ¬string` (⊥), so the
+/// body should still type-check without crashing.
+#[test]
+fn narrow_contradictory_guards_no_crash() {
+    let nix = indoc! {r#"
+        x: if isString x then
+            (if !(isString x) then 42 else 0)
+        else "default"
+    "#};
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    // The inner else returns 0 (int), the outer else returns "default" (string).
+    // The contradictory branch returns 42 (int). Union of int | string.
+    match body {
+        OutputTy::Union(_) => {}
+        OutputTy::Primitive(PrimitiveTy::Int) => {}
+        OutputTy::Primitive(PrimitiveTy::String) => {}
+        _ => panic!("expected union or primitive, got: {body}"),
+    }
+}
+
+/// `isString x` then `isInt x` nested — the inner then-branch narrows
+/// x to `string ∧ int` which is contradictory (different types). The
+/// test verifies inference doesn't crash.
+#[test]
+fn narrow_contradictory_different_preds_no_crash() {
+    let nix = indoc! {"
+        x: if isString x then
+            (if isInt x then x + 1 else 0)
+        else 0
+    "};
+    let ty = get_inferred_root(nix);
+    let (_param, _body) = unwrap_lambda(&ty);
+    // Should not crash. The contradictory branch's result doesn't matter
+    // much — the key assertion is that inference completes.
+}

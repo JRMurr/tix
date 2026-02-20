@@ -101,6 +101,18 @@ dispatch = x:
 - `!cond` (flips the narrowing)
 - `assert cond; body` (narrows in the body)
 
+### Negation normalization
+
+Negation types are normalized during canonicalization using standard Boolean algebra rules:
+
+- **Double negation**: `~~T` simplifies to `T`
+- **De Morgan (union)**: `~(A | B)` becomes `~A & ~B`
+- **De Morgan (intersection)**: `~(A & B)` becomes `~A | ~B`
+- **Contradiction**: `T & ~T` in an intersection is detected as uninhabited (bottom)
+- **Tautology**: `T | ~T` in a union is detected as universal (top) and both members are removed
+
+These rules keep inferred types readable and prevent redundant negations from accumulating through nested guards.
+
 ## Row polymorphism (open attrsets)
 
 Functions that access attrset fields get inferred types that are open — they accept any attrset that has the required fields.

@@ -24,7 +24,7 @@ use la_arena::ArenaMap;
 use lang_ast::{AstDb, Expr, ExprId, Module, NameId, NameResolution, NixFile, OverloadBinOp};
 use lang_ty::{OutputTy, PrimitiveTy, Ty};
 use std::collections::{HashMap, HashSet};
-use storage::TypeStorage;
+use storage::{TypeEntry, TypeStorage};
 use thiserror::Error;
 
 #[salsa::tracked]
@@ -374,7 +374,15 @@ impl<'db> CheckCtx<'db> {
     }
 
     /// Allocate a concrete type and return its TyId.
+    ///
+    /// Applies double negation elimination: `Neg(Neg(x))` → `x`, so double
+    /// negations never exist in the type table during inference.
     fn alloc_concrete(&mut self, ty: Ty<TyId>) -> TyId {
+        if let Ty::Neg(inner) = &ty {
+            if let TypeEntry::Concrete(Ty::Neg(x)) = self.table.get(*inner) {
+                return *x;
+            }
+        }
         self.table.new_concrete(ty)
     }
 
