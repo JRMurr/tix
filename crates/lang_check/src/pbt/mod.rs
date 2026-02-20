@@ -581,9 +581,7 @@ proptest! {
 // that narrowing doesn't crash on arbitrary combinations of guards and values.
 
 /// The type predicates available for narrowing, paired with their builtin names.
-const NARROWING_PREDICATES: &[&str] = &[
-    "isNull", "isString", "isInt", "isFloat", "isBool",
-];
+const NARROWING_PREDICATES: &[&str] = &["isNull", "isString", "isInt", "isFloat", "isBool"];
 
 /// Generate a primitive value as Nix text, for use in narrowed branches.
 fn arb_narr_value() -> impl Strategy<Value = (PrimitiveTy, NixTextStr)> {
@@ -617,9 +615,7 @@ fn arb_narrowing_same_type() -> impl Strategy<Value = (PrimitiveTy, NixTextStr)>
         let pred = NARROWING_PREDICATES[pred_idx];
         // Both branches return the same value, so the result type is known.
         // Parenthesize the argument to avoid `-1` being parsed as subtraction.
-        let text = format!(
-            "((__narr_x: if {pred} __narr_x then ({val}) else ({val})) ({val}))"
-        );
+        let text = format!("((__narr_x: if {pred} __narr_x then ({val}) else ({val})) ({val}))");
         (prim, text)
     })
 }
