@@ -21,7 +21,7 @@ use aliases::TypeAliasRegistry;
 use comment_parser::{parse_and_collect, parse_context_annotation, ParsedTy, TypeVarValue};
 use derive_more::Debug;
 use diagnostic::TixDiagnostic;
-use infer_expr::{PendingMerge, PendingOverload};
+use infer_expr::{PendingHasField, PendingMerge, PendingOverload};
 use la_arena::ArenaMap;
 use lang_ast::{AstDb, Expr, ExprId, Module, NameId, NameResolution, NixFile, OverloadBinOp};
 use lang_ty::{OutputTy, PrimitiveTy, Ty};
@@ -267,6 +267,7 @@ pub fn check_file_collecting(
 pub enum PendingConstraint {
     Overload(PendingOverload),
     Merge(PendingMerge),
+    HasField(PendingHasField),
 }
 
 /// Constraints whose resolution is deferred until operand types are known.

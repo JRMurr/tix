@@ -4039,3 +4039,87 @@ fn narrow_contradiction_self_negated() {
     let (_param, body) = unwrap_lambda(&ty);
     assert_eq!(*body, arc_ty!(Int));
 }
+
+// ==============================================================================
+// Has-field constraints (deferred field presence checks)
+// ==============================================================================
+
+// Field access on a variable that resolves to a closed set WITH the field → ok.
+test_case!(
+    has_field_present_at_call_site,
+    "let f = x: x.y; in f { y = 1; }",
+    Int
+);
+
+// Field access on a variable that resolves to a closed set WITHOUT the field → error.
+#[test]
+fn has_field_missing_at_call_site() {
+    let err = get_check_error("let f = x: x.y; in f { z = 1; }");
+    assert!(
+        matches!(err, TixDiagnosticKind::MissingField { ref field, .. } if field == "y"),
+        "expected MissingField for 'y', got: {err:?}"
+    );
+}
+
+// Polymorphic function not called — field access on open set, no error.
+// PendingHasField stays pending and is discarded at SCC group end.
+#[test]
+fn has_field_uncalled_polymorphic_no_error() {
+    let ty = get_inferred_root("x: x.y");
+    assert!(
+        matches!(ty, OutputTy::Lambda { .. }),
+        "expected lambda, got: {ty}"
+    );
+}
+
+// Field access with `or` default — never errors even if field absent.
+// PendingHasField is NOT emitted for defaulted Select.
+#[test]
+fn has_field_with_default_no_error() {
+    let _ty = get_inferred_root(r#"let f = x: x.y or "fallback"; in f { z = 1; }"#);
+    // No error — `or` fallback makes the field optional.
+}
+
+// Pattern + field access: missing field at call site → error.
+#[test]
+fn has_field_pattern_plus_select_missing() {
+    let err = get_check_error("let f = { x, ... }@args: args.y; in f { x = 1; }");
+    assert!(
+        matches!(err, TixDiagnosticKind::MissingField { ref field, .. } if field == "y"),
+        "expected MissingField for 'y', got: {err:?}"
+    );
+}
+
+// Pattern + field access: field present at call site → ok.
+test_case!(
+    has_field_pattern_plus_select_present,
+    "let f = { x, ... }@args: args.y; in f { x = 1; y = 2; }",
+    Int
+);
+
+// Multi-segment select: x.a.b where a exists but b doesn't.
+#[test]
+fn has_field_nested_missing() {
+    let err = get_check_error("let f = x: x.a.b; in f { a = { c = 1; }; }");
+    assert!(
+        matches!(err, TixDiagnosticKind::MissingField { ref field, .. } if field == "b"),
+        "expected MissingField for 'b', got: {err:?}"
+    );
+}
+
+// Direct merge + field access (non-polymorphic): field missing → error.
+#[test]
+fn has_field_direct_merge_missing() {
+    let err = get_check_error("let c = { x = 1; } // { y = 2; }; in c.z");
+    assert!(
+        matches!(err, TixDiagnosticKind::MissingField { ref field, .. } if field == "z"),
+        "expected MissingField for 'z', got: {err:?}"
+    );
+}
+
+// Direct merge + field access: field present → ok.
+test_case!(
+    has_field_direct_merge_present,
+    "let a = { x = 1; }; b = { y = 2; }; in (a // b).y",
+    Int
+);

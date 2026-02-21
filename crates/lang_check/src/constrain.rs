@@ -190,11 +190,12 @@ impl CheckCtx<'_> {
                     // Open attrsets intentionally pass here: the unknown "rest"
                     // portion may contain the required field. This is sound for
                     // pattern-match destructuring (`{ x, ... }: x`) where extra
-                    // fields are expected, but it means we can't catch a missing
-                    // field at constraint time when the attrset is open.
-                    // A more precise approach would emit "has-field" constraints
-                    // that are checked when the attrset becomes closed, but that
-                    // is not yet implemented.
+                    // fields are expected.
+                    //
+                    // PendingHasField constraints (emitted at Select sites in
+                    // infer_expr.rs) provide a second-chance check: after merges
+                    // and overloads resolve, resolve_pending re-validates field
+                    // presence on any attrset that became concrete or closed.
                 }
             }
         }

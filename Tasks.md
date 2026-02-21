@@ -517,6 +517,6 @@ Medium tasks (each is a full session):
 Larger refactors (plan before starting):
 
 11. ~~**B1** — Extract TypeTable~~ ✅
-12. **E2** — Has-field constraints
+12. ~~**E2** — Has-field constraints~~ ✅
 13. **C2** — Move narrowing into SCC grouping
 14. **G1** — Cross-file import tests

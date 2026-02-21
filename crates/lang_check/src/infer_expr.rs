@@ -264,13 +264,28 @@ impl CheckCtx<'_> {
                     }
                     // Constrain set_ty to have the field we're selecting.
                     let field_attr = self.alloc_concrete(Ty::AttrSet(AttrSetTy {
-                        fields: [(opt_key, value_ty)].into_iter().collect(),
+                        fields: [(opt_key.clone(), value_ty)].into_iter().collect(),
                         dyn_ty: None,
                         open: true, // there may be more fields
                         optional_fields,
                     }));
                     self.constrain(set_ty, field_attr)
                         .map_err(|err| self.locate_err(err))?;
+
+                    // Register a has-field obligation so that resolve_pending can
+                    // re-check field presence after merges/overloads resolve.
+                    // Only emit when there's no default (`or`) — defaulted field
+                    // accesses are optional by design.
+                    if !has_default {
+                        self.deferred.active.push(super::PendingConstraint::HasField(
+                            PendingHasField {
+                                set_ty,
+                                field: opt_key,
+                                field_ty: value_ty,
+                                at_expr: self.current_expr,
+                            },
+                        ));
+                    }
 
                     Ok::<TyId, LocatedError>(value_ty)
                 })?;
@@ -871,3 +886,23 @@ pub struct PendingOverload {
 
 /// A deferred attrset merge constraint (`//` operator).
 pub type PendingMerge = BinConstraint;
+
+/// A deferred has-field constraint: the set must eventually have the field,
+/// and the field's type must be a subtype of the expected type.
+///
+/// Emitted during Select inference when the set type is not yet known to be
+/// concrete. Checked during resolve_pending after merges/overloads have had
+/// a chance to pin concrete types.
+#[derive(Debug, Clone)]
+pub struct PendingHasField {
+    /// The attrset expression's type — typically a variable that may resolve
+    /// to a concrete attrset.
+    pub set_ty: TyId,
+    /// The field that must be present.
+    pub field: SmolStr,
+    /// The expected field type (fresh variable created at the Select site).
+    /// When the field is found, we constrain actual_field_ty <: field_ty.
+    pub field_ty: TyId,
+    /// Location for error reporting.
+    pub at_expr: ExprId,
+}

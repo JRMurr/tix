@@ -1,5 +1,15 @@
 ## Known Issues & Future Work
 
+### Merge Constraints Not Carried Across SCC Groups
+
+Polymorphic `//` merge constraints are discarded at SCC group end (only overloads
+are carried). This means `let f = a: b: (a // b).z; in f { x = 1; } { y = 2; }`
+does NOT error — the merge never resolves because neither operand becomes concrete
+within the SCC group. PendingHasField can't fix this because the merge result
+never becomes concrete within the group. Fixing this would require carrying merge
+constraints (similar to how overloads are carried) and re-instantiating them during
+extrusion.
+
 ### Intersection Annotation Body Verification
 
 - Per-component verification of intersection-of-function annotations is deferred.

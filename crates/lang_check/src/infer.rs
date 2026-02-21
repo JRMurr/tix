@@ -12,7 +12,7 @@ use super::{CheckCtx, InferenceError, InferenceResult, LocatedError, Polarity, T
 use crate::collect::{canonicalize_standalone, Collector};
 use crate::diagnostic;
 use crate::diagnostic::TixDiagnostic;
-use crate::infer_expr::{BinConstraint, PendingMerge, PendingOverload};
+use crate::infer_expr::{BinConstraint, PendingHasField, PendingMerge, PendingOverload};
 use crate::storage::TypeEntry;
 use lang_ast::nameres::{DependentGroup, GroupedDefs};
 use lang_ty::simplify::simplify;
@@ -135,9 +135,10 @@ impl CheckCtx<'_> {
             if let super::PendingConstraint::Overload(ov) = constraint {
                 self.deferred.carried.push(ov);
             }
-            // Merges are discarded here — they're only relevant within their
-            // SCC group. (Merges that couldn't resolve within the group
-            // remain unresolved, matching the previous behavior.)
+            // Merges and HasField constraints are discarded here — they're
+            // only relevant within their SCC group. (Constraints that couldn't
+            // resolve within the group remain unresolved, matching the
+            // previous behavior.)
         }
 
         // Snapshot each successfully-inferred name's canonical type NOW, before
@@ -505,6 +506,16 @@ impl CheckCtx<'_> {
                             false => remaining.push(super::PendingConstraint::Merge(mg)),
                         }
                     }
+                    super::PendingConstraint::HasField(hf) => {
+                        self.current_expr = hf.at_expr;
+                        match self
+                            .try_resolve_has_field(&hf)
+                            .map_err(|err| self.locate_err(err))?
+                        {
+                            true => made_progress = true,
+                            false => remaining.push(super::PendingConstraint::HasField(hf)),
+                        }
+                    }
                 }
             }
 
@@ -601,6 +612,51 @@ impl CheckCtx<'_> {
             Ok(OverloadProgress::PartialProgress)
         } else {
             Ok(OverloadProgress::NoProgress)
+        }
+    }
+
+    /// Try to resolve a deferred has-field constraint.
+    ///
+    /// Returns Ok(true) if resolved (field found, or type is non-attrset meaning
+    /// a TypeMismatch was already reported by the original constrain call).
+    /// Returns Ok(false) if still pending (set type not yet concrete, or still open).
+    /// Returns Err if the set resolved to a closed attrset without the field.
+    fn try_resolve_has_field(
+        &mut self,
+        hf: &PendingHasField,
+    ) -> Result<bool, InferenceError> {
+        let Some(concrete) = self.types.find_concrete(hf.set_ty) else {
+            return Ok(false); // not yet concrete
+        };
+
+        match concrete {
+            Ty::AttrSet(attr) => {
+                if let Some(&actual_field_ty) = attr.fields.get(&hf.field) {
+                    // Field found — link the types. This is likely redundant with
+                    // the existing constrain() from Select, but harmless (the
+                    // constrain_cache deduplicates).
+                    self.constrain(actual_field_ty, hf.field_ty)?;
+                    Ok(true)
+                } else if attr.dyn_ty.is_some() {
+                    // Has a dynamic field type — the field might be satisfied
+                    // by the dynamic portion. Keep pending.
+                    // TODO: could constrain dyn_ty <: field_ty here.
+                    Ok(false)
+                } else if !attr.open {
+                    // Closed attrset without the field.
+                    Err(InferenceError::MissingField {
+                        field: hf.field.clone(),
+                        available: attr.fields.keys().cloned().collect(),
+                    })
+                } else {
+                    // Still open — field might appear via future constraints.
+                    Ok(false)
+                }
+            }
+            // Non-attrset concrete type: the TypeMismatch (e.g. int vs attrset)
+            // is already caught by the original constrain() in Select. Mark as
+            // resolved to avoid double-reporting.
+            _ => Ok(true),
         }
     }
 
