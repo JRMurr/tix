@@ -6,7 +6,7 @@
 // inferring each definition, resolving pending constraints, and generalizing
 // type variables via SimpleSub's level-based approach (extrude).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use super::{CheckCtx, InferenceError, InferenceResult, LocatedError, Polarity, TyId};
 use crate::collect::{canonicalize_standalone, Collector};
@@ -83,7 +83,7 @@ impl CheckCtx<'_> {
         // while we still have access to the TypeStorage for canonicalization.
         let warnings = std::mem::take(&mut self.warnings);
         let mut diagnostics =
-            diagnostic::errors_to_diagnostics(&errors, &self.table, &self.alias_provenance);
+            diagnostic::errors_to_diagnostics(&errors, &self.types.storage, &self.alias_provenance);
         diagnostics.extend(diagnostic::warnings_to_diagnostics(&warnings));
 
         let mut collector = Collector::new(self);
@@ -103,14 +103,16 @@ impl CheckCtx<'_> {
     /// imbalance and ensures successfully-inferred names within the group are
     /// still recorded.
     fn infer_scc_group(&mut self, group: DependentGroup) -> Option<LocatedError> {
-        self.table.enter_level();
+        self.types.storage.enter_level();
 
         // Lift pre-allocated name vars to the current (inner) level so that
         // type variables created during inference of this group are at the
         // right level for generalization.
         for def in &group {
             let name_ty = self.ty_for_name_direct(def.name());
-            self.table.set_var_level(name_ty, self.table.current_level);
+            self.types
+                .storage
+                .set_var_level(name_ty, self.types.storage.current_level);
         }
 
         // Also lift pre-allocated expression slots for all sub-expressions
@@ -141,9 +143,9 @@ impl CheckCtx<'_> {
         // Snapshot each successfully-inferred name's canonical type NOW, before
         // exit_level and before use-site extrusions add concrete bounds.
         for &(name_id, ty) in &inferred {
-            let poly_ty = self.resolve_to_concrete_id(ty).unwrap_or(ty);
+            let poly_ty = self.types.resolve_to_concrete_id(ty).unwrap_or(ty);
             let output = canonicalize_standalone(
-                &self.table,
+                &self.types.storage,
                 &self.alias_provenance,
                 poly_ty,
                 Polarity::Positive,
@@ -152,7 +154,7 @@ impl CheckCtx<'_> {
             self.early_canonical.insert(name_id, simplified);
         }
 
-        self.table.exit_level();
+        self.types.storage.exit_level();
 
         // Record the inferred type in poly_type_env for successfully-inferred
         // names, resolving Variables to their concrete type where possible.
@@ -160,7 +162,7 @@ impl CheckCtx<'_> {
             if self.poly_type_env.contains_idx(name_id) {
                 continue;
             }
-            let poly_ty = self.resolve_to_concrete_id(ty).unwrap_or(ty);
+            let poly_ty = self.types.resolve_to_concrete_id(ty).unwrap_or(ty);
             self.poly_type_env.insert(name_id, poly_ty);
         }
 
@@ -332,17 +334,17 @@ impl CheckCtx<'_> {
             return cached;
         }
 
-        let entry = self.table.get(ty_id).clone();
+        let entry = self.types.storage.get(ty_id).clone();
 
         match entry {
-            TypeEntry::Variable(ref v) if v.level >= self.table.current_level => {
+            TypeEntry::Variable(ref v) if v.level >= self.types.storage.current_level => {
                 // This variable was bound at a deeper level — it's polymorphic.
                 // However, if it has been pinned to a concrete type (has the same
                 // concrete type as both a direct lower and upper bound), it was
                 // fully resolved by e.g. overload resolution. Extrude the concrete
                 // type instead of creating a fresh variable, to avoid losing the
                 // resolved type information.
-                if let Some(pinned) = self.find_pinned_concrete(v) {
+                if let Some(pinned) = self.types.find_pinned_concrete(v) {
                     // Insert into cache so deferred overload re-instantiation
                     // can find this var was extruded.
                     let concrete_id = self.alloc_concrete(pinned);
@@ -441,11 +443,11 @@ impl CheckCtx<'_> {
         // In negative position, `fresh <: original`: symmetrically reversed.
         let bounds_to_copy = match polarity {
             Polarity::Positive => {
-                self.table.add_upper_bound(original, fresh);
+                self.types.storage.add_upper_bound(original, fresh);
                 var.lower_bounds.clone()
             }
             Polarity::Negative => {
-                self.table.add_lower_bound(original, fresh);
+                self.types.storage.add_lower_bound(original, fresh);
                 var.upper_bounds.clone()
             }
         };
@@ -453,8 +455,8 @@ impl CheckCtx<'_> {
         for bound in bounds_to_copy {
             let extruded = self.extrude_inner(bound, polarity, cache);
             match polarity {
-                Polarity::Positive => self.table.add_lower_bound(fresh, extruded),
-                Polarity::Negative => self.table.add_upper_bound(fresh, extruded),
+                Polarity::Positive => self.types.storage.add_lower_bound(fresh, extruded),
+                Polarity::Negative => self.types.storage.add_upper_bound(fresh, extruded),
             }
         }
     }
@@ -522,8 +524,8 @@ impl CheckCtx<'_> {
     ) -> Result<OverloadProgress, InferenceError> {
         let c = &ov.constraint;
         let spec = crate::operators::overload_spec(ov.op);
-        let lhs_concrete = self.find_concrete(c.lhs);
-        let rhs_concrete = self.find_concrete(c.rhs);
+        let lhs_concrete = self.types.find_concrete(c.lhs);
+        let rhs_concrete = self.types.find_concrete(c.rhs);
 
         // ---- Phase 1: Full Resolution — both operands concrete ----
 
@@ -551,7 +553,7 @@ impl CheckCtx<'_> {
         // resolution actually added new constraints. If the cache didn't grow,
         // the constraints were all redundant and re-iterating would produce an
         // infinite loop.
-        let cache_size_before = self.constrain_cache.len();
+        let cache_size_before = self.types.constrain_cache.len();
 
         // --- 2a: Numeric operand → constrain unknown side to Number ---
         //
@@ -595,7 +597,7 @@ impl CheckCtx<'_> {
         //
         // If no new constraints were added, report NoProgress to prevent
         // infinite re-iteration of the deferred overload loop.
-        if self.constrain_cache.len() > cache_size_before {
+        if self.types.constrain_cache.len() > cache_size_before {
             Ok(OverloadProgress::PartialProgress)
         } else {
             Ok(OverloadProgress::NoProgress)
@@ -603,8 +605,8 @@ impl CheckCtx<'_> {
     }
 
     fn try_resolve_merge(&mut self, mg: &PendingMerge) -> Result<bool, InferenceError> {
-        let lhs_concrete = self.find_concrete(mg.lhs);
-        let rhs_concrete = self.find_concrete(mg.rhs);
+        let lhs_concrete = self.types.find_concrete(mg.lhs);
+        let rhs_concrete = self.types.find_concrete(mg.rhs);
 
         match (&lhs_concrete, &rhs_concrete) {
             (Some(Ty::AttrSet(_)), Some(Ty::AttrSet(_))) => {}
@@ -627,89 +629,16 @@ impl CheckCtx<'_> {
         Ok(true)
     }
 
-    /// Check if a variable has been pinned to a simple concrete type — i.e. the
-    /// same primitive type appears as both a direct lower and upper bound. This
-    /// indicates the variable was fully resolved (e.g. by overload resolution) and
-    /// is no longer truly polymorphic.
-    ///
-    /// Only primitives are considered "pinned" — types with internal structure
-    /// (Lambda, List, AttrSet) may contain polymorphic sub-components that need
-    /// proper extrusion.
-    fn find_pinned_concrete(&self, v: &crate::storage::TypeVariable) -> Option<Ty<TyId>> {
-        // Collect primitive types from direct lower bounds.
-        let lower_prims: Vec<_> = v
-            .lower_bounds
-            .iter()
-            .filter_map(|&lb| {
-                if let TypeEntry::Concrete(ty @ Ty::Primitive(_)) = self.table.get(lb) {
-                    Some(ty.clone())
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        // Check if any of those also appear as a direct upper bound.
-        for &ub in &v.upper_bounds {
-            if let TypeEntry::Concrete(ub_ty @ Ty::Primitive(_)) = self.table.get(ub) {
-                if lower_prims.contains(ub_ty) {
-                    return Some(ub_ty.clone());
-                }
-            }
-        }
-        None
-    }
-
     /// Recursively lift all pre-allocated expression TyId slots under `expr`
     /// to the current level. This ensures that during extrusion, these slots
     /// are treated as polymorphic and get fresh copies — preventing use-site
     /// constraints from leaking back through shared expression slots.
     fn lift_expr_slots(&mut self, expr: lang_ast::ExprId) {
         let slot = self.ty_for_expr(expr);
-        self.table.set_var_level(slot, self.table.current_level);
+        self.types
+            .storage
+            .set_var_level(slot, self.types.storage.current_level);
         let e = self.module[expr].clone();
         e.walk_child_exprs(|child| self.lift_expr_slots(child));
-    }
-
-    /// Walk lower bounds transitively to find a Concrete entry and return its
-    /// TyId. Used to resolve partial-application result variables (which point
-    /// to a Lambda via lower bounds) so poly_type_env stores the structural type
-    /// that extrude can traverse.
-    fn resolve_to_concrete_id(&self, ty_id: TyId) -> Option<TyId> {
-        let mut visited = HashSet::new();
-        self.resolve_to_concrete_id_inner(ty_id, &mut visited)
-    }
-
-    fn resolve_to_concrete_id_inner(
-        &self,
-        ty_id: TyId,
-        visited: &mut HashSet<TyId>,
-    ) -> Option<TyId> {
-        if !visited.insert(ty_id) {
-            return None; // Cycle detected.
-        }
-        match self.table.get(ty_id) {
-            TypeEntry::Concrete(_) => Some(ty_id),
-            TypeEntry::Variable(v) => {
-                let bounds = v.lower_bounds.clone();
-                for lb in bounds {
-                    if let Some(id) = self.resolve_to_concrete_id_inner(lb, visited) {
-                        return Some(id);
-                    }
-                }
-                None
-            }
-        }
-    }
-
-    /// Walk lower bounds of a variable to find a concrete type, if one exists.
-    /// Delegates to `resolve_to_concrete_id` to avoid duplicating the traversal
-    /// and cycle-detection logic.
-    pub(crate) fn find_concrete(&self, ty_id: TyId) -> Option<Ty<TyId>> {
-        let concrete_id = self.resolve_to_concrete_id(ty_id)?;
-        match self.table.get(concrete_id) {
-            TypeEntry::Concrete(ty) => Some(ty.clone()),
-            _ => None,
-        }
     }
 }

@@ -101,7 +101,7 @@ be more honest. Lower priority than `Bottom` because tautologies are rarer.
 
 ## Theme B: CheckCtx Decomposition
 
-### B1. Extract `TypeTable` from `CheckCtx`
+### ~~B1. Extract `TypeTable` from `CheckCtx`~~ ✅ Done
 
 **Effort**: Medium-High | **Impact**: High | **Risk reduction**: High — isolates
 constraint state from inference orchestration
@@ -516,7 +516,7 @@ Medium tasks (each is a full session):
 
 Larger refactors (plan before starting):
 
-11. **B1** — Extract TypeTable
+11. ~~**B1** — Extract TypeTable~~ ✅
 12. **E2** — Has-field constraints
 13. **C2** — Move narrowing into SCC grouping
 14. **G1** — Cross-file import tests

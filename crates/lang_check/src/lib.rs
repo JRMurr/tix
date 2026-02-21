@@ -9,6 +9,7 @@ pub(crate) mod infer_expr;
 mod narrow;
 mod operators;
 pub(crate) mod storage;
+pub(crate) mod type_table;
 
 #[cfg(test)]
 mod tests;
@@ -24,9 +25,9 @@ use infer_expr::{PendingMerge, PendingOverload};
 use la_arena::ArenaMap;
 use lang_ast::{AstDb, Expr, ExprId, Module, NameId, NameResolution, NixFile, OverloadBinOp};
 use lang_ty::{OutputTy, PrimitiveTy, Ty};
-use std::collections::{HashMap, HashSet};
-use storage::{TypeEntry, TypeStorage};
+use std::collections::HashMap;
 use thiserror::Error;
+use type_table::TypeTable;
 
 #[salsa::tracked]
 pub fn check_file(db: &dyn AstDb, file: NixFile) -> Result<InferenceResult, TixDiagnostic> {
@@ -297,22 +298,11 @@ pub struct CheckCtx<'db> {
     /// Warnings accumulated during inference (e.g. unresolved names).
     warnings: Vec<LocatedWarning>,
 
-    table: TypeStorage,
+    types: TypeTable,
 
     /// Maps generalized names to their polymorphic TyId.
     /// The TyId + variable levels encode the polymorphic scheme.
     poly_type_env: ArenaMap<NameId, TyId>,
-
-    /// Cache (sub, sup) pairs already processed by constrain() to avoid cycles.
-    /// Intentionally never cleared between SCC groups: extrusion creates fresh
-    /// vars linked to old ones via constrain(), and re-processing those pairs
-    /// would cause infinite loops across extrusion boundaries. The cache is
-    /// scoped to the lifetime of this CheckCtx (one per file), so it doesn't
-    /// grow across files.
-    constrain_cache: HashSet<(TyId, TyId)>,
-
-    /// Primitive type cache for deduplication.
-    prim_cache: HashMap<PrimitiveTy, TyId>,
 
     /// Constraints whose resolution is deferred until operand types are known.
     deferred: DeferredConstraints,
@@ -407,10 +397,8 @@ impl<'db> CheckCtx<'db> {
             binding_exprs,
             current_expr: module.entry_expr,
             warnings: Vec::new(),
-            table: TypeStorage::new(),
+            types: TypeTable::new(),
             poly_type_env: ArenaMap::new(),
-            constrain_cache: HashSet::new(),
-            prim_cache: HashMap::new(),
             deferred: DeferredConstraints::default(),
             early_canonical: ArenaMap::new(),
             type_aliases,
@@ -424,30 +412,17 @@ impl<'db> CheckCtx<'db> {
 
     /// Allocate a fresh type variable at the current level.
     fn new_var(&mut self) -> TyId {
-        self.table.new_var()
+        self.types.new_var()
     }
 
     /// Allocate a concrete type and return its TyId.
-    ///
-    /// Applies double negation elimination: `Neg(Neg(x))` → `x`, so double
-    /// negations never exist in the type table during inference.
     fn alloc_concrete(&mut self, ty: Ty<TyId>) -> TyId {
-        if let Ty::Neg(inner) = &ty {
-            if let TypeEntry::Concrete(Ty::Neg(x)) = self.table.get(*inner) {
-                return *x;
-            }
-        }
-        self.table.new_concrete(ty)
+        self.types.alloc_concrete(ty)
     }
 
     /// Allocate a primitive type, deduplicating via cache.
     fn alloc_prim(&mut self, prim: PrimitiveTy) -> TyId {
-        if let Some(&id) = self.prim_cache.get(&prim) {
-            return id;
-        }
-        let id = self.alloc_concrete(Ty::Primitive(prim));
-        self.prim_cache.insert(prim, id);
-        id
+        self.types.alloc_prim(prim)
     }
 
     /// Count the number of visible nested lambda parameters in an expression.
@@ -464,9 +439,9 @@ impl<'db> CheckCtx<'db> {
     fn ty_for_name_direct(&self, name: NameId) -> TyId {
         let id: TyId = u32::from(name.into_raw()).into();
         debug_assert!(
-            usize::from(id) < self.table.len(),
+            usize::from(id) < self.types.storage.len(),
             "ty_for_name_direct: TyId {id:?} out of bounds (storage has {} entries)",
-            self.table.len()
+            self.types.storage.len()
         );
         id
     }
@@ -476,9 +451,9 @@ impl<'db> CheckCtx<'db> {
         let idx = self.module.names().len() as u32 + u32::from(i.into_raw());
         let id: TyId = idx.into();
         debug_assert!(
-            usize::from(id) < self.table.len(),
+            usize::from(id) < self.types.storage.len(),
             "ty_for_expr: TyId {id:?} out of bounds (storage has {} entries)",
-            self.table.len()
+            self.types.storage.len()
         );
         id
     }

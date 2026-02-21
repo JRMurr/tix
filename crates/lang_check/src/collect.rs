@@ -527,7 +527,7 @@ impl<'db> Collector<'db> {
         let mut expr_ty_map = ArenaMap::with_capacity(expr_cnt);
 
         // Create a Canonicalizer that borrows the type storage for this pass.
-        let mut canon = Canonicalizer::new(&self.ctx.table, &self.ctx.alias_provenance);
+        let mut canon = Canonicalizer::new(&self.ctx.types.storage, &self.ctx.alias_provenance);
 
         for (name, ty) in name_tys {
             // Prefer the early-canonicalized type (captured before use-site

@@ -98,7 +98,9 @@ impl CheckCtx<'_> {
                 // 3. Deferred overloads that reference the param TyId are found in the extrude cache
                 let param_ty = if let Some(name) = param {
                     let name_ty = self.ty_for_name_direct(name);
-                    self.table.set_var_level(name_ty, self.table.current_level);
+                    self.types
+                        .storage
+                        .set_var_level(name_ty, self.types.storage.current_level);
                     name_ty
                 } else {
                     self.new_var()
@@ -123,7 +125,9 @@ impl CheckCtx<'_> {
                         let Some(name) = name else { continue };
                         let name_ty = self.ty_for_name_direct(name);
                         // Lift pattern field names to current level for generalization.
-                        self.table.set_var_level(name_ty, self.table.current_level);
+                        self.types
+                            .storage
+                            .set_var_level(name_ty, self.types.storage.current_level);
                         if let Some(default_ty) = default_ty {
                             self.constrain(default_ty, name_ty)
                                 .map_err(|err| self.locate_err(err))?;
@@ -490,8 +494,8 @@ impl CheckCtx<'_> {
     /// bidirectional propagation — same technique as `link_extruded_var`.
     fn narrow_fresh_var(&mut self, original: TyId, constraint: TyId) -> TyId {
         let fresh = self.new_var();
-        self.table.add_upper_bound(fresh, original);
-        self.table.add_upper_bound(fresh, constraint);
+        self.types.storage.add_upper_bound(fresh, original);
+        self.types.storage.add_upper_bound(fresh, constraint);
         fresh
     }
 

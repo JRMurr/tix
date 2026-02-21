@@ -42,13 +42,13 @@ impl CheckCtx<'_> {
         }
 
         // Cycle detection: if we've already processed this (sub, sup) pair, skip.
-        if !self.constrain_cache.insert((sub, sup)) {
+        if !self.types.constrain_cache.insert((sub, sup)) {
             return Ok(());
         }
 
         // Clone entries to avoid borrow conflicts with &mut self.
-        let sub_entry = self.table.get(sub).clone();
-        let sup_entry = self.table.get(sup).clone();
+        let sub_entry = self.types.storage.get(sub).clone();
+        let sup_entry = self.types.storage.get(sup).clone();
 
         match (&sub_entry, &sup_entry) {
             // sub is a variable — record sup as upper bound, propagate to existing lower bounds.
@@ -60,8 +60,14 @@ impl CheckCtx<'_> {
                 if let Some(expr) = self.expr_for_ty(sub) {
                     self.current_expr = expr;
                 }
-                self.table.add_upper_bound(sub, sup);
-                let lower_bounds = self.table.get_var(sub).unwrap().lower_bounds.clone();
+                self.types.storage.add_upper_bound(sub, sup);
+                let lower_bounds = self
+                    .types
+                    .storage
+                    .get_var(sub)
+                    .unwrap()
+                    .lower_bounds
+                    .clone();
                 for lb in lower_bounds {
                     self.constrain(lb, sup)?;
                 }
@@ -72,8 +78,14 @@ impl CheckCtx<'_> {
                 if let Some(expr) = self.expr_for_ty(sup) {
                     self.current_expr = expr;
                 }
-                self.table.add_lower_bound(sup, sub);
-                let upper_bounds = self.table.get_var(sup).unwrap().upper_bounds.clone();
+                self.types.storage.add_lower_bound(sup, sub);
+                let upper_bounds = self
+                    .types
+                    .storage
+                    .get_var(sup)
+                    .unwrap()
+                    .upper_bounds
+                    .clone();
                 for ub in upper_bounds {
                     self.constrain(sub, ub)?;
                 }
@@ -136,7 +148,7 @@ impl CheckCtx<'_> {
             // Primitive <: Neg(inner): succeeds when the primitive is disjoint
             // from what's negated. E.g. Int <: ¬Null succeeds because Int ≠ Null.
             (Ty::Primitive(p1), Ty::Neg(inner)) => {
-                match self.table.get(*inner).clone() {
+                match self.types.storage.get(*inner).clone() {
                     TypeEntry::Concrete(Ty::Primitive(p2)) => {
                         if p1 == &p2 || p1.is_subtype_of(&p2) {
                             // Contradiction: e.g. Null <: ¬Null, or Int <: ¬Number.
