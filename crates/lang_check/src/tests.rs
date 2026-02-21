@@ -3999,3 +3999,43 @@ fn narrow_hasattr_field_arithmetic() {
     let (_param, body) = unwrap_lambda(&ty);
     assert_eq!(*body, arc_ty!(Int));
 }
+
+// ==============================================================================
+// Negation + intersection contradiction tests (G3)
+// ==============================================================================
+//
+// These tests document behavior when narrowing produces contradictory types
+// (e.g. `string & int`, `float & ~float`). Contradictions currently resolve
+// to TyVar stand-ins; after A2 (OutputTy::Bottom) they will resolve to `never`.
+
+/// `x: if isString x then (if isInt x then x else 0) else 0` — the inner
+/// then-branch has `string & int` which is contradictory. The overall
+/// body is int (both non-contradictory branches return int).
+#[test]
+fn narrow_contradiction_isstring_then_isint() {
+    let nix = "x: if builtins.isString x then (if builtins.isInt x then x else 0) else 0";
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(*body, arc_ty!(Int));
+}
+
+/// `x: if !(isNull x) then (if isString x then stringLength x else 0) else 0`
+/// — `~null & string` is NOT contradictory. The body is int (stringLength
+/// returns int, else branches return int).
+#[test]
+fn narrow_non_contradiction_neg_null_string() {
+    let nix = "x: if !(builtins.isNull x) then (if builtins.isString x then builtins.stringLength x else 0) else 0";
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(*body, arc_ty!(Int));
+}
+
+/// `x: if isFloat x then (if !(isFloat x) then x else 0) else 0` —
+/// `float & ~float` is a contradiction. Body is int.
+#[test]
+fn narrow_contradiction_self_negated() {
+    let nix = "x: if builtins.isFloat x then (if !(builtins.isFloat x) then x else 0) else 0";
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(*body, arc_ty!(Int));
+}

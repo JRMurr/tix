@@ -694,4 +694,57 @@ mod tests {
         let result = remove_tautological_pairs(members.clone());
         assert_eq!(result, members);
     }
+
+    // -- contradiction canonicalization tests (G3) ----------------------------
+
+    #[test]
+    fn contradiction_canonicalizes_to_tyvar() {
+        // Build a type variable whose upper bounds produce `int & ~int` in
+        // negative position. Currently returns TyVar as a stand-in for ⊥.
+        // TODO: assert Bottom after A2 is implemented.
+        use crate::storage::TypeStorage;
+        use lang_ty::Ty;
+
+        let mut table = TypeStorage::new();
+        let var_id = table.new_var();
+        let int_ty = table.new_concrete(Ty::Primitive(lang_ty::PrimitiveTy::Int));
+        let neg_int = table.new_concrete(Ty::Neg(int_ty));
+
+        // Add int and ~int as upper bounds of the variable.
+        table.add_upper_bound(var_id, int_ty);
+        table.add_upper_bound(var_id, neg_int);
+
+        let provenance = std::collections::HashMap::new();
+        let result = canonicalize_standalone(&table, &provenance, var_id, Negative);
+        // Contradiction produces a bare TyVar (will be Bottom after A2).
+        assert!(
+            matches!(result, OutputTy::TyVar(_)),
+            "int & ~int contradiction should produce TyVar stand-in, got: {result}"
+        );
+    }
+
+    #[test]
+    fn no_contradiction_string_neg_null() {
+        // `string & ~null` is NOT a contradiction — string and null are
+        // unrelated types. The intersection should be preserved.
+        use crate::storage::TypeStorage;
+        use lang_ty::Ty;
+
+        let mut table = TypeStorage::new();
+        let var_id = table.new_var();
+        let string_ty = table.new_concrete(Ty::Primitive(lang_ty::PrimitiveTy::String));
+        let null_ty = table.new_concrete(Ty::Primitive(lang_ty::PrimitiveTy::Null));
+        let neg_null = table.new_concrete(Ty::Neg(null_ty));
+
+        table.add_upper_bound(var_id, string_ty);
+        table.add_upper_bound(var_id, neg_null);
+
+        let provenance = std::collections::HashMap::new();
+        let result = canonicalize_standalone(&table, &provenance, var_id, Negative);
+        // Should be an intersection, not a TyVar (not a contradiction).
+        assert!(
+            matches!(result, OutputTy::Intersection(_)),
+            "string & ~null should produce Intersection, got: {result}"
+        );
+    }
 }
