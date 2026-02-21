@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::{CheckCtx, InferenceError, InferenceResult, LocatedError, TyId};
+use super::{CheckCtx, InferenceError, InferenceResult, LocatedError, Polarity, TyId};
 use crate::collect::{canonicalize_standalone, Collector};
 use crate::diagnostic;
 use crate::diagnostic::TixDiagnostic;
@@ -127,17 +127,28 @@ impl CheckCtx<'_> {
 
         // --- Cleanup always runs, even on error ---
 
-        // Move unresolved overloads to deferred list — they'll be re-instantiated
-        // per call-site during extrusion.
-        let remaining = std::mem::take(&mut self.deferred.overloads);
-        self.deferred.deferred_overloads.extend(remaining);
+        // Move unresolved overloads to the carried list — they'll be
+        // re-instantiated per call-site during extrusion.
+        let remaining = std::mem::take(&mut self.deferred.active);
+        for constraint in remaining {
+            if let super::PendingConstraint::Overload(ov) = constraint {
+                self.deferred.carried.push(ov);
+            }
+            // Merges are discarded here — they're only relevant within their
+            // SCC group. (Merges that couldn't resolve within the group
+            // remain unresolved, matching the previous behavior.)
+        }
 
         // Snapshot each successfully-inferred name's canonical type NOW, before
         // exit_level and before use-site extrusions add concrete bounds.
         for &(name_id, ty) in &inferred {
             let poly_ty = self.resolve_to_concrete_id(ty).unwrap_or(ty);
-            let output =
-                canonicalize_standalone(&self.table, &self.alias_provenance, poly_ty, true);
+            let output = canonicalize_standalone(
+                &self.table,
+                &self.alias_provenance,
+                poly_ty,
+                Polarity::Positive,
+            );
             let simplified = simplify(&output);
             self.early_canonical.insert(name_id, simplified);
         }
@@ -233,7 +244,7 @@ impl CheckCtx<'_> {
     // The `polarity` parameter tracks variance: positive = output/covariant,
     // negative = input/contravariant.
 
-    pub fn extrude(&mut self, ty_id: TyId, polarity: bool) -> TyId {
+    pub fn extrude(&mut self, ty_id: TyId, polarity: Polarity) -> TyId {
         let mut cache = HashMap::new();
         let result = self.extrude_inner(ty_id, polarity, &mut cache);
 
@@ -257,7 +268,7 @@ impl CheckCtx<'_> {
         // may add new entries to the cache, which then makes other overloads
         // eligible for re-instantiation (e.g. when overload chains share
         // intermediate result vars like `(a + b) + (c + d)`).
-        let deferred = self.deferred.deferred_overloads.clone();
+        let deferred = self.deferred.carried.clone();
         let mut processed = vec![false; deferred.len()];
         loop {
             let mut made_progress = false;
@@ -279,7 +290,7 @@ impl CheckCtx<'_> {
                             if let Some(&fresh) = cache.get(&id) {
                                 fresh
                             } else {
-                                this.extrude_inner(id, true, cache)
+                                this.extrude_inner(id, Polarity::Positive, cache)
                             }
                         };
 
@@ -287,15 +298,17 @@ impl CheckCtx<'_> {
                     let new_rhs = get_or_extrude(ov.constraint.rhs, self, &mut cache);
                     let new_ret = get_or_extrude(ov.constraint.ret, self, &mut cache);
 
-                    self.deferred.overloads.push(PendingOverload {
-                        op: ov.op,
-                        constraint: BinConstraint {
-                            lhs: new_lhs,
-                            rhs: new_rhs,
-                            ret: new_ret,
-                            at_expr: ov.constraint.at_expr,
-                        },
-                    });
+                    self.deferred
+                        .active
+                        .push(super::PendingConstraint::Overload(PendingOverload {
+                            op: ov.op,
+                            constraint: BinConstraint {
+                                lhs: new_lhs,
+                                rhs: new_rhs,
+                                ret: new_ret,
+                                at_expr: ov.constraint.at_expr,
+                            },
+                        }));
 
                     processed[i] = true;
                     made_progress = true;
@@ -313,7 +326,7 @@ impl CheckCtx<'_> {
     fn extrude_inner(
         &mut self,
         ty_id: TyId,
-        polarity: bool,
+        polarity: Polarity,
         cache: &mut HashMap<TyId, TyId>,
     ) -> TyId {
         if let Some(&cached) = cache.get(&ty_id) {
@@ -356,7 +369,7 @@ impl CheckCtx<'_> {
                         let placeholder = self.new_var();
                         cache.insert(ty_id, placeholder);
 
-                        let p = self.extrude_inner(param, !polarity, cache); // flip polarity
+                        let p = self.extrude_inner(param, polarity.flip(), cache); // flip polarity
                         let b = self.extrude_inner(body, polarity, cache);
                         let result = self.alloc_concrete(Ty::Lambda { param: p, body: b });
 
@@ -388,7 +401,7 @@ impl CheckCtx<'_> {
                     Ty::TyVar(_) => ty_id,
                     // Negation flips polarity, same as Lambda param.
                     Ty::Neg(inner) => {
-                        let e = self.extrude_inner(inner, !polarity, cache);
+                        let e = self.extrude_inner(inner, polarity.flip(), cache);
                         self.alloc_concrete(Ty::Neg(e))
                     }
                 };
@@ -418,7 +431,7 @@ impl CheckCtx<'_> {
         &mut self,
         original: TyId,
         fresh: TyId,
-        polarity: bool,
+        polarity: Polarity,
         var: crate::storage::TypeVariable,
         cache: &mut HashMap<TyId, TyId>,
     ) {
@@ -427,20 +440,22 @@ impl CheckCtx<'_> {
         // copy the original's lower bounds (extruded) into fresh.
         //
         // In negative position, `fresh <: original`: symmetrically reversed.
-        let bounds_to_copy = if polarity {
-            self.table.add_upper_bound(original, fresh);
-            var.lower_bounds.clone()
-        } else {
-            self.table.add_lower_bound(original, fresh);
-            var.upper_bounds.clone()
+        let bounds_to_copy = match polarity {
+            Polarity::Positive => {
+                self.table.add_upper_bound(original, fresh);
+                var.lower_bounds.clone()
+            }
+            Polarity::Negative => {
+                self.table.add_lower_bound(original, fresh);
+                var.upper_bounds.clone()
+            }
         };
 
         for bound in bounds_to_copy {
             let extruded = self.extrude_inner(bound, polarity, cache);
-            if polarity {
-                self.table.add_lower_bound(fresh, extruded);
-            } else {
-                self.table.add_upper_bound(fresh, extruded);
+            match polarity {
+                Polarity::Positive => self.table.add_lower_bound(fresh, extruded),
+                Polarity::Negative => self.table.add_upper_bound(fresh, extruded),
             }
         }
     }
@@ -458,42 +473,41 @@ impl CheckCtx<'_> {
         loop {
             let mut made_progress = false;
 
-            // Resolve overloads.
-            let overloads = std::mem::take(&mut self.deferred.overloads);
-            let mut remaining_overloads = Vec::new();
-            for ov in overloads {
-                self.current_expr = ov.constraint.at_expr;
-                match self
-                    .try_resolve_overload(&ov)
-                    .map_err(|err| self.locate_err(err))?
-                {
-                    OverloadProgress::FullyResolved => made_progress = true,
-                    OverloadProgress::PartialProgress => {
-                        // Partial work was done (constraints added) but the
-                        // overload isn't fully resolved yet. Keep it pending
-                        // and mark progress so the loop iterates again.
-                        made_progress = true;
-                        remaining_overloads.push(ov);
-                    }
-                    OverloadProgress::NoProgress => remaining_overloads.push(ov),
-                }
-            }
-            self.deferred.overloads = remaining_overloads;
+            let pending = std::mem::take(&mut self.deferred.active);
+            let mut remaining = Vec::new();
 
-            // Resolve merges.
-            let merges = std::mem::take(&mut self.deferred.merges);
-            let mut remaining_merges = Vec::new();
-            for mg in merges {
-                self.current_expr = mg.at_expr;
-                match self
-                    .try_resolve_merge(&mg)
-                    .map_err(|err| self.locate_err(err))?
-                {
-                    true => made_progress = true,
-                    false => remaining_merges.push(mg),
+            for constraint in pending {
+                match constraint {
+                    super::PendingConstraint::Overload(ov) => {
+                        self.current_expr = ov.constraint.at_expr;
+                        match self
+                            .try_resolve_overload(&ov)
+                            .map_err(|err| self.locate_err(err))?
+                        {
+                            OverloadProgress::FullyResolved => made_progress = true,
+                            OverloadProgress::PartialProgress => {
+                                made_progress = true;
+                                remaining.push(super::PendingConstraint::Overload(ov));
+                            }
+                            OverloadProgress::NoProgress => {
+                                remaining.push(super::PendingConstraint::Overload(ov));
+                            }
+                        }
+                    }
+                    super::PendingConstraint::Merge(mg) => {
+                        self.current_expr = mg.at_expr;
+                        match self
+                            .try_resolve_merge(&mg)
+                            .map_err(|err| self.locate_err(err))?
+                        {
+                            true => made_progress = true,
+                            false => remaining.push(super::PendingConstraint::Merge(mg)),
+                        }
+                    }
                 }
             }
-            self.deferred.merges = remaining_merges;
+
+            self.deferred.active = remaining;
 
             if !made_progress {
                 break;
@@ -692,27 +706,13 @@ impl CheckCtx<'_> {
     }
 
     /// Walk lower bounds of a variable to find a concrete type, if one exists.
+    /// Delegates to `resolve_to_concrete_id` to avoid duplicating the traversal
+    /// and cycle-detection logic.
     pub(crate) fn find_concrete(&self, ty_id: TyId) -> Option<Ty<TyId>> {
-        let mut visited = HashSet::new();
-        self.find_concrete_inner(ty_id, &mut visited)
-    }
-
-    fn find_concrete_inner(&self, ty_id: TyId, visited: &mut HashSet<TyId>) -> Option<Ty<TyId>> {
-        if !visited.insert(ty_id) {
-            return None; // Cycle detected — stop recursing.
-        }
-        match self.table.get(ty_id) {
+        let concrete_id = self.resolve_to_concrete_id(ty_id)?;
+        match self.table.get(concrete_id) {
             TypeEntry::Concrete(ty) => Some(ty.clone()),
-            TypeEntry::Variable(v) => {
-                // Check lower bounds for a concrete type.
-                let bounds = v.lower_bounds.clone();
-                for lb in bounds {
-                    if let Some(ty) = self.find_concrete_inner(lb, visited) {
-                        return Some(ty);
-                    }
-                }
-                None
-            }
+            _ => None,
         }
     }
 

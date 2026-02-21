@@ -16,7 +16,7 @@ use smol_str::SmolStr;
 
 use crate::collect::canonicalize_standalone;
 use crate::storage::TypeStorage;
-use crate::{InferenceError, Located, LocatedError, LocatedWarning, TyId, Warning};
+use crate::{InferenceError, Located, LocatedError, LocatedWarning, Polarity, TyId, Warning};
 
 /// A display-ready diagnostic paired with the expression where it occurred.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -219,12 +219,12 @@ fn canonicalize_ty_structural(
         lang_ty::Ty::Primitive(p) => OutputTy::Primitive(*p),
         lang_ty::Ty::TyVar(x) => OutputTy::TyVar(*x),
         lang_ty::Ty::List(elem) => {
-            let c_elem = canonicalize_standalone(table, provenance, *elem, true);
+            let c_elem = canonicalize_standalone(table, provenance, *elem, Polarity::Positive);
             OutputTy::List(lang_ty::TyRef::from(c_elem))
         }
         lang_ty::Ty::Lambda { param, body } => {
-            let c_param = canonicalize_standalone(table, provenance, *param, false);
-            let c_body = canonicalize_standalone(table, provenance, *body, true);
+            let c_param = canonicalize_standalone(table, provenance, *param, Polarity::Negative);
+            let c_body = canonicalize_standalone(table, provenance, *body, Polarity::Positive);
             OutputTy::Lambda {
                 param: lang_ty::TyRef::from(c_param),
                 body: lang_ty::TyRef::from(c_body),
@@ -235,13 +235,18 @@ fn canonicalize_ty_structural(
                 .fields
                 .iter()
                 .map(|(k, &v)| {
-                    let c_field = canonicalize_standalone(table, provenance, v, true);
+                    let c_field = canonicalize_standalone(table, provenance, v, Polarity::Positive);
                     (k.clone(), lang_ty::TyRef::from(c_field))
                 })
                 .collect();
-            let dyn_ty = attr
-                .dyn_ty
-                .map(|d| lang_ty::TyRef::from(canonicalize_standalone(table, provenance, d, true)));
+            let dyn_ty = attr.dyn_ty.map(|d| {
+                lang_ty::TyRef::from(canonicalize_standalone(
+                    table,
+                    provenance,
+                    d,
+                    Polarity::Positive,
+                ))
+            });
             OutputTy::AttrSet(lang_ty::AttrSetTy {
                 fields,
                 dyn_ty,
@@ -250,7 +255,7 @@ fn canonicalize_ty_structural(
             })
         }
         lang_ty::Ty::Neg(inner) => {
-            let c_inner = canonicalize_standalone(table, provenance, *inner, true);
+            let c_inner = canonicalize_standalone(table, provenance, *inner, Polarity::Positive);
             OutputTy::Neg(lang_ty::TyRef::from(c_inner))
         }
     }

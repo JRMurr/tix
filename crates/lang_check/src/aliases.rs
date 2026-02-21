@@ -64,9 +64,7 @@ impl DocIndex {
         // e.g. path=["findFirst"] matches stored ["lists", "findFirst"].
         entries
             .iter()
-            .find(|(stored_path, _)| {
-                stored_path.len() > path.len() && stored_path.ends_with(path)
-            })
+            .find(|(stored_path, _)| stored_path.len() > path.len() && stored_path.ends_with(path))
             .map(|(_, doc)| doc)
     }
 

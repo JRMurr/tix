@@ -109,6 +109,13 @@ impl CheckCtx<'_> {
             }
 
             // List: covariant in element type.
+            //
+            // Covariance is sound here because Nix is a pure language — lists
+            // are immutable values. In a language with mutable list operations
+            // (e.g. `list[0] = x`), covariance would be unsound: you could
+            // alias a `List<Cat>` as `List<Animal>`, then write a `Dog` into
+            // it through the `Animal` reference, violating the `Cat` invariant.
+            // Nix has no such mutation, so `[Cat] <: [Animal]` is safe.
             (Ty::List(e1), Ty::List(e2)) => self.constrain(*e1, *e2),
 
             // AttrSet: width subtyping — sub must have all fields that sup requires.

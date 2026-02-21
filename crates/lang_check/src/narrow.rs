@@ -14,8 +14,8 @@
 // constraint contamination.
 
 use lang_ast::{
-    nameres::ResolveResult, BinOP, BindingValue, Expr, ExprBinOp, ExprId, Literal, NameId,
-    NormalBinOp,
+    nameres::ResolveResult, BinOP, BindingValue, Bindings, Expr, ExprBinOp, ExprId, Literal,
+    NameId, NormalBinOp,
 };
 use lang_ty::PrimitiveTy;
 use smol_str::SmolStr;
@@ -569,66 +569,16 @@ impl CheckCtx<'_> {
 
             // ── LetIn: record narrowings for each binding, recurse
             Expr::LetIn { bindings, body } => {
-                if !active.is_empty() {
-                    for &(name, value) in bindings.statics.iter() {
-                        // Record active narrowings for this binding's name.
-                        scopes
-                            .entry(name)
-                            .or_insert_with(Vec::new)
-                            .extend(active.iter().cloned());
-
-                        match value {
-                            BindingValue::Expr(e) | BindingValue::Inherit(e) => {
-                                self.walk_for_narrow_scopes(e, active, scopes);
-                            }
-                            BindingValue::InheritFrom(_) => {}
-                        }
-                    }
-                    for &from_expr in bindings.inherit_froms.iter() {
-                        self.walk_for_narrow_scopes(from_expr, active, scopes);
-                    }
-                    for &(k, v) in bindings.dynamics.iter() {
-                        self.walk_for_narrow_scopes(k, active, scopes);
-                        self.walk_for_narrow_scopes(v, active, scopes);
-                    }
-                } else {
-                    bindings.walk_child_exprs(|child| {
-                        self.walk_for_narrow_scopes(child, active, scopes);
-                    });
-                }
+                self.record_and_walk_bindings(&bindings, active, scopes);
                 self.walk_for_narrow_scopes(body, active, scopes);
             }
 
-            // ── Recursive AttrSet: same as LetIn for bindings
+            // ── Recursive AttrSet: same as LetIn for bindings (no body)
             Expr::AttrSet {
                 is_rec: true,
                 bindings,
             } => {
-                if !active.is_empty() {
-                    for &(name, value) in bindings.statics.iter() {
-                        scopes
-                            .entry(name)
-                            .or_insert_with(Vec::new)
-                            .extend(active.iter().cloned());
-                        match value {
-                            BindingValue::Expr(e) | BindingValue::Inherit(e) => {
-                                self.walk_for_narrow_scopes(e, active, scopes);
-                            }
-                            BindingValue::InheritFrom(_) => {}
-                        }
-                    }
-                    for &from_expr in bindings.inherit_froms.iter() {
-                        self.walk_for_narrow_scopes(from_expr, active, scopes);
-                    }
-                    for &(k, v) in bindings.dynamics.iter() {
-                        self.walk_for_narrow_scopes(k, active, scopes);
-                        self.walk_for_narrow_scopes(v, active, scopes);
-                    }
-                } else {
-                    bindings.walk_child_exprs(|child| {
-                        self.walk_for_narrow_scopes(child, active, scopes);
-                    });
-                }
+                self.record_and_walk_bindings(&bindings, active, scopes);
             }
 
             // ── Everything else: recurse into children with same narrowings
@@ -640,13 +590,50 @@ impl CheckCtx<'_> {
         }
     }
 
+    /// Record active narrowings for each static binding in `bindings` and
+    /// recurse into their value expressions. When `active` is empty, skips
+    /// the per-binding scope recording and uses the bulk `walk_child_exprs`.
+    ///
+    /// Shared by the `LetIn` and `AttrSet { is_rec: true }` arms of
+    /// `walk_for_narrow_scopes`.
+    fn record_and_walk_bindings(
+        &self,
+        bindings: &Bindings,
+        active: &[NarrowBinding],
+        scopes: &mut std::collections::HashMap<NameId, Vec<NarrowBinding>>,
+    ) {
+        if !active.is_empty() {
+            for &(name, value) in bindings.statics.iter() {
+                scopes
+                    .entry(name)
+                    .or_insert_with(Vec::new)
+                    .extend(active.iter().cloned());
+
+                match value {
+                    BindingValue::Expr(e) | BindingValue::Inherit(e) => {
+                        self.walk_for_narrow_scopes(e, active, scopes);
+                    }
+                    BindingValue::InheritFrom(_) => {}
+                }
+            }
+            for &from_expr in bindings.inherit_froms.iter() {
+                self.walk_for_narrow_scopes(from_expr, active, scopes);
+            }
+            for &(k, v) in bindings.dynamics.iter() {
+                self.walk_for_narrow_scopes(k, active, scopes);
+                self.walk_for_narrow_scopes(v, active, scopes);
+            }
+        } else {
+            bindings.walk_child_exprs(|child| {
+                self.walk_for_narrow_scopes(child, active, scopes);
+            });
+        }
+    }
+
     /// Like `detect_conditional_apply_narrowing` but for the pre-pass.
     /// Checks if `fun_expr` is `Apply(conditional_fn, cond_expr)` and
     /// returns narrowing info for the body argument.
-    fn detect_conditional_apply_narrowing_prepass(
-        &self,
-        fun_expr: ExprId,
-    ) -> Option<NarrowInfo> {
+    fn detect_conditional_apply_narrowing_prepass(&self, fun_expr: ExprId) -> Option<NarrowInfo> {
         let Expr::Apply {
             fun: inner_fn,
             arg: cond_expr,

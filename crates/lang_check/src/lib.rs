@@ -64,6 +64,31 @@ pub fn check_file_with_imports(
     check.infer_prog(grouped_defs)
 }
 
+/// Tracks whether a type position is covariant (output/positive) or
+/// contravariant (input/negative). Using an enum instead of `bool` prevents
+/// silent sign-flip bugs where `polarity` is accidentally passed instead of
+/// `!polarity`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Polarity {
+    /// Output/covariant position — variables expand to union of lower bounds.
+    Positive,
+    /// Input/contravariant position — variables expand to intersection of upper bounds.
+    Negative,
+}
+
+impl Polarity {
+    pub fn flip(self) -> Self {
+        match self {
+            Polarity::Positive => Polarity::Negative,
+            Polarity::Negative => Polarity::Positive,
+        }
+    }
+
+    pub fn is_positive(self) -> bool {
+        matches!(self, Polarity::Positive)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Copy, Hash)]
 #[debug("TyId({_0:?})")]
 pub struct TyId(u32);
@@ -234,16 +259,22 @@ pub fn check_file_collecting(
     }
 }
 
+/// A pending constraint that couldn't be resolved immediately because one or
+/// both operand types are still unknown.
+#[derive(Debug, Clone)]
+pub enum PendingConstraint {
+    Overload(PendingOverload),
+    Merge(PendingMerge),
+}
+
 /// Constraints whose resolution is deferred until operand types are known.
 #[derive(Debug, Clone, Default)]
 pub struct DeferredConstraints {
-    /// Pending overloaded binary op constraints to resolve later.
-    pub overloads: Vec<PendingOverload>,
-    /// Pending attrset merge constraints to resolve later.
-    pub merges: Vec<PendingMerge>,
-    /// Overloads that couldn't be resolved in their SCC group and should be
-    /// re-instantiated per call-site during extrusion.
-    pub deferred_overloads: Vec<PendingOverload>,
+    /// Active pending constraints for the current SCC group.
+    pub active: Vec<PendingConstraint>,
+    /// Overloads carried over from previous groups — re-instantiated per
+    /// call-site during extrusion.
+    pub carried: Vec<PendingOverload>,
 }
 
 #[derive(Debug, Clone)]

@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{CheckCtx, LocatedError, TyId};
+use super::{CheckCtx, LocatedError, Polarity, TyId};
 use lang_ast::{
     nameres::ResolveResult, BinOP, BindingValue, Bindings, Expr, ExprBinOp, ExprId, InterpolPart,
     Literal, NameId, NormalBinOp, OverloadBinOp,
@@ -417,7 +417,7 @@ impl CheckCtx<'_> {
 
                     // If the name is in poly_type_env, instantiate via extrude.
                     if let Some(&poly_ty) = self.poly_type_env.get(name) {
-                        Ok(self.extrude(poly_ty, true))
+                        Ok(self.extrude(poly_ty, Polarity::Positive))
                     } else {
                         // Not yet generalized — return the pre-allocated TyId directly.
                         Ok(self.ty_for_name_direct(name))
@@ -643,15 +643,17 @@ impl CheckCtx<'_> {
                 // Still push the overload for deferred full resolution, which
                 // will pin to the precise type (int vs float) when both
                 // operands become concrete.
-                self.deferred.overloads.push(PendingOverload {
-                    op: *overload_op,
-                    constraint: BinConstraint {
-                        lhs: lhs_ty,
-                        rhs: rhs_ty,
-                        ret: ret_ty,
-                        at_expr: self.current_expr,
-                    },
-                });
+                self.deferred
+                    .active
+                    .push(super::PendingConstraint::Overload(PendingOverload {
+                        op: *overload_op,
+                        constraint: BinConstraint {
+                            lhs: lhs_ty,
+                            rhs: rhs_ty,
+                            ret: ret_ty,
+                            at_expr: self.current_expr,
+                        },
+                    }));
                 Ok(ret_ty)
             }
 
@@ -710,12 +712,14 @@ impl CheckCtx<'_> {
             BinOP::Normal(NormalBinOp::AttrUpdate) => {
                 // attr merge: we'll handle this as a pending constraint
                 let ret_ty = self.new_var();
-                self.deferred.merges.push(BinConstraint {
-                    lhs: lhs_ty,
-                    rhs: rhs_ty,
-                    ret: ret_ty,
-                    at_expr: self.current_expr,
-                });
+                self.deferred
+                    .active
+                    .push(super::PendingConstraint::Merge(BinConstraint {
+                        lhs: lhs_ty,
+                        rhs: rhs_ty,
+                        ret: ret_ty,
+                        at_expr: self.current_expr,
+                    }));
                 Ok(ret_ty)
             }
         }
@@ -770,7 +774,7 @@ impl CheckCtx<'_> {
                 | BindingValue::Expr(e)
                 | BindingValue::InheritFrom(e)) = value;
                 self.current_expr = e;
-                let instantiated = self.extrude(poly_ty, true);
+                let instantiated = self.extrude(poly_ty, Polarity::Positive);
                 fields.insert(name_text, instantiated);
                 continue;
             }

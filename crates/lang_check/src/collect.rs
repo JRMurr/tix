@@ -14,9 +14,11 @@ use la_arena::ArenaMap;
 
 use smol_str::SmolStr;
 
-use super::{CheckCtx, InferenceResult, TyId};
+use super::{CheckCtx, InferenceResult, Polarity, TyId};
 use crate::storage::{TypeEntry, TypeStorage};
 use lang_ty::{AttrSetTy, OutputTy, Ty, TyRef};
+
+use Polarity::{Negative, Positive};
 
 // ==============================================================================
 // Canonicalizer — shared canonicalization engine
@@ -30,8 +32,8 @@ use lang_ty::{AttrSetTy, OutputTy, Ty, TyRef};
 struct Canonicalizer<'a> {
     table: &'a TypeStorage,
     alias_provenance: &'a HashMap<TyId, SmolStr>,
-    cache: HashMap<(TyId, bool), OutputTy>,
-    in_progress: HashSet<(TyId, bool)>,
+    cache: HashMap<(TyId, Polarity), OutputTy>,
+    in_progress: HashSet<(TyId, Polarity)>,
 }
 
 impl<'a> Canonicalizer<'a> {
@@ -44,8 +46,8 @@ impl<'a> Canonicalizer<'a> {
         }
     }
 
-    fn canonicalize(&mut self, ty_id: TyId, positive: bool) -> OutputTy {
-        let key = (ty_id, positive);
+    fn canonicalize(&mut self, ty_id: TyId, polarity: Polarity) -> OutputTy {
+        let key = (ty_id, polarity);
 
         if let Some(cached) = self.cache.get(&key) {
             return cached.clone();
@@ -56,26 +58,23 @@ impl<'a> Canonicalizer<'a> {
         }
 
         self.in_progress.insert(key);
-        let result = self.canonicalize_inner(ty_id, positive);
+        let result = self.canonicalize_inner(ty_id, polarity);
         self.in_progress.remove(&key);
 
         self.cache.insert(key, result.clone());
         result
     }
 
-    fn canonicalize_inner(&mut self, ty_id: TyId, positive: bool) -> OutputTy {
+    fn canonicalize_inner(&mut self, ty_id: TyId, polarity: Polarity) -> OutputTy {
         let entry = self.table.get(ty_id).clone();
         let alias_name = self.alias_provenance.get(&ty_id).cloned();
 
         let result = match entry {
-            TypeEntry::Variable(v) => {
-                if positive {
-                    self.expand_bounds_as_union(&v.lower_bounds, ty_id)
-                } else {
-                    self.expand_bounds_as_intersection(&v.upper_bounds, ty_id)
-                }
-            }
-            TypeEntry::Concrete(ty) => self.canonicalize_concrete(&ty, positive),
+            TypeEntry::Variable(v) => match polarity {
+                Positive => self.expand_bounds_as_union(&v.lower_bounds, ty_id),
+                Negative => self.expand_bounds_as_intersection(&v.upper_bounds, ty_id),
+            },
+            TypeEntry::Concrete(ty) => self.canonicalize_concrete(&ty, polarity),
         };
 
         // If this TyId originated from a type alias, wrap the canonical form
@@ -96,7 +95,10 @@ impl<'a> Canonicalizer<'a> {
     /// thing we can show for unconstrained return types of arithmetic operations.
     fn expand_bounds_as_union(&mut self, bounds: &[TyId], var_id: TyId) -> OutputTy {
         let bounds = bounds.to_vec();
-        let members: Vec<OutputTy> = bounds.iter().map(|&b| self.canonicalize(b, true)).collect();
+        let members: Vec<OutputTy> = bounds
+            .iter()
+            .map(|&b| self.canonicalize(b, Positive))
+            .collect();
 
         let flattened = flatten_union(members);
 
@@ -150,7 +152,7 @@ impl<'a> Canonicalizer<'a> {
         let bounds = bounds.to_vec();
         let members: Vec<OutputTy> = bounds
             .iter()
-            .map(|&b| self.canonicalize(b, false))
+            .map(|&b| self.canonicalize(b, Negative))
             .collect();
 
         let flattened = flatten_intersection(members);
@@ -180,17 +182,17 @@ impl<'a> Canonicalizer<'a> {
         }
     }
 
-    fn canonicalize_concrete(&mut self, ty: &Ty<TyId>, positive: bool) -> OutputTy {
+    fn canonicalize_concrete(&mut self, ty: &Ty<TyId>, polarity: Polarity) -> OutputTy {
         match ty {
             Ty::Primitive(p) => OutputTy::Primitive(*p),
             Ty::TyVar(x) => OutputTy::TyVar(*x),
             Ty::List(elem) => {
-                let c_elem = self.canonicalize(*elem, positive);
+                let c_elem = self.canonicalize(*elem, polarity);
                 OutputTy::List(TyRef::from(c_elem))
             }
             Ty::Lambda { param, body } => {
-                let c_param = self.canonicalize(*param, !positive);
-                let c_body = self.canonicalize(*body, positive);
+                let c_param = self.canonicalize(*param, polarity.flip());
+                let c_body = self.canonicalize(*body, polarity);
                 OutputTy::Lambda {
                     param: TyRef::from(c_param),
                     body: TyRef::from(c_body),
@@ -199,12 +201,12 @@ impl<'a> Canonicalizer<'a> {
             Ty::AttrSet(attr) => {
                 let mut new_fields = BTreeMap::new();
                 for (k, &v) in &attr.fields {
-                    let c_field = self.canonicalize(v, positive);
+                    let c_field = self.canonicalize(v, polarity);
                     new_fields.insert(k.clone(), TyRef::from(c_field));
                 }
                 let dyn_ty = attr
                     .dyn_ty
-                    .map(|d| TyRef::from(self.canonicalize(d, positive)));
+                    .map(|d| TyRef::from(self.canonicalize(d, polarity)));
                 OutputTy::AttrSet(AttrSetTy {
                     fields: new_fields,
                     dyn_ty,
@@ -217,7 +219,7 @@ impl<'a> Canonicalizer<'a> {
             // canonicalization the inner type may be a Union or Intersection
             // (from variable bound expansion), so we normalize via De Morgan.
             Ty::Neg(inner) => {
-                let c_inner = self.canonicalize(*inner, !positive);
+                let c_inner = self.canonicalize(*inner, polarity.flip());
                 negate_output_ty(c_inner)
             }
         }
@@ -231,10 +233,10 @@ pub fn canonicalize_standalone(
     table: &TypeStorage,
     alias_provenance: &HashMap<TyId, SmolStr>,
     ty_id: TyId,
-    positive: bool,
+    polarity: Polarity,
 ) -> OutputTy {
     let mut canon = Canonicalizer::new(table, alias_provenance);
-    canon.canonicalize(ty_id, positive)
+    canon.canonicalize(ty_id, polarity)
 }
 
 // ==============================================================================
@@ -533,18 +535,18 @@ impl<'db> Collector<'db> {
                     // likely because enclosing lambda parameter annotations hadn't
                     // propagated yet. Fall back to late canonicalization which sees
                     // the fully-constrained bounds.
-                    canon.canonicalize(ty, true)
+                    canon.canonicalize(ty, Positive)
                 } else {
                     early.clone()
                 }
             } else {
-                canon.canonicalize(ty, true)
+                canon.canonicalize(ty, Positive)
             };
             name_ty_map.insert(name, output.normalize_vars());
         }
 
         for (expr, ty) in expr_tys {
-            let mut output = canon.canonicalize(ty, true);
+            let mut output = canon.canonicalize(ty, Positive);
             if expr == self.ctx.module.entry_expr {
                 output = output.normalize_vars();
             }
