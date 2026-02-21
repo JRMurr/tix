@@ -193,7 +193,7 @@ impl ParsedTy {
             ParsedTy::Lambda { param, body } => param.0.contains_union() || body.0.contains_union(),
             ParsedTy::AttrSet(attr) => {
                 attr.fields.values().any(|v| v.0.contains_union())
-                    || attr.dyn_ty.as_ref().map_or(false, |d| d.0.contains_union())
+                    || attr.dyn_ty.as_ref().is_some_and(|d| d.0.contains_union())
             }
             ParsedTy::Intersection(members) => members.iter().any(|m| m.0.contains_union()),
         }

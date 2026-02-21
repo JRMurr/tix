@@ -268,9 +268,9 @@ fn error_to_diagnostic(
     provenance: &HashMap<TyId, SmolStr>,
 ) -> TixDiagnostic {
     let kind = match &error.payload {
-        InferenceError::TypeMismatch(sub, sup) => {
-            let actual = canonicalize_error_ty(sub, table, provenance);
-            let expected = canonicalize_error_ty(sup, table, provenance);
+        InferenceError::TypeMismatch(pair) => {
+            let actual = canonicalize_error_ty(&pair.0, table, provenance);
+            let expected = canonicalize_error_ty(&pair.1, table, provenance);
             TixDiagnosticKind::TypeMismatch { expected, actual }
         }
         InferenceError::MissingField { field, available } => {
@@ -281,18 +281,18 @@ fn error_to_diagnostic(
                 suggestion,
             }
         }
-        InferenceError::InvalidBinOp(op, lhs, rhs) => {
-            let lhs_ty = canonicalize_error_ty(lhs, table, provenance);
-            let rhs_ty = canonicalize_error_ty(rhs, table, provenance);
+        InferenceError::InvalidBinOp(triple) => {
+            let lhs_ty = canonicalize_error_ty(&triple.1, table, provenance);
+            let rhs_ty = canonicalize_error_ty(&triple.2, table, provenance);
             TixDiagnosticKind::InvalidBinOp {
-                op: *op,
+                op: triple.0,
                 lhs_ty,
                 rhs_ty,
             }
         }
-        InferenceError::InvalidAttrMerge(lhs, rhs) => {
-            let lhs_ty = canonicalize_error_ty(lhs, table, provenance);
-            let rhs_ty = canonicalize_error_ty(rhs, table, provenance);
+        InferenceError::InvalidAttrMerge(pair) => {
+            let lhs_ty = canonicalize_error_ty(&pair.0, table, provenance);
+            let rhs_ty = canonicalize_error_ty(&pair.1, table, provenance);
             TixDiagnosticKind::InvalidAttrMerge { lhs_ty, rhs_ty }
         }
     };

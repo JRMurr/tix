@@ -30,7 +30,7 @@ enum OverloadProgress {
 }
 
 impl CheckCtx<'_> {
-    pub fn infer_prog(self, groups: GroupedDefs) -> Result<InferenceResult, TixDiagnostic> {
+    pub fn infer_prog(self, groups: GroupedDefs) -> Result<InferenceResult, Box<TixDiagnostic>> {
         let (result, diagnostics) = self.infer_prog_partial(groups);
         // Return the first error diagnostic (skip warnings like UnresolvedName).
         for diag in diagnostics {
@@ -40,7 +40,7 @@ impl CheckCtx<'_> {
                     | crate::diagnostic::TixDiagnosticKind::AnnotationArityMismatch { .. }
                     | crate::diagnostic::TixDiagnosticKind::AnnotationUnchecked { .. }
             ) {
-                return Err(diag);
+                return Err(Box::new(diag));
             }
         }
         Ok(result)
@@ -542,14 +542,14 @@ impl CheckCtx<'_> {
 
         if let (Some(lhs_ty), Some(rhs_ty)) = (&lhs_concrete, &rhs_concrete) {
             let (Ty::Primitive(l), Ty::Primitive(r)) = (lhs_ty, rhs_ty) else {
-                return Err(InferenceError::InvalidBinOp(
+                return Err(InferenceError::InvalidBinOp(Box::new((
                     ov.op,
                     lhs_ty.clone(),
                     rhs_ty.clone(),
-                ));
+                ))));
             };
             let ret_prim = (spec.full_resolve)(l, r).ok_or_else(|| {
-                InferenceError::InvalidBinOp(ov.op, lhs_ty.clone(), rhs_ty.clone())
+                InferenceError::InvalidBinOp(Box::new((ov.op, lhs_ty.clone(), rhs_ty.clone())))
             })?;
 
             let ret_id = self.alloc_prim(ret_prim);
@@ -667,7 +667,7 @@ impl CheckCtx<'_> {
         match (&lhs_concrete, &rhs_concrete) {
             (Some(Ty::AttrSet(_)), Some(Ty::AttrSet(_))) => {}
             (Some(lhs), Some(rhs)) => {
-                return Err(InferenceError::InvalidAttrMerge(lhs.clone(), rhs.clone()));
+                return Err(InferenceError::InvalidAttrMerge(Box::new((lhs.clone(), rhs.clone()))));
             }
             _ => return Ok(false),
         }

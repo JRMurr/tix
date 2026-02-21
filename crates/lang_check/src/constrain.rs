@@ -152,19 +152,19 @@ impl CheckCtx<'_> {
                     TypeEntry::Concrete(Ty::Primitive(p2)) => {
                         if p1 == &p2 || p1.is_subtype_of(&p2) {
                             // Contradiction: e.g. Null <: ¬Null, or Int <: ¬Number.
-                            Err(InferenceError::TypeMismatch(sub.clone(), sup.clone()))
+                            Err(InferenceError::TypeMismatch(Box::new((sub.clone(), sup.clone()))))
                         } else {
                             // Disjoint atoms: Int <: ¬Null is fine.
                             Ok(())
                         }
                     }
                     // Inner is a variable or non-primitive — conservatively fail.
-                    _ => Err(InferenceError::TypeMismatch(sub.clone(), sup.clone())),
+                    _ => Err(InferenceError::TypeMismatch(Box::new((sub.clone(), sup.clone())))),
                 }
             }
 
             // Type mismatch.
-            _ => Err(InferenceError::TypeMismatch(sub.clone(), sup.clone())),
+            _ => Err(InferenceError::TypeMismatch(Box::new((sub.clone(), sup.clone())))),
         }
     }
 

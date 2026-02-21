@@ -606,7 +606,7 @@ impl CheckCtx<'_> {
             for &(name, value) in bindings.statics.iter() {
                 scopes
                     .entry(name)
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .extend(active.iter().cloned());
 
                 match value {

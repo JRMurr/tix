@@ -8,7 +8,7 @@ use crate::{check_file_with_aliases, InferenceResult};
 
 use super::check_file;
 
-pub fn check_str(src: &str) -> (Module, Result<InferenceResult, TixDiagnostic>) {
+pub fn check_str(src: &str) -> (Module, Result<InferenceResult, Box<TixDiagnostic>>) {
     let (db, file) = TestDatabase::single_file(src).unwrap();
     let module = module(&db, file);
     (module, check_file(&db, file))
@@ -17,7 +17,7 @@ pub fn check_str(src: &str) -> (Module, Result<InferenceResult, TixDiagnostic>) 
 pub fn check_str_with_aliases(
     src: &str,
     aliases: &TypeAliasRegistry,
-) -> (Module, Result<InferenceResult, TixDiagnostic>) {
+) -> (Module, Result<InferenceResult, Box<TixDiagnostic>>) {
     let (db, file) = TestDatabase::single_file(src).unwrap();
     let module = module(&db, file);
     (module, check_file_with_aliases(&db, file, aliases))

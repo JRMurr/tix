@@ -30,7 +30,7 @@ use thiserror::Error;
 use type_table::TypeTable;
 
 #[salsa::tracked]
-pub fn check_file(db: &dyn AstDb, file: NixFile) -> Result<InferenceResult, TixDiagnostic> {
+pub fn check_file(db: &dyn AstDb, file: NixFile) -> Result<InferenceResult, Box<TixDiagnostic>> {
     check_file_with_aliases(db, file, &TypeAliasRegistry::default())
 }
 
@@ -40,7 +40,7 @@ pub fn check_file_with_aliases(
     db: &dyn AstDb,
     file: NixFile,
     aliases: &TypeAliasRegistry,
-) -> Result<InferenceResult, TixDiagnostic> {
+) -> Result<InferenceResult, Box<TixDiagnostic>> {
     check_file_with_imports(db, file, aliases, HashMap::new())
 }
 
@@ -50,7 +50,7 @@ pub fn check_file_with_imports(
     file: NixFile,
     aliases: &TypeAliasRegistry,
     import_types: HashMap<ExprId, OutputTy>,
-) -> Result<InferenceResult, TixDiagnostic> {
+) -> Result<InferenceResult, Box<TixDiagnostic>> {
     let module = lang_ast::module(db, file);
     let name_res = lang_ast::name_resolution(db, file);
     let indices = lang_ast::module_indices(db, file);
@@ -141,8 +141,8 @@ impl InferenceResult {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum InferenceError {
-    #[error("Type mismatch: {0:?} is not a subtype of {1:?}")]
-    TypeMismatch(Ty<TyId>, Ty<TyId>),
+    #[error("Type mismatch: {:?} is not a subtype of {:?}", .0.0, .0.1)]
+    TypeMismatch(Box<(Ty<TyId>, Ty<TyId>)>),
 
     #[error("Missing field: {field:?}")]
     MissingField {
@@ -150,11 +150,11 @@ pub enum InferenceError {
         available: Vec<smol_str::SmolStr>,
     },
 
-    #[error("Can not do binary operation ({1:?}) ({0:?}) ({2:?})")]
-    InvalidBinOp(OverloadBinOp, Ty<TyId>, Ty<TyId>),
+    #[error("Can not do binary operation ({:?}) ({:?}) ({:?})", .0.0, .0.1, .0.2)]
+    InvalidBinOp(Box<(OverloadBinOp, Ty<TyId>, Ty<TyId>)>),
 
-    #[error("Can not do attrset merge on ({0:?}) ({1:?})")]
-    InvalidAttrMerge(Ty<TyId>, Ty<TyId>),
+    #[error("Can not do attrset merge on ({:?}) ({:?})", .0.0, .0.1)]
+    InvalidAttrMerge(Box<(Ty<TyId>, Ty<TyId>)>),
 }
 
 /// A diagnostic payload paired with the expression where it occurred.
