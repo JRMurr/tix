@@ -30,7 +30,7 @@ let
   }).options;
 
   nixosOptionsJson = builtins.toJSON (
-    import ./tools/extract-options.nix {
+    import ../tools/extract-options.nix {
       options = nixosOptions;
       maxDepth = 8;
     }
@@ -62,7 +62,7 @@ let
   };
 
   hmOptionsJson = builtins.toJSON (
-    import ./tools/extract-options.nix {
+    import ../tools/extract-options.nix {
       options = hmEval.options;
       maxDepth = 8;
     }

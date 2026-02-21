@@ -8,7 +8,7 @@
 
 let
   lib = pkgs.lib;
-  rustVersion = (pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml);
+  rustVersion = (pkgs.rust-bin.fromRustupToolchainFile ../rust-toolchain.toml);
   rustPlatform = pkgs.makeRustPlatform {
     cargo = rustVersion;
     rustc = rustVersion;
@@ -18,14 +18,14 @@ let
 
   fs = lib.fileset;
   src = fs.toSource {
-    root = ./.;
+    root = ./..;
     fileset = fs.unions [
-      ./crates
-      ./Cargo.toml
-      ./Cargo.lock
-      ./stubs
-      ./tools
-      ./test
+      ../crates
+      ../Cargo.toml
+      ../Cargo.lock
+      ../stubs
+      ../tools
+      ../test
     ];
   };
 

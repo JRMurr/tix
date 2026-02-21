@@ -16,7 +16,7 @@ test-crate crate:
 
 # Run property-based tests (default 50k cases)
 pbt cases="50000":
-    ./pbt.sh {{ cases }}
+    ./scripts/pbt.sh {{ cases }}
 
 # Format code
 fmt:

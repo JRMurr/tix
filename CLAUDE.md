@@ -15,11 +15,11 @@ cargo test --package lang_check      # Test a specific crate
 cargo run --bin tix-cli test/basic.nix  # Type-check a Nix file
 cargo fmt                            # Format (uses .rustfmt.toml)
 cargo clippy                         # Lint
-./pbt.sh                             # Property-based tests (50k cases default)
-./pbt.sh 100000                      # PBT with custom case count
-./cov.sh                             # Coverage report (cargo-tarpaulin)
+./scripts/pbt.sh                     # Property-based tests (50k cases default)
+./scripts/pbt.sh 100000              # PBT with custom case count
+./scripts/cov.sh                     # Coverage report (cargo-tarpaulin)
 nix build .#                         # Build with nix
-echo 'let x = 1; in x' | ./tixc.sh  # Type-check Nix from stdin (debug build)
+echo 'let x = 1; in x' | ./scripts/tixc.sh  # Type-check Nix from stdin (debug build)
 ```
 
 Run a single test:
@@ -28,7 +28,7 @@ cargo test --package lang_check -- test_name
 ```
 
 
-When debugging with `./tixc.sh` you do not need to ask me for permission to run. It is safe to run always
+When debugging with `./scripts/tixc.sh` you do not need to ask me for permission to run. It is safe to run always
 
 
 ## Must Do
@@ -114,7 +114,7 @@ Extending tix from SimpleSub to BAS (Boolean-Algebraic Subtyping) by adding nega
 - `github.com/fo5for/sebas` — BAS reference impl (POPL 2026 artifact)
 - Parreaux & Chau, "MLstruct" (OOPSLA 2022) — negation + pattern matching
 - Chau & Parreaux, "Simple Essence of Boolean-Algebraic Subtyping" (POPL 2026)
-- See `narrowing-design.md` for full rationale and pseudocode
+- See `docs/internal/narrowing-design.md` for full rationale and pseudocode
 
 ## `.tix` Declaration Files (Stubs)
 

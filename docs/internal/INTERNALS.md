@@ -87,9 +87,9 @@ Operators like `+` and `*` are overloaded across types. Resolution is deferred u
 ```bash
 cargo test                        # All unit tests
 cargo test --package lang_check   # Just the inference engine
-./pbt.sh                          # Property-based tests (50k cases)
-./pbt.sh 100000                   # PBT with custom count
-./cov.sh                          # Coverage report (cargo-tarpaulin)
+./scripts/pbt.sh                  # Property-based tests (50k cases)
+./scripts/pbt.sh 100000           # PBT with custom count
+./scripts/cov.sh                  # Coverage report (cargo-tarpaulin)
 ```
 
 Property-based tests live in `lang_check/src/pbt/mod.rs` and generate arbitrary ASTs/types via proptest.

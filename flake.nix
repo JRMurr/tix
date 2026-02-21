@@ -33,19 +33,19 @@
             type: pkgs :: Pkgs
           */
           pkgs = import nixpkgs { inherit system overlays; };
-          rustAttrs = import ./rust.nix { inherit pkgs crane; };
-          tix-lsp-dev = import ./lsp-dev.nix { inherit pkgs; };
-          tix-code = import ./vscode.nix {
+          rustAttrs = import ./nix/rust.nix { inherit pkgs crane; };
+          tix-lsp-dev = import ./nix/lsp-dev.nix { inherit pkgs; };
+          tix-code = import ./nix/vscode.nix {
             inherit pkgs;
             serverPath = "${tix-with-stubs}/bin/tix-lsp";
           };
-          tix-code-dev = import ./vscode.nix {
+          tix-code-dev = import ./nix/vscode.nix {
             inherit pkgs;
             serverPath = "${tix-lsp-dev}/bin/tix-lsp-dev";
             name = "tix-code-dev";
           };
 
-          tix-stubs = import ./stubs.nix {
+          tix-stubs = import ./nix/stubs.nix {
             inherit pkgs;
             home-manager = home-manager;
             tix-cli = rustAttrs.binary;
@@ -133,7 +133,7 @@
 
           rust-overlay = (import rust-overlay);
 
-          tix = import ./overlay.nix { inherit crane; };
+          tix = import ./nix/overlay.nix { inherit crane; };
         };
       }
     );

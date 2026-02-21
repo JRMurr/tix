@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Read Nix source from stdin, write to a temp file, and run tix-cli on it.
-# Usage: echo 'let x = 1; in x' | ./tixc.sh
+# Usage: echo 'let x = 1; in x' | ./scripts/tixc.sh
 
 set -euo pipefail
 
