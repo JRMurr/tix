@@ -71,8 +71,8 @@ impl<'a> Canonicalizer<'a> {
 
         let result = match entry {
             TypeEntry::Variable(v) => match polarity {
-                Positive => self.expand_bounds_as_union(&v.lower_bounds, ty_id),
-                Negative => self.expand_bounds_as_intersection(&v.upper_bounds, ty_id),
+                Positive => self.expand_bounds(&v.lower_bounds, ty_id, Positive),
+                Negative => self.expand_bounds(&v.upper_bounds, ty_id, Negative),
             },
             TypeEntry::Concrete(ty) => self.canonicalize_concrete(&ty, polarity),
         };
@@ -86,100 +86,103 @@ impl<'a> Canonicalizer<'a> {
         }
     }
 
-    /// Expand lower bounds of a variable into a union (positive position).
+    /// Expand bounds of a variable into a union (positive) or intersection (negative).
     ///
-    /// When a variable has no concrete lower bounds but has primitive-only upper
-    /// bounds, we use those upper bounds as the type. This is a **display heuristic**,
-    /// not a type-theoretically sound transformation: `ret <: Number` doesn't mean
-    /// `ret` IS `Number`, but in practice the upper bound is the most informative
-    /// thing we can show for unconstrained return types of arithmetic operations.
-    fn expand_bounds_as_union(&mut self, bounds: &[TyId], var_id: TyId) -> OutputTy {
+    /// Shared logic for both polarities:
+    /// 1. Canonicalize each bound at the given polarity
+    /// 2. Flatten nested composites (union or intersection)
+    /// 3. Filter bare TyVar and Bottom members
+    /// 4. Normalize: tautology removal (positive) or attrset merging + contradiction
+    ///    detection (negative)
+    /// 5. Build result: single element, or Union/Intersection wrapper
+    ///
+    /// In positive position with no concrete lower bounds, a display heuristic
+    /// checks for atom-only upper bounds — `ret <: Number` becomes `number`
+    /// rather than a bare type variable.
+    fn expand_bounds(&mut self, bounds: &[TyId], var_id: TyId, polarity: Polarity) -> OutputTy {
         let bounds = bounds.to_vec();
+
+        // 1. Canonicalize each bound at the given polarity.
         let members: Vec<OutputTy> = bounds
             .iter()
-            .map(|&b| self.canonicalize(b, Positive))
+            .map(|&b| self.canonicalize(b, polarity))
             .collect();
 
-        let flattened = flatten_union(members);
+        // 2. Flatten nested composites.
+        let flattened = match polarity {
+            Positive => flatten_union(members),
+            Negative => flatten_intersection(members),
+        };
 
-        // Filter out bare type variables and Bottom — in positive position, a
-        // TyVar bound means "something unknown flows in" which adds no
-        // information to a union; Bottom is the identity for union (A ∨ ⊥ = A).
+        // 3. Filter bare TyVar (uninformative in either position) and Bottom
+        //    (identity for union, and won't appear as a raw bound in negative).
         let concrete: Vec<OutputTy> = flattened
             .into_iter()
             .filter(|m| !matches!(m, OutputTy::TyVar(_) | OutputTy::Bottom))
             .collect();
 
-        // Tautology detection: remove complementary pairs Primitive(P) + Neg(Primitive(P)).
-        // A ∨ ¬A = ⊤, so the pair contributes no information and can be dropped.
-        let concrete = remove_tautological_pairs(concrete);
-
-        match concrete.len() {
-            0 => {
-                // No concrete lower bounds. If the variable has atom-only upper
-                // bounds (primitives or negations of primitives), use them: a
-                // value bounded above by Number IS a Number in output position.
-                // This turns `ret <: Number` into `number` and `x <: ¬Null` into
-                // `a & ~null` instead of a bare type variable.
-                if let Some(v) = self.table.get_var(var_id) {
-                    let atom_uppers: Vec<TyId> = v
-                        .upper_bounds
-                        .iter()
-                        .copied()
-                        .filter(|&ub| match self.table.get(ub) {
-                            TypeEntry::Concrete(Ty::Primitive(_)) => true,
-                            TypeEntry::Concrete(Ty::Neg(inner)) => {
-                                matches!(
-                                    self.table.get(*inner),
-                                    TypeEntry::Concrete(Ty::Primitive(_))
-                                )
-                            }
-                            _ => false,
-                        })
-                        .collect();
-                    if !atom_uppers.is_empty() {
-                        return self.expand_bounds_as_intersection(&atom_uppers, var_id);
-                    }
-                }
-                OutputTy::TyVar(var_id.0)
+        // 4. Polarity-specific normalization.
+        let concrete = match polarity {
+            Positive => {
+                // Tautology detection: A ∨ ¬A = ⊤, drop both.
+                remove_tautological_pairs(concrete)
             }
+            Negative => {
+                // Merge multiple attrsets into one (intersection of records =
+                // record with all fields).
+                let concrete = merge_attrset_intersection(concrete);
+                // Contradiction detection: Primitive(P) ∧ ¬Primitive(P) = ⊥.
+                if has_primitive_contradiction(&concrete) {
+                    return OutputTy::Bottom;
+                }
+                concrete
+            }
+        };
+
+        // 5. Build the result.
+        match concrete.len() {
+            0 => self.expand_bounds_empty_fallback(var_id, polarity),
             1 => concrete.into_iter().next().unwrap(),
-            _ => OutputTy::Union(concrete.into_iter().map(TyRef::from).collect()),
+            _ => match polarity {
+                Positive => OutputTy::Union(concrete.into_iter().map(TyRef::from).collect()),
+                Negative => OutputTy::Intersection(concrete.into_iter().map(TyRef::from).collect()),
+            },
         }
     }
 
-    /// Expand upper bounds of a variable into an intersection (negative position).
-    fn expand_bounds_as_intersection(&mut self, bounds: &[TyId], var_id: TyId) -> OutputTy {
-        let bounds = bounds.to_vec();
-        let members: Vec<OutputTy> = bounds
-            .iter()
-            .map(|&b| self.canonicalize(b, Negative))
-            .collect();
-
-        let flattened = flatten_intersection(members);
-
-        // Filter out bare type variables — in negative position, a TyVar bound
-        // means "flows into something unknown" which adds no information.
-        let concrete: Vec<OutputTy> = flattened
-            .into_iter()
-            .filter(|m| !matches!(m, OutputTy::TyVar(_)))
-            .collect();
-
-        // Merge multiple attrsets into one (intersection of records = record with all fields).
-        let concrete = merge_attrset_intersection(concrete);
-
-        // Contradiction detection: if the intersection contains both
-        // Primitive(P) and Neg(Primitive(Q)) where P == Q or P <: Q,
-        // the entire intersection is uninhabited (⊥).
-        if has_primitive_contradiction(&concrete) {
-            return OutputTy::Bottom;
+    /// Fallback when a variable has no concrete bounds in the given polarity.
+    ///
+    /// - **Positive**: check for atom-only upper bounds (primitives, negations of
+    ///   primitives) as a display heuristic. `ret <: Number` becomes `number`
+    ///   rather than a bare type variable. If no atom uppers, return TyVar.
+    /// - **Negative**: return a bare TyVar.
+    fn expand_bounds_empty_fallback(&mut self, var_id: TyId, polarity: Polarity) -> OutputTy {
+        if polarity == Negative {
+            return OutputTy::TyVar(var_id.0);
         }
 
-        match concrete.len() {
-            0 => OutputTy::TyVar(var_id.0),
-            1 => concrete.into_iter().next().unwrap(),
-            _ => OutputTy::Intersection(concrete.into_iter().map(TyRef::from).collect()),
+        // Positive position: look for atom-only upper bounds.
+        if let Some(v) = self.table.get_var(var_id) {
+            let atom_uppers: Vec<TyId> = v
+                .upper_bounds
+                .iter()
+                .copied()
+                .filter(|&ub| match self.table.get(ub) {
+                    TypeEntry::Concrete(Ty::Primitive(_)) => true,
+                    TypeEntry::Concrete(Ty::Neg(inner)) => {
+                        matches!(
+                            self.table.get(*inner),
+                            TypeEntry::Concrete(Ty::Primitive(_))
+                        )
+                    }
+                    _ => false,
+                })
+                .collect();
+            if !atom_uppers.is_empty() {
+                return self.expand_bounds(&atom_uppers, var_id, Negative);
+            }
         }
+        OutputTy::TyVar(var_id.0)
     }
 
     fn canonicalize_concrete(&mut self, ty: &Ty<TyId>, polarity: Polarity) -> OutputTy {
