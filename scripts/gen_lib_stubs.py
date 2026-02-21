@@ -33,6 +33,9 @@ SKIP_MODULES = {
     "sourceTypes",
     "kernel",
     "systems",
+    # types is manually maintained below (values + nested submodules, not
+    # functions with translatable noogle signatures).
+    "types",
 }
 
 # Maximum line width for doc comments before wrapping.
@@ -89,6 +92,126 @@ MANUAL_OVERRIDES: dict[tuple[str | None, str], str] = {
     (None, "naturalSort"): "[string] -> [string]",
     (None, "subtractLists"): "[a] -> [a] -> [a]",
     (None, "intersectLists"): "[a] -> [a] -> [a]",
+    # ---- lib.options (NixOS module system) ----
+    ("options", "mkOption"): "{ ... } -> { ... }",
+    ("options", "mkEnableOption"): "string -> { ... }",
+    ("options", "mkPackageOption"): "{ ... } -> (string | [string]) -> { ... } -> { ... }",
+    ("options", "mkSinkUndeclaredOptions"): "{ ... } -> { ... }",
+    ("options", "literalExpression"): "string -> { ... }",
+    ("options", "literalMD"): "string -> { ... }",
+    ("options", "showOption"): "[string] -> string",
+    ("options", "showDefs"): "[{ file: string, value: a }] -> string",
+    ("options", "showFiles"): "[string] -> string",
+    ("options", "mergeOneOption"): "[string] -> [{ file: string, value: a }] -> a",
+    ("options", "mergeEqualOption"): "[string] -> [{ file: string, value: a }] -> a",
+    ("options", "getValues"): "[{ value: a }] -> [a]",
+    ("options", "getFiles"): "[{ file: a }] -> [a]",
+    # ---- lib.modules (NixOS module system) ----
+    ("modules", "mkIf"): "bool -> a -> a",
+    ("modules", "mkMerge"): "[a] -> a",
+    ("modules", "mkOverride"): "int -> a -> a",
+    ("modules", "mkDefault"): "a -> a",
+    ("modules", "mkForce"): "a -> a",
+    ("modules", "mkOptionDefault"): "a -> a",
+    ("modules", "mkImageMediaOverride"): "a -> a",
+    ("modules", "mkVMOverride"): "a -> a",
+    ("modules", "mkOrder"): "int -> a -> a",
+    ("modules", "mkBefore"): "a -> a",
+    ("modules", "mkAfter"): "a -> a",
+    ("modules", "mkRenamedOptionModule"): "[string] -> [string] -> { ... }",
+    ("modules", "mkRemovedOptionModule"): "[string] -> string -> { ... }",
+    ("modules", "mkAliasOptionModule"): "[string] -> [string] -> { ... }",
+    ("modules", "mkChangedOptionModule"): "[string] -> [string] -> (a -> b) -> { ... }",
+    ("modules", "mkMergedOptionModule"): "[[string]] -> [string] -> ([a] -> b) -> { ... }",
+    ("modules", "evalModules"): "{ ... } -> { ... }",
+    ("modules", "mkDerivedConfig"): "{ ... } -> (a -> b) -> b",
+    ("modules", "importApply"): "path -> a -> { ... }",
+    # ---- top-level re-exports of NixOS module system functions ----
+    (None, "mkIf"): "bool -> a -> a",
+    (None, "mkMerge"): "[a] -> a",
+    (None, "mkOverride"): "int -> a -> a",
+    (None, "mkDefault"): "a -> a",
+    (None, "mkForce"): "a -> a",
+    (None, "mkOptionDefault"): "a -> a",
+    (None, "mkOrder"): "int -> a -> a",
+    (None, "mkBefore"): "a -> a",
+    (None, "mkAfter"): "a -> a",
+    (None, "mkOption"): "{ ... } -> { ... }",
+    (None, "mkEnableOption"): "string -> { ... }",
+    (None, "mkPackageOption"): "{ ... } -> (string | [string]) -> { ... } -> { ... }",
+    (None, "mkSinkUndeclaredOptions"): "{ ... } -> { ... }",
+    (None, "literalExpression"): "string -> { ... }",
+    (None, "literalMD"): "string -> { ... }",
+    (None, "evalModules"): "{ ... } -> { ... }",
+    (None, "mkRenamedOptionModule"): "[string] -> [string] -> { ... }",
+    (None, "mkRemovedOptionModule"): "[string] -> string -> { ... }",
+    (None, "mkAliasOptionModule"): "[string] -> [string] -> { ... }",
+    (None, "showOption"): "[string] -> string",
+}
+
+# Manual declarations for the lib.types module. Noogle entries for types are
+# opaque values (not functions) and include nested submodules, so they can't
+# go through the normal translation pipeline.
+# Each entry is (val_name, type_signature, doc_comment_or_None).
+MANUAL_TYPES_ENTRIES: list[tuple[str, str, str | None]] = [
+    # Primitive types
+    ("bool", "OptionType", "A boolean type (true or false)."),
+    ("int", "OptionType", "A signed integer type."),
+    ("float", "OptionType", "A floating-point number type."),
+    ("number", "OptionType", "An integer or floating-point number type."),
+    ("str", "OptionType", "A string type (single definition only; use lines for merging)."),
+    ("singleLineStr", "OptionType", "A string that must not contain newline characters."),
+    ("lines", "OptionType", "A string type where multiple definitions are merged with newlines."),
+    ("commas", "OptionType", "A string type where multiple definitions are merged with commas."),
+    ("envVar", "OptionType", "A string type where multiple definitions are merged with colons."),
+    ("path", "OptionType", "A filesystem path type."),
+    ("pathInStore", "OptionType", "A path that must be in the Nix store."),
+    ("package", "OptionType", "A Nix derivation (package) type."),
+    ("pkgs", "OptionType", "A nixpkgs package set type."),
+    ("attrs", "OptionType", "A free-form attribute set with no type checking on values."),
+    ("anything", "OptionType", "Accepts any value; attribute sets are merged recursively."),
+    ("raw", "OptionType", "Accepts any value with no merging (exactly one definition)."),
+    ("optionType", "OptionType", "A type whose values are themselves option types."),
+    # Parameterized / composed types
+    ("enum", "[a] -> OptionType", "An enumeration type accepting one value from a given list."),
+    ("nullOr", "OptionType -> OptionType", "Accepts null or a value of the given type."),
+    ("listOf", "OptionType -> OptionType", "A list where all elements have the given type."),
+    ("nonEmptyListOf", "OptionType -> OptionType", "Like listOf but the merged list must contain at least one element."),
+    ("attrsOf", "OptionType -> OptionType", "An attribute set where all values have the given type."),
+    ("lazyAttrsOf", "OptionType -> OptionType", "Like attrsOf but lazy in its values."),
+    ("either", "OptionType -> OptionType -> OptionType", "A value that is either of type t1 or t2."),
+    ("oneOf", "[OptionType] -> OptionType", "A value that matches one of the given types."),
+    ("coercedTo", "OptionType -> (a -> b) -> OptionType -> OptionType", "Accepts fromType (coerced via function) or toType directly."),
+    ("functionTo", "OptionType -> OptionType", "A function that returns a value of the given type."),
+    ("submodule", "({ ... } | ({ ... } -> { ... })) -> OptionType", "Defines a set of sub-options handled like a separate module."),
+    ("submoduleWith", "{ ... } -> OptionType", "Like submodule but with more options (modules, specialArgs, etc.)."),
+    ("deferredModule", "OptionType", "A module that is not yet evaluated (deferred for later composition)."),
+    ("deferredModuleWith", "{ ... } -> OptionType", "Like deferredModule but accepts statically known modules."),
+    ("attrTag", "{ ... } -> OptionType", "A tagged union type where each attribute represents a variant."),
+    ("uniq", "OptionType -> OptionType", "Wraps a type to prevent merging (error on multiple definitions)."),
+    ("unique", "{ ... } -> OptionType -> OptionType", "Like uniq but allows multiple definitions if they are all equal."),
+    ("addCheck", "OptionType -> (a -> bool) -> OptionType", "Extends a type with an additional validation check function."),
+    ("mkOptionType", "{ ... } -> OptionType", "Creates a custom option type."),
+    ("strMatching", "string -> OptionType", "A string that must match the given regular expression."),
+    ("separatedString", "string -> OptionType", "A string type where definitions are merged with the given separator."),
+    ("passwdEntry", "OptionType -> OptionType", "Wraps a type to ensure values are safe for /etc/passwd format."),
+    ("port", "OptionType", "A TCP/UDP port number (0 to 65535)."),
+]
+
+# Submodules nested inside lib.types.
+# Key: submodule name, Value: list of (val_name, type_signature, doc).
+MANUAL_TYPES_SUBMODULES: dict[str, list[tuple[str, str, str | None]]] = {
+    "ints": [
+        ("positive", "OptionType", "A positive integer (> 0)."),
+        ("unsigned", "OptionType", "An unsigned integer (>= 0)."),
+        ("between", "int -> int -> OptionType", "An integer in a specified inclusive range."),
+        ("s8", "OptionType", "A signed 8-bit integer (-128 to 127)."),
+        ("s16", "OptionType", "A signed 16-bit integer (-32768 to 32767)."),
+        ("s32", "OptionType", "A signed 32-bit integer."),
+        ("u8", "OptionType", "An unsigned 8-bit integer (0 to 255)."),
+        ("u16", "OptionType", "An unsigned 16-bit integer (0 to 65535)."),
+        ("u32", "OptionType", "An unsigned 32-bit integer."),
+    ],
 }
 
 
@@ -610,6 +733,34 @@ def format_val_decl(func: FuncEntry, indent: str) -> str:
     return "\n".join(lines)
 
 
+def format_manual_module(
+    name: str,
+    entries: list[tuple[str, str, str | None]],
+    submodules: dict[str, list[tuple[str, str, str | None]]],
+    indent: str,
+) -> str:
+    """Format a manually-maintained module block with optional submodules.
+
+    Each entry is (val_name, type_signature, doc_comment_or_None).
+    """
+    inner = indent + "  "
+    lines = [f"\n{indent}module {name} {{"]
+    for val_name, sig, doc in entries:
+        if doc:
+            lines.append(format_doc_comment(doc, inner))
+        lines.append(f"{inner}val {val_name} :: {sig};")
+    for sub_name, sub_entries in submodules.items():
+        sub_inner = inner + "  "
+        lines.append(f"\n{inner}module {sub_name} {{")
+        for val_name, sig, doc in sub_entries:
+            if doc:
+                lines.append(format_doc_comment(doc, sub_inner))
+            lines.append(f"{sub_inner}val {val_name} :: {sig};")
+        lines.append(f"{inner}}}")
+    lines.append(f"{indent}}}")
+    return "\n".join(lines)
+
+
 def generate_tix(
     module_entries: dict[str, list[FuncEntry]],
     top_level_entries: list[FuncEntry],
@@ -651,7 +802,10 @@ type Derivation = {
 };
 
 # Opaque type representing a set of local files.
-type FileSet = { ... };"""
+type FileSet = { ... };
+
+# Opaque type representing a NixOS option type descriptor (e.g. types.str).
+type OptionType = { ... };"""
     )
 
     # pkgs module (kept from original — not in noogle data).
@@ -761,6 +915,14 @@ module lib {"""
         out.append(f"\n  module {mod_name} {{")
         out.append("\n".join(decls))
         out.append("  }")
+
+    # Types module — manually maintained because lib.types contains opaque
+    # values (not functions with translatable noogle signatures) and nested
+    # submodules like types.ints. Data lives in MANUAL_TYPES_ENTRIES and
+    # MANUAL_TYPES_SUBMODULES at the top of this file.
+    out.append(format_manual_module(
+        "types", MANUAL_TYPES_ENTRIES, MANUAL_TYPES_SUBMODULES, indent="  ",
+    ))
 
     # Top-level re-exports and functions that only exist at lib.X level.
     # Track which names are already in submodules.

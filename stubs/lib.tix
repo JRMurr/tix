@@ -27,6 +27,9 @@ type Derivation = {
 # Opaque type representing a set of local files.
 type FileSet = { ... };
 
+# Opaque type representing a NixOS option type descriptor (e.g. types.str).
+type OptionType = { ... };
+
 # ---------------------------------------------------------------------------
 # pkgs module — creates the "Pkgs" type alias
 # ---------------------------------------------------------------------------
@@ -643,13 +646,83 @@ module lib {
   }
 
   module options {
+    ## Extracts values of all file keys of the given list
+    val getFiles :: [{ file: a }] -> [a];
+    ## Extracts values of all value keys of the given list.
+    val getValues :: [{ value: a }] -> [a];
     ## Returns true when the given argument a is an option
     val isOption :: a -> bool;
+    ## For use in the defaultText and example option attributes. Causes the
+    ## given string to be rendered verbatim in the documentation as Nix code.
+    ## This is necessary for complex values, e.g. functions, or ...
+    val literalExpression :: string -> { ... };
+    ## For use in the defaultText and example option attributes. Causes the
+    ## given MD text to be inserted verbatim in the documentation, for when a
+    ## literalExpression would be too hard to read.
+    val literalMD :: string -> { ... };
+    ## "Merge" option definitions by checking that they all have the same
+    ## value.
+    val mergeEqualOption :: [string] -> [{ file: string, value: a }] -> a;
+    ## Require a single definition.
+    val mergeOneOption :: [string] -> [{ file: string, value: a }] -> a;
+    ## Creates an option declaration with a default value of false, and can be
+    ## defined to true.
+    val mkEnableOption :: string -> { ... };
+    ## Creates an Option declaration for use with the module system.
+    val mkOption :: { ... } -> { ... };
+    ## Creates an Option attribute set for an option that specifies the
+    ## package a module should use for some purpose.
+    val mkPackageOption :: { ... } -> (string | [string]) -> { ... } -> { ... };
+    ## This option accepts arbitrary definitions, but it does not produce an
+    ## option value.
+    val mkSinkUndeclaredOptions :: { ... } -> { ... };
+    val showDefs :: [{ file: string, value: a }] -> string;
+    val showFiles :: [string] -> string;
+    ## Convert an option, described as a list of the option parts to a human-
+    ## readable version.
+    val showOption :: [string] -> string;
   }
 
   module modules {
+    ## See https://nixos.org/manual/nixpkgs/unstable/#module-system-lib-
+    ## evalModules or file://./../doc/module-system/module-system.chapter.md
+    val evalModules :: { ... } -> { ... };
+    ## importApply file arg :: Path -> a -> Module, where import file :: a ->
+    ## Module
+    val importApply :: path -> a -> { ... };
+    val mkAfter :: a -> a;
+    ## Like ‘mkRenamedOptionModule’, but doesn't show a warning.
+    val mkAliasOptionModule :: [string] -> [string] -> { ... };
+    val mkBefore :: a -> a;
+    ## Single "from" version of mkMergedOptionModule. Returns a module that
+    ## causes a warning to be shown if the "from" option is defined; the
+    ## defined value can be used in the "mergeFn" to set the "to" val...
+    val mkChangedOptionModule :: [string] -> [string] -> (a -> b) -> { ... };
+    val mkDefault :: a -> a;
+    ## mkDerivedConfig : Option a -> (a -> Definition b) -> Definition b
+    val mkDerivedConfig :: { ... } -> (a -> b) -> b;
     ## The identity function For when you need a function that does “nothing”.
     val mkFixStrictness :: a -> a;
+    val mkForce :: a -> a;
+    ## Properties.
+    val mkIf :: bool -> a -> a;
+    val mkImageMediaOverride :: a -> a;
+    val mkMerge :: [a] -> a;
+    ## Returns a module that causes a warning to be shown if any of the "from"
+    ## option is defined; the defined values can be used in the "mergeFn" to
+    ## set the "to" value. This function can be used to merge ...
+    val mkMergedOptionModule :: [[string]] -> [string] -> ([a] -> b) -> { ... };
+    val mkOptionDefault :: a -> a;
+    val mkOrder :: int -> a -> a;
+    val mkOverride :: int -> a -> a;
+    ## Returns a module that causes a warning to be shown if the specified
+    ## option is defined. For example,
+    val mkRemovedOptionModule :: [string] -> string -> { ... };
+    ## Returns a module that causes a warning to be shown if the specified
+    ## "from" option is defined; the defined value is however forwarded to the
+    ## "to" option. This can be used to rename options while pro...
+    val mkRenamedOptionModule :: [string] -> [string] -> { ... };
+    val mkVMOverride :: a -> a;
   }
 
   module customisation {
@@ -927,6 +1000,110 @@ module lib {
     val propagatedBuildInputs :: [a] -> [a] -> [a];
   }
 
+  module types {
+    ## A boolean type (true or false).
+    val bool :: OptionType;
+    ## A signed integer type.
+    val int :: OptionType;
+    ## A floating-point number type.
+    val float :: OptionType;
+    ## An integer or floating-point number type.
+    val number :: OptionType;
+    ## A string type (single definition only; use lines for merging).
+    val str :: OptionType;
+    ## A string that must not contain newline characters.
+    val singleLineStr :: OptionType;
+    ## A string type where multiple definitions are merged with newlines.
+    val lines :: OptionType;
+    ## A string type where multiple definitions are merged with commas.
+    val commas :: OptionType;
+    ## A string type where multiple definitions are merged with colons.
+    val envVar :: OptionType;
+    ## A filesystem path type.
+    val path :: OptionType;
+    ## A path that must be in the Nix store.
+    val pathInStore :: OptionType;
+    ## A Nix derivation (package) type.
+    val package :: OptionType;
+    ## A nixpkgs package set type.
+    val pkgs :: OptionType;
+    ## A free-form attribute set with no type checking on values.
+    val attrs :: OptionType;
+    ## Accepts any value; attribute sets are merged recursively.
+    val anything :: OptionType;
+    ## Accepts any value with no merging (exactly one definition).
+    val raw :: OptionType;
+    ## A type whose values are themselves option types.
+    val optionType :: OptionType;
+    ## An enumeration type accepting one value from a given list.
+    val enum :: [a] -> OptionType;
+    ## Accepts null or a value of the given type.
+    val nullOr :: OptionType -> OptionType;
+    ## A list where all elements have the given type.
+    val listOf :: OptionType -> OptionType;
+    ## Like listOf but the merged list must contain at least one element.
+    val nonEmptyListOf :: OptionType -> OptionType;
+    ## An attribute set where all values have the given type.
+    val attrsOf :: OptionType -> OptionType;
+    ## Like attrsOf but lazy in its values.
+    val lazyAttrsOf :: OptionType -> OptionType;
+    ## A value that is either of type t1 or t2.
+    val either :: OptionType -> OptionType -> OptionType;
+    ## A value that matches one of the given types.
+    val oneOf :: [OptionType] -> OptionType;
+    ## Accepts fromType (coerced via function) or toType directly.
+    val coercedTo :: OptionType -> (a -> b) -> OptionType -> OptionType;
+    ## A function that returns a value of the given type.
+    val functionTo :: OptionType -> OptionType;
+    ## Defines a set of sub-options handled like a separate module.
+    val submodule :: ({ ... } | ({ ... } -> { ... })) -> OptionType;
+    ## Like submodule but with more options (modules, specialArgs, etc.).
+    val submoduleWith :: { ... } -> OptionType;
+    ## A module that is not yet evaluated (deferred for later composition).
+    val deferredModule :: OptionType;
+    ## Like deferredModule but accepts statically known modules.
+    val deferredModuleWith :: { ... } -> OptionType;
+    ## A tagged union type where each attribute represents a variant.
+    val attrTag :: { ... } -> OptionType;
+    ## Wraps a type to prevent merging (error on multiple definitions).
+    val uniq :: OptionType -> OptionType;
+    ## Like uniq but allows multiple definitions if they are all equal.
+    val unique :: { ... } -> OptionType -> OptionType;
+    ## Extends a type with an additional validation check function.
+    val addCheck :: OptionType -> (a -> bool) -> OptionType;
+    ## Creates a custom option type.
+    val mkOptionType :: { ... } -> OptionType;
+    ## A string that must match the given regular expression.
+    val strMatching :: string -> OptionType;
+    ## A string type where definitions are merged with the given separator.
+    val separatedString :: string -> OptionType;
+    ## Wraps a type to ensure values are safe for /etc/passwd format.
+    val passwdEntry :: OptionType -> OptionType;
+    ## A TCP/UDP port number (0 to 65535).
+    val port :: OptionType;
+
+    module ints {
+      ## A positive integer (> 0).
+      val positive :: OptionType;
+      ## An unsigned integer (>= 0).
+      val unsigned :: OptionType;
+      ## An integer in a specified inclusive range.
+      val between :: int -> int -> OptionType;
+      ## A signed 8-bit integer (-128 to 127).
+      val s8 :: OptionType;
+      ## A signed 16-bit integer (-32768 to 32767).
+      val s16 :: OptionType;
+      ## A signed 32-bit integer.
+      val s32 :: OptionType;
+      ## An unsigned 8-bit integer (0 to 255).
+      val u8 :: OptionType;
+      ## An unsigned 16-bit integer (0 to 65535).
+      val u16 :: OptionType;
+      ## An unsigned 32-bit integer.
+      val u32 :: OptionType;
+    }
+  }
+
   # Re-exports — nixpkgs lib re-exports submodule functions at the top level
   val addContextFrom :: string -> string -> string;
   val all :: (a -> bool) -> [a] -> bool;
@@ -977,6 +1154,7 @@ module lib {
   val escapeShellArgs :: [string] -> string;
   val escapeURL :: string -> string;
   val escapeXML :: string -> string;
+  val evalModules :: { ... } -> { ... };
   val extendDerivation :: bool -> Any -> Derivation -> Derivation;
   val fileContents :: path -> string;
   val filter :: (a -> bool) -> [a] -> [a];
@@ -1037,6 +1215,8 @@ module lib {
   val last :: [a] -> a;
   val length :: [a] -> int;
   val listToAttrs :: [{ name: string, value: a }] -> { _: a, ... };
+  val literalExpression :: string -> { ... };
+  val literalMD :: string -> { ... };
   val makeBinPath :: [Derivation] -> string;
   val makeIncludePath :: [Derivation] -> string;
   val makeLibraryPath :: [Derivation] -> string;
@@ -1059,9 +1239,25 @@ module lib {
   val mesonEnable :: string -> bool -> string;
   val mesonOption :: string -> string -> string;
   val mirrorFunctionArgs :: (a -> b) -> (a -> c) -> (a -> c);
+  val mkAfter :: a -> a;
+  val mkAliasOptionModule :: [string] -> [string] -> { ... };
+  val mkBefore :: a -> a;
+  val mkDefault :: a -> a;
   val mkEUI64Suffix :: string -> string;
+  val mkEnableOption :: string -> { ... };
   val mkFixStrictness :: a -> a;
+  val mkForce :: a -> a;
+  val mkIf :: bool -> a -> a;
   val mkLuaInline :: string -> { ... };
+  val mkMerge :: [a] -> a;
+  val mkOption :: { ... } -> { ... };
+  val mkOptionDefault :: a -> a;
+  val mkOrder :: int -> a -> a;
+  val mkOverride :: int -> a -> a;
+  val mkPackageOption :: { ... } -> (string | [string]) -> { ... } -> { ... };
+  val mkRemovedOptionModule :: [string] -> string -> { ... };
+  val mkRenamedOptionModule :: [string] -> [string] -> { ... };
+  val mkSinkUndeclaredOptions :: { ... } -> { ... };
   val nameFromURL :: string -> string;
   val naturalSort :: [string] -> [string];
   val optional :: bool -> a -> [a];
@@ -1091,6 +1287,7 @@ module lib {
   val setAttrByPath :: [string] -> Any -> { ... };
   val setFunctionArgs :: (a -> b) -> { _: bool, ... } -> (a -> b);
   val showAttrPath :: [string] -> string;
+  val showOption :: [string] -> string;
   val singleton :: a -> [a];
   val sort :: (a -> a -> bool) -> [a] -> [a];
   val sourceFilesBySuffices :: a -> [string] -> a;
