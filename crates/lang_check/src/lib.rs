@@ -698,6 +698,15 @@ impl<'db> CheckCtx<'db> {
     ) -> TyId {
         match ty {
             ParsedTy::TyVar(var) => {
+                // `Any` is treated as a wildcard — each occurrence gets its own
+                // fresh variable so `Any -> Any` doesn't unify the two positions.
+                // This matches the noogle convention where `Any` means "some type"
+                // rather than "the same type everywhere".
+                if let comment_parser::TypeVarValue::Reference(name) = var {
+                    if name == "Any" && self.type_aliases.get("Any").is_none() {
+                        return self.new_var();
+                    }
+                }
                 let replacement = substitutions
                     .get(var)
                     .unwrap_or_else(|| panic!("No replacement for {var:?}"));

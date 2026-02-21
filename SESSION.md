@@ -114,12 +114,11 @@
 
 ### Automatic Type Extraction from Nix Ecosystem
 
-- **Eval-assisted stub generation for `lib`**: Use `nix eval` to discover the attrset
-  structure of nixpkgs `lib`, combine with `builtins.functionArgs` to get parameter
-  names, and optionally run tix inference on the lib source where feasible. Output a
-  `.tix` skeleton with known types filled in and TODOs for what couldn't be inferred.
-  `lib` is ~260 functions — manageable to hand-verify once generated. Could evolve
-  into a general `tix-gen` tool for any Nix attrset.
+- **Lib stubs are now generated from noogle data**: `scripts/gen_lib_stubs.py` pulls
+  structured data from `nix build 'github:nix-community/noogle#data-json'` and
+  translates ~500 type signatures into `.tix` declarations. ~200 lib functions lack
+  noogle signatures and are omitted. Could supplement with `nix eval` + `functionArgs`
+  to discover parameter names for those.
 
 - **Generated stubs are now part of the Nix build**: `nix build .#stubs` and
   `nix build .#with-stubs` generate NixOS/HM stubs at build time. The evaluation

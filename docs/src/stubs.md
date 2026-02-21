@@ -62,7 +62,7 @@ mkDerivation { name = "my-pkg"; src = ./.; }
 Tix ships with stubs for common nixpkgs functions. These are compiled into the binary and loaded by default. They cover:
 
 - **Pkgs**: `mkDerivation`, `stdenv.mkDerivation`, `fetchurl`, `fetchFromGitHub`, `runCommand`, `writeText`, etc.
-- **Lib**: `id`, `const`, `flip`, `pipe`, `fix` + submodules for `strings`, `lists`, `attrsets`, `trivial`, `options`, `modules`, `filesets`, `debug`, `generators`, `cli`, `customisation`, `meta`
+- **Lib**: ~500 declarations covering `strings`, `lists`, `attrsets`, `trivial`, `fixedPoints`, `options`, `modules`, `fileset`, `filesystem`, `path`, `sources`, `versions`, `debug`, `generators`, `customisation`, `meta`, `asserts`, `gvariant`, `network`, and more. Generated from [noogle.dev](https://noogle.dev) data.
 - **Derivation**: type alias for `{ name: string, system: string, builder: path | string, ... }`
 
 Use `--no-default-stubs` if you want to replace them entirely with your own.
