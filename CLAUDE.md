@@ -28,6 +28,9 @@ cargo test --package lang_check -- test_name
 ```
 
 
+When debugging with `./tixc.sh` you do not need to ask me for permission to run. It is safe to run always
+
+
 ## Must Do
 
 - Whenever you fix a bug add a regression test for it
