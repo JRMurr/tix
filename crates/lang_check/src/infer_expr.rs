@@ -624,19 +624,19 @@ impl CheckCtx<'_> {
         match op {
             BinOP::Overload(overload_op) => {
                 let ret_ty = self.new_var();
+                let spec = crate::operators::overload_spec(*overload_op);
 
-                // For non-+ arithmetic ops (-, *, /), immediately constrain
-                // both operands and the result to Number. This gives partial
-                // type information even when operands are still polymorphic
+                // If the operator has an immediate bound (-, *, / → Number),
+                // constrain both operands and the result right away. This
+                // gives partial type info even with polymorphic operands
                 // (e.g. `a: b: a - b` → `number -> number -> number`).
-                // + is excluded because it's also valid for strings and paths.
-                if !overload_op.is_add() {
-                    let number = self.alloc_prim(PrimitiveTy::Number);
-                    self.constrain(lhs_ty, number)
+                if let Some(bound) = spec.immediate_bound {
+                    let bound_ty = self.alloc_prim(bound);
+                    self.constrain(lhs_ty, bound_ty)
                         .map_err(|err| self.locate_err(err))?;
-                    self.constrain(rhs_ty, number)
+                    self.constrain(rhs_ty, bound_ty)
                         .map_err(|err| self.locate_err(err))?;
-                    self.constrain(ret_ty, number)
+                    self.constrain(ret_ty, bound_ty)
                         .map_err(|err| self.locate_err(err))?;
                 }
 

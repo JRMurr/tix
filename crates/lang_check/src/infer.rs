@@ -15,7 +15,6 @@ use crate::diagnostic::TixDiagnostic;
 use crate::infer_expr::{BinConstraint, PendingMerge, PendingOverload};
 use crate::storage::TypeEntry;
 use lang_ast::nameres::{DependentGroup, GroupedDefs};
-use lang_ast::OverloadBinOp;
 use lang_ty::simplify::simplify;
 use lang_ty::{AttrSetTy, PrimitiveTy, Ty};
 
@@ -522,19 +521,25 @@ impl CheckCtx<'_> {
         ov: &PendingOverload,
     ) -> Result<OverloadProgress, InferenceError> {
         let c = &ov.constraint;
+        let spec = crate::operators::overload_spec(ov.op);
         let lhs_concrete = self.find_concrete(c.lhs);
         let rhs_concrete = self.find_concrete(c.rhs);
 
         // ---- Phase 1: Full Resolution — both operands concrete ----
 
         if let (Some(lhs_ty), Some(rhs_ty)) = (&lhs_concrete, &rhs_concrete) {
-            let ret_ty = self
-                .solve_bin_op_types(ov.op, lhs_ty, rhs_ty)
-                .ok_or_else(|| {
-                    InferenceError::InvalidBinOp(ov.op, lhs_ty.clone(), rhs_ty.clone())
-                })?;
+            let (Ty::Primitive(l), Ty::Primitive(r)) = (lhs_ty, rhs_ty) else {
+                return Err(InferenceError::InvalidBinOp(
+                    ov.op,
+                    lhs_ty.clone(),
+                    rhs_ty.clone(),
+                ));
+            };
+            let ret_prim = (spec.full_resolve)(l, r).ok_or_else(|| {
+                InferenceError::InvalidBinOp(ov.op, lhs_ty.clone(), rhs_ty.clone())
+            })?;
 
-            let ret_id = self.alloc_concrete(ret_ty);
+            let ret_id = self.alloc_prim(ret_prim);
             self.constrain(ret_id, c.ret)?;
             self.constrain(c.ret, ret_id)?;
             return Ok(OverloadProgress::FullyResolved);
@@ -574,20 +579,12 @@ impl CheckCtx<'_> {
             self.constrain(c.ret, number)?;
         }
 
-        // --- 2b: String/path lhs with + → pin return type ---
+        // --- 2b: Known lhs type → pin return type early ---
         //
-        // In Nix, the return type of `+` is always the lhs type when lhs is
-        // string or path. We can pin ret early without waiting for the rhs.
-        if ov.op.is_add() {
-            let lhs_is_string = matches!(&lhs_concrete, Some(Ty::Primitive(PrimitiveTy::String)));
-            let lhs_is_path = matches!(&lhs_concrete, Some(Ty::Primitive(PrimitiveTy::Path)));
-
-            if lhs_is_string || lhs_is_path {
-                let ret_prim = if lhs_is_string {
-                    PrimitiveTy::String
-                } else {
-                    PrimitiveTy::Path
-                };
+        // Use the spec's early_ret_from_lhs to check if the lhs type alone
+        // determines the return type (e.g. string + _ → string, path + _ → path).
+        if let Some(Ty::Primitive(lhs_prim)) = &lhs_concrete {
+            if let Some(ret_prim) = (spec.early_ret_from_lhs)(lhs_prim) {
                 let ret_id = self.alloc_prim(ret_prim);
                 self.constrain(ret_id, c.ret)?;
                 self.constrain(c.ret, ret_id)?;
@@ -713,41 +710,6 @@ impl CheckCtx<'_> {
         match self.table.get(concrete_id) {
             TypeEntry::Concrete(ty) => Some(ty.clone()),
             _ => None,
-        }
-    }
-
-    fn solve_bin_op_types(
-        &self,
-        op: OverloadBinOp,
-        lhs: &Ty<TyId>,
-        rhs: &Ty<TyId>,
-    ) -> Option<Ty<TyId>> {
-        use Ty::Primitive;
-
-        let (Primitive(l), Primitive(r)) = (lhs, rhs) else {
-            return None;
-        };
-
-        // Both numbers — float wins, Number stays Number.
-        if l.is_number() && r.is_number() {
-            if l.is_float() || r.is_float() {
-                return Some(Primitive(PrimitiveTy::Float));
-            }
-            if matches!(l, PrimitiveTy::Number) || matches!(r, PrimitiveTy::Number) {
-                return Some(Primitive(PrimitiveTy::Number));
-            }
-            return Some(lhs.clone()); // both Int
-        }
-
-        if !op.is_add() {
-            return None;
-        }
-
-        // Both addable (strings/paths) — lhs type wins.
-        if l.is_addable() && r.is_addable() {
-            Some(lhs.clone())
-        } else {
-            None
         }
     }
 }

@@ -7,6 +7,7 @@ pub mod imports;
 mod infer;
 pub(crate) mod infer_expr;
 mod narrow;
+mod operators;
 pub(crate) mod storage;
 
 #[cfg(test)]
