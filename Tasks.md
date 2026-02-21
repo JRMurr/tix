@@ -12,7 +12,7 @@ noted). Effort/impact ratings are relative to each other.
 
 ## Theme A: Type System Representation
 
-### A1. Introduce `Polarity` enum to replace `bool`
+### ~~A1. Introduce `Polarity` enum to replace `bool`~~ ✅ Done
 
 **Effort**: Low | **Impact**: Medium | **Risk reduction**: Prevents silent sign-flip bugs
 
@@ -55,7 +55,7 @@ passes (`./scripts/pbt.sh`).
 
 ---
 
-### A2. Add `OutputTy::Bottom` (Never) variant
+### ~~A2. Add `OutputTy::Bottom` (Never) variant~~ ✅ Done
 
 **Effort**: Medium | **Impact**: Medium | **Risk reduction**: Makes contradictions visible
 
@@ -151,7 +151,7 @@ works independently of inference.
 
 ---
 
-### B2. Unify `find_concrete` and `resolve_to_concrete_id`
+### ~~B2. Unify `find_concrete` and `resolve_to_concrete_id`~~ ✅ Done
 
 **Effort**: Low | **Impact**: Low | **Risk reduction**: Eliminates code duplication
 
@@ -186,7 +186,7 @@ and cycle-detection logic.
 
 ## Theme C: Narrowing Simplification
 
-### C1. Deduplicate `walk_for_narrow_scopes` binding iteration
+### ~~C1. Deduplicate `walk_for_narrow_scopes` binding iteration~~ ✅ Done
 
 **Effort**: Low | **Impact**: Low-Medium | **Risk reduction**: Prevents
 copy-paste divergence
@@ -254,7 +254,7 @@ through scope-introducing expressions (if-then-else, assert).
 
 ## Theme D: Deferred Constraint Cleanup
 
-### D1. Unify deferred constraint types
+### ~~D1. Unify deferred constraint types~~ ✅ Done
 
 **Effort**: Low | **Impact**: Medium | **Risk reduction**: Makes lifecycle
 explicit
@@ -293,7 +293,7 @@ lifecycle stages, managed by convention (`infer.rs:132-133`).
 
 ---
 
-### D2. Table-driven operator dispatch
+### ~~D2. Table-driven operator dispatch~~ ✅ Done
 
 **Effort**: Medium | **Impact**: Medium | **Risk reduction**: Centralizes
 operator semantics currently spread across 3 locations
@@ -333,7 +333,7 @@ The `+` operator has special handling in all three places.
 
 ## Theme E: Constraint System Improvements
 
-### E1. Add covariance/soundness comment for List
+### ~~E1. Add covariance/soundness comment for List~~ ✅ Done
 
 **Effort**: Trivial | **Impact**: Low | **Risk reduction**: Documents a critical
 assumption
@@ -397,7 +397,7 @@ types.
 
 ## Theme F: Canonicalization Robustness
 
-### F1. Property test for early-canonicalization stability
+### ~~F1. Property test for early-canonicalization stability~~ ✅ Done
 
 **Effort**: Medium | **Impact**: High | **Risk reduction**: Validates a
 correctness-critical heuristic
@@ -429,7 +429,7 @@ a bare `TyVar`. This is a heuristic — there's no formal argument for why
 
 ---
 
-### F2. Unify `expand_bounds_as_union` and `expand_bounds_as_intersection`
+### ~~F2. Unify `expand_bounds_as_union` and `expand_bounds_as_intersection`~~ ✅ Done
 
 **Effort**: Low | **Impact**: Low | **Risk reduction**: Eliminates
 near-duplicate code
@@ -472,7 +472,7 @@ imported files. Add tests in `lang_check/src/tests.rs` using
 
 ---
 
-### G2. Narrowing + overload interaction tests
+### ~~G2. Narrowing + overload interaction tests~~ ✅ Done
 
 **Effort**: Low-Medium | **Impact**: Medium
 
@@ -484,7 +484,7 @@ Add tests for cases where narrowing and overload resolution interact:
 
 ---
 
-### G3. Negation + intersection contradiction tests
+### ~~G3. Negation + intersection contradiction tests~~ ✅ Done
 
 **Effort**: Low | **Impact**: Low-Medium
 
@@ -500,19 +500,19 @@ Add tests verifying that contradictions are detected:
 
 Quick wins (do first, each is a single short session):
 
-1. **E1** — Add list covariance comment (trivial)
-2. **A1** — Polarity enum (low effort, immediate readability win)
-3. **B2** — Unify find_concrete variants (low effort, removes duplication)
-4. **C1** — Dedup narrow walk_for_narrow_scopes (low effort)
-5. **D1** — Unify deferred constraint types (low effort)
+1. ~~**E1** — Add list covariance comment (trivial)~~ ✅
+2. ~~**A1** — Polarity enum (low effort, immediate readability win)~~ ✅
+3. ~~**B2** — Unify find_concrete variants (low effort, removes duplication)~~ ✅
+4. ~~**C1** — Dedup narrow walk_for_narrow_scopes (low effort)~~ ✅
+5. ~~**D1** — Unify deferred constraint types (low effort)~~ ✅
 
 Medium tasks (each is a full session):
 
-6. **G2, G3** — Test gap coverage
-7. **F2** — Unify expand_bounds (easy after A1)
-8. **D2** — Table-driven operator dispatch
-9. **A2** — Add Bottom type
-10. **F1** — Early-canonicalization property test
+6. ~~**G2, G3** — Test gap coverage~~ ✅
+7. ~~**F2** — Unify expand_bounds (easy after A1)~~ ✅
+8. ~~**D2** — Table-driven operator dispatch~~ ✅
+9. ~~**A2** — Add Bottom type~~ ✅
+10. ~~**F1** — Early-canonicalization property test~~ ✅
 
 Larger refactors (plan before starting):
 
