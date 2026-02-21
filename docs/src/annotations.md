@@ -1,6 +1,6 @@
 # Type Annotations
 
-**TLDR:** Annotate bindings with doc comments when inference isn't enough. Two flavors: nixdoc-style `# Type` sections and inline `/** type: name :: Type */` comments.
+**TLDR:** Annotate bindings with doc comments when inference isn't enough. Three flavors: nixdoc-style `# Type` sections, inline `/** type: name :: Type */` block comments, and `# type: name :: Type` line comments.
 
 ## When you need annotations
 
@@ -31,7 +31,7 @@ concatStringsSep = sep: list: builtins.concatStringsSep sep list;
 
 ### Inline type annotation
 
-For quick one-liners:
+For quick one-liners, use either block comments or line comments:
 
 ```nix
 /** type: lib :: Lib */
@@ -39,11 +39,20 @@ lib = import <nixpkgs/lib>;
 
 /** type: add :: int -> int -> int */
 add = a: b: a + b;
-# Without the annotation, `+` is overloaded and tix infers: a -> b -> c
-# The annotation constrains it to integer addition only.
 ```
 
-The `type:` prefix distinguishes it from regular doc comments.
+Line comments work too — handy for attrset pattern parameters where `/**` feels heavy:
+
+```nix
+{
+  # type: pkgs :: Pkgs
+  pkgs,
+  # type: lib :: Lib
+  lib,
+}: ...
+```
+
+The `type:` prefix distinguishes annotations from regular comments.
 
 ### Assigning type aliases
 

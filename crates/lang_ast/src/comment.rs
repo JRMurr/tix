@@ -10,9 +10,14 @@ use crate::{AstPtr, DocComment, DocComments};
 
 fn doc_text(comment: &rnix::ast::Comment) -> Option<DocComment> {
     let text = comment.syntax().text();
-    // Check whether this is a doc-comment
+    // Block doc-comment: /** type: name :: Type */
     if text.starts_with(r#"/**"#) && comment.text().starts_with('*') {
         comment.text().strip_prefix('*').map(|x| x.into())
+    // Line comment with type annotation: # type: name :: Type
+    // rnix's Comment::text() strips the `#` prefix, so for `# type: pkgs :: Pkgs`
+    // it returns ` type: pkgs :: Pkgs` — exactly what the pest grammar expects.
+    } else if text.starts_with('#') && comment.text().trim_start().starts_with("type:") {
+        Some(comment.text().into())
     } else {
         None
     }

@@ -548,6 +548,53 @@ error_case!(
     matches TixDiagnosticKind::TypeMismatch { .. }
 );
 
+// ==============================================================================
+// Line comment annotations (# type: name :: Type)
+// ==============================================================================
+
+// Line comments with `type:` prefix should work identically to /** type: */ block comments.
+test_case!(
+    line_comment_annotation_pat_field,
+    "
+    let
+        f = {
+            # type: x :: int
+            x,
+            # type: y :: string
+            y
+        }: { inherit x y; };
+    in
+    f { x = 1; y = \"hello\"; }
+    ",
+    { "x": (Int), "y": (String) }
+);
+
+test_case!(
+    line_comment_annotation_constrains_body,
+    "
+    let
+        f = {
+            # type: x :: int
+            x
+        }: x + 1;
+    in
+    f { x = 42; }
+    ",
+    Int
+);
+
+test_case!(
+    line_comment_annotation_let_binding,
+    "
+    let
+        # type: foo :: string
+        foo = ''hi'';
+    in
+    foo
+    ",
+    String
+);
+
 /// Look up the type of a named binding by text name, with aliases loaded.
 /// When the same name has multiple NameIds (e.g. definition + inherit reference),
 /// prefer the version without unions/intersections (the clean early-canonicalized form).
