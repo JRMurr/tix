@@ -623,6 +623,45 @@ fn arb_narrowing_same_type() -> impl Strategy<Value = (PrimitiveTy, NixTextStr)>
     })
 }
 
+// ==============================================================================
+// F1: Early-canonicalization stability — polymorphic let-binding type is stable
+// regardless of how many use sites call it with different concrete types.
+// ==============================================================================
+
+/// Fixed set of polymorphic bindings and their expected canonical types.
+/// Each entry is (binding_body, expected_root_type_when_returned).
+const POLY_BINDINGS: &[(&str, &str)] = &[
+    ("x: x", "a -> a"),
+    ("x: [x]", "a -> [a]"),
+    ("x: { val = x; }", "a -> { val: a }"),
+    ("x: y: x", "a -> b -> a"),
+];
+
+/// Concrete values to use as arguments at use sites.
+const USE_SITE_ARGS: &[&str] = &["1", "\"hello\"", "true", "3.14", "null"];
+
+/// Generate a Nix expression: `let f = <binding>; _u0 = f <arg0>; ... in f`
+/// with 0-5 use sites, each applying f to a different concrete argument.
+fn arb_early_canon_stability() -> impl Strategy<Value = (usize, usize, NixTextStr)> {
+    let binding_idx = 0..POLY_BINDINGS.len();
+    let num_uses = 0..=5usize;
+    // Select which concrete args to use (indices into USE_SITE_ARGS).
+    let use_indices = prop::collection::vec(0..USE_SITE_ARGS.len(), 0..=5);
+
+    (binding_idx, num_uses, use_indices).prop_map(|(binding_idx, num_uses, use_indices)| {
+        let (binding_body, _expected) = POLY_BINDINGS[binding_idx];
+        let mut let_bindings = format!("let f = {binding_body};");
+        let actual_uses = num_uses.min(use_indices.len());
+        for i in 0..actual_uses {
+            let arg = USE_SITE_ARGS[use_indices[i]];
+            let _ =
+                std::fmt::Write::write_fmt(&mut let_bindings, format_args!(" _u{i} = f ({arg});"));
+        }
+        let_bindings.push_str(" in f");
+        (binding_idx, actual_uses, let_bindings)
+    })
+}
+
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: 256, .. ProptestConfig::default()
@@ -644,5 +683,24 @@ proptest! {
     fn test_narrowing_same_type_branches((prim, text) in arb_narrowing_same_type()) {
         let root_ty = get_inferred_root(&text);
         prop_assert_eq!(root_ty, OutputTy::Primitive(prim));
+    }
+
+    /// Early-canonicalization stability: a polymorphic let-binding's type
+    /// should be the same regardless of how many call sites instantiate it
+    /// with different concrete types. `let f = x: x; in f` and
+    /// `let f = x: x; _u0 = f 1; _u1 = f "hi"; in f` should both produce
+    /// `a -> a` for f.
+    #[test]
+    fn test_early_canon_stability((binding_idx, _num_uses, text) in arb_early_canon_stability()) {
+        let (binding_body, _) = POLY_BINDINGS[binding_idx];
+        // Base case: no use sites.
+        let base_nix = format!("let f = {binding_body}; in f");
+        let base_ty = get_inferred_root(&base_nix);
+        let actual_ty = get_inferred_root(&text);
+        prop_assert_eq!(
+            base_ty.clone(), actual_ty.clone(),
+            "Binding `{}` with use sites changed type:\n  base: {}\n  with uses: {}",
+            binding_body, base_ty, actual_ty
+        );
     }
 }
