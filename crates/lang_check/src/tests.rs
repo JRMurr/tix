@@ -3940,3 +3940,62 @@ fn narrow_conditional_fn_let_binding() {
     // The key assertion is that inference succeeds without a type error.
     // The let-bound y = x.name sees narrowed x (non-null) via the pre-pass.
 }
+
+// ==============================================================================
+// Type narrowing + overload interaction tests (G2)
+// ==============================================================================
+//
+// These tests verify that type narrowing and operator overload resolution
+// compose correctly: narrowing a variable to a concrete type in a branch
+// should let the overloaded `+` operator resolve to the correct result type.
+
+/// `x: if isInt x then x + 1 else 0` — isInt narrows x to int in the
+/// then-branch, so `+` resolves to int addition. Body is int.
+#[test]
+fn narrow_isint_then_add() {
+    let nix = "x: if builtins.isInt x then x + 1 else 0";
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(*body, arc_ty!(Int));
+}
+
+/// `x: if isNull x then 0 else x + 1` — else-branch has x narrowed to
+/// ~null, and `+ 1` constrains x to Number. Body is int.
+#[test]
+fn narrow_isnull_else_add() {
+    let nix = "x: if builtins.isNull x then 0 else x + 1";
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(*body, arc_ty!(Int));
+}
+
+/// `x: y: if isInt x then (if isInt y then x + y else 0) else 0`
+/// — both x and y are narrowed to int, so `x + y` resolves to int.
+#[test]
+fn narrow_isint_nested_arithmetic() {
+    let nix = "x: y: if builtins.isInt x then (if builtins.isInt y then x + y else 0) else 0";
+    let ty = get_inferred_root(nix);
+    let (_param, inner) = unwrap_lambda(&ty);
+    let (_param2, body) = unwrap_lambda(inner);
+    assert_eq!(*body, arc_ty!(Int));
+}
+
+/// `x: if isString x then x + "suffix" else "default"` — isString narrows
+/// x to string, so `+` resolves to string concatenation. Body is string.
+#[test]
+fn narrow_isstring_then_concat() {
+    let nix = r#"x: if builtins.isString x then x + "suffix" else "default""#;
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(*body, arc_ty!(String));
+}
+
+/// `x: if x ? count then x.count + 1 else 0` — `? count` narrows x to
+/// have a `count` field, field access succeeds, and `+ 1` resolves to int.
+#[test]
+fn narrow_hasattr_field_arithmetic() {
+    let nix = "x: if x ? count then x.count + 1 else 0";
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(*body, arc_ty!(Int));
+}
