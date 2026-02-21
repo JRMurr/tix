@@ -329,7 +329,7 @@ module lib {
     val filter :: (a -> bool) -> [a] -> [a];
     ## Find the first element in the list matching the specified predicate or
     ## return default if no such element exists.
-    val findFirst :: (a -> bool) -> a -> [a] -> a;
+    val findFirst :: (a -> bool) -> b -> [a] -> (a | b);
     ## Find the first index in the list matching the specified predicate or
     ## return default if no such element exists.
     val findFirstIndex :: (a -> bool) -> b -> [a] -> (int | b);
@@ -982,7 +982,7 @@ module lib {
   val filter :: (a -> bool) -> [a] -> [a];
   val filterAttrs :: (string -> Any -> bool) -> { ... } -> { ... };
   val filterAttrsRecursive :: (string -> Any -> bool) -> { ... } -> { ... };
-  val findFirst :: (a -> bool) -> a -> [a] -> a;
+  val findFirst :: (a -> bool) -> b -> [a] -> (a | b);
   val findSingle :: (a -> bool) -> a -> a -> [a] -> a;
   val fix :: (a -> a) -> a;
   val fixedWidthNumber :: int -> int -> string;

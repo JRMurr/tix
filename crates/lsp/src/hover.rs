@@ -540,6 +540,42 @@ mod tests {
     }
 
     #[test]
+    fn hover_shows_submodule_doc_for_flat_reexport() {
+        // Flat re-exports (e.g. `lib.findFirst`) should inherit docs from
+        // their submodule source (e.g. `lib.lists.findFirst`) when the flat
+        // val has no doc comment of its own.
+        let stubs = r#"
+            module lib {
+                module lists {
+                    ## Find the first matching element.
+                    val findFirst :: (a -> bool) -> b -> [a] -> (a | b);
+                }
+                val findFirst :: (a -> bool) -> b -> [a] -> (a | b);
+            }
+        "#;
+        let file = comment_parser::parse_tix_file(stubs).expect("parse stubs");
+        let mut registry = TypeAliasRegistry::new();
+        registry.load_tix_file(&file);
+
+        let src = indoc! {"
+            let
+                /** type: lib :: Lib */
+                lib = { findFirst = x: x; };
+            in lib.findFirst
+        "};
+        let offset = find_offset(src, ".findFirst");
+        let t = TestAnalysis::with_registry(src, registry);
+        let h = hover_at(&t, offset).expect("hover should return a result");
+        let (_type_text, doc) = hover_parts(&h);
+
+        assert_eq!(
+            doc.as_deref(),
+            Some("Find the first matching element."),
+            "flat re-export should inherit doc from submodule val"
+        );
+    }
+
+    #[test]
     fn hover_on_attrpath_shows_field_type() {
         let stubs = r#"
             type Config = {

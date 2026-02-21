@@ -50,8 +50,24 @@ impl DocIndex {
     /// Look up the doc comment for a field within a type alias.
     /// `alias` is the type alias name (e.g. "NixosConfig").
     /// `path` is the dotted path to the field (e.g. ["services", "enable"]).
+    ///
+    /// When no doc exists at the exact path, falls back to searching for a
+    /// longer path that ends with the same segments. This lets flat re-exports
+    /// (e.g. `lib.findFirst`) inherit docs from their submodule source
+    /// (e.g. `lib.lists.findFirst`) without duplicating doc comments.
     pub fn field_doc(&self, alias: &str, path: &[SmolStr]) -> Option<&SmolStr> {
-        self.field_docs.get(alias)?.get(path)
+        let entries = self.field_docs.get(alias)?;
+        if let Some(doc) = entries.get(path) {
+            return Some(doc);
+        }
+        // Fallback: find a longer path whose suffix matches `path`.
+        // e.g. path=["findFirst"] matches stored ["lists", "findFirst"].
+        entries
+            .iter()
+            .find(|(stored_path, _)| {
+                stored_path.len() > path.len() && stored_path.ends_with(path)
+            })
+            .map(|(_, doc)| doc)
     }
 
     /// Number of aliases with field docs.

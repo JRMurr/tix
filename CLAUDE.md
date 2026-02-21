@@ -28,13 +28,14 @@ cargo test --package lang_check -- test_name
 ```
 
 
-When debugging with `./scripts/tixc.sh` you do not need to ask me for permission to run. It is safe to run always
+When debugging and you want to make tmp nix programs use `./scripts/tixc.sh`, you do not need to ask me for permission to run. It is safe to run always
 
 
 ## Must Do
 
 - Whenever you fix a bug add a regression test for it
 - When changing user-facing behavior (new features, changed semantics, new CLI flags, new LSP capabilities, etc.), update the relevant pages in `docs/src/`. The mdbook is the primary user-facing documentation. Check `docs/src/SUMMARY.md` for the page list.
+- If you update `stubs/lib.tix` make sure its through updating `scripts/gen_lib_stubs.py` so if re-run the fix always is applied
 
 ## Workspace Crates
 

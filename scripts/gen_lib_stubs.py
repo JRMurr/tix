@@ -58,6 +58,9 @@ MANUAL_OVERRIDES: dict[tuple[str | None, str], str] = {
     ("lists", "intersectLists"): "[a] -> [a] -> [a]",
     ("lists", "mutuallyExclusive"): "[a] -> [a] -> bool",
     ("lists", "crossLists"): "(a -> b -> c) -> [a] -> [b] -> [c]",
+    # findFirst's default value can differ from list element type — the return
+    # is a union of the element type and the default type.
+    ("lists", "findFirst"): "(a -> bool) -> b -> [a] -> (a | b)",
     # attrsets builtins
     ("attrsets", "attrNames"): "{ ... } -> [string]",
     ("attrsets", "hasAttr"): "string -> { ... } -> bool",
@@ -81,6 +84,7 @@ MANUAL_OVERRIDES: dict[tuple[str | None, str], str] = {
     (None, "getAttr"): "string -> { _: a, ... } -> a",
     (None, "listToAttrs"): "[{ name: string, value: a }] -> { _: a, ... }",
     (None, "isAttrs"): "a -> bool",
+    (None, "findFirst"): "(a -> bool) -> b -> [a] -> (a | b)",
     (None, "replaceStrings"): "[string] -> [string] -> string -> string",
     (None, "naturalSort"): "[string] -> [string]",
     (None, "subtractLists"): "[a] -> [a] -> [a]",
@@ -528,18 +532,16 @@ def process_entries(data: list[dict]) -> tuple[dict[str, list[FuncEntry]], list[
             description=desc,
         )
 
-        # Translate signature (noogle → .tix), falling back to manual overrides.
-        if sig:
+        # Manual overrides take priority over noogle translations (some
+        # noogle sigs translate but are semantically wrong, e.g. findFirst).
+        override = MANUAL_OVERRIDES.get((module_name, func_name))
+        if override:
+            func.tix_sig = override
+        elif sig:
             result = translate_signature(sig)
             func.tix_sig = result.tix_sig
             func.needs_review = result.needs_review
             func.review_reason = result.reason
-
-        if not func.tix_sig:
-            override = MANUAL_OVERRIDES.get((module_name, func_name))
-            if override:
-                func.tix_sig = override
-                func.needs_review = False
 
         module_entries[module_name].append(func)
         module_funcs[func_name] = module_name
@@ -562,17 +564,14 @@ def process_entries(data: list[dict]) -> tuple[dict[str, list[FuncEntry]], list[
             description=desc,
         )
 
-        if sig:
+        override = MANUAL_OVERRIDES.get((None, func_name))
+        if override:
+            func.tix_sig = override
+        elif sig:
             result = translate_signature(sig)
             func.tix_sig = result.tix_sig
             func.needs_review = result.needs_review
             func.review_reason = result.reason
-
-        if not func.tix_sig:
-            override = MANUAL_OVERRIDES.get((None, func_name))
-            if override:
-                func.tix_sig = override
-                func.needs_review = False
 
         top_level_entries.append(func)
 
