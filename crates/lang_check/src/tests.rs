@@ -737,6 +737,54 @@ error_case!(
 );
 
 // ==============================================================================
+// Boolean operators
+// ==============================================================================
+
+test_case!(bool_and, "true && false", Bool);
+test_case!(bool_or, "true || false", Bool);
+
+// Nix `->` is boolean implication (not lambda). Must use let-bound
+// variables because `true -> false` would parse as a lambda.
+test_case!(bool_implication, "let a = true; b = false; in a -> b", Bool);
+
+// Polymorphic boolean operators: both operands constrained to Bool.
+test_case!(bool_and_vars, "a: b: a && b", (Bool -> Bool -> Bool));
+test_case!(bool_or_vars, "a: b: a || b", (Bool -> Bool -> Bool));
+
+// Non-bool operand is a type error.
+error_case!(
+    bool_and_non_bool_lhs,
+    "1 && true",
+    matches TixDiagnosticKind::TypeMismatch { .. }
+);
+error_case!(
+    bool_or_non_bool_rhs,
+    "true || 1",
+    matches TixDiagnosticKind::TypeMismatch { .. }
+);
+
+// ==============================================================================
+// Comparison operators
+// ==============================================================================
+
+// Ordering operators: both sides must be the same type, result is Bool.
+test_case!(compare_less, "1 < 2", Bool);
+test_case!(compare_greater_eq, "1.0 >= 2.0", Bool);
+test_case!(compare_string, r#""a" < "b""#, Bool);
+
+// Ordering on different types is a type error (bidirectional constraint).
+error_case!(
+    compare_cross_type,
+    r#"1 < "hi""#,
+    matches TixDiagnosticKind::TypeMismatch { .. }
+);
+
+// Equality operators: no type constraints, result is always Bool.
+test_case!(equality_same_type, "1 == 2", Bool);
+test_case!(equality_cross_type, r#"1 == "hi""#, Bool);
+test_case!(inequality, "1 != 2", Bool);
+
+// ==============================================================================
 // String / Path interpolation
 // ==============================================================================
 
@@ -844,13 +892,23 @@ test_case!(nested_list, "[[1 2] [3 4]]", [[Int]]);
 fn heterogeneous_list() {
     let ty = get_inferred_root("[1 \"hi\" true]");
     match &ty {
-        lang_ty::OutputTy::List(elem) => {
-            assert!(
-                matches!(&*elem.0, lang_ty::OutputTy::Union(_)),
-                "heterogeneous list should have union element type, got: {}",
-                elem.0
-            );
-        }
+        lang_ty::OutputTy::List(elem) => match &*elem.0 {
+            lang_ty::OutputTy::Union(members) => {
+                assert_eq!(
+                    members.len(),
+                    3,
+                    "expected 3 union members, got: {}",
+                    elem.0
+                );
+                let has_int = members.iter().any(|m| *m.0 == arc_ty!(Int));
+                let has_string = members.iter().any(|m| *m.0 == arc_ty!(String));
+                let has_bool = members.iter().any(|m| *m.0 == arc_ty!(Bool));
+                assert!(has_int, "union should contain Int, got: {}", elem.0);
+                assert!(has_string, "union should contain String, got: {}", elem.0);
+                assert!(has_bool, "union should contain Bool, got: {}", elem.0);
+            }
+            other => panic!("expected union element type, got: {other}"),
+        },
         _ => panic!("expected list type, got: {ty}"),
     }
 }
@@ -951,18 +1009,24 @@ test_case!(
 #[test]
 fn dynamic_select_no_panic() {
     let ty = get_inferred_root("let s = { x = 1; }; k = \"x\"; in s.${k}");
-    // Dynamic key can't resolve statically, but inference doesn't panic
-    // and the result comes from the attrset's dyn_ty.
-    let _ = ty;
+    // Dynamic key can't resolve statically — the result comes from the
+    // attrset's dyn_ty, which is unconstrained (type variable).
+    assert!(
+        matches!(ty, OutputTy::TyVar(_)),
+        "dynamic select should produce type var, got: {ty}"
+    );
 }
 
 // Dynamic intermediate keys in nested attr paths should not panic.
 #[test]
 fn dynamic_intermediate_attr_key() {
     let ty = get_inferred_root(r#"let k = "x"; in { ${k}.b = 1; }"#);
-    // The dynamic key produces a dynamic entry whose value is { b = int }.
-    // Just verify lowering and inference don't panic.
-    let _ = ty;
+    // The dynamic key produces an attrset with a dynamic entry whose
+    // value is { b = int }.
+    assert!(
+        matches!(ty, OutputTy::AttrSet(_)),
+        "dynamic intermediate key should produce attrset, got: {ty}"
+    );
 }
 
 // ==============================================================================
@@ -2044,13 +2108,9 @@ fn null_default_field_access_is_type_error() {
 /// participates in the result while the optional one unions with null.
 #[test]
 fn null_default_with_required_field_inline() {
-    let nix_src =
-        r#"({ config ? null, name }: { inherit config name; }) { name = "hello"; }"#;
+    let nix_src = r#"({ config ? null, name }: { inherit config name; }) { name = "hello"; }"#;
     let ty = get_inferred_root(nix_src);
-    assert_eq!(
-        ty,
-        arc_ty!({ "config": Null, "name": String })
-    );
+    assert_eq!(ty, arc_ty!({ "config": Null, "name": String }));
 }
 
 /// Required fields still error when missing.
@@ -2978,7 +3038,9 @@ fn narrow_islist_then_head() {
     let nix = r#"x: if isList x then builtins.head x else 0"#;
     let ty = get_inferred_root(nix);
     let (_param, _body) = unwrap_lambda(&ty);
-    // Should not error — head requires a list, and isList narrows to one.
+    // Inference succeeds without error: isList narrows x to a list, so
+    // `head x` is valid. The body type is int|element — no stronger
+    // assertion is possible since the element type is unconstrained.
 }
 
 /// `builtins.isList x` — qualified form.
@@ -2997,7 +3059,9 @@ fn narrow_isfunction_then_apply() {
     let nix = r#"x: if isFunction x then x 42 else 0"#;
     let ty = get_inferred_root(nix);
     let (_param, _body) = unwrap_lambda(&ty);
-    // Should not error — x is narrowed to a function, so application succeeds.
+    // Inference succeeds: isFunction narrows x to a function, so `x 42`
+    // is valid. The return type of `x` is unconstrained, so no stronger
+    // assertion than "no error" is possible.
 }
 
 /// `builtins.isFunction x` — qualified form.
@@ -3006,7 +3070,9 @@ fn narrow_builtins_isfunction() {
     let nix = r#"x: if builtins.isFunction x then x "hello" else "default""#;
     let ty = get_inferred_root(nix);
     let (_param, _body) = unwrap_lambda(&ty);
-    // Should not error.
+    // Inference succeeds: builtins.isFunction narrows x to a function.
+    // The return type of `x "hello"` is unconstrained, so no stronger
+    // assertion than "no error" is possible.
 }
 
 /// Local alias for isAttrs should be traced through.
@@ -3494,8 +3560,13 @@ fn narrow_optional_attrs_null_guard() {
         in x: lib.optionalAttrs (x != null) { y = x.name; }
     "#};
     // Should not error — x.name in the body is under null-guard narrowing.
+    // optionalAttrs returns {} or {y = ...}, so result is an attrset.
     let ty = get_inferred_root(nix);
-    let (_param, _body) = unwrap_lambda(&ty);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert!(
+        matches!(body, OutputTy::AttrSet(_)),
+        "optionalAttrs should return attrset, got: {body}"
+    );
 }
 
 /// `lib.optional (x != null) x.field` — body is narrowed, returns a list.
@@ -3506,8 +3577,15 @@ fn narrow_optional_null_guard() {
         in x: lib.optional (x != null) x.field
     "#};
     // Should not error — x.field is under null-guard narrowing.
+    // optional returns [val] | [], which canonicalizes as a union of
+    // two list types. Verify the body contains list structure.
     let ty = get_inferred_root(nix);
-    let (_param, _body) = unwrap_lambda(&ty);
+    let (_param, body) = unwrap_lambda(&ty);
+    let body_str = body.to_string();
+    assert!(
+        body_str.contains('['),
+        "optional should return list-shaped type, got: {body}"
+    );
 }
 
 /// `lib.mkIf (x != null) x.name` — mkIf is a conditional function too.

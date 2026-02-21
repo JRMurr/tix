@@ -157,6 +157,11 @@
   a separate concern from normalization. Currently only primitive-vs-negated-primitive
   contradictions are detected.
 
+- Type simplification (`simplify.rs`) only removes bare `TyVar` members from
+  unions/intersections. `Neg(TyVar)` members are not removed even when the
+  variable is single-polarity, because the removal check only pattern-matches
+  on `OutputTy::TyVar(v)`, not on `Neg(TyVar(v))`.
+
 - Negation bounds (`¬T` upper bounds on narrowed variables) don't survive
   let-generalization. `let f = x: if isNull x then 0 else x; in f` produces
   `a -> int` — the `¬null` on x's narrowed else-branch var is lost during extrude.

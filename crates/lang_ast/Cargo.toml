@@ -22,5 +22,8 @@ ordered-float = "4.6.0"
 proptest = { workspace = true, optional = true }
 
 
+[dev-dependencies]
+proptest = { workspace = true }
+
 [features]
 proptest_support = ["dep:proptest"]

@@ -430,4 +430,72 @@ mod tests {
         // applies to union/intersection members. The vars remain.
         assert_eq!(result, ty);
     }
+
+    // ======================================================================
+    // Negation type simplification
+    // ======================================================================
+    //
+    // Neg flips polarity (like lambda params). These tests verify that
+    // polarity analysis through Neg correctly identifies removable
+    // variables in unions and intersections.
+
+    #[test]
+    fn simplify_neg_flips_polarity_in_union() {
+        // Union(Neg(TyVar(5)), Int) — polarity analysis correctly tracks
+        // TyVar(5) as negative-only (through Neg), but apply_simplification
+        // only removes *bare* TyVar members from unions/intersections.
+        // Neg(TyVar(5)) is not a bare TyVar, so it stays. This is a known
+        // limitation: only top-level TyVar members are stripped.
+        let ty = OutputTy::Union(vec![
+            TyRef::from(OutputTy::Neg(TyRef::from(OutputTy::TyVar(5)))),
+            TyRef::from(OutputTy::Primitive(crate::PrimitiveTy::Int)),
+        ]);
+        let result = simplify(&ty);
+        assert_eq!(result, ty);
+    }
+
+    #[test]
+    fn simplify_neg_both_polarities_preserved() {
+        // Intersection(TyVar(3), Neg(TyVar(3))) — TyVar(3) appears in
+        // positive polarity (bare intersection member) and negative polarity
+        // (inside Neg). Both polarities → NOT removable.
+        let ty = OutputTy::Intersection(vec![
+            TyRef::from(OutputTy::TyVar(3)),
+            TyRef::from(OutputTy::Neg(TyRef::from(OutputTy::TyVar(3)))),
+        ]);
+        let result = simplify(&ty);
+        assert_eq!(result, ty);
+    }
+
+    #[test]
+    fn simplify_neg_in_intersection_not_removed() {
+        // Intersection(Int, Neg(TyVar(7))) — TyVar(7) is single-polarity
+        // but Neg(TyVar(7)) is not a bare TyVar, so the member stays.
+        // Same limitation as simplify_neg_flips_polarity_in_union.
+        let ty = OutputTy::Intersection(vec![
+            TyRef::from(OutputTy::Primitive(crate::PrimitiveTy::Int)),
+            TyRef::from(OutputTy::Neg(TyRef::from(OutputTy::TyVar(7)))),
+        ]);
+        let result = simplify(&ty);
+        assert_eq!(result, ty);
+    }
+
+    #[test]
+    fn simplify_neg_preserves_concrete() {
+        // Neg(Null) — no type variables, nothing to simplify.
+        let ty = OutputTy::Neg(TyRef::from(OutputTy::Primitive(crate::PrimitiveTy::Null)));
+        let result = simplify(&ty);
+        assert_eq!(result, ty);
+    }
+
+    proptest::proptest! {
+        /// Simplification is idempotent: applying it twice yields the same
+        /// result as applying it once.
+        #[test]
+        fn simplify_is_idempotent(ty: OutputTy) {
+            let once = simplify(&ty);
+            let twice = simplify(&once);
+            proptest::prop_assert_eq!(once, twice);
+        }
+    }
 }
