@@ -577,6 +577,10 @@ impl<'db> CheckCtx<'db> {
                 let inner_id = self.intern_output_ty_inner(&inner.0, var_map);
                 self.alloc_concrete(Ty::Neg(inner_id))
             }
+            // Bottom (never): uninhabited type from contradictions. Intern as
+            // a fresh variable with no bounds — it shouldn't appear in
+            // importable type signatures in practice.
+            OutputTy::Bottom => self.new_var(),
         }
     }
 

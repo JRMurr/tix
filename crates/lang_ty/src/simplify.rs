@@ -100,7 +100,7 @@ fn analyze(
                 })
                 .or_insert_with(|| VarInfo::new(pol, type_path));
         }
-        OutputTy::Primitive(_) => {}
+        OutputTy::Primitive(_) | OutputTy::Bottom => {}
         OutputTy::List(inner) => {
             path.push(PathSegment::ListElem);
             analyze(&inner.0, positive, path, vars);
@@ -205,7 +205,7 @@ fn apply_simplification(
             let resolved = substitution.get(v).copied().unwrap_or(*v);
             OutputTy::TyVar(resolved)
         }
-        OutputTy::Primitive(_) => ty.clone(),
+        OutputTy::Primitive(_) | OutputTy::Bottom => ty.clone(),
         OutputTy::List(inner) => OutputTy::List(TyRef::from(apply_simplification(
             &inner.0,
             substitution,
@@ -249,11 +249,12 @@ fn apply_simplification(
                             return None;
                         }
                     }
-                    Some(TyRef::from(apply_simplification(
-                        &m.0,
-                        substitution,
-                        removable,
-                    )))
+                    let s = apply_simplification(&m.0, substitution, removable);
+                    // Bottom is the identity for union: A ∨ ⊥ = A.
+                    if matches!(s, OutputTy::Bottom) {
+                        return None;
+                    }
+                    Some(TyRef::from(s))
                 })
                 .collect();
 
@@ -285,6 +286,11 @@ fn apply_simplification(
                     )))
                 })
                 .collect();
+
+            // Bottom is absorbing for intersection: A ∧ ⊥ = ⊥.
+            if simplified.iter().any(|m| matches!(&*m.0, OutputTy::Bottom)) {
+                return OutputTy::Bottom;
+            }
 
             match simplified.len() {
                 // All members were polar-only type variables. Keep the first

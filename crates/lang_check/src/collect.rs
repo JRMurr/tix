@@ -102,11 +102,12 @@ impl<'a> Canonicalizer<'a> {
 
         let flattened = flatten_union(members);
 
-        // Filter out bare type variables — in positive position, a TyVar bound
-        // means "something unknown flows in" which adds no information to a union.
+        // Filter out bare type variables and Bottom — in positive position, a
+        // TyVar bound means "something unknown flows in" which adds no
+        // information to a union; Bottom is the identity for union (A ∨ ⊥ = A).
         let concrete: Vec<OutputTy> = flattened
             .into_iter()
-            .filter(|m| !matches!(m, OutputTy::TyVar(_)))
+            .filter(|m| !matches!(m, OutputTy::TyVar(_) | OutputTy::Bottom))
             .collect();
 
         // Tautology detection: remove complementary pairs Primitive(P) + Neg(Primitive(P)).
@@ -169,10 +170,9 @@ impl<'a> Canonicalizer<'a> {
 
         // Contradiction detection: if the intersection contains both
         // Primitive(P) and Neg(Primitive(Q)) where P == Q or P <: Q,
-        // the entire intersection is uninhabited (⊥). Return a bare type
-        // variable as a stand-in rather than introducing OutputTy::Bottom.
+        // the entire intersection is uninhabited (⊥).
         if has_primitive_contradiction(&concrete) {
-            return OutputTy::TyVar(var_id.0);
+            return OutputTy::Bottom;
         }
 
         match concrete.len() {
@@ -698,10 +698,9 @@ mod tests {
     // -- contradiction canonicalization tests (G3) ----------------------------
 
     #[test]
-    fn contradiction_canonicalizes_to_tyvar() {
+    fn contradiction_canonicalizes_to_bottom() {
         // Build a type variable whose upper bounds produce `int & ~int` in
-        // negative position. Currently returns TyVar as a stand-in for ⊥.
-        // TODO: assert Bottom after A2 is implemented.
+        // negative position. Returns Bottom (never) — the uninhabited type.
         use crate::storage::TypeStorage;
         use lang_ty::Ty;
 
@@ -716,10 +715,10 @@ mod tests {
 
         let provenance = std::collections::HashMap::new();
         let result = canonicalize_standalone(&table, &provenance, var_id, Negative);
-        // Contradiction produces a bare TyVar (will be Bottom after A2).
-        assert!(
-            matches!(result, OutputTy::TyVar(_)),
-            "int & ~int contradiction should produce TyVar stand-in, got: {result}"
+        assert_eq!(
+            result,
+            arc_ty!(Bottom),
+            "int & ~int contradiction should produce Bottom (never), got: {result}"
         );
     }
 

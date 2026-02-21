@@ -128,7 +128,7 @@ Negation types are normalized during canonicalization using standard Boolean alg
 - **Double negation**: `~~T` simplifies to `T`
 - **De Morgan (union)**: `~(A | B)` becomes `~A & ~B`
 - **De Morgan (intersection)**: `~(A & B)` becomes `~A | ~B`
-- **Contradiction**: `T & ~T` in an intersection is detected as uninhabited (bottom)
+- **Contradiction**: `T & ~T` in an intersection is detected as uninhabited and displayed as `never`
 - **Tautology**: `T | ~T` in a union is detected as universal (top) and both members are removed
 
 These rules keep inferred types readable and prevent redundant negations from accumulating through nested guards.

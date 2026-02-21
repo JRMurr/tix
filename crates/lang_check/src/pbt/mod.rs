@@ -223,6 +223,9 @@ fn text_from_ty(ty: &OutputTy) -> impl Strategy<Value = NixTextStr> {
         OutputTy::Neg(_) => unreachable!("Neg should not appear in PBT type generation"),
         // Named is just a display wrapper — delegate to the inner type.
         OutputTy::Named(_, inner) => text_from_ty(&inner.0).boxed(),
+        // Bottom (never) doesn't arise in PBT — it's only produced by
+        // contradiction detection in canonicalization.
+        OutputTy::Bottom => unreachable!("Bottom should not appear in PBT type generation"),
     };
 
     inner.prop_flat_map(non_type_modifying_transform)

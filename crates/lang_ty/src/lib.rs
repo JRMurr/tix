@@ -80,6 +80,10 @@ macro_rules! arc_ty {
     (Number) => {
         $crate::OutputTy::Primitive($crate::PrimitiveTy::Number)
     };
+    // -- Bottom (never / uninhabited type) ------------------------------------
+    (Bottom) => {
+        $crate::OutputTy::Bottom
+    };
     // -- TyVar syntax: TyVar(N) --------------------------------------------
     (# $n:expr) => {
         $crate::OutputTy::TyVar($n)
