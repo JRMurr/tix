@@ -14,7 +14,8 @@
 // constraint contamination.
 
 use lang_ast::{
-    nameres::ResolveResult, BinOP, Expr, ExprBinOp, ExprId, Literal, NameId, NormalBinOp,
+    nameres::ResolveResult, BinOP, BindingValue, Expr, ExprBinOp, ExprId, Literal, NameId,
+    NormalBinOp,
 };
 use lang_ty::PrimitiveTy;
 use smol_str::SmolStr;
@@ -485,5 +486,181 @@ impl CheckCtx<'_> {
             }
             _ => false,
         }
+    }
+
+    // ==========================================================================
+    // Pre-pass: detect let-bindings inside narrowing scopes
+    // ==========================================================================
+    //
+    // SCC group processing infers let-bindings *before* the if-then-else that
+    // contains them installs narrowing overrides. This pre-pass walks the AST
+    // purely syntactically (no type info needed) to record which bindings sit
+    // inside narrowing scopes, so the SCC processing can install the right
+    // overrides when inferring those bindings.
+
+    /// Entry point: walk from the module's root expression and populate
+    /// `self.binding_narrow_scopes`.
+    pub(crate) fn compute_binding_narrow_scopes(&mut self) {
+        let mut scopes = std::collections::HashMap::new();
+        let entry = self.module.entry_expr;
+        self.walk_for_narrow_scopes(entry, &[], &mut scopes);
+        self.binding_narrow_scopes = scopes;
+    }
+
+    /// Recursive walk that tracks a stack of active narrowings. When we
+    /// encounter a let-binding (or rec attrset binding) under active
+    /// narrowings, we record those narrowings for the binding's NameId
+    /// into the `scopes` map.
+    fn walk_for_narrow_scopes(
+        &self,
+        expr: ExprId,
+        active: &[NarrowBinding],
+        scopes: &mut std::collections::HashMap<NameId, Vec<NarrowBinding>>,
+    ) {
+        let e = self.module[expr].clone();
+        match e {
+            // ── IfThenElse: analyze condition, push narrowings into branches
+            Expr::IfThenElse {
+                cond,
+                then_body,
+                else_body,
+            } => {
+                // Walk the condition with current narrowings (conditions don't
+                // introduce new narrowings for their own sub-expressions).
+                self.walk_for_narrow_scopes(cond, active, scopes);
+
+                let info = self.analyze_condition(cond);
+
+                // Then-branch: extend active narrowings with then_branch bindings.
+                let mut then_active: Vec<NarrowBinding> = active.to_vec();
+                then_active.extend(info.then_branch);
+                self.walk_for_narrow_scopes(then_body, &then_active, scopes);
+
+                // Else-branch: extend with else_branch bindings.
+                let mut else_active: Vec<NarrowBinding> = active.to_vec();
+                else_active.extend(info.else_branch);
+                self.walk_for_narrow_scopes(else_body, &else_active, scopes);
+            }
+
+            // ── Assert: condition narrowing applies to body
+            Expr::Assert { cond, body } => {
+                self.walk_for_narrow_scopes(cond, active, scopes);
+
+                let info = self.analyze_condition(cond);
+                let mut body_active: Vec<NarrowBinding> = active.to_vec();
+                body_active.extend(info.then_branch);
+                self.walk_for_narrow_scopes(body, &body_active, scopes);
+            }
+
+            // ── Apply: detect conditional library functions
+            Expr::Apply { fun, arg } => {
+                let narrow_info = self.detect_conditional_apply_narrowing_prepass(fun);
+
+                self.walk_for_narrow_scopes(fun, active, scopes);
+
+                if let Some(info) = narrow_info {
+                    let mut arg_active: Vec<NarrowBinding> = active.to_vec();
+                    arg_active.extend(info.then_branch);
+                    self.walk_for_narrow_scopes(arg, &arg_active, scopes);
+                } else {
+                    self.walk_for_narrow_scopes(arg, active, scopes);
+                }
+            }
+
+            // ── LetIn: record narrowings for each binding, recurse
+            Expr::LetIn { bindings, body } => {
+                if !active.is_empty() {
+                    for &(name, value) in bindings.statics.iter() {
+                        // Record active narrowings for this binding's name.
+                        scopes
+                            .entry(name)
+                            .or_insert_with(Vec::new)
+                            .extend(active.iter().cloned());
+
+                        match value {
+                            BindingValue::Expr(e) | BindingValue::Inherit(e) => {
+                                self.walk_for_narrow_scopes(e, active, scopes);
+                            }
+                            BindingValue::InheritFrom(_) => {}
+                        }
+                    }
+                    for &from_expr in bindings.inherit_froms.iter() {
+                        self.walk_for_narrow_scopes(from_expr, active, scopes);
+                    }
+                    for &(k, v) in bindings.dynamics.iter() {
+                        self.walk_for_narrow_scopes(k, active, scopes);
+                        self.walk_for_narrow_scopes(v, active, scopes);
+                    }
+                } else {
+                    bindings.walk_child_exprs(|child| {
+                        self.walk_for_narrow_scopes(child, active, scopes);
+                    });
+                }
+                self.walk_for_narrow_scopes(body, active, scopes);
+            }
+
+            // ── Recursive AttrSet: same as LetIn for bindings
+            Expr::AttrSet {
+                is_rec: true,
+                bindings,
+            } => {
+                if !active.is_empty() {
+                    for &(name, value) in bindings.statics.iter() {
+                        scopes
+                            .entry(name)
+                            .or_insert_with(Vec::new)
+                            .extend(active.iter().cloned());
+                        match value {
+                            BindingValue::Expr(e) | BindingValue::Inherit(e) => {
+                                self.walk_for_narrow_scopes(e, active, scopes);
+                            }
+                            BindingValue::InheritFrom(_) => {}
+                        }
+                    }
+                    for &from_expr in bindings.inherit_froms.iter() {
+                        self.walk_for_narrow_scopes(from_expr, active, scopes);
+                    }
+                    for &(k, v) in bindings.dynamics.iter() {
+                        self.walk_for_narrow_scopes(k, active, scopes);
+                        self.walk_for_narrow_scopes(v, active, scopes);
+                    }
+                } else {
+                    bindings.walk_child_exprs(|child| {
+                        self.walk_for_narrow_scopes(child, active, scopes);
+                    });
+                }
+            }
+
+            // ── Everything else: recurse into children with same narrowings
+            other => {
+                other.walk_child_exprs(|child| {
+                    self.walk_for_narrow_scopes(child, active, scopes);
+                });
+            }
+        }
+    }
+
+    /// Like `detect_conditional_apply_narrowing` but for the pre-pass.
+    /// Checks if `fun_expr` is `Apply(conditional_fn, cond_expr)` and
+    /// returns narrowing info for the body argument.
+    fn detect_conditional_apply_narrowing_prepass(
+        &self,
+        fun_expr: ExprId,
+    ) -> Option<NarrowInfo> {
+        let Expr::Apply {
+            fun: inner_fn,
+            arg: cond_expr,
+        } = &self.module[fun_expr]
+        else {
+            return None;
+        };
+
+        self.detect_conditional_fn(*inner_fn)?;
+
+        let info = self.analyze_condition(*cond_expr);
+        if info.then_branch.is_empty() {
+            return None;
+        }
+        Some(info)
     }
 }

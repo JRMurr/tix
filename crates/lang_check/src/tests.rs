@@ -3843,3 +3843,100 @@ fn non_lambda_intersection_falls_through() {
             .collect::<Vec<_>>()
     );
 }
+
+// ==============================================================================
+// Type narrowing — let-bindings under narrowing scopes (SCC pre-pass)
+// ==============================================================================
+//
+// When a let-binding is inside a narrowing scope (if-then-else branch, assert
+// body, conditional function argument), the SCC group processing must install
+// narrowing overrides so that references to narrowed names get the narrowed
+// type. Without this, the binding is inferred before the if-then-else installs
+// overrides, causing false type errors.
+
+/// Regression: `{ x ? null }: if x != null then (let y = x.name; in y) else ""`
+/// The let-binding `y = x.name` is inside the then-branch of a null guard.
+/// Without the SCC narrowing pre-pass, x.name would see the un-narrowed x
+/// (which includes null from the default), producing a false type error.
+#[test]
+fn narrow_let_binding_under_null_guard() {
+    let nix = indoc! {r#"
+        { x ? null }: if x != null then (let y = x.name; in y) else ""
+    "#};
+    let ty = get_inferred_root(nix);
+    // Should succeed without error — x is narrowed to non-null in the let.
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(
+        *body,
+        arc_ty!(String),
+        "let binding under null guard should succeed, got: {body}"
+    );
+}
+
+/// Assert narrowing with let-binding: `x: assert x != null; let y = x.name; in y`
+/// The assert narrows x to non-null, so y = x.name should succeed.
+#[test]
+fn narrow_assert_then_let_binding() {
+    let nix = "x: assert x != null; let y = x.name; in y";
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert!(
+        matches!(body, OutputTy::TyVar(_)),
+        "assert-narrowed let binding body should be a type variable (from field access), got: {body}"
+    );
+}
+
+/// Nested narrowing with let-bindings: inner if narrows further, and the
+/// let-binding inside the inner then-branch should see both narrowings.
+#[test]
+fn narrow_nested_let_bindings() {
+    let nix = indoc! {r#"
+        x: if x != null then
+            (if x ? name then
+                (let y = x.name; in y)
+            else "no name")
+        else "null"
+    "#};
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    // Should succeed: x is narrowed to non-null and has `name` field.
+    assert_eq!(
+        *body,
+        arc_ty!(String),
+        "nested narrowing with let binding should succeed, got: {body}"
+    );
+}
+
+/// Multiple let-bindings in the same let under one guard.
+/// Both y and z access fields of the narrowed x.
+#[test]
+fn narrow_multiple_let_bindings_under_guard() {
+    let nix = indoc! {"
+        x: if x != null then
+            (let
+                y = x.name;
+                z = x.value;
+            in { inherit y z; })
+        else {}
+    "};
+    let ty = get_inferred_root(nix);
+    let (_param, _body) = unwrap_lambda(&ty);
+    // Should succeed without error — both y and z see narrowed x.
+}
+
+/// Conditional library function with let-binding inside the body argument.
+/// `lib.optionalString (x != null) (let y = x.name; in y)` — the body arg
+/// is only evaluated when the guard is true, so x.name should succeed.
+/// Without the SCC narrowing pre-pass, this would produce a false type error
+/// because y = x.name would see un-narrowed x (which includes null).
+#[test]
+fn narrow_conditional_fn_let_binding() {
+    let nix = indoc! {r#"
+        x: let lib = { optionalString = cond: str: if cond then str else ""; };
+        in lib.optionalString (x != null) (let y = x.name; in y)
+    "#};
+    let ty = get_inferred_root(nix);
+    let (_param, _body) = unwrap_lambda(&ty);
+    // The key assertion is that inference succeeds without a type error.
+    // The let-bound y = x.name sees narrowed x (non-null) via the pre-pass.
+}

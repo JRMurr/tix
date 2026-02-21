@@ -179,6 +179,14 @@
   of the variable shows only the lower bound (null) without the type variable.
   Likely an interaction between optional-field default handling and extrusion.
 
+### `test/null_default.nix` Residual Error
+
+- After the SCC narrowing pre-pass fix, the `pasta != null` + let-binding patterns
+  in `null_default.nix` type-check correctly. However, line 45 still errors:
+  `lib.findFirst (k: arg ? ${k}) null (builtins.attrNames bindTypes)` — the `null`
+  literal as `findFirst`'s default arg causes a `string vs null` mismatch because
+  `findFirst` is not stubbed. Unrelated to narrowing.
+
 ### Future Enhancements
 
 - Full intersection-type-based operator overloading (replace pragmatic deferred
