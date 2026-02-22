@@ -540,6 +540,27 @@ impl CheckCtx<'_> {
                 }));
                 self.alloc_concrete(Ty::Inter(original_ty, constraint))
             }
+            crate::narrow::NarrowPredicate::NotHasField(ref field_name) => {
+                // α ∧ ¬{field: β, ...} — the variable does NOT have this field.
+                //
+                // Use the pre-allocated variable (not the resolved poly type)
+                // to ensure variable isolation works in constrain_lhs_inter.
+                // The poly_type_env entry may have been resolved to a concrete
+                // type (e.g. a closed attrset), which lacks the variable needed
+                // for MLstruct-style isolation.
+                let var_ty = self.ty_for_name_direct(binding.name);
+                let fresh_field_var = self.new_var();
+                let has_field_ty = self.alloc_concrete(Ty::AttrSet(AttrSetTy {
+                    fields: [(field_name.clone(), fresh_field_var)]
+                        .into_iter()
+                        .collect(),
+                    dyn_ty: None,
+                    open: true,
+                    optional_fields: BTreeSet::new(),
+                }));
+                let neg = self.alloc_concrete(Ty::Neg(has_field_ty));
+                self.alloc_concrete(Ty::Inter(var_ty, neg))
+            }
             crate::narrow::NarrowPredicate::IsAttrSet => {
                 // α ∧ {..}
                 let constraint = self.alloc_concrete(Ty::AttrSet(AttrSetTy {

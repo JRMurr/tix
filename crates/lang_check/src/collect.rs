@@ -484,9 +484,28 @@ fn are_output_types_disjoint(a: &OutputTy, b: &OutputTy) -> bool {
         | (OutputTy::Lambda { .. }, OutputTy::AttrSet(_))
         | (OutputTy::Lambda { .. }, OutputTy::List(_)) => true,
 
+        // Two attrsets: disjoint if one is closed and the other requires a field
+        // the closed one doesn't have.
+        (OutputTy::AttrSet(a), OutputTy::AttrSet(b)) => {
+            if !a.open {
+                for field in b.fields.keys() {
+                    if !a.fields.contains_key(field) && !b.optional_fields.contains(field) {
+                        return true;
+                    }
+                }
+            }
+            if !b.open {
+                for field in a.fields.keys() {
+                    if !b.fields.contains_key(field) && !a.optional_fields.contains(field) {
+                        return true;
+                    }
+                }
+            }
+            false
+        }
+
         // Same compound constructor — conservatively not disjoint.
-        (OutputTy::AttrSet(_), OutputTy::AttrSet(_))
-        | (OutputTy::List(_), OutputTy::List(_))
+        (OutputTy::List(_), OutputTy::List(_))
         | (OutputTy::Lambda { .. }, OutputTy::Lambda { .. }) => false,
 
         // Anything involving TyVar, Union, Intersection, Neg, Named, Bottom
@@ -1024,11 +1043,53 @@ mod tests {
     }
 
     #[test]
-    fn not_disjoint_same_compound() {
+    fn disjoint_closed_attrsets_different_required_fields() {
+        // Closed {x: Int} vs closed {y: String} — disjoint because
+        // each requires a field the other doesn't have.
         let attrset1 = arc_ty!({ "x": Int });
         let attrset2 = arc_ty!({ "y": String });
-        assert!(!are_output_types_disjoint(&attrset1, &attrset2));
+        assert!(are_output_types_disjoint(&attrset1, &attrset2));
+    }
 
+    #[test]
+    fn not_disjoint_closed_attrsets_shared_field() {
+        // Closed {x: Int} vs closed {x: String} — NOT disjoint because
+        // both have field `x` (they overlap structurally, the field types
+        // could unify or not, but the attrset shapes aren't disjoint).
+        let attrset1 = arc_ty!({ "x": Int });
+        let attrset2 = arc_ty!({ "x": String });
+        assert!(!are_output_types_disjoint(&attrset1, &attrset2));
+    }
+
+    #[test]
+    fn disjoint_open_attrset_vs_closed_missing_required() {
+        // Open {x: Int, ...} vs closed {y: String} — disjoint because
+        // the open attrset requires `x` but the closed one doesn't have it.
+        let open = arc_ty!({ "x": Int; ... });
+        let closed = arc_ty!({ "y": String });
+        assert!(are_output_types_disjoint(&open, &closed));
+    }
+
+    #[test]
+    fn not_disjoint_open_attrsets() {
+        // Open {x: Int, ...} vs open {y: String, ...} — NOT disjoint because
+        // both are open, so a value with both fields could satisfy both.
+        let open1 = arc_ty!({ "x": Int; ... });
+        let open2 = arc_ty!({ "y": String; ... });
+        assert!(!are_output_types_disjoint(&open1, &open2));
+    }
+
+    #[test]
+    fn disjoint_closed_vs_open_attrset_missing_required_field() {
+        // Closed {x: Int} vs open {y: String, ...} — disjoint because
+        // the closed attrset doesn't have `y` which is required by the open one.
+        let closed = arc_ty!({ "x": Int });
+        let open = arc_ty!({ "y": String; ... });
+        assert!(are_output_types_disjoint(&closed, &open));
+    }
+
+    #[test]
+    fn not_disjoint_same_compound() {
         let list1 = arc_ty!([Int]);
         let list2 = arc_ty!([String]);
         assert!(!are_output_types_disjoint(&list1, &list2));

@@ -97,7 +97,7 @@ dispatch = x:
 - `isAttrs x` / `builtins.isAttrs x` / `lib.isAttrs x` (then-branch only)
 - `isList x` / `builtins.isList x` / `lib.isList x` (then-branch only)
 - `isFunction x` / `builtins.isFunction x` / `lib.isFunction x` (then-branch only)
-- `x ? field` / `builtins.hasAttr "field" x` (then-branch narrows x to have the field)
+- `x ? field` / `builtins.hasAttr "field" x` (then-branch narrows x to have the field; else-branch narrows x to not have the field)
 - `!cond` (flips the narrowing)
 - `assert cond; body` (narrows in the body)
 - `cond1 && cond2` (both narrowings apply in the then-branch)

@@ -2753,6 +2753,86 @@ fn narrow_hasattr_field_access_then_arithmetic() {
 }
 
 // ==============================================================================
+// Type narrowing — NotHasField (else-branch of x ? field)
+// ==============================================================================
+
+/// Else-branch of `x ? field` should narrow x to ¬{field: β, ...}.
+/// When the then-branch accesses the field, the else-branch should
+/// still type-check without errors.
+#[test]
+fn narrow_not_hasfield_else_branch_typechecks() {
+    let nix = indoc! {r#"
+        arg':
+          let
+            arg = if builtins.isString arg' then { escaped = arg'; } else arg';
+          in
+          if arg ? escaped then
+            arg.escaped
+          else if arg ? unescaped then
+            arg.unescaped
+          else
+            "default"
+    "#};
+    let ty = get_inferred_root(nix);
+    // Should succeed without errors — the chained ? guards with a
+    // let-bound union type were previously failing.
+    assert!(
+        matches!(ty, OutputTy::Lambda { .. }),
+        "should produce a lambda, got: {ty}"
+    );
+}
+
+/// `!(x ? field)` should flip narrowing: then-branch gets NotHasField,
+/// else-branch gets HasField.
+#[test]
+fn narrow_not_hasfield_negated_flip() {
+    let nix = r#"x: if !(x ? name) then "no-name" else x.name"#;
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    // else-branch has HasField narrowing (flipped), so x.name succeeds.
+    assert_eq!(*body, arc_ty!(String), "negated hasattr flip should work");
+}
+
+/// Chained `? attr` guards on a parameter (not let-bound) should
+/// type-check without errors.
+#[test]
+fn narrow_not_hasfield_chained_on_param() {
+    let nix = indoc! {r#"
+        arg:
+        if arg ? escaped then
+          arg.escaped
+        else if arg ? unescaped then
+          arg.unescaped
+        else
+          "default"
+    "#};
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(*body, arc_ty!(String), "chained hasattr on param");
+}
+
+/// `builtins.hasAttr "field" x` else-branch should also produce
+/// NotHasField narrowing.
+#[test]
+fn narrow_not_hasfield_builtins_hasattr() {
+    let nix = indoc! {r#"
+        x:
+        if builtins.hasAttr "name" x then
+          x.name
+        else if builtins.hasAttr "value" x then
+          x.value
+        else
+          null
+    "#};
+    let ty = get_inferred_root(nix);
+    // Should succeed without errors.
+    assert!(
+        matches!(ty, OutputTy::Lambda { .. }),
+        "builtins.hasAttr else-branch should typecheck, got: {ty}"
+    );
+}
+
+// ==============================================================================
 // Type narrowing — type predicate builtins (isString, isInt, etc.)
 // ==============================================================================
 

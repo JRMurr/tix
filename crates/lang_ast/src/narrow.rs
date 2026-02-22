@@ -56,6 +56,8 @@ pub enum NarrowPredicate {
     IsNotType(NarrowPrimitive),
     /// The variable is known to have a field with this name (from `x ? field`).
     HasField(SmolStr),
+    /// The variable is known to NOT have a field (else-branch of `x ? field`).
+    NotHasField(SmolStr),
     /// The variable is known to be an attrset (from `isAttrs x`).
     IsAttrSet,
     /// The variable is known to be a list (from `isList x`).
@@ -187,11 +189,12 @@ pub fn analyze_condition(
             NarrowInfo {
                 then_branch: vec![NarrowBinding {
                     name,
-                    predicate: NarrowPredicate::HasField(field),
+                    predicate: NarrowPredicate::HasField(field.clone()),
                 }],
-                // No useful narrowing for else-branch — knowing a field
-                // is absent doesn't constrain the type in a useful way.
-                else_branch: vec![],
+                else_branch: vec![NarrowBinding {
+                    name,
+                    predicate: NarrowPredicate::NotHasField(field),
+                }],
             }
         }
 
@@ -496,8 +499,10 @@ fn try_hasattr_builtin_call(
             name,
             predicate: NarrowPredicate::HasField(field_name.clone()),
         }],
-        // No useful narrowing for else-branch (field absence).
-        else_branch: vec![],
+        else_branch: vec![NarrowBinding {
+            name,
+            predicate: NarrowPredicate::NotHasField(field_name.clone()),
+        }],
     })
 }
 

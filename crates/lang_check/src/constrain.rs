@@ -467,8 +467,9 @@ fn discriminant_matches(a: &Ty<TyId>, b: &Ty<TyId>) -> bool {
 /// - **Both primitives** → disjoint when neither is a subtype of the other.
 ///   `Int` and `String` are disjoint, but `Int` and `Number` overlap
 ///   (`Int ⊂ Number`).
-/// - **Same compound constructor** → conservatively not disjoint. Two attrsets
-///   could overlap, two lambdas could overlap, etc.
+/// - **Two attrsets** → disjoint when one is closed and the other requires a field
+///   the closed one doesn't have. Otherwise conservatively not disjoint.
+/// - **Same compound constructor (list, lambda)** → conservatively not disjoint.
 /// - **Inter/Union/Neg on either side** → conservatively not disjoint.
 fn are_types_disjoint(a: &Ty<TyId>, b: &Ty<TyId>) -> bool {
     match (a, b) {
@@ -491,9 +492,29 @@ fn are_types_disjoint(a: &Ty<TyId>, b: &Ty<TyId>) -> bool {
         | (Ty::Lambda { .. }, Ty::AttrSet(_))
         | (Ty::Lambda { .. }, Ty::List(_)) => true,
 
+        // Two attrsets: disjoint if one is closed and the other requires a field
+        // the closed one doesn't have (a required field is one that's present in
+        // `fields` but not in `optional_fields`).
+        (Ty::AttrSet(a), Ty::AttrSet(b)) => {
+            if !a.open {
+                for field in b.fields.keys() {
+                    if !a.fields.contains_key(field) && !b.optional_fields.contains(field) {
+                        return true;
+                    }
+                }
+            }
+            if !b.open {
+                for field in a.fields.keys() {
+                    if !b.fields.contains_key(field) && !a.optional_fields.contains(field) {
+                        return true;
+                    }
+                }
+            }
+            false
+        }
+
         // Same compound constructor — conservatively not disjoint.
-        (Ty::AttrSet(_), Ty::AttrSet(_))
-        | (Ty::List(_), Ty::List(_))
+        (Ty::List(_), Ty::List(_))
         | (Ty::Lambda { .. }, Ty::Lambda { .. }) => false,
 
         // Inter, Union, Neg, or TyVar on either side — can't determine statically.
