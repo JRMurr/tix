@@ -1575,6 +1575,320 @@ mod import_tests {
         assert!(has_reference, "targets should include the import Reference");
         assert!(has_path_literal, "targets should include the path Literal");
     }
+
+    // ======================================================================
+    // Helper: check_multifile with a custom TypeAliasRegistry
+    // ======================================================================
+
+    /// Like `check_multifile`, but threads a caller-provided `TypeAliasRegistry`
+    /// through both import resolution and file checking so tests can verify
+    /// alias provenance across file boundaries.
+    fn check_multifile_with_aliases(
+        files: &[(&str, &str)],
+        aliases: &TypeAliasRegistry,
+    ) -> (OutputTy, Vec<crate::imports::ImportError>) {
+        let (db, entry_file) = MultiFileTestDatabase::new(files);
+
+        let module = lang_ast::module(&db, entry_file);
+        let name_res = lang_ast::name_resolution(&db, entry_file);
+
+        let mut in_progress = HashSet::new();
+        let mut cache = HashMap::new();
+        let resolution = resolve_imports(
+            &db,
+            entry_file,
+            &module,
+            &name_res,
+            aliases,
+            &mut in_progress,
+            &mut cache,
+        );
+
+        let errors = resolution.errors;
+
+        let result = check_file_with_imports(&db, entry_file, aliases, resolution.types)
+            .expect("inference should succeed");
+
+        let root_ty = result
+            .expr_ty_map
+            .get(module.entry_expr)
+            .expect("root expr should have a type")
+            .clone();
+
+        (root_ty, errors)
+    }
+
+    fn get_multifile_root_with_aliases(
+        files: &[(&str, &str)],
+        aliases: &TypeAliasRegistry,
+    ) -> OutputTy {
+        check_multifile_with_aliases(files, aliases).0
+    }
+
+    // ======================================================================
+    // Polymorphic isolation tests
+    // ======================================================================
+
+    // Import a function with multiple type variables and verify each is
+    // instantiated independently at the call site.
+    #[test]
+    fn import_polymorphic_multi_var() {
+        let ty = get_multifile_root(&[
+            (
+                "/main.nix",
+                r#"
+                let mk = import /mk.nix;
+                in mk 1 "hello"
+                "#,
+            ),
+            ("/mk.nix", "a: b: { x = a; y = b; }"),
+        ]);
+        match &ty {
+            OutputTy::AttrSet(attr) => {
+                let x = attr.fields.get("x").expect("field x");
+                let y = attr.fields.get("y").expect("field y");
+                assert_eq!(*x.0, arc_ty!(Int), "first arg should be int");
+                assert_eq!(*y.0, arc_ty!(String), "second arg should be string");
+            }
+            _ => panic!("expected attrset, got: {ty}"),
+        }
+    }
+
+    // Import the same polymorphic identity function twice (diamond shape) and
+    // apply it at `int` in one branch and `string` in the other. Constraints
+    // must not leak between the two instantiations.
+    #[test]
+    fn import_polymorphic_no_leakback() {
+        let ty = get_multifile_root(&[
+            (
+                "/main.nix",
+                r#"
+                let
+                    id1 = import /id.nix;
+                    id2 = import /id.nix;
+                in {
+                    a = id1 1;
+                    b = id2 "hello";
+                }
+                "#,
+            ),
+            ("/id.nix", "x: x"),
+        ]);
+        match &ty {
+            OutputTy::AttrSet(attr) => {
+                let a = attr.fields.get("a").expect("field a");
+                let b = attr.fields.get("b").expect("field b");
+                assert_eq!(*a.0, arc_ty!(Int), "id1 applied to int should be int");
+                assert_eq!(
+                    *b.0,
+                    arc_ty!(String),
+                    "id2 applied to string should be string"
+                );
+            }
+            _ => panic!("expected attrset, got: {ty}"),
+        }
+    }
+
+    // Import a function that wraps its argument in a list. The inner list
+    // element type tracks through the shared variable.
+    #[test]
+    fn import_polymorphic_list() {
+        let ty = get_multifile_root(&[
+            ("/main.nix", "(import /wrap.nix) 1"),
+            ("/wrap.nix", "x: [x]"),
+        ]);
+        // The result is [a] where a is the shared type variable from the
+        // imported `a -> [a]`. After applying to int, the variable's lower
+        // bound is int, but canonicalization may or may not collapse it
+        // depending on polarity. Accept either [int] or [TyVar].
+        match &ty {
+            OutputTy::List(inner) => match inner.0.as_ref() {
+                i if *i == arc_ty!(Int) => { /* fully resolved */ }
+                OutputTy::TyVar(_) => { /* variable survived — acceptable */ }
+                other => panic!("expected list element to be int or TyVar, got: {other:?}"),
+            },
+            _ => panic!("expected list type, got: {ty}"),
+        }
+    }
+
+    // Import a polymorphic identity function but don't apply it. The import
+    // site should produce a polymorphic function type, not a bare TyVar.
+    #[test]
+    fn import_polymorphic_unused() {
+        let ty = get_multifile_root(&[("/main.nix", "import /id.nix"), ("/id.nix", "x: x")]);
+        match &ty {
+            OutputTy::Lambda { .. } => { /* good — polymorphic lambda preserved */ }
+            _ => panic!("expected lambda type for unused polymorphic import, got: {ty}"),
+        }
+    }
+
+    // ======================================================================
+    // Union / intersection interning tests
+    // ======================================================================
+
+    // Import a file that produces a union type (via isNull guard).
+    // The imported type body should contain a union of int and string.
+    #[test]
+    fn import_union_type() {
+        let ty = get_multifile_root(&[
+            ("/main.nix", "import /union_fn.nix"),
+            (
+                "/union_fn.nix",
+                r#"x: if builtins.isNull x then 1 else "hello""#,
+            ),
+        ]);
+        match &ty {
+            OutputTy::Lambda { body, .. } => {
+                // The body should be a union containing int and string.
+                match body.0.as_ref() {
+                    OutputTy::Union(members) => {
+                        let has_int = members.iter().any(|m| *m.0 == arc_ty!(Int));
+                        let has_string = members.iter().any(|m| *m.0 == arc_ty!(String));
+                        assert!(has_int, "union should contain int, got: {members:?}");
+                        assert!(has_string, "union should contain string, got: {members:?}");
+                    }
+                    other => panic!("expected union body, got: {other:?}"),
+                }
+            }
+            _ => panic!("expected lambda, got: {ty}"),
+        }
+    }
+
+    // Import a union-producing function and apply it — verify the union
+    // propagates into the importing file's inference.
+    #[test]
+    fn import_union_type_used() {
+        let ty = get_multifile_root(&[
+            ("/main.nix", "(import /union_fn.nix) null"),
+            (
+                "/union_fn.nix",
+                r#"x: if builtins.isNull x then 1 else "hello""#,
+            ),
+        ]);
+        // Applying the union function should give us int | string.
+        match &ty {
+            OutputTy::Union(members) => {
+                let has_int = members.iter().any(|m| *m.0 == arc_ty!(Int));
+                let has_string = members.iter().any(|m| *m.0 == arc_ty!(String));
+                assert!(has_int, "result union should contain int, got: {members:?}");
+                assert!(
+                    has_string,
+                    "result union should contain string, got: {members:?}"
+                );
+            }
+            _ => panic!("expected union type from applied import, got: {ty}"),
+        }
+    }
+
+    // Import a closed attrset and merge it with another attrset in the
+    // importing file, exercising attrset interning across the boundary.
+    #[test]
+    fn import_intersection_attrset() {
+        let ty = get_multifile_root(&[
+            (
+                "/main.nix",
+                r#"
+                let
+                    base = import /base.nix;
+                in {
+                    a = base.x;
+                    b = base.y;
+                }
+                "#,
+            ),
+            ("/base.nix", r#"{ x = 1; y = "hello"; }"#),
+        ]);
+        match &ty {
+            OutputTy::AttrSet(attr) => {
+                let a = attr.fields.get("a").expect("field a");
+                let b = attr.fields.get("b").expect("field b");
+                assert_eq!(*a.0, arc_ty!(Int), "x field should be int");
+                assert_eq!(*b.0, arc_ty!(String), "y field should be string");
+            }
+            _ => panic!("expected attrset, got: {ty}"),
+        }
+    }
+
+    // ======================================================================
+    // Named / alias provenance tests
+    // ======================================================================
+
+    // Verify that a Named type annotation in an imported file survives the
+    // cross-file boundary — the importing file should see OutputTy::Named.
+    #[test]
+    fn import_named_alias_preserved() {
+        let registry = super::registry_from_tix(
+            r#"
+            type Foo = { x: int };
+        "#,
+        );
+
+        let ty = get_multifile_root_with_aliases(
+            &[
+                ("/main.nix", "import /lib.nix"),
+                (
+                    "/lib.nix",
+                    indoc::indoc! { r#"
+                        let
+                            /**
+                                type: result :: Foo
+                            */
+                            result = { x = 1; };
+                        in
+                        result
+                    "# },
+                ),
+            ],
+            &registry,
+        );
+
+        assert!(
+            matches!(&ty, OutputTy::Named(name, _) if name == "Foo"),
+            "imported type should preserve Named(\"Foo\", ...), got: {ty:?}"
+        );
+    }
+
+    // Import a Named type and select a field from it — verify the field
+    // access unwraps the Named wrapper and produces the correct concrete type.
+    #[test]
+    fn import_named_alias_used_in_importer() {
+        let registry = super::registry_from_tix(
+            r#"
+            type Foo = { x: int };
+        "#,
+        );
+
+        let ty = get_multifile_root_with_aliases(
+            &[
+                (
+                    "/main.nix",
+                    r#"
+                    let lib = import /lib.nix;
+                    in lib.x
+                    "#,
+                ),
+                (
+                    "/lib.nix",
+                    indoc::indoc! { r#"
+                        let
+                            /**
+                                type: result :: Foo
+                            */
+                            result = { x = 1; };
+                        in
+                        result
+                    "# },
+                ),
+            ],
+            &registry,
+        );
+
+        assert_eq!(
+            ty,
+            arc_ty!(Int),
+            "selecting .x from Named(Foo, {{ x: int }}) should produce int"
+        );
+    }
 }
 
 // ==============================================================================
