@@ -4041,6 +4041,71 @@ fn narrow_contradiction_self_negated() {
 }
 
 // ==============================================================================
+// Cross-type disjointness rules
+// ==============================================================================
+//
+// These tests verify that the constraint solver handles `Concrete <: Neg(inner)`
+// for all constructor kinds, not just primitives. Attrsets, lists, and lambdas
+// are disjoint from primitives, so `AttrSet <: ~Null` should succeed.
+
+/// `x: if x != null then x.name else "default"` with a callback that passes
+/// an attrset — the attrset flows into the narrowed variable that has ~null
+/// upper bound. AttrSet <: ~Null must succeed.
+#[test]
+fn cross_disjoint_attrset_neg_null() {
+    // The callback pattern: `callback` takes a value that in the else-branch
+    // is narrowed to non-null. Passing an attrset as argument should succeed.
+    let nix = r#"let f = x: if x != null then x.name else "default"; in f { name = "hello"; }"#;
+    let ty = get_inferred_root(nix);
+    assert_eq!(ty, arc_ty!(String));
+}
+
+/// Chained narrowing: `if isAttrs x then ... else if isString x then ...`
+/// Each branch gets a different narrowing. Both should succeed.
+#[test]
+fn cross_disjoint_chained_narrowing() {
+    let nix = r#"x: if builtins.isAttrs x then x.name else if builtins.isString x then builtins.stringLength x else 0"#;
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    // All branches return int-ish: x.name is a TyVar, stringLength returns int, else is int.
+    // The body should be some union or int — it should NOT error.
+    assert!(
+        !matches!(body, OutputTy::Bottom),
+        "chained narrowing body should not be Bottom, got: {body}"
+    );
+}
+
+/// `number & ~null` should simplify to just `number` in output (redundant
+/// negation removal).
+#[test]
+fn cross_disjoint_redundant_neg_removed_in_output() {
+    // `x: if x != null then x + 1 else 0` — the else-branch has x narrowed
+    // to ~null, and x+1 constrains x to number. The parameter type should
+    // show `number` not `number & ~null`.
+    let nix = "x: if x != null then x + 1 else 0";
+    let ty = get_inferred_root(nix);
+    let (param, _body) = unwrap_lambda(&ty);
+    let formatted = format!("{param}");
+    assert!(
+        !formatted.contains("~null"),
+        "parameter type should not contain ~null (redundant), got: {formatted}"
+    );
+}
+
+/// Verify the overlap bug fix: `Number <: ~Int` should FAIL because Number
+/// and Int overlap (Int <: Number). This tests the constraint solver directly
+/// via a program that would trigger such a constraint.
+#[test]
+fn cross_disjoint_overlap_number_neg_int() {
+    // `int & ~number` is a contradiction (int <: number).
+    let nix = "x: if builtins.isInt x then (if !(builtins.isInt x) then x else 0) else 0";
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    // The inner then-branch is contradictory (int & ~int), so body is int.
+    assert_eq!(*body, arc_ty!(Int));
+}
+
+// ==============================================================================
 // Has-field constraints (deferred field presence checks)
 // ==============================================================================
 

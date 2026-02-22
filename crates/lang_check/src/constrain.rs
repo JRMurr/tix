@@ -145,20 +145,21 @@ impl CheckCtx<'_> {
             // Neg(A) <: Neg(B) iff B <: A (contravariant flip).
             (Ty::Neg(a), Ty::Neg(b)) => self.constrain(*b, *a),
 
-            // Primitive <: Neg(inner): succeeds when the primitive is disjoint
-            // from what's negated. E.g. Int <: ¬Null succeeds because Int ≠ Null.
-            (Ty::Primitive(p1), Ty::Neg(inner)) => {
+            // Concrete <: Neg(inner): succeeds when the concrete type is
+            // provably disjoint from the negated type. Handles all constructor
+            // kinds — primitives, attrsets, lists, lambdas — not just primitives.
+            // E.g. AttrSet <: ¬Null succeeds because attrsets and null are
+            // disjoint constructors; Int <: ¬Null succeeds because Int ≠ Null.
+            (sub, Ty::Neg(inner)) => {
                 match self.types.storage.get(*inner).clone() {
-                    TypeEntry::Concrete(Ty::Primitive(p2)) => {
-                        if p1 == &p2 || p1.is_subtype_of(&p2) {
-                            // Contradiction: e.g. Null <: ¬Null, or Int <: ¬Number.
-                            Err(InferenceError::TypeMismatch(Box::new((sub.clone(), sup.clone()))))
-                        } else {
-                            // Disjoint atoms: Int <: ¬Null is fine.
+                    TypeEntry::Concrete(inner_ty) => {
+                        if are_types_disjoint(sub, &inner_ty) {
                             Ok(())
+                        } else {
+                            Err(InferenceError::TypeMismatch(Box::new((sub.clone(), sup.clone()))))
                         }
                     }
-                    // Inner is a variable or non-primitive — conservatively fail.
+                    // Inner is a variable — conservatively fail.
                     _ => Err(InferenceError::TypeMismatch(Box::new((sub.clone(), sup.clone())))),
                 }
             }
@@ -200,5 +201,50 @@ impl CheckCtx<'_> {
             }
         }
         Ok(())
+    }
+}
+
+/// Check whether two concrete types are provably disjoint (their intersection
+/// is uninhabited). Used by the `Concrete <: Neg(inner)` rule: if `sub` and
+/// the negated type are disjoint, the constraint succeeds.
+///
+/// Disjointness rules:
+/// - **Different constructor kinds** → always disjoint. A primitive can never
+///   be an attrset, list, or lambda, and vice versa.
+/// - **Both primitives** → disjoint when neither is a subtype of the other.
+///   `Int` and `String` are disjoint, but `Int` and `Number` overlap
+///   (`Int ⊂ Number`).
+/// - **Same compound constructor** → conservatively not disjoint. Two attrsets
+///   could overlap, two lambdas could overlap, etc.
+/// - **Neg on either side** → not handled here (other match arms in
+///   `constrain_concrete` handle those cases).
+fn are_types_disjoint(a: &Ty<TyId>, b: &Ty<TyId>) -> bool {
+    match (a, b) {
+        // Both primitives: disjoint when no overlap in the subtype lattice.
+        (Ty::Primitive(p1), Ty::Primitive(p2)) => {
+            p1 != p2 && !p1.is_subtype_of(p2) && !p2.is_subtype_of(p1)
+        }
+
+        // Different constructor kinds — always disjoint.
+        (Ty::Primitive(_), Ty::AttrSet(_))
+        | (Ty::Primitive(_), Ty::List(_))
+        | (Ty::Primitive(_), Ty::Lambda { .. })
+        | (Ty::AttrSet(_), Ty::Primitive(_))
+        | (Ty::AttrSet(_), Ty::List(_))
+        | (Ty::AttrSet(_), Ty::Lambda { .. })
+        | (Ty::List(_), Ty::Primitive(_))
+        | (Ty::List(_), Ty::AttrSet(_))
+        | (Ty::List(_), Ty::Lambda { .. })
+        | (Ty::Lambda { .. }, Ty::Primitive(_))
+        | (Ty::Lambda { .. }, Ty::AttrSet(_))
+        | (Ty::Lambda { .. }, Ty::List(_)) => true,
+
+        // Same compound constructor — conservatively not disjoint.
+        (Ty::AttrSet(_), Ty::AttrSet(_))
+        | (Ty::List(_), Ty::List(_))
+        | (Ty::Lambda { .. }, Ty::Lambda { .. }) => false,
+
+        // Neg or TyVar on either side — can't determine statically.
+        _ => false,
     }
 }
