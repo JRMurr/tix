@@ -70,7 +70,7 @@ Nix source → [lang_ast::lower] Parse with rnix → Tix AST
 
 - **Bounds-based variables, not union-find**: type variables store upper/lower bounds; `constrain(sub, sup)` propagates bounds inline (no separate solve phase).
 - **Extrude replaces instantiate/generalize**: deep-level variables are copied to fresh variables at the current level with bounds linked via subtyping constraints.
-- **Two type representations**: `Ty<R, VarType>` during inference (no union/intersection variants); `OutputTy` after canonicalization (has Union/Intersection).
+- **Two type representations**: `Ty<R, VarType>` during inference (includes `Neg`, `Inter`, `Union` for narrowing); `OutputTy` after canonicalization (has Union/Intersection/Neg).
 - **Polarity-aware canonicalization**: positive positions expand to union of lower bounds; negative positions expand to intersection of upper bounds.
 - **Salsa** for incremental computation (query caching).
 - **Overload resolution is deferred**: operators like `+` and `*` are resolved after the SCC group is fully inferred.
@@ -85,31 +85,29 @@ Nix source → [lang_ast::lower] Parse with rnix → Tix AST
 - `lang_check/src/builtins.rs` — Nix builtin type synthesis (uses `synth_ty!` macro)
 
 
-### Active Work: Boolean-Algebraic Subtyping + Type Narrowing
+### Boolean-Algebraic Subtyping + Type Narrowing
 
-Extending tix from SimpleSub to BAS (Boolean-Algebraic Subtyping) by adding negation types, then using them for precise type narrowing in if/else branches.
+Tix extends SimpleSub with BAS (Boolean-Algebraic Subtyping): negation types (`Neg`), first-class `Inter`/`Union` types during inference (MLstruct-style), and type narrowing in if/else branches.
 
-**Design decisions (settled):**
-- Add `Neg(TypeId)` to the type algebra. Negation only on atoms (base types, type vars). Normalize via De Morgan.
+**Design decisions:**
+- `Neg(TypeId)` in the type algebra. Negation only on atoms (base types, type vars). Normalize via De Morgan.
 - Narrowing: then-branch gets `α ∧ GuardType`, else-branch gets `α ∧ ¬GuardType`. No separate proposition system.
-- Keep MLsub's arrow distribution rule — no inferred overloaded function types. Users annotate intersection types for dispatch.
-- "Annotation required" errors when solver can't make progress (co-NP blowup, ambiguous overloading).
+- First-class `Inter`/`Union` in `Ty<R>` preserve narrowing through extrusion/generalization.
 - Nix's purity makes narrowing unconditionally sound — no invalidation concerns.
 
-**Guards to recognize (pattern-match on if-conditions):**
-- `builtins.isString x` etc. → then: `α ∧ String`, else: `α ∧ ¬String`
+**Recognized guards (pattern-match on if-conditions):**
+- `builtins.isNull x`, `builtins.isString x`, `isInt`, `isFloat`, `isBool`, `isPath` → then: `α ∧ T`, else: `α ∧ ¬T`
+- `builtins.isAttrs x`, `isList x`, `isFunction x` → then-branch only (no `¬{..}` representation)
 - `x == null` / `null == x` → then: `α ∧ Null`, else: `α ∧ ¬Null`
 - `x ? attr` / `builtins.hasAttr "attr" x` → then: `α ∧ {attr: β_fresh}`, else: `α ∧ ¬{attr: ⊤}`
+- `!cond` → flips then/else narrowings
+- `a && b` → combines then-branch narrowings; `a || b` → combines else-branch narrowings
 - Unrecognized conditions → no narrowing, both branches see original type
 
-**Implementation order:**
-1. Extend type repr with `Neg(TypeId)` + normalization in `lang_ty`
-2. Update `constrain.rs` biunification to handle negation (ref: sebas artifact)
-3. Add Guard enum + syntactic recognition pass
-4. Modify if-expression inference in `infer_expr.rs` to narrow per branch
-5. `? attr` record narrowing (field presence/absence on record type vars)
-6. Annotation checking for intersection types
-7. "Annotation required" diagnostics
+**Key files for narrowing:**
+- `lang_ast/src/narrow.rs` — guard recognition, `NarrowPredicate` enum, `analyze_condition()`
+- `lang_check/src/infer_expr.rs` — `infer_with_narrowing()`, `compute_narrow_override()`
+- `lang_check/src/constrain.rs` — `are_types_disjoint()`, negation constraint rules
 
 **Key references:**
 - `github.com/fo5for/sebas` — BAS reference impl (POPL 2026 artifact)

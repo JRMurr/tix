@@ -170,21 +170,10 @@ extrusion.
   and tautologies (`A ∨ ¬A`) simply remove both members. Adding explicit Top/Bottom
   would be more principled but touches every `match` on `OutputTy`.
 
-- ~~Cross-type disjointness in `constrain.rs` (e.g., `AttrSet <: Neg(Primitive)`)~~
-  **Fixed**: the `(sub, Neg(inner))` rule now handles all constructor kinds via
-  `are_types_disjoint`. Also fixed the `Number <: ~Int` overlap bug (was missing
-  `p2.is_subtype_of(p1)` check). Redundant negations are removed during
-  canonicalization (`{name: string} & ~null` → `{name: string}`).
-
 - Type simplification (`simplify.rs`) only removes bare `TyVar` members from
   unions/intersections. `Neg(TyVar)` members are not removed even when the
   variable is single-polarity, because the removal check only pattern-matches
   on `OutputTy::TyVar(v)`, not on `Neg(TyVar(v))`.
-
-- ~~Negation bounds don't survive let-generalization~~ **Fixed**: first-class
-  Inter/Union types during inference (MLstruct-style) preserve narrowing information
-  through extrusion. `let f = x: if isNull x then 0 else x; in f` now produces
-  `a -> int | ~null` instead of `a -> int`.
 
 ### Null-Default Field: Polymorphic Return Type Loses Default
 
@@ -209,24 +198,11 @@ extrusion.
 
 - Full intersection-type-based operator overloading (replace pragmatic deferred
   overload list with proper intersection types for overloaded functions)
-- Type narrowing: Phase 1 (null narrowing), Phase 2a (`?`/hasAttr, single-key
-  only), Phase 2b (all `is*` primitive predicates, `builtins.hasAttr`), and
-  `¬T` output display are implemented. `Neg(R)` type variant is wired through
-  the full pipeline (Ty, OutputTy, constrain, extrude, canonicalize, Display)
-  and emitted as upper bounds on narrowed variables. Nested redundant guards
-  (e.g. `if x != null then (if x != null then ...)`) are handled because
-  equality comparisons (`==`/`!=`) generate no type constraints — they just
-  return bool. `isAttrs`, `isFunction`, `isList` now have then-branch
-  narrowing (constraining to `{..}`, `[α]`, `α → β` respectively).
-  Else-branch narrowing for compound types is skipped (no `¬{..}`).
-  `&&`/`||` combinators are implemented: `&&` combines then-branch narrowings,
-  `||` combines else-branch narrowings. Remaining: else-branch for `HasField`
-  (field absence), multi-key `?` paths.
 - Literal / singleton types (`"circle"` as a type, not just `string`)
-- Type narrowing + arithmetic in narrowed branches: with first-class Inter types,
-  `x: if x == null then x else x - 1` should now properly constrain the else-branch
-  variable through the `Inter(α, ¬Null)` type. The arithmetic `-` constrains the
-  unwrapped member to `Number`. Worth verifying the output is `null | number`.
+- Multi-key `?` attrpath narrowing (only single keys are currently supported)
+- Else-branch narrowing for compound types (`isAttrs`/`isList`/`isFunction`
+  only narrow the then-branch; else-branch is skipped because `¬{..}` etc.
+  are not representable)
 - Co-occurrence simplification: path-based co-occurrence grouping is strict —
   variables that appear at structurally different positions (e.g. different attrset
   fields) won't be merged. This could be relaxed to use "occurrence signature"
