@@ -96,13 +96,23 @@ impl CheckCtx<'_> {
             (TypeEntry::Concrete(sub_ty), TypeEntry::Concrete(sup_ty)) => {
                 let sub_ty = sub_ty.clone();
                 let sup_ty = sup_ty.clone();
-                self.constrain_concrete(&sub_ty, &sup_ty)
+                self.constrain_concrete(sub, sup, &sub_ty, &sup_ty)
             }
         }
     }
 
     /// Structural subtyping between two concrete types.
-    fn constrain_concrete(&mut self, sub: &Ty<TyId>, sup: &Ty<TyId>) -> Result<(), InferenceError> {
+    ///
+    /// `sub_id`/`sup_id` are the original TyIds from `constrain()` — passed
+    /// through so that Inter/Union decomposition reuses them instead of
+    /// allocating fresh copies (which would defeat the constrain_cache).
+    fn constrain_concrete(
+        &mut self,
+        sub_id: TyId,
+        sup_id: TyId,
+        sub: &Ty<TyId>,
+        sup: &Ty<TyId>,
+    ) -> Result<(), InferenceError> {
         match (sub, sup) {
             // Lambda: contravariant in param, covariant in body.
             (
@@ -170,14 +180,17 @@ impl CheckCtx<'_> {
             // Always decomposable regardless of what the sub-type is.
             (_, Ty::Inter(a, b)) => {
                 let (a, b) = (*a, *b);
-                self.constrain_rhs_inter(sub, a, b)
+                // Reuse original sub_id — don't allocate a fresh copy.
+                self.constrain(sub_id, a)?;
+                self.constrain(sub_id, b)
             }
 
             // Union on LHS: A ∨ B <: V → A <: V and B <: V
             // Always decomposable regardless of what the super-type is.
             (Ty::Union(a, b), _) => {
                 let (a, b) = (*a, *b);
-                self.constrain_lhs_union(a, b, sup)
+                self.constrain(a, sup_id)?;
+                self.constrain(b, sup_id)
             }
 
             // Intersection on LHS — the "annoying" case (MLstruct-style).
@@ -186,46 +199,18 @@ impl CheckCtx<'_> {
             //   α ∧ C <: U → α <: U ∨ ¬C
             (Ty::Inter(a, b), _) => {
                 let (a, b) = (*a, *b);
-                self.constrain_lhs_inter(a, b, sup)
+                self.constrain_lhs_inter(a, b, sup_id, sup)
             }
 
             // Union on RHS: route concrete sub to the appropriate member.
             (_, Ty::Union(a, b)) => {
                 let (a, b) = (*a, *b);
-                self.constrain_rhs_union(sub, a, b)
+                self.constrain_rhs_union(sub, a, b, sub_id)
             }
 
             // Type mismatch.
             _ => Err(InferenceError::TypeMismatch(Box::new((sub.clone(), sup.clone())))),
         }
-    }
-
-    /// `sub <: Inter(a, b)` — decompose: sub must be subtype of both members.
-    fn constrain_rhs_inter(
-        &mut self,
-        sub: &Ty<TyId>,
-        a: TyId,
-        b: TyId,
-    ) -> Result<(), InferenceError> {
-        // We need a TyId for sub. Since this is called from constrain_concrete,
-        // we allocate a temporary concrete type. However, the original sub_id
-        // was lost. Re-allocate it. This is safe because constrain_cache
-        // deduplicates, and the allocation is cheap.
-        let sub_id = self.types.storage.new_concrete(sub.clone());
-        self.constrain(sub_id, a)?;
-        self.constrain(sub_id, b)
-    }
-
-    /// `Union(a, b) <: sup` — decompose: both members must be subtypes of sup.
-    fn constrain_lhs_union(
-        &mut self,
-        a: TyId,
-        b: TyId,
-        sup: &Ty<TyId>,
-    ) -> Result<(), InferenceError> {
-        let sup_id = self.types.storage.new_concrete(sup.clone());
-        self.constrain(a, sup_id)?;
-        self.constrain(b, sup_id)
     }
 
     /// `Inter(a, b) <: sup` — the "annoying" case. Use variable isolation
@@ -239,6 +224,7 @@ impl CheckCtx<'_> {
         &mut self,
         a: TyId,
         b: TyId,
+        sup_id: TyId,
         sup: &Ty<TyId>,
     ) -> Result<(), InferenceError> {
         // Determine if each side contains a variable (possibly nested in Inter).
@@ -246,8 +232,6 @@ impl CheckCtx<'_> {
         let b_has_var = self.inter_contains_var(b);
         let a_is_var = matches!(self.types.storage.get(a), TypeEntry::Variable(_));
         let b_is_var = matches!(self.types.storage.get(b), TypeEntry::Variable(_));
-
-        let sup_id = self.types.storage.new_concrete(sup.clone());
 
         match (a_is_var || (a_has_var && !b_has_var), b_is_var || (b_has_var && !a_has_var)) {
             (true, false) => {
@@ -262,8 +246,18 @@ impl CheckCtx<'_> {
                 }
                 // α ∧ C <: U → α <: U ∨ ¬C (α side absorbs the constraint)
                 let neg_b = self.alloc_concrete(Ty::Neg(b));
-                let union = self.alloc_concrete(Ty::Union(sup_id, neg_b));
-                self.constrain(a, union)
+                // Union absorption: (A ∨ B) ∨ B = A ∨ B. If sup_id's union
+                // tree already contains neg_b, skip wrapping — the constraint
+                // is already captured. This prevents infinite growth when two
+                // mutually-lower-bounded variables both carry Inter wrappers
+                // (e.g. from narrowing), which would otherwise create ever-deeper
+                // Union nesting with fresh TyIds that defeat the constrain_cache.
+                let target = if self.union_contains_member(sup_id, neg_b) {
+                    sup_id
+                } else {
+                    self.alloc_concrete(Ty::Union(sup_id, neg_b))
+                };
+                self.constrain(a, target)
             }
             (false, true) => {
                 if let TypeEntry::Concrete(a_ty) = self.types.storage.get(a).clone() {
@@ -276,8 +270,12 @@ impl CheckCtx<'_> {
                 }
                 // C ∧ α <: U → α <: U ∨ ¬C
                 let neg_a = self.alloc_concrete(Ty::Neg(a));
-                let union = self.alloc_concrete(Ty::Union(sup_id, neg_a));
-                self.constrain(b, union)
+                let target = if self.union_contains_member(sup_id, neg_a) {
+                    sup_id
+                } else {
+                    self.alloc_concrete(Ty::Union(sup_id, neg_a))
+                };
+                self.constrain(b, target)
             }
             _ => {
                 // Both have variables or neither — can't isolate cleanly.
@@ -301,6 +299,28 @@ impl CheckCtx<'_> {
         }
     }
 
+    /// Check if a Union type tree contains a specific TyId as a leaf member.
+    /// Used for union absorption: `(A ∨ B) ∨ B = A ∨ B`. When variable
+    /// isolation creates `Union(sup, neg_c)` and sup already contains neg_c,
+    /// wrapping would be redundant and cause infinite growth in cyclic variable
+    /// chains.
+    ///
+    /// Only checks TyId equality (not structural equivalence), which is
+    /// sufficient because `alloc_concrete(Neg(x))` is deduplicated via
+    /// `neg_cache` — the same `Neg(x)` always returns the same TyId.
+    fn union_contains_member(&self, id: TyId, target: TyId) -> bool {
+        if id == target {
+            return true;
+        }
+        match self.types.storage.get(id) {
+            TypeEntry::Concrete(Ty::Union(a, b)) => {
+                self.union_contains_member(*a, target)
+                    || self.union_contains_member(*b, target)
+            }
+            _ => false,
+        }
+    }
+
     /// `sub <: Union(a, b)` — route the sub-type to the correct union member.
     ///
     /// Uses a two-phase approach: try concrete match first, fall to variable.
@@ -311,11 +331,10 @@ impl CheckCtx<'_> {
         sub: &Ty<TyId>,
         a: TyId,
         b: TyId,
+        sub_id: TyId,
     ) -> Result<(), InferenceError> {
         let a_is_var = matches!(self.types.storage.get(a), TypeEntry::Variable(_));
         let b_is_var = matches!(self.types.storage.get(b), TypeEntry::Variable(_));
-
-        let sub_id = self.types.storage.new_concrete(sub.clone());
 
         match (a_is_var, b_is_var) {
             // One variable, one concrete: route to concrete if compatible, else variable.

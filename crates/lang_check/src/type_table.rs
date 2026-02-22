@@ -25,6 +25,13 @@ pub(crate) struct TypeTable {
     /// doesn't grow across files.
     pub(crate) constrain_cache: HashSet<(TyId, TyId)>,
 
+    /// Negation type cache for deduplication. Maps inner TyId → Neg(inner) TyId.
+    /// Ensures that `alloc_concrete(Neg(x))` returns the same TyId for the same
+    /// `x`, which is critical for union absorption in constrain_lhs_inter:
+    /// the absorption check uses TyId equality, so identical Neg types must share
+    /// a TyId.
+    pub(crate) neg_cache: HashMap<TyId, TyId>,
+
     /// Primitive type cache for deduplication.
     pub(crate) prim_cache: HashMap<PrimitiveTy, TyId>,
 }
@@ -34,6 +41,7 @@ impl TypeTable {
         Self {
             storage: TypeStorage::new(),
             constrain_cache: HashSet::new(),
+            neg_cache: HashMap::new(),
             prim_cache: HashMap::new(),
         }
     }
@@ -51,24 +59,36 @@ impl TypeTable {
     /// - `Neg(Union(a,b))` → `Inter(Neg(a), Neg(b))`
     pub fn alloc_concrete(&mut self, ty: Ty<TyId>) -> TyId {
         if let Ty::Neg(inner) = &ty {
-            match self.storage.get(*inner) {
+            // Deduplicate: return cached Neg if we've seen this inner before.
+            if let Some(&cached) = self.neg_cache.get(inner) {
+                return cached;
+            }
+            let inner_val = *inner;
+            match self.storage.get(inner_val) {
                 TypeEntry::Concrete(Ty::Neg(x)) => return *x, // ¬¬A → A
                 TypeEntry::Concrete(Ty::Inter(a, b)) => {
                     // ¬(A ∧ B) → ¬A ∨ ¬B
                     let (a, b) = (*a, *b);
                     let neg_a = self.alloc_concrete(Ty::Neg(a));
                     let neg_b = self.alloc_concrete(Ty::Neg(b));
-                    return self.storage.new_concrete(Ty::Union(neg_a, neg_b));
+                    let id = self.storage.new_concrete(Ty::Union(neg_a, neg_b));
+                    self.neg_cache.insert(inner_val, id);
+                    return id;
                 }
                 TypeEntry::Concrete(Ty::Union(a, b)) => {
                     // ¬(A ∨ B) → ¬A ∧ ¬B
                     let (a, b) = (*a, *b);
                     let neg_a = self.alloc_concrete(Ty::Neg(a));
                     let neg_b = self.alloc_concrete(Ty::Neg(b));
-                    return self.storage.new_concrete(Ty::Inter(neg_a, neg_b));
+                    let id = self.storage.new_concrete(Ty::Inter(neg_a, neg_b));
+                    self.neg_cache.insert(inner_val, id);
+                    return id;
                 }
                 _ => {}
             }
+            let id = self.storage.new_concrete(ty);
+            self.neg_cache.insert(inner_val, id);
+            return id;
         }
         self.storage.new_concrete(ty)
     }

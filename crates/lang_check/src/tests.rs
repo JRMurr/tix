@@ -4207,6 +4207,40 @@ fn narrow_and_combinator_mixed_predicates() {
     );
 }
 
+/// Regression test: cyclic narrowed variables with Inter wrappers should not
+/// cause infinite recursion (stack overflow) in the constraint solver.
+///
+/// The pattern `{ pasta ? null }: ... if pasta != null then pasta.field ...`
+/// creates `Inter(α, ¬Null)` which, combined with mutually-lower-bounded
+/// variables from `isString` narrowing, previously caused infinite growth of
+/// Union types in `constrain_lhs_inter` (each iteration wrapped the previous
+/// Union, creating fresh TyIds that defeated the constrain_cache).
+///
+/// Fixed by: neg_cache deduplication + union absorption in constrain_lhs_inter.
+#[test]
+fn narrow_cyclic_inter_no_stack_overflow() {
+    let nix = indoc! {r#"
+        { pasta ? null }:
+        let
+          renderArg =
+            arg':
+            let
+              arg = if builtins.isString arg' then { escaped = arg'; } else arg';
+            in
+            if arg ? escaped then arg.escaped
+            else if arg ? unescaped then arg.unescaped
+            else "other";
+          pastaFlags = if pasta != null then pasta.tcpForward else null;
+        in
+        { inherit renderArg pastaFlags; }
+    "#};
+    // Should complete without stack overflow. We don't check exact types,
+    // just that inference terminates.
+    let (_module, result) = check_str(nix);
+    // Allow type errors (field access issues) but not panics.
+    let _ = result;
+}
+
 // ==============================================================================
 // Has-field constraints (deferred field presence checks)
 // ==============================================================================
