@@ -4469,3 +4469,95 @@ fn partial_narrowing_not_tautology() {
         "partial narrowing should not produce 'any', got: {formatted}"
     );
 }
+
+// ==============================================================================
+// Lambda alias provenance propagation
+// ==============================================================================
+
+// When a function annotation uses a type alias for a parameter type, the
+// alias name should propagate through to the parameter's display type.
+#[test]
+fn lambda_param_alias_provenance() {
+    let registry = registry_from_tix(
+        r#"
+        type Foo = { name: string, age: int };
+    "#,
+    );
+
+    let nix_src = indoc! { r#"
+        let
+            /**
+                type: f :: Foo -> string
+            */
+            f = x: x.name;
+        in
+        f
+    "# };
+
+    let ty = get_name_type_with_aliases(nix_src, "f", &registry);
+    let formatted = format!("{ty}");
+    assert!(
+        formatted.contains("Foo"),
+        "annotated lambda param should display alias name 'Foo', got: {formatted}"
+    );
+}
+
+// Curried function with multiple alias params.
+#[test]
+fn lambda_curried_alias_provenance() {
+    let registry = registry_from_tix(
+        r#"
+        type Foo = { name: string };
+        type Bar = { age: int };
+    "#,
+    );
+
+    let nix_src = indoc! { r#"
+        let
+            /**
+                type: f :: Foo -> Bar -> string
+            */
+            f = x: y: x.name;
+        in
+        f
+    "# };
+
+    let ty = get_name_type_with_aliases(nix_src, "f", &registry);
+    let formatted = format!("{ty}");
+    assert!(
+        formatted.contains("Foo"),
+        "first param should display 'Foo', got: {formatted}"
+    );
+    assert!(
+        formatted.contains("Bar"),
+        "second param should display 'Bar', got: {formatted}"
+    );
+}
+
+// ==============================================================================
+// Intersection simplification — renderArg-like if-chain
+// ==============================================================================
+
+// A minimal if-chain similar to renderArg: multiple `if arg ? field then ...`
+// branches produce intersections of unions. After simplification, the output
+// should be significantly more compact.
+#[test]
+fn if_chain_has_field_simplification() {
+    let nix = indoc! {"
+        arg:
+            if arg ? escaped then
+                arg.escaped
+            else if arg ? unescaped then
+                arg.unescaped
+            else
+                \"fallback\"
+    "};
+    let ty = get_inferred_root(nix);
+    let formatted = format!("{ty}");
+    // The result should contain `string` (factored out or in union) and
+    // should be simpler than a raw intersection of unions.
+    assert!(
+        formatted.contains("string"),
+        "if-chain result should contain 'string', got: {formatted}"
+    );
+}

@@ -129,7 +129,9 @@ impl<'a> Canonicalizer<'a> {
         let concrete = match polarity {
             Positive => {
                 // Tautology detection: A ∨ ¬A = ⊤, drop both.
-                remove_tautological_pairs(concrete)
+                let concrete = remove_tautological_pairs(concrete);
+                // Absorb open attrsets subsumed by more general open attrsets.
+                absorb_subsumed_union_members(concrete)
             }
             Negative => {
                 // Merge multiple attrsets into one (intersection of records =
@@ -146,7 +148,9 @@ impl<'a> Canonicalizer<'a> {
                 if has_type_contradiction(&concrete) {
                     return OutputTy::Bottom;
                 }
-                concrete
+                // Factor shared members from intersections of unions:
+                // (A|C) & (B|C) = C | (A&B).
+                factor_shared_from_intersection(concrete)
             }
         };
 
@@ -273,6 +277,9 @@ impl<'a> Canonicalizer<'a> {
                         remove_redundant_negations(c)
                     }
                 };
+                // Factor shared members from intersections of unions:
+                // (A|C) & (B|C) = C | (A&B).
+                let concrete = factor_shared_from_intersection(concrete);
                 match concrete.len() {
                     // Tautology removal emptied a non-empty vec in positive
                     // position — return Top.
@@ -297,8 +304,11 @@ impl<'a> Canonicalizer<'a> {
                     .collect();
                 let had_concrete = !concrete.is_empty();
                 let concrete = match polarity {
-                    Positive => remove_tautological_pairs(concrete),
-                    Negative => concrete,
+                    Positive => {
+                        let c = remove_tautological_pairs(concrete);
+                        absorb_subsumed_union_members(c)
+                    }
+                    Negative => absorb_subsumed_union_members(concrete),
                 };
                 match concrete.len() {
                     // Tautology removal emptied a non-empty vec in positive
@@ -433,6 +443,180 @@ fn remove_tautological_pairs(members: Vec<OutputTy>) -> Vec<OutputTy> {
             }
         })
         .collect()
+}
+
+/// Absorb subsumed attrsets in a union. In a union `A | B`, open attrset A
+/// subsumes open attrset B when:
+/// - Both are open
+/// - A has no dyn_ty (or A.dyn_ty == B.dyn_ty)
+/// - Every required (non-optional) field of A also appears in B
+///
+/// This is exact: `A | B = A` when `B <: A` structurally. The common case is
+/// `{ ... }` (open, no fields) absorbing any open attrset. Closed attrsets
+/// are never absorbed because they assert "exactly these fields".
+fn absorb_subsumed_union_members(members: Vec<OutputTy>) -> Vec<OutputTy> {
+    // Collect indices of attrset members for pairwise comparison.
+    let attrset_indices: Vec<usize> = members
+        .iter()
+        .enumerate()
+        .filter_map(|(i, m)| matches!(m, OutputTy::AttrSet(_)).then_some(i))
+        .collect();
+
+    if attrset_indices.len() < 2 {
+        return members;
+    }
+
+    // Mark indices that are subsumed by another attrset in the union.
+    let mut subsumed: HashSet<usize> = HashSet::new();
+    for &i in &attrset_indices {
+        if subsumed.contains(&i) {
+            continue;
+        }
+        for &j in &attrset_indices {
+            if i == j || subsumed.contains(&j) {
+                continue;
+            }
+            let a = match &members[i] {
+                OutputTy::AttrSet(a) => a,
+                _ => unreachable!(),
+            };
+            let b = match &members[j] {
+                OutputTy::AttrSet(b) => b,
+                _ => unreachable!(),
+            };
+            // A subsumes B when B <: A:
+            // - Both open (closed attrsets assert exact fields)
+            // - A has no dyn_ty or same dyn_ty as B
+            // - Every required field of A appears in B
+            if a.open
+                && b.open
+                && (a.dyn_ty.is_none() || a.dyn_ty == b.dyn_ty)
+                && a.fields
+                    .keys()
+                    .all(|k| a.optional_fields.contains(k) || b.fields.contains_key(k))
+            {
+                // B is more specific than A, so A absorbs B.
+                subsumed.insert(j);
+            }
+        }
+    }
+
+    if subsumed.is_empty() {
+        return members;
+    }
+
+    members
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| !subsumed.contains(i))
+        .map(|(_, m)| m)
+        .collect()
+}
+
+/// Factor shared members from an intersection of unions using the distributive law:
+/// `(A|C) & (B|C) = C | (A&B)`.
+///
+/// When intersection members are unions sharing common OutputTy members,
+/// the shared members are factored out. For example, if `string` appears in
+/// every union term, it gets extracted: `(string|X) & (string|Y) = string | (X&Y)`.
+///
+/// Algorithm:
+/// 1. Partition intersection members into unions and non-unions
+/// 2. If < 2 union members, return as-is (nothing to factor)
+/// 3. Find OutputTy members present in ALL unions (set intersection)
+/// 4. Remove shared members from each union, producing remainders
+/// 5. Return `Union(shared..., Intersection(remainders..., non_unions...))`
+fn factor_shared_from_intersection(members: Vec<OutputTy>) -> Vec<OutputTy> {
+    let mut unions: Vec<Vec<OutputTy>> = Vec::new();
+    let mut non_unions: Vec<OutputTy> = Vec::new();
+
+    for m in members {
+        match m {
+            OutputTy::Union(inner) => {
+                unions.push(inner.into_iter().map(|r| (*r.0).clone()).collect());
+            }
+            other => non_unions.push(other),
+        }
+    }
+
+    if unions.len() < 2 {
+        // Reassemble: put unions back as OutputTy::Union members alongside non-unions.
+        let mut result = non_unions;
+        for u in unions {
+            match u.len() {
+                0 => {}
+                1 => result.push(u.into_iter().next().unwrap()),
+                _ => result.push(OutputTy::Union(u.into_iter().map(TyRef::from).collect())),
+            }
+        }
+        return result;
+    }
+
+    // Find members present in ALL unions. Use the first union as the candidate
+    // set and intersect with each subsequent union.
+    let mut shared: HashSet<OutputTy> = unions[0].iter().cloned().collect();
+    for u in &unions[1..] {
+        let u_set: HashSet<OutputTy> = u.iter().cloned().collect();
+        shared.retain(|m| u_set.contains(m));
+    }
+
+    if shared.is_empty() {
+        // No shared members — reassemble unchanged.
+        let mut result = non_unions;
+        for u in unions {
+            result.push(OutputTy::Union(u.into_iter().map(TyRef::from).collect()));
+        }
+        return result;
+    }
+
+    // Remove shared members from each union, producing remainders.
+    let remainders: Vec<OutputTy> = unions
+        .into_iter()
+        .filter_map(|u| {
+            let remainder: Vec<OutputTy> = u.into_iter().filter(|m| !shared.contains(m)).collect();
+            match remainder.len() {
+                0 => None,
+                1 => Some(remainder.into_iter().next().unwrap()),
+                _ => Some(OutputTy::Union(
+                    remainder.into_iter().map(TyRef::from).collect(),
+                )),
+            }
+        })
+        .collect();
+
+    // Build the factored result: shared | (remainders & non_unions)
+    let mut shared_vec: Vec<OutputTy> = shared.into_iter().collect();
+    // Sort for deterministic output (OutputTy derives Eq+Hash but ordering
+    // is by Debug representation — stable enough for display).
+    shared_vec.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
+
+    // Build the intersection of remainders + non_unions.
+    let mut intersection_parts: Vec<OutputTy> = remainders;
+    intersection_parts.extend(non_unions);
+
+    if intersection_parts.is_empty() {
+        // All union members were shared — result is just the shared union.
+        match shared_vec.len() {
+            1 => vec![shared_vec.into_iter().next().unwrap()],
+            _ => vec![OutputTy::Union(
+                shared_vec.into_iter().map(TyRef::from).collect(),
+            )],
+        }
+    } else {
+        // Result is shared | intersection(remainders, non_unions).
+        let intersection = match intersection_parts.len() {
+            1 => intersection_parts.into_iter().next().unwrap(),
+            _ => OutputTy::Intersection(intersection_parts.into_iter().map(TyRef::from).collect()),
+        };
+        shared_vec.push(intersection);
+        // Return as a single-element vec containing the final Union.
+        // The caller (expand_bounds/canonicalize_concrete) will wrap in
+        // Intersection if there are multiple members, but we've already
+        // restructured into a Union, so return it as one element.
+        vec![OutputTy::Union(
+            shared_vec.into_iter().map(TyRef::from).collect(),
+        )]
+    }
 }
 
 /// Check whether an intersection contains a contradictory pair.
@@ -1377,5 +1561,153 @@ mod tests {
             OutputTy::Neg(TyRef::from(arc_ty!(String))),
         ];
         assert!(!has_type_contradiction(&members));
+    }
+
+    // -- absorb_subsumed_union_members tests ----------------------------------
+
+    #[test]
+    fn absorb_open_wildcard_absorbs_open_with_fields() {
+        // { ... } | { setenv: a, ... } → { ... }
+        // The bare open attrset subsumes any open attrset with more fields.
+        let bare_open = arc_ty!({ ; ... });
+        let specific_open = arc_ty!({ "setenv": String; ... });
+        let members = vec![bare_open.clone(), specific_open];
+        let result = absorb_subsumed_union_members(members);
+        assert_eq!(result, vec![bare_open]);
+    }
+
+    #[test]
+    fn absorb_closed_not_absorbed() {
+        // Closed attrsets should never be absorbed.
+        // { x: int } | { x: int, y: string } → unchanged (both closed).
+        let a = arc_ty!({ "x": Int });
+        let b = arc_ty!({ "x": Int, "y": String });
+        let members = vec![a.clone(), b.clone()];
+        let result = absorb_subsumed_union_members(members);
+        assert_eq!(result, vec![a, b]);
+    }
+
+    #[test]
+    fn absorb_partial_subsumption_keeps_both() {
+        // { x: int, ... } | { y: string, ... } → unchanged (neither subsumes).
+        let a = arc_ty!({ "x": Int; ... });
+        let b = arc_ty!({ "y": String; ... });
+        let members = vec![a.clone(), b.clone()];
+        let result = absorb_subsumed_union_members(members);
+        assert_eq!(result, vec![a, b]);
+    }
+
+    #[test]
+    fn absorb_open_with_shared_fields() {
+        // { x: int, ... } | { x: int, y: string, ... } → { x: int, ... }
+        // The first subsumes the second (every required field of first is in second).
+        let general = arc_ty!({ "x": Int; ... });
+        let specific = arc_ty!({ "x": Int, "y": String; ... });
+        let members = vec![general.clone(), specific];
+        let result = absorb_subsumed_union_members(members);
+        assert_eq!(result, vec![general]);
+    }
+
+    #[test]
+    fn absorb_preserves_non_attrset_members() {
+        // string | { ... } | { x: int, ... } → string | { ... }
+        let bare_open = arc_ty!({ ; ... });
+        let specific = arc_ty!({ "x": Int; ... });
+        let members = vec![arc_ty!(String), bare_open.clone(), specific];
+        let result = absorb_subsumed_union_members(members);
+        assert_eq!(result, vec![arc_ty!(String), bare_open]);
+    }
+
+    // -- factor_shared_from_intersection tests --------------------------------
+
+    #[test]
+    fn factor_shared_basic() {
+        // (A|C) & (B|C) → C | (A&B)
+        // (int|string) & (bool|string) → string | (int & bool)
+        let members = vec![
+            OutputTy::Union(vec![
+                TyRef::from(arc_ty!(Int)),
+                TyRef::from(arc_ty!(String)),
+            ]),
+            OutputTy::Union(vec![
+                TyRef::from(arc_ty!(Bool)),
+                TyRef::from(arc_ty!(String)),
+            ]),
+        ];
+        let result = factor_shared_from_intersection(members);
+        assert_eq!(result.len(), 1, "should produce single element: {result:?}");
+        // The result should be a Union containing string and (int & bool).
+        match &result[0] {
+            OutputTy::Union(parts) => {
+                assert_eq!(parts.len(), 2, "union should have 2 members: {parts:?}");
+                // One should be string, the other an intersection of int & bool.
+                let has_string = parts.iter().any(|p| *p.0 == arc_ty!(String));
+                assert!(has_string, "should contain string");
+                let has_intersection = parts
+                    .iter()
+                    .any(|p| matches!(&*p.0, OutputTy::Intersection(inner) if inner.len() == 2));
+                assert!(
+                    has_intersection,
+                    "should contain intersection of remainders"
+                );
+            }
+            other => panic!("expected Union, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn factor_no_shared_unchanged() {
+        // (int|string) & (bool|float) → unchanged (no shared members).
+        let u1 = OutputTy::Union(vec![
+            TyRef::from(arc_ty!(Int)),
+            TyRef::from(arc_ty!(String)),
+        ]);
+        let u2 = OutputTy::Union(vec![
+            TyRef::from(arc_ty!(Bool)),
+            TyRef::from(arc_ty!(Float)),
+        ]);
+        let members = vec![u1.clone(), u2.clone()];
+        let result = factor_shared_from_intersection(members);
+        // Should reassemble as two union members unchanged.
+        assert_eq!(result, vec![u1, u2]);
+    }
+
+    #[test]
+    fn factor_fewer_than_two_unions_unchanged() {
+        // Only one union member — nothing to factor.
+        let u1 = OutputTy::Union(vec![
+            TyRef::from(arc_ty!(Int)),
+            TyRef::from(arc_ty!(String)),
+        ]);
+        let non_union = arc_ty!(Bool);
+        let members = vec![u1.clone(), non_union.clone()];
+        let result = factor_shared_from_intersection(members);
+        assert_eq!(result, vec![non_union, u1]);
+    }
+
+    #[test]
+    fn factor_mixed_union_and_non_union() {
+        // (int|string) & (bool|string) & null → string | ((int & bool) & null)
+        let members = vec![
+            OutputTy::Union(vec![
+                TyRef::from(arc_ty!(Int)),
+                TyRef::from(arc_ty!(String)),
+            ]),
+            OutputTy::Union(vec![
+                TyRef::from(arc_ty!(Bool)),
+                TyRef::from(arc_ty!(String)),
+            ]),
+            arc_ty!(Null),
+        ];
+        let result = factor_shared_from_intersection(members);
+        assert_eq!(result.len(), 1, "should produce single element: {result:?}");
+        match &result[0] {
+            OutputTy::Union(parts) => {
+                assert_eq!(parts.len(), 2, "should have shared + remainder: {parts:?}");
+                let has_string = parts.iter().any(|p| *p.0 == arc_ty!(String));
+                assert!(has_string, "should contain shared string");
+            }
+            other => panic!("expected Union, got: {other:?}"),
+        }
     }
 }

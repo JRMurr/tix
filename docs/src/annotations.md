@@ -106,3 +106,17 @@ Tix applies annotations as bidirectional constraints — the inferred type must 
 **Union types.** Annotations containing union types (e.g. `f :: string -> (string | [string]) -> string`) are currently skipped. Verifying union-typed parameters requires type narrowing for guards like `builtins.isList`, which is not yet fully implemented. The function is still type-checked based on its body alone.
 
 **Intersection types (overloaded functions).** Annotations with intersection function types (e.g. `(int -> int) & (string -> string)`) are accepted as declared types for callers. The function body is type-checked based on inference alone — each component of the intersection is not individually verified against the body. This is useful for declaring overloaded APIs where the implementation uses type guards (`builtins.isInt`, etc.) to dispatch. An `AnnotationUnchecked` warning is emitted to indicate the annotation is trusted rather than verified.
+
+## Named alias display in functions
+
+When a function annotation references type aliases for its parameters, tix propagates the alias names through the function's lambda structure. This means the alias name is displayed instead of the expanded structural type:
+
+```nix
+# In a .tix stub:
+# type BwrapArg = { escaped: string, ... } | string;
+
+/** type: renderArg :: BwrapArg -> string */
+renderArg = arg: ...;
+```
+
+Hovering over `renderArg` displays `BwrapArg -> string` rather than the fully expanded union/intersection type. This works for curried functions too — each parameter position preserves its alias name independently.

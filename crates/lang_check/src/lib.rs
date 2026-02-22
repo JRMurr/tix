@@ -588,6 +588,8 @@ impl<'db> CheckCtx<'db> {
                 if let Some(name) = self.alias_provenance.get(&annotation_ty).cloned() {
                     self.alias_provenance.insert(ty, name);
                 }
+                // Propagate alias provenance through Lambda parameter structure.
+                self.propagate_lambda_provenance(annotation_ty, name_id);
                 self.emit_warning(Warning::AnnotationUnchecked {
                     name: self.module[name_id].text.clone(),
                     reason: "intersection-of-function annotations are accepted as declared types \
@@ -635,6 +637,10 @@ impl<'db> CheckCtx<'db> {
                 if let Some(name) = self.alias_provenance.get(&annotation_ty).cloned() {
                     self.alias_provenance.insert(ty, name);
                 }
+                // Propagate alias provenance through Lambda parameter structure
+                // so that annotated param types (e.g. `BwrapArg`) display their
+                // alias name instead of the expanded structural type.
+                self.propagate_lambda_provenance(annotation_ty, name_id);
                 return Ok(());
             }
 
@@ -651,9 +657,56 @@ impl<'db> CheckCtx<'db> {
             if let Some(name) = self.alias_provenance.get(&annotation_ty).cloned() {
                 self.alias_provenance.insert(ty, name);
             }
+            // Propagate alias provenance through Lambda parameter structure
+            // so that annotated param types display their alias name.
+            self.propagate_lambda_provenance(annotation_ty, name_id);
         }
 
         Ok(())
+    }
+
+    /// Walk an interned annotation type and the corresponding expression in
+    /// parallel, transferring alias provenance at each Lambda level.
+    ///
+    /// For `renderArg :: BwrapArg -> string`, the annotation creates a
+    /// `Lambda { param, body }` where `param` has BwrapArg provenance. The
+    /// expression is `Lambda { param: Some(name_id), body }`. We transfer
+    /// provenance from the annotation's param TyId to the inferred param's
+    /// TyId (derived from name_id) so that display shows "BwrapArg" instead
+    /// of the fully expanded structural type.
+    fn propagate_lambda_provenance(&mut self, annotation_ty: TyId, name_id: NameId) {
+        let Some(&expr_id) = self.binding_exprs.get(&name_id) else {
+            return;
+        };
+        self.propagate_lambda_provenance_inner(annotation_ty, expr_id);
+    }
+
+    fn propagate_lambda_provenance_inner(&mut self, annotation_ty: TyId, expr_id: ExprId) {
+        // Get the annotation type structure.
+        let annot_entry = self.types.storage.get(annotation_ty).clone();
+        let (annot_param, annot_body) = match annot_entry {
+            crate::storage::TypeEntry::Concrete(Ty::Lambda { param, body }) => (param, body),
+            _ => return,
+        };
+
+        // Get the expression structure.
+        let expr = self.module[expr_id].clone();
+        let (param_name, body_expr) = match expr {
+            Expr::Lambda { param, body, .. } => (param, body),
+            _ => return,
+        };
+
+        // Transfer provenance from annotation param to inferred param.
+        if let Some(param_name_id) = param_name {
+            let inferred_param_ty = self.ty_for_name_direct(param_name_id);
+            if let Some(name) = self.alias_provenance.get(&annot_param).cloned() {
+                self.alias_provenance.insert(inferred_param_ty, name);
+            }
+        }
+
+        // Recurse into the body: if the annotation body is also a Lambda,
+        // walk into the body expression to transfer deeper provenance.
+        self.propagate_lambda_provenance_inner(annot_body, body_expr);
     }
 
     /// Intern a ParsedTy with fresh type variables for each free generic var

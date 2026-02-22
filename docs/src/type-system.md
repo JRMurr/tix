@@ -153,6 +153,8 @@ Negation types are normalized during canonicalization using standard Boolean alg
 - **Contradiction**: `T & ~T` or `string & int` in an intersection is detected as uninhabited and displayed as `never`
 - **Tautology**: `T | ~T` in a union is detected as universal and simplifies to `any` (the top type — every value inhabits it)
 - **Redundant negation**: `{name: string} & ~null` simplifies to `{name: string}` (attrsets are inherently non-null)
+- **Union absorption**: `{...} | {x: int, ...}` simplifies to `{...}` — an open attrset with fewer required fields subsumes more specific open attrsets in a union
+- **Intersection factoring**: `(A | C) & (B | C)` simplifies to `C | (A & B)` — shared members across all union terms in an intersection are factored out using the distributive law
 
 These rules keep inferred types readable and prevent redundant negations from accumulating through nested guards.
 
