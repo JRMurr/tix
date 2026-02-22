@@ -15,7 +15,9 @@ pub use primitive::PrimitiveTy;
 pub trait RefType: Eq + std::hash::Hash {}
 impl<T> RefType for T where T: Eq + std::hash::Hash {}
 
-// the mono type — used during inference (no Union/Intersection)
+// The mono type — used during inference. Inter/Union are first-class
+// during inference (MLstruct-style); canonicalization converts them to
+// the OutputTy Union/Intersection representation for display.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Ty<R, VarType = u32>
 where
@@ -40,11 +42,22 @@ where
 
     /// Negation type — `¬T`. Used in Boolean-Algebraic Subtyping (BAS) for
     /// precise else-branch narrowing: when `isNull x` is false, x gets type
-    /// `α ∧ ¬Null` instead of a bare fresh variable. Only produced on atoms
-    /// (primitives, type vars); compound negation (¬(A∨B)) is not needed
-    /// since guards only produce primitive negations.
+    /// `α ∧ ¬Null` instead of a bare fresh variable.
     #[debug("Neg({_0:?})")]
     Neg(R),
+
+    /// Intersection type — `A ∧ B`. Produced by narrowing: `Inter(α, ¬T)`
+    /// means "α but not T". First-class during inference so intersections
+    /// survive extrusion/generalization (MLstruct-style). Binary — multi-member
+    /// composites nest: `Inter(a, Inter(b, c))`.
+    #[debug("Inter({_0:?}, {_1:?})")]
+    Inter(R, R),
+
+    /// Union type — `A ∨ B`. Produced by the "annoying" constraint
+    /// decomposition: `Inter(α, C) <: U` becomes `α <: Union(U, ¬C)`.
+    /// Binary — multi-member composites nest.
+    #[debug("Union({_0:?}, {_1:?})")]
+    Union(R, R),
 }
 
 /// Macro for constructing `OutputTy` values conveniently in tests.

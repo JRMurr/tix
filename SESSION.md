@@ -31,6 +31,14 @@ extrusion.
   loop for re-instantiation, interaction with constraint cache). Consider replacing
   with intersection-type-based overloading (see Future Enhancements).
 
+### CLI Display of Narrowed Lambda Types
+
+- The CLI displays `a` for lambdas whose parameter type is a variable with only
+  Inter/Union upper bounds (e.g. `x: if isNull x then 0 else x` shows as `a`
+  instead of the full lambda type). The test harness shows the correct type
+  `a -> int | ~null`. The CLI display path may need to show more of the type
+  structure for lambda expressions.
+
 ### Canonicalization / Type Display
 
 - Early canonicalization captures clean polymorphic types for name bindings, but the
@@ -173,11 +181,10 @@ extrusion.
   variable is single-polarity, because the removal check only pattern-matches
   on `OutputTy::TyVar(v)`, not on `Neg(TyVar(v))`.
 
-- Negation bounds (`¬T` upper bounds on narrowed variables) don't survive
-  let-generalization. `let f = x: if isNull x then 0 else x; in f` produces
-  `a -> int` — the `¬null` on x's narrowed else-branch var is lost during extrude.
-  The non-let form (`f: x: if isNull x then 0 else f x`) preserves it because the
-  narrowed var flows directly into `f`'s param without generalization/extrusion.
+- ~~Negation bounds don't survive let-generalization~~ **Fixed**: first-class
+  Inter/Union types during inference (MLstruct-style) preserve narrowing information
+  through extrusion. `let f = x: if isNull x then 0 else x; in f` now produces
+  `a -> int | ~null` instead of `a -> int`.
 
 ### Null-Default Field: Polymorphic Return Type Loses Default
 
@@ -212,16 +219,14 @@ extrusion.
   return bool. `isAttrs`, `isFunction`, `isList` now have then-branch
   narrowing (constraining to `{..}`, `[α]`, `α → β` respectively).
   Else-branch narrowing for compound types is skipped (no `¬{..}`).
-  Remaining: else-branch for `HasField` (field absence), multi-key `?`
-  paths, `&&`/`||` combinators.
+  `&&`/`||` combinators are implemented: `&&` combines then-branch narrowings,
+  `||` combines else-branch narrowings. Remaining: else-branch for `HasField`
+  (field absence), multi-key `?` paths.
 - Literal / singleton types (`"circle"` as a type, not just `string`)
-- Type narrowing + arithmetic in narrowed branches: `x: if x == null then x else x - 1`
-  produces body type `null` rather than `null | number`. The narrowed else-branch creates
-  a fresh variable for x; arithmetic on that fresh variable produces a result whose
-  lower bounds don't survive canonicalization in the union with null. The unconstrained
-  result var in positive position is bottom, so `null | bottom = null`. This may be
-  correct from the type system's perspective but is surprising. Worth investigating
-  whether the arithmetic constraints should propagate lower bounds more eagerly.
+- Type narrowing + arithmetic in narrowed branches: with first-class Inter types,
+  `x: if x == null then x else x - 1` should now properly constrain the else-branch
+  variable through the `Inter(α, ¬Null)` type. The arithmetic `-` constrains the
+  unwrapped member to `Number`. Worth verifying the output is `null | number`.
 - Co-occurrence simplification: path-based co-occurrence grouping is strict —
   variables that appear at structurally different positions (e.g. different attrset
   fields) won't be merged. This could be relaxed to use "occurrence signature"

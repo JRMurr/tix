@@ -232,6 +232,65 @@ impl<'a> Canonicalizer<'a> {
                 let c_inner = self.canonicalize(*inner, polarity.flip());
                 negate_output_ty(c_inner)
             }
+
+            // Intersection: canonicalize both members and flatten/normalize
+            // using the same logic as variable bound expansion.
+            Ty::Inter(a, b) => {
+                let ca = self.canonicalize(*a, polarity);
+                let cb = self.canonicalize(*b, polarity);
+                let members = flatten_intersection(vec![ca, cb]);
+                // Filter bare TyVar and Bottom.
+                let concrete: Vec<OutputTy> = members
+                    .into_iter()
+                    .filter(|m| !matches!(m, OutputTy::TyVar(_) | OutputTy::Bottom))
+                    .collect();
+                // Check for contradictions in all polarities for Inter types.
+                // Unlike variable-bound intersections (negative polarity only),
+                // Inter types from narrowing can appear in either polarity and
+                // may contain contradictions like String ∧ Int = ⊥.
+                if has_type_contradiction(&concrete) {
+                    return OutputTy::Bottom;
+                }
+                let concrete = match polarity {
+                    Positive => {
+                        let c = remove_redundant_negations(concrete);
+                        remove_tautological_pairs(c)
+                    }
+                    Negative => {
+                        let c = merge_attrset_intersection(concrete);
+                        remove_redundant_negations(c)
+                    }
+                };
+                match concrete.len() {
+                    0 => OutputTy::TyVar(0), // shouldn't arise in practice
+                    1 => concrete.into_iter().next().unwrap(),
+                    _ => OutputTy::Intersection(
+                        concrete.into_iter().map(TyRef::from).collect(),
+                    ),
+                }
+            }
+
+            // Union: canonicalize both members and flatten/normalize.
+            Ty::Union(a, b) => {
+                let ca = self.canonicalize(*a, polarity);
+                let cb = self.canonicalize(*b, polarity);
+                let members = flatten_union(vec![ca, cb]);
+                let concrete: Vec<OutputTy> = members
+                    .into_iter()
+                    .filter(|m| !matches!(m, OutputTy::TyVar(_) | OutputTy::Bottom))
+                    .collect();
+                let concrete = match polarity {
+                    Positive => remove_tautological_pairs(concrete),
+                    Negative => concrete,
+                };
+                match concrete.len() {
+                    0 => OutputTy::TyVar(0),
+                    1 => concrete.into_iter().next().unwrap(),
+                    _ => OutputTy::Union(
+                        concrete.into_iter().map(TyRef::from).collect(),
+                    ),
+                }
+            }
         }
     }
 }
@@ -385,6 +444,17 @@ fn has_type_contradiction(members: &[OutputTy]) -> bool {
             }
         }
     }
+
+    // Also check for mutually disjoint positives: String ∧ Int = ⊥
+    // because String and Int have no overlap.
+    for i in 0..positives.len() {
+        for j in (i + 1)..positives.len() {
+            if are_output_types_disjoint(positives[i], positives[j]) {
+                return true;
+            }
+        }
+    }
+
     false
 }
 
@@ -773,9 +843,16 @@ mod tests {
     }
 
     #[test]
-    fn no_contradiction_no_negation() {
-        // Int ∧ String — no negation, no contradiction
+    fn contradiction_disjoint_positives() {
+        // Int ∧ String — disjoint primitives, IS a contradiction.
         let members = vec![arc_ty!(Int), arc_ty!(String)];
+        assert!(has_type_contradiction(&members));
+    }
+
+    #[test]
+    fn no_contradiction_same_positives() {
+        // Int ∧ Int — same type, no contradiction.
+        let members = vec![arc_ty!(Int), arc_ty!(Int)];
         assert!(!has_type_contradiction(&members));
     }
 

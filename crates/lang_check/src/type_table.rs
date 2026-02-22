@@ -45,12 +45,29 @@ impl TypeTable {
 
     /// Allocate a concrete type and return its TyId.
     ///
-    /// Applies double negation elimination: `Neg(Neg(x))` → `x`, so double
-    /// negations never exist in the type table during inference.
+    /// Normalizes negations via double-negation elimination and De Morgan:
+    /// - `Neg(Neg(x))` → `x`
+    /// - `Neg(Inter(a,b))` → `Union(Neg(a), Neg(b))`
+    /// - `Neg(Union(a,b))` → `Inter(Neg(a), Neg(b))`
     pub fn alloc_concrete(&mut self, ty: Ty<TyId>) -> TyId {
         if let Ty::Neg(inner) = &ty {
-            if let TypeEntry::Concrete(Ty::Neg(x)) = self.storage.get(*inner) {
-                return *x;
+            match self.storage.get(*inner) {
+                TypeEntry::Concrete(Ty::Neg(x)) => return *x, // ¬¬A → A
+                TypeEntry::Concrete(Ty::Inter(a, b)) => {
+                    // ¬(A ∧ B) → ¬A ∨ ¬B
+                    let (a, b) = (*a, *b);
+                    let neg_a = self.alloc_concrete(Ty::Neg(a));
+                    let neg_b = self.alloc_concrete(Ty::Neg(b));
+                    return self.storage.new_concrete(Ty::Union(neg_a, neg_b));
+                }
+                TypeEntry::Concrete(Ty::Union(a, b)) => {
+                    // ¬(A ∨ B) → ¬A ∧ ¬B
+                    let (a, b) = (*a, *b);
+                    let neg_a = self.alloc_concrete(Ty::Neg(a));
+                    let neg_b = self.alloc_concrete(Ty::Neg(b));
+                    return self.storage.new_concrete(Ty::Inter(neg_a, neg_b));
+                }
+                _ => {}
             }
         }
         self.storage.new_concrete(ty)
@@ -108,6 +125,22 @@ impl TypeTable {
         }
     }
 
+    /// Like `find_concrete`, but if the result is an `Inter(α, C)` where
+    /// exactly one member is a concrete non-Neg, non-variable type, return
+    /// that member. This lets the overload resolver see through narrowing
+    /// intersections: `Inter(α, Int)` → `Primitive(Int)`.
+    ///
+    /// Returns None for Inter types where no useful concrete member can be
+    /// extracted (e.g. `Inter(α, ¬Null)`), so the overload resolver treats
+    /// the type as not yet resolved.
+    pub fn find_concrete_through_inter(&self, ty_id: TyId) -> Option<Ty<TyId>> {
+        let ty = self.find_concrete(ty_id)?;
+        match &ty {
+            Ty::Inter(..) => unwrap_inter_concrete(&self.storage, &ty),
+            _ => Some(ty),
+        }
+    }
+
     /// Check if a variable has been pinned to a simple concrete type — i.e. the
     /// same primitive type appears as both a direct lower and upper bound. This
     /// indicates the variable was fully resolved (e.g. by overload resolution) and
@@ -140,6 +173,28 @@ impl TypeTable {
         }
         None
     }
+}
+
+/// If `ty` is `Inter(a, b)`, extract the "useful" concrete member for
+/// overload/merge/has_field resolution. Returns the non-Neg, non-variable
+/// member (primitives, attrsets, lists, lambdas). Recurses into nested
+/// Inter types. Returns None if no useful concrete member is found.
+fn unwrap_inter_concrete(storage: &TypeStorage, ty: &Ty<TyId>) -> Option<Ty<TyId>> {
+    let Ty::Inter(a, b) = ty else { return None };
+
+    // Try to get a "useful" type from each side: something that is concrete
+    // and not a Neg (negations are constraints, not types you can do overload
+    // resolution on).
+    let useful_from = |id: TyId| -> Option<Ty<TyId>> {
+        match storage.get(id) {
+            TypeEntry::Concrete(c @ Ty::Inter(..)) => unwrap_inter_concrete(storage, c),
+            TypeEntry::Concrete(Ty::Neg(_)) => None, // skip negations
+            TypeEntry::Concrete(c) => Some(c.clone()),
+            TypeEntry::Variable(_) => None,
+        }
+    };
+
+    useful_from(*a).or_else(|| useful_from(*b))
 }
 
 #[cfg(test)]

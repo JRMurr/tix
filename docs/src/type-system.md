@@ -100,6 +100,28 @@ dispatch = x:
 - `x ? field` / `builtins.hasAttr "field" x` (then-branch narrows x to have the field)
 - `!cond` (flips the narrowing)
 - `assert cond; body` (narrows in the body)
+- `cond1 && cond2` (both narrowings apply in the then-branch)
+- `cond1 || cond2` (both narrowings apply in the else-branch)
+
+### Boolean combinators
+
+`&&` and `||` combine multiple narrowing conditions:
+
+```nix
+# &&: both guards hold in the then-branch
+safeGet = x:
+  if x != null && x ? name then x.name
+  else "default";
+# then-branch: x is non-null AND has field `name`
+
+# ||: both guards fail in the else-branch
+dispatch = x:
+  if isString x || isInt x then doSomething x
+  else x;
+# else-branch: x is neither string nor int (has ~string & ~int)
+```
+
+For `&&`, only the then-branch gets combined narrowings (we can't determine which guard failed in the else-branch). For `||`, only the else-branch gets combined narrowings (we can't determine which guard holds in the then-branch).
 
 ### Conditional library functions
 
@@ -128,10 +150,28 @@ Negation types are normalized during canonicalization using standard Boolean alg
 - **Double negation**: `~~T` simplifies to `T`
 - **De Morgan (union)**: `~(A | B)` becomes `~A & ~B`
 - **De Morgan (intersection)**: `~(A & B)` becomes `~A | ~B`
-- **Contradiction**: `T & ~T` in an intersection is detected as uninhabited and displayed as `never`
+- **Contradiction**: `T & ~T` or `string & int` in an intersection is detected as uninhabited and displayed as `never`
 - **Tautology**: `T | ~T` in a union is detected as universal (top) and both members are removed
+- **Redundant negation**: `{name: string} & ~null` simplifies to `{name: string}` (attrsets are inherently non-null)
 
 These rules keep inferred types readable and prevent redundant negations from accumulating through nested guards.
+
+### How narrowing works internally
+
+Narrowing uses first-class intersection types during inference (following the MLstruct approach from OOPSLA 2022). When `isString x` is the condition:
+
+- **Then-branch**: x gets type `α ∧ string` (an intersection of the original type variable with string)
+- **Else-branch**: x gets type `α ∧ ~string` (intersection with negation)
+
+These intersection types are structural — they flow through constraints, extrusion, and generalization like any other type. This means narrowing information survives let-polymorphism:
+
+```nix
+let f = x: if isNull x then 0 else x; in f
+# f :: a -> int | ~null
+# The ~null constraint on the else-branch's x is preserved
+```
+
+When a narrowed type like `α ∧ ~null` flows into a function that expects `string`, the solver applies variable isolation (the "annoying" constraint decomposition from MLstruct): `α ∧ ~null <: string` becomes `α <: string | null`, correctly constraining α without losing the negation information.
 
 ## Row polymorphism (open attrsets)
 

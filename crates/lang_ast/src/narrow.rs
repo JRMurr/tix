@@ -205,6 +205,34 @@ pub fn analyze_condition(
             info
         }
 
+        // ── a && b — both hold in then-branch ────────────────────────
+        Expr::BinOp {
+            lhs,
+            rhs,
+            op: BinOP::Normal(NormalBinOp::Bool(crate::BoolBinOp::And)),
+        } => {
+            let a = analyze_condition(module, name_res, binding_exprs, *lhs);
+            let b = analyze_condition(module, name_res, binding_exprs, *rhs);
+            NarrowInfo {
+                then_branch: [a.then_branch, b.then_branch].concat(),
+                else_branch: vec![], // can't determine which guard failed
+            }
+        }
+
+        // ── a || b — both fail in else-branch ────────────────────────
+        Expr::BinOp {
+            lhs,
+            rhs,
+            op: BinOP::Normal(NormalBinOp::Bool(crate::BoolBinOp::Or)),
+        } => {
+            let a = analyze_condition(module, name_res, binding_exprs, *lhs);
+            let b = analyze_condition(module, name_res, binding_exprs, *rhs);
+            NarrowInfo {
+                then_branch: vec![], // can't determine which guard holds
+                else_branch: [a.else_branch, b.else_branch].concat(),
+            }
+        }
+
         // ── is* builtins: isNull, isString, isInt, etc. ─────────────
         //
         // In the AST this is Apply { fun, arg } where fun resolves to

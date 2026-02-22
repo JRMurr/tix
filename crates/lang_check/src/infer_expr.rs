@@ -498,25 +498,17 @@ impl CheckCtx<'_> {
         )
     }
 
-    /// Create a fresh type variable for narrowing, linked to the original
-    /// variable and a constraint via one-way upper bounds.
-    ///
-    /// Returns a fresh variable `β` where `β ≤ original` and `β ≤ constraint`.
-    /// Using `add_upper_bound` directly (instead of `constrain()`) avoids
-    /// bidirectional propagation — same technique as `link_extruded_var`.
-    fn narrow_fresh_var(&mut self, original: TyId, constraint: TyId) -> TyId {
-        let fresh = self.new_var();
-        self.types.storage.add_upper_bound(fresh, original);
-        self.types.storage.add_upper_bound(fresh, constraint);
-        fresh
-    }
-
     /// Compute the override TyId for a single NarrowBinding.
     ///
-    /// Given a predicate and the name it narrows, returns a fresh TyId that
-    /// represents the narrowed type. Shared by `infer_with_narrowing` (inline
-    /// branch narrowing) and `install_binding_narrowing` (SCC-group
-    /// narrowing for let-bindings under guard scopes).
+    /// Given a predicate and the name it narrows, returns a TyId representing
+    /// the narrowed type as `Inter(original, constraint)`. This is the
+    /// MLstruct-style approach: narrowing produces first-class intersection
+    /// types that survive extrusion/generalization, instead of the old
+    /// side-channel fresh variables with one-way bounds.
+    ///
+    /// Shared by `infer_with_narrowing` (inline branch narrowing) and
+    /// `install_binding_narrowing` (SCC-group narrowing for let-bindings
+    /// under guard scopes).
     pub(crate) fn compute_narrow_override(
         &mut self,
         binding: &crate::narrow::NarrowBinding,
@@ -525,14 +517,15 @@ impl CheckCtx<'_> {
 
         match binding.predicate {
             crate::narrow::NarrowPredicate::IsType(prim) => {
-                // α ∧ PrimType = PrimType for base types.
-                self.alloc_prim(crate::narrow::narrow_prim_to_ty(prim))
+                // α ∧ PrimType — structural intersection with the primitive.
+                let prim_ty = self.alloc_prim(crate::narrow::narrow_prim_to_ty(prim));
+                self.alloc_concrete(Ty::Inter(original_ty, prim_ty))
             }
             crate::narrow::NarrowPredicate::IsNotType(prim) => {
-                // α ∧ ¬PrimType — fresh var linked to original and ¬Prim.
+                // α ∧ ¬PrimType — structural intersection with negation.
                 let prim_ty = self.alloc_prim(crate::narrow::narrow_prim_to_ty(prim));
                 let neg_ty = self.alloc_concrete(Ty::Neg(prim_ty));
-                self.narrow_fresh_var(original_ty, neg_ty)
+                self.alloc_concrete(Ty::Inter(original_ty, neg_ty))
             }
             crate::narrow::NarrowPredicate::HasField(ref field_name) => {
                 // α ∧ {field: β}
@@ -545,7 +538,7 @@ impl CheckCtx<'_> {
                     open: true,
                     optional_fields: BTreeSet::new(),
                 }));
-                self.narrow_fresh_var(original_ty, constraint)
+                self.alloc_concrete(Ty::Inter(original_ty, constraint))
             }
             crate::narrow::NarrowPredicate::IsAttrSet => {
                 // α ∧ {..}
@@ -555,13 +548,13 @@ impl CheckCtx<'_> {
                     open: true,
                     optional_fields: BTreeSet::new(),
                 }));
-                self.narrow_fresh_var(original_ty, constraint)
+                self.alloc_concrete(Ty::Inter(original_ty, constraint))
             }
             crate::narrow::NarrowPredicate::IsList => {
                 // α ∧ [β]
                 let elem_var = self.new_var();
                 let constraint = self.alloc_concrete(Ty::List(elem_var));
-                self.narrow_fresh_var(original_ty, constraint)
+                self.alloc_concrete(Ty::Inter(original_ty, constraint))
             }
             crate::narrow::NarrowPredicate::IsFunction => {
                 // α ∧ (β → γ)
@@ -571,7 +564,7 @@ impl CheckCtx<'_> {
                     param: param_var,
                     body: body_var,
                 });
-                self.narrow_fresh_var(original_ty, constraint)
+                self.alloc_concrete(Ty::Inter(original_ty, constraint))
             }
         }
     }

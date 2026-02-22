@@ -400,6 +400,20 @@ impl CheckCtx<'_> {
                         let e = self.extrude_inner(inner, polarity.flip(), cache);
                         self.alloc_concrete(Ty::Neg(e))
                     }
+                    // Intersection and Union: covariant — polarity preserved.
+                    // This is what makes narrowing survive generalization:
+                    // Inter(α, ¬T) extrudes to Inter(α', ¬T') where α' is
+                    // the fresh call-site copy.
+                    Ty::Inter(a, b) => {
+                        let ea = self.extrude_inner(a, polarity, cache);
+                        let eb = self.extrude_inner(b, polarity, cache);
+                        self.alloc_concrete(Ty::Inter(ea, eb))
+                    }
+                    Ty::Union(a, b) => {
+                        let ea = self.extrude_inner(a, polarity, cache);
+                        let eb = self.extrude_inner(b, polarity, cache);
+                        self.alloc_concrete(Ty::Union(ea, eb))
+                    }
                 };
 
                 // Propagate alias provenance through extrusion so that
@@ -529,8 +543,10 @@ impl CheckCtx<'_> {
     ) -> Result<OverloadProgress, InferenceError> {
         let c = &ov.constraint;
         let spec = crate::operators::overload_spec(ov.op);
-        let lhs_concrete = self.types.find_concrete(c.lhs);
-        let rhs_concrete = self.types.find_concrete(c.rhs);
+        // Use find_concrete_through_inter so narrowed types like
+        // Inter(α, Int) are visible to the overload resolver as Int.
+        let lhs_concrete = self.types.find_concrete_through_inter(c.lhs);
+        let rhs_concrete = self.types.find_concrete_through_inter(c.rhs);
 
         // ---- Phase 1: Full Resolution — both operands concrete ----
 
@@ -619,7 +635,9 @@ impl CheckCtx<'_> {
         &mut self,
         hf: &PendingHasField,
     ) -> Result<bool, InferenceError> {
-        let Some(concrete) = self.types.find_concrete(hf.set_ty) else {
+        // Use find_concrete_through_inter so narrowed types like
+        // Inter(α, {field: β}) expose the attrset for field lookup.
+        let Some(concrete) = self.types.find_concrete_through_inter(hf.set_ty) else {
             return Ok(false); // not yet concrete
         };
 
@@ -655,8 +673,8 @@ impl CheckCtx<'_> {
     }
 
     fn try_resolve_merge(&mut self, mg: &PendingMerge) -> Result<bool, InferenceError> {
-        let lhs_concrete = self.types.find_concrete(mg.lhs);
-        let rhs_concrete = self.types.find_concrete(mg.rhs);
+        let lhs_concrete = self.types.find_concrete_through_inter(mg.lhs);
+        let rhs_concrete = self.types.find_concrete_through_inter(mg.rhs);
 
         match (&lhs_concrete, &rhs_concrete) {
             (Some(Ty::AttrSet(_)), Some(Ty::AttrSet(_))) => {}
