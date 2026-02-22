@@ -1,5 +1,6 @@
 pub mod arc_ty;
 mod attrset;
+pub mod disjoint;
 mod primitive;
 pub mod simplify;
 

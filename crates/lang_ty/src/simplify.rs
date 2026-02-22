@@ -194,6 +194,33 @@ fn polar_only_vars(vars: &FxHashMap<u32, VarInfo>) -> FxHashSet<u32> {
         .collect()
 }
 
+/// Check if a union/intersection member is a removable variable reference:
+/// either a bare `TyVar(v)` or `Neg(TyVar(v))` where `v` (after substitution)
+/// is in the removable set. `Neg(TyVar(v))` with a polar-only `v` carries no
+/// more information than the bare variable — both are unconstrained in one
+/// direction.
+fn is_removable_var_member(
+    ty: &OutputTy,
+    substitution: &FxHashMap<u32, u32>,
+    removable: &FxHashSet<u32>,
+) -> bool {
+    match ty {
+        OutputTy::TyVar(v) => {
+            let resolved = substitution.get(v).copied().unwrap_or(*v);
+            removable.contains(&resolved)
+        }
+        OutputTy::Neg(inner) => {
+            if let OutputTy::TyVar(v) = &*inner.0 {
+                let resolved = substitution.get(v).copied().unwrap_or(*v);
+                removable.contains(&resolved)
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
 /// Apply the substitution + removal to produce a simplified type.
 fn apply_simplification(
     ty: &OutputTy,
@@ -242,12 +269,11 @@ fn apply_simplification(
                 .iter()
                 .filter_map(|m| {
                     // Remove polar-only variables from unions (positive-only vars
-                    // in a union add no information).
-                    if let OutputTy::TyVar(v) = &*m.0 {
-                        let resolved = substitution.get(v).copied().unwrap_or(*v);
-                        if removable.contains(&resolved) {
-                            return None;
-                        }
+                    // in a union add no information). Also handles Neg(TyVar(v))
+                    // where v is removable — the negation of an uninformative
+                    // variable is itself uninformative.
+                    if is_removable_var_member(&m.0, substitution, removable) {
+                        return None;
                     }
                     let s = apply_simplification(&m.0, substitution, removable);
                     // Bottom is the identity for union: A ∨ ⊥ = A.
@@ -272,12 +298,10 @@ fn apply_simplification(
                 .iter()
                 .filter_map(|m| {
                     // Remove polar-only variables from intersections (negative-only
-                    // vars in an intersection add no information).
-                    if let OutputTy::TyVar(v) = &*m.0 {
-                        let resolved = substitution.get(v).copied().unwrap_or(*v);
-                        if removable.contains(&resolved) {
-                            return None;
-                        }
+                    // vars in an intersection add no information). Also handles
+                    // Neg(TyVar(v)) where v is removable.
+                    if is_removable_var_member(&m.0, substitution, removable) {
+                        return None;
                     }
                     Some(TyRef::from(apply_simplification(
                         &m.0,
@@ -448,16 +472,15 @@ mod tests {
     #[test]
     fn simplify_neg_flips_polarity_in_union() {
         // Union(Neg(TyVar(5)), Int) — polarity analysis correctly tracks
-        // TyVar(5) as negative-only (through Neg), but apply_simplification
-        // only removes *bare* TyVar members from unions/intersections.
-        // Neg(TyVar(5)) is not a bare TyVar, so it stays. This is a known
-        // limitation: only top-level TyVar members are stripped.
+        // TyVar(5) as negative-only (through Neg). Since TyVar(5) is
+        // single-polarity (removable), Neg(TyVar(5)) is also removed,
+        // leaving just Int.
         let ty = OutputTy::Union(vec![
             TyRef::from(OutputTy::Neg(TyRef::from(OutputTy::TyVar(5)))),
             TyRef::from(OutputTy::Primitive(crate::PrimitiveTy::Int)),
         ]);
         let result = simplify(&ty);
-        assert_eq!(result, ty);
+        assert_eq!(result, OutputTy::Primitive(crate::PrimitiveTy::Int));
     }
 
     #[test]
@@ -474,16 +497,16 @@ mod tests {
     }
 
     #[test]
-    fn simplify_neg_in_intersection_not_removed() {
+    fn simplify_neg_in_intersection_removed() {
         // Intersection(Int, Neg(TyVar(7))) — TyVar(7) is single-polarity
-        // but Neg(TyVar(7)) is not a bare TyVar, so the member stays.
-        // Same limitation as simplify_neg_flips_polarity_in_union.
+        // (negative, through Neg in an intersection). Since it's removable,
+        // the Neg(TyVar(7)) member is stripped, leaving just Int.
         let ty = OutputTy::Intersection(vec![
             TyRef::from(OutputTy::Primitive(crate::PrimitiveTy::Int)),
             TyRef::from(OutputTy::Neg(TyRef::from(OutputTy::TyVar(7)))),
         ]);
         let result = simplify(&ty);
-        assert_eq!(result, ty);
+        assert_eq!(result, OutputTy::Primitive(crate::PrimitiveTy::Int));
     }
 
     #[test]

@@ -164,16 +164,10 @@ extrusion.
 
 ### Negation Normalization
 
-- `OutputTy::Top` / `OutputTy::Bottom` variants would allow proper representation
-  of contradictions and tautologies instead of falling back to `TyVar`. Currently
-  contradictions (`A ∧ ¬A`) produce a bare type variable as a stand-in for ⊥,
-  and tautologies (`A ∨ ¬A`) simply remove both members. Adding explicit Top/Bottom
-  would be more principled but touches every `match` on `OutputTy`.
-
-- Type simplification (`simplify.rs`) only removes bare `TyVar` members from
-  unions/intersections. `Neg(TyVar)` members are not removed even when the
-  variable is single-polarity, because the removal check only pattern-matches
-  on `OutputTy::TyVar(v)`, not on `Neg(TyVar(v))`.
+- `OutputTy::Top` variant would allow proper representation of tautologies
+  instead of simply removing both members. Contradictions are now handled via
+  `OutputTy::Bottom`. Adding explicit Top would be more principled but touches
+  every `match` on `OutputTy`.
 
 ### Null-Default Field: Polymorphic Return Type Loses Default
 

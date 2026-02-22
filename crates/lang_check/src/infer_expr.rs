@@ -509,6 +509,23 @@ impl CheckCtx<'_> {
     /// Shared by `infer_with_narrowing` (inline branch narrowing) and
     /// `install_binding_narrowing` (SCC-group narrowing for let-bindings
     /// under guard scopes).
+    ///
+    /// ## Design note: `original_ty` vs `ty_for_name_direct`
+    ///
+    /// Most predicates use `name_slot_or_override(name)` as the "original"
+    /// type in the intersection. This resolves through existing narrow
+    /// overrides (for nested narrowing like `if isAttrs x then if x ? y`)
+    /// and through poly_type_env (for generalized names).
+    ///
+    /// `NotHasField` is the exception: it uses `ty_for_name_direct(name)`
+    /// — the raw pre-allocated variable slot — because the intersection
+    /// `Inter(var, Neg({field: β, ...}))` requires a type variable on the
+    /// left side for MLstruct-style variable isolation in
+    /// `constrain_lhs_inter`. If we used `name_slot_or_override`, a
+    /// generalized name would resolve to a concrete type (e.g. a closed
+    /// attrset), which lacks the variable needed for isolation and would
+    /// cause constraint failures. Other predicates don't have this issue
+    /// because their constraint side is always compatible with concrete types.
     pub(crate) fn compute_narrow_override(
         &mut self,
         binding: &crate::narrow::NarrowBinding,

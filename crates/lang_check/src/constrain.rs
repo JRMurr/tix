@@ -31,7 +31,10 @@
 
 use super::{CheckCtx, InferenceError, TyId};
 use crate::storage::TypeEntry;
-use lang_ty::{AttrSetTy, Ty};
+use lang_ty::{
+    disjoint::{are_shapes_disjoint, ConstructorShape},
+    AttrSetTy, Ty,
+};
 
 impl CheckCtx<'_> {
     /// Record that `sub <: sup` — `sub` is a subtype of `sup`.
@@ -458,66 +461,45 @@ fn discriminant_matches(a: &Ty<TyId>, b: &Ty<TyId>) -> bool {
 }
 
 /// Check whether two concrete types are provably disjoint (their intersection
-/// is uninhabited). Used by the `Concrete <: Neg(inner)` rule: if `sub` and
-/// the negated type are disjoint, the constraint succeeds.
+/// is uninhabited). Delegates to the shared `are_shapes_disjoint` logic in
+/// `lang_ty::disjoint`.
 ///
-/// Disjointness rules:
-/// - **Different constructor kinds** → always disjoint. A primitive can never
-///   be an attrset, list, or lambda, and vice versa.
-/// - **Both primitives** → disjoint when neither is a subtype of the other.
-///   `Int` and `String` are disjoint, but `Int` and `Number` overlap
-///   (`Int ⊂ Number`).
-/// - **Two attrsets** → disjoint when one is closed and the other requires a field
-///   the closed one doesn't have. Otherwise conservatively not disjoint.
-/// - **Same compound constructor (list, lambda)** → conservatively not disjoint.
-/// - **Inter/Union/Neg on either side** → conservatively not disjoint.
+/// See `lang_ty::disjoint::are_shapes_disjoint` for the full disjointness rules.
 fn are_types_disjoint(a: &Ty<TyId>, b: &Ty<TyId>) -> bool {
-    match (a, b) {
-        // Both primitives: disjoint when no overlap in the subtype lattice.
-        (Ty::Primitive(p1), Ty::Primitive(p2)) => {
-            p1 != p2 && !p1.is_subtype_of(p2) && !p2.is_subtype_of(p1)
-        }
+    // Build owned key maps for attrset shapes. These are allocated only when
+    // both types need shape projection (which involves attrsets).
+    let a_keys;
+    let b_keys;
 
-        // Different constructor kinds — always disjoint.
-        (Ty::Primitive(_), Ty::AttrSet(_))
-        | (Ty::Primitive(_), Ty::List(_))
-        | (Ty::Primitive(_), Ty::Lambda { .. })
-        | (Ty::AttrSet(_), Ty::Primitive(_))
-        | (Ty::AttrSet(_), Ty::List(_))
-        | (Ty::AttrSet(_), Ty::Lambda { .. })
-        | (Ty::List(_), Ty::Primitive(_))
-        | (Ty::List(_), Ty::AttrSet(_))
-        | (Ty::List(_), Ty::Lambda { .. })
-        | (Ty::Lambda { .. }, Ty::Primitive(_))
-        | (Ty::Lambda { .. }, Ty::AttrSet(_))
-        | (Ty::Lambda { .. }, Ty::List(_)) => true,
-
-        // Two attrsets: disjoint if one is closed and the other requires a field
-        // the closed one doesn't have (a required field is one that's present in
-        // `fields` but not in `optional_fields`).
-        (Ty::AttrSet(a), Ty::AttrSet(b)) => {
-            if !a.open {
-                for field in b.fields.keys() {
-                    if !a.fields.contains_key(field) && !b.optional_fields.contains(field) {
-                        return true;
-                    }
-                }
+    let a_shape = match a {
+        Ty::Primitive(p) => ConstructorShape::Primitive(*p),
+        Ty::AttrSet(attr) => {
+            a_keys = attr.fields.keys().map(|k| (k.clone(), ())).collect();
+            ConstructorShape::AttrSet {
+                fields: &a_keys,
+                open: attr.open,
+                optional: &attr.optional_fields,
             }
-            if !b.open {
-                for field in a.fields.keys() {
-                    if !b.fields.contains_key(field) && !a.optional_fields.contains(field) {
-                        return true;
-                    }
-                }
-            }
-            false
         }
+        Ty::List(_) => ConstructorShape::List,
+        Ty::Lambda { .. } => ConstructorShape::Lambda,
+        _ => ConstructorShape::Opaque,
+    };
 
-        // Same compound constructor — conservatively not disjoint.
-        (Ty::List(_), Ty::List(_))
-        | (Ty::Lambda { .. }, Ty::Lambda { .. }) => false,
+    let b_shape = match b {
+        Ty::Primitive(p) => ConstructorShape::Primitive(*p),
+        Ty::AttrSet(attr) => {
+            b_keys = attr.fields.keys().map(|k| (k.clone(), ())).collect();
+            ConstructorShape::AttrSet {
+                fields: &b_keys,
+                open: attr.open,
+                optional: &attr.optional_fields,
+            }
+        }
+        Ty::List(_) => ConstructorShape::List,
+        Ty::Lambda { .. } => ConstructorShape::Lambda,
+        _ => ConstructorShape::Opaque,
+    };
 
-        // Inter, Union, Neg, or TyVar on either side — can't determine statically.
-        _ => false,
-    }
+    are_shapes_disjoint(&a_shape, &b_shape)
 }

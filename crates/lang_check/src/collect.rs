@@ -16,7 +16,10 @@ use smol_str::SmolStr;
 
 use super::{CheckCtx, InferenceResult, Polarity, TyId};
 use crate::storage::{TypeEntry, TypeStorage};
-use lang_ty::{AttrSetTy, OutputTy, Ty, TyRef};
+use lang_ty::{
+    disjoint::{are_shapes_disjoint, ConstructorShape},
+    AttrSetTy, OutputTy, Ty, TyRef,
+};
 
 use Polarity::{Negative, Positive};
 
@@ -138,7 +141,7 @@ impl<'a> Canonicalizer<'a> {
                 // non-null. Only removes when the positive member has a known
                 // constructor (not a TyVar).
                 let concrete = remove_redundant_negations(concrete);
-                // Contradiction detection: T ∧ ¬S = ⊥ when T <: S.
+                // Contradiction detection: T ∧ ¬S = ⊥ when T ⊆ S.
                 if has_type_contradiction(&concrete) {
                     return OutputTy::Bottom;
                 }
@@ -239,7 +242,9 @@ impl<'a> Canonicalizer<'a> {
                 let ca = self.canonicalize(*a, polarity);
                 let cb = self.canonicalize(*b, polarity);
                 let members = flatten_intersection(vec![ca, cb]);
-                // Filter bare TyVar and Bottom.
+                // Filter bare TyVar and Bottom. Keep all members around for
+                // fallback if every concrete member is filtered out.
+                let all_members = members.clone();
                 let concrete: Vec<OutputTy> = members
                     .into_iter()
                     .filter(|m| !matches!(m, OutputTy::TyVar(_) | OutputTy::Bottom))
@@ -262,7 +267,9 @@ impl<'a> Canonicalizer<'a> {
                     }
                 };
                 match concrete.len() {
-                    0 => OutputTy::TyVar(0), // shouldn't arise in practice
+                    // All concrete members were filtered out. Fall back to
+                    // the first member before filtering (a TyVar or Bottom).
+                    0 => all_members.into_iter().next().unwrap_or(OutputTy::Bottom),
                     1 => concrete.into_iter().next().unwrap(),
                     _ => OutputTy::Intersection(
                         concrete.into_iter().map(TyRef::from).collect(),
@@ -275,6 +282,7 @@ impl<'a> Canonicalizer<'a> {
                 let ca = self.canonicalize(*a, polarity);
                 let cb = self.canonicalize(*b, polarity);
                 let members = flatten_union(vec![ca, cb]);
+                let all_members = members.clone();
                 let concrete: Vec<OutputTy> = members
                     .into_iter()
                     .filter(|m| !matches!(m, OutputTy::TyVar(_) | OutputTy::Bottom))
@@ -284,7 +292,7 @@ impl<'a> Canonicalizer<'a> {
                     Negative => concrete,
                 };
                 match concrete.len() {
-                    0 => OutputTy::TyVar(0),
+                    0 => all_members.into_iter().next().unwrap_or(OutputTy::Bottom),
                     1 => concrete.into_iter().next().unwrap(),
                     _ => OutputTy::Union(
                         concrete.into_iter().map(TyRef::from).collect(),
@@ -412,16 +420,20 @@ fn remove_tautological_pairs(members: Vec<OutputTy>) -> Vec<OutputTy> {
         .collect()
 }
 
-/// Check whether an intersection contains a contradictory pair: a positive
-/// type `T` and `Neg(S)` where `T` is a subtype of (or equal to) `S`.
+/// Check whether an intersection contains a contradictory pair.
 ///
-/// Handles all constructor kinds — not just primitives:
-/// - `int & ~int` → contradiction (exact match)
+/// Two kinds of contradictions:
+/// 1. `T ∧ ¬S` where `T <: S` (subsumption). E.g. `Int ∧ ¬Number = ⊥`
+///    because every Int is a Number. Note: `Number ∧ ¬Int` is NOT a
+///    contradiction — Number includes Float, which is not Int.
+/// 2. `T ∧ S` where `T` and `S` are provably disjoint. E.g. `Int ∧ String = ⊥`.
+///
+/// Examples:
+/// - `int & ~int` → contradiction (Int <: Int, reflexive)
 /// - `int & ~number` → contradiction (Int <: Number)
-/// - `{name: string} & ~{name: string}` → contradiction (same attrset)
-/// - `[int] & ~[int]` → contradiction (same list)
-/// - `int & ~null` → NOT a contradiction (disjoint constructors)
-/// - `{...} & ~null` → NOT a contradiction (disjoint constructors)
+/// - `{name: string} & ~{name: string}` → contradiction (structural equality)
+/// - `number & ~int` → NOT a contradiction (Number ⊄ Int)
+/// - `int & ~null` → NOT a contradiction (disjoint, handled by redundant neg removal)
 fn has_type_contradiction(members: &[OutputTy]) -> bool {
     // Collect positive (non-negated) and negated inner types.
     let mut positives: Vec<&OutputTy> = Vec::new();
@@ -435,11 +447,13 @@ fn has_type_contradiction(members: &[OutputTy]) -> bool {
         }
     }
 
-    // A contradiction exists when a positive type is NOT disjoint from a
-    // negated type: T ∧ ¬S = ⊥ when T <: S (i.e., T and S overlap).
+    // A contradiction exists when a positive type is a subtype of (or equal
+    // to) a negated type: T ∧ ¬S = ⊥ iff T <: S. The previous check used
+    // "not disjoint" which conflated overlap with subsumption — e.g. it would
+    // incorrectly flag `Number ∧ ¬Int` as contradictory.
     for pos in &positives {
         for neg in &negated_inners {
-            if !are_output_types_disjoint(pos, neg) {
+            if is_output_subtype_or_equal(pos, neg) {
                 return true;
             }
         }
@@ -458,60 +472,70 @@ fn has_type_contradiction(members: &[OutputTy]) -> bool {
     false
 }
 
-/// Check whether two OutputTy values are provably disjoint (their intersection
-/// is uninhabited). Same semantics as `are_types_disjoint` in constrain.rs but
-/// operates on the canonicalized `OutputTy` representation.
-fn are_output_types_disjoint(a: &OutputTy, b: &OutputTy) -> bool {
-    match (a, b) {
-        // Both primitives: disjoint when no overlap in the subtype lattice.
+/// Check whether `sub` is a subtype of (or structurally equal to) `sup` in the
+/// OutputTy representation. This is a conservative approximation — it returns
+/// true only when the relationship is provable from constructor shape alone.
+///
+/// Used by `has_type_contradiction` to determine whether `T ∧ ¬S = ⊥`.
+///
+/// Handles:
+/// - Primitive subtyping: `Int <: Number`, `Float <: Number`
+/// - Structural equality for compound types (attrsets, lists, lambdas)
+/// - Different constructors → not a subtype
+fn is_output_subtype_or_equal(sub: &OutputTy, sup: &OutputTy) -> bool {
+    match (sub, sup) {
         (OutputTy::Primitive(p1), OutputTy::Primitive(p2)) => {
-            p1 != p2 && !p1.is_subtype_of(p2) && !p2.is_subtype_of(p1)
+            p1 == p2 || p1.is_subtype_of(p2)
         }
-
-        // Different constructor kinds — always disjoint.
-        // Primitive vs compound:
-        (OutputTy::Primitive(_), OutputTy::AttrSet(_))
-        | (OutputTy::Primitive(_), OutputTy::List(_))
-        | (OutputTy::Primitive(_), OutputTy::Lambda { .. })
-        | (OutputTy::AttrSet(_), OutputTy::Primitive(_))
-        | (OutputTy::List(_), OutputTy::Primitive(_))
-        | (OutputTy::Lambda { .. }, OutputTy::Primitive(_))
-        // Compound vs different compound:
-        | (OutputTy::AttrSet(_), OutputTy::List(_))
-        | (OutputTy::AttrSet(_), OutputTy::Lambda { .. })
-        | (OutputTy::List(_), OutputTy::AttrSet(_))
-        | (OutputTy::List(_), OutputTy::Lambda { .. })
-        | (OutputTy::Lambda { .. }, OutputTy::AttrSet(_))
-        | (OutputTy::Lambda { .. }, OutputTy::List(_)) => true,
-
-        // Two attrsets: disjoint if one is closed and the other requires a field
-        // the closed one doesn't have.
-        (OutputTy::AttrSet(a), OutputTy::AttrSet(b)) => {
-            if !a.open {
-                for field in b.fields.keys() {
-                    if !a.fields.contains_key(field) && !b.optional_fields.contains(field) {
-                        return true;
-                    }
-                }
-            }
-            if !b.open {
-                for field in a.fields.keys() {
-                    if !b.fields.contains_key(field) && !a.optional_fields.contains(field) {
-                        return true;
-                    }
-                }
-            }
-            false
-        }
-
-        // Same compound constructor — conservatively not disjoint.
-        (OutputTy::List(_), OutputTy::List(_))
-        | (OutputTy::Lambda { .. }, OutputTy::Lambda { .. }) => false,
-
-        // Anything involving TyVar, Union, Intersection, Neg, Named, Bottom
-        // — can't determine statically.
+        // Same structural compound types → equal (conservative).
+        (a, b) if a == b => true,
+        // Different constructors or non-trivially-comparable → not a subtype.
         _ => false,
     }
+}
+
+/// Check whether two OutputTy values are provably disjoint (their intersection
+/// is uninhabited). Delegates to the shared `are_shapes_disjoint` logic in
+/// `lang_ty::disjoint`.
+///
+/// See `lang_ty::disjoint::are_shapes_disjoint` for the full disjointness rules.
+fn are_output_types_disjoint(a: &OutputTy, b: &OutputTy) -> bool {
+    // Build owned key maps for attrset shapes upfront so borrows outlive the
+    // shape references.
+    let a_keys: BTreeMap<SmolStr, ()>;
+    let b_keys: BTreeMap<SmolStr, ()>;
+
+    let a_shape = match a {
+        OutputTy::Primitive(p) => ConstructorShape::Primitive(*p),
+        OutputTy::AttrSet(attr) => {
+            a_keys = attr.fields.keys().map(|k| (k.clone(), ())).collect();
+            ConstructorShape::AttrSet {
+                fields: &a_keys,
+                open: attr.open,
+                optional: &attr.optional_fields,
+            }
+        }
+        OutputTy::List(_) => ConstructorShape::List,
+        OutputTy::Lambda { .. } => ConstructorShape::Lambda,
+        _ => ConstructorShape::Opaque,
+    };
+
+    let b_shape = match b {
+        OutputTy::Primitive(p) => ConstructorShape::Primitive(*p),
+        OutputTy::AttrSet(attr) => {
+            b_keys = attr.fields.keys().map(|k| (k.clone(), ())).collect();
+            ConstructorShape::AttrSet {
+                fields: &b_keys,
+                open: attr.open,
+                optional: &attr.optional_fields,
+            }
+        }
+        OutputTy::List(_) => ConstructorShape::List,
+        OutputTy::Lambda { .. } => ConstructorShape::Lambda,
+        _ => ConstructorShape::Opaque,
+    };
+
+    are_shapes_disjoint(&a_shape, &b_shape)
 }
 
 /// Remove redundant negations from an intersection. When the intersection
@@ -1237,5 +1261,85 @@ mod tests {
         ];
         let result = remove_tautological_pairs(members);
         assert_eq!(result, vec![arc_ty!(String)]);
+    }
+
+    // -- is_output_subtype_or_equal tests --------------------------------------
+
+    #[test]
+    fn subtype_int_number() {
+        assert!(is_output_subtype_or_equal(&arc_ty!(Int), &arc_ty!(Number)));
+    }
+
+    #[test]
+    fn subtype_float_number() {
+        assert!(is_output_subtype_or_equal(
+            &arc_ty!(Float),
+            &arc_ty!(Number)
+        ));
+    }
+
+    #[test]
+    fn subtype_reflexive() {
+        assert!(is_output_subtype_or_equal(&arc_ty!(Int), &arc_ty!(Int)));
+        assert!(is_output_subtype_or_equal(
+            &arc_ty!(String),
+            &arc_ty!(String)
+        ));
+    }
+
+    #[test]
+    fn not_subtype_number_int() {
+        // Number is NOT a subtype of Int — Number also includes Float.
+        assert!(!is_output_subtype_or_equal(
+            &arc_ty!(Number),
+            &arc_ty!(Int)
+        ));
+    }
+
+    #[test]
+    fn not_subtype_different_constructors() {
+        assert!(!is_output_subtype_or_equal(&arc_ty!(Int), &arc_ty!(String)));
+        assert!(!is_output_subtype_or_equal(
+            &arc_ty!(Int),
+            &arc_ty!({ "x": Int })
+        ));
+    }
+
+    #[test]
+    fn subtype_structural_equality_attrset() {
+        let a = arc_ty!({ "x": Int });
+        let b = arc_ty!({ "x": Int });
+        assert!(is_output_subtype_or_equal(&a, &b));
+    }
+
+    // -- Regression: Number ∧ ¬Int is NOT a contradiction ----------------------
+
+    #[test]
+    fn no_contradiction_number_neg_int() {
+        // Number ∧ ¬Int should NOT be a contradiction. Number includes Float,
+        // so Number ∧ ¬Int = Float (a valid, inhabited type). The old
+        // "not disjoint" check incorrectly flagged this as contradictory
+        // because Number and Int overlap.
+        let members = vec![
+            arc_ty!(Number),
+            OutputTy::Neg(TyRef::from(arc_ty!(Int))),
+        ];
+        assert!(
+            !has_type_contradiction(&members),
+            "Number ∧ ¬Int should NOT be a contradiction (Number ⊄ Int)"
+        );
+    }
+
+    #[test]
+    fn no_contradiction_number_neg_float() {
+        // Number ∧ ¬Float should NOT be a contradiction (Number ∧ ¬Float = Int).
+        let members = vec![
+            arc_ty!(Number),
+            OutputTy::Neg(TyRef::from(arc_ty!(Float))),
+        ];
+        assert!(
+            !has_type_contradiction(&members),
+            "Number ∧ ¬Float should NOT be a contradiction (Number ⊄ Float)"
+        );
     }
 }
