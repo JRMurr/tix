@@ -162,9 +162,11 @@ extrusion.
   and tautologies (`A ∨ ¬A`) simply remove both members. Adding explicit Top/Bottom
   would be more principled but touches every `match` on `OutputTy`.
 
-- Cross-type disjointness in `constrain.rs` (e.g., `AttrSet <: Neg(Primitive)`) is
-  a separate concern from normalization. Currently only primitive-vs-negated-primitive
-  contradictions are detected.
+- ~~Cross-type disjointness in `constrain.rs` (e.g., `AttrSet <: Neg(Primitive)`)~~
+  **Fixed**: the `(sub, Neg(inner))` rule now handles all constructor kinds via
+  `are_types_disjoint`. Also fixed the `Number <: ~Int` overlap bug (was missing
+  `p2.is_subtype_of(p1)` check). Redundant negations are removed during
+  canonicalization (`{name: string} & ~null` → `{name: string}`).
 
 - Type simplification (`simplify.rs`) only removes bare `TyVar` members from
   unions/intersections. `Neg(TyVar)` members are not removed even when the
