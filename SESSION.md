@@ -33,11 +33,10 @@ extrusion.
 
 ### CLI Display of Narrowed Lambda Types
 
-- The CLI displays `a` for lambdas whose parameter type is a variable with only
-  Inter/Union upper bounds (e.g. `x: if isNull x then 0 else x` shows as `a`
-  instead of the full lambda type). The test harness shows the correct type
-  `a -> int | ~null`. The CLI display path may need to show more of the type
-  structure for lambda expressions.
+- RESOLVED: The CLI correctly displays narrowed lambda types (e.g.
+  `x: if isNull x then 0 else x` → `a -> int | ~null`). The earlier
+  observation of `a` was caused by a race condition in `scripts/tixc.sh`
+  where the temp file could be deleted before the binary finished reading it.
 
 ### Canonicalization / Type Display
 
@@ -162,12 +161,15 @@ extrusion.
   most entries. Could hoist the `enable` option's description up to the
   parent namespace, or synthesize a summary from child options.
 
-### Negation Normalization
+### Stubs `Any` Type Alias
 
-- `OutputTy::Top` variant would allow proper representation of tautologies
-  instead of simply removing both members. Contradictions are now handled via
-  `OutputTy::Bottom`. Adding explicit Top would be more principled but touches
-  every `match` on `OutputTy`.
+- The `.tix` stub type alias `Any` is currently interned as a fresh
+  unconstrained type variable (`new_var()`) rather than `OutputTy::Top`.
+  Each `Any` reference creates an independent variable, which is pragmatically
+  correct but displays as a bare type variable (`a`) instead of `any`.
+  Adding `Ty::Top` to the inference-time representation would fix this but
+  requires updates to `constrain.rs`. Low priority — the fresh-variable
+  approach gives correct inference behavior.
 
 ### Null-Default Field: Polymorphic Return Type Loses Default
 

@@ -342,7 +342,6 @@ pub struct CheckCtx<'db> {
     /// to a branch-local TyId. Consulted in `infer_reference` before the
     /// normal name resolution path. Pushed/popped around branch inference.
     narrow_overrides: HashMap<NameId, TyId>,
-
 }
 
 /// Count the function arity (number of arrows along the spine) of a ParsedTy.
@@ -546,6 +545,10 @@ impl<'db> CheckCtx<'db> {
             // a fresh variable with no bounds — it shouldn't appear in
             // importable type signatures in practice.
             OutputTy::Bottom => self.new_var(),
+            // Top (any): universal type from tautologies. Intern as a fresh
+            // unconstrained variable — equivalent to "any value" during
+            // inference.
+            OutputTy::Top => self.new_var(),
         }
     }
 

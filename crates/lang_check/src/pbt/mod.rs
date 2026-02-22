@@ -226,6 +226,9 @@ fn text_from_ty(ty: &OutputTy) -> impl Strategy<Value = NixTextStr> {
         // Bottom (never) doesn't arise in PBT — it's only produced by
         // contradiction detection in canonicalization.
         OutputTy::Bottom => unreachable!("Bottom should not appear in PBT type generation"),
+        // Top (any) doesn't arise in PBT — it's only produced by
+        // tautology detection in canonicalization.
+        OutputTy::Top => unreachable!("Top should not appear in PBT type generation"),
     };
 
     inner.prop_flat_map(non_type_modifying_transform)

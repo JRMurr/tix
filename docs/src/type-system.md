@@ -151,7 +151,7 @@ Negation types are normalized during canonicalization using standard Boolean alg
 - **De Morgan (union)**: `~(A | B)` becomes `~A & ~B`
 - **De Morgan (intersection)**: `~(A & B)` becomes `~A | ~B`
 - **Contradiction**: `T & ~T` or `string & int` in an intersection is detected as uninhabited and displayed as `never`
-- **Tautology**: `T | ~T` in a union is detected as universal (top) and both members are removed
+- **Tautology**: `T | ~T` in a union is detected as universal and simplifies to `any` (the top type — every value inhabits it)
 - **Redundant negation**: `{name: string} & ~null` simplifies to `{name: string}` (attrsets are inherently non-null)
 
 These rules keep inferred types readable and prevent redundant negations from accumulating through nested guards.

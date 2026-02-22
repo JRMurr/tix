@@ -60,6 +60,13 @@ pub enum OutputTy {
     /// `int & ~int`. No values inhabit this type. Displayed as `never`.
     #[debug("Bottom")]
     Bottom,
+
+    /// The universal (top) type, representing tautologies like
+    /// `int | ~int`. All values inhabit this type. Displayed as `any`.
+    /// Dual to Bottom: identity for intersection (`A & any = A`),
+    /// absorbing for union (`A | any = any`).
+    #[debug("Top")]
+    Top,
 }
 
 /// Arc-wrapped OutputTy for recursive type structures.
@@ -171,7 +178,9 @@ impl OutputTy {
     /// variant structure. Leaf variants (TyVar, Primitive) are returned as-is.
     pub fn map_children(&self, f: &mut impl FnMut(&OutputTy) -> OutputTy) -> OutputTy {
         match self {
-            OutputTy::TyVar(_) | OutputTy::Primitive(_) | OutputTy::Bottom => self.clone(),
+            OutputTy::TyVar(_) | OutputTy::Primitive(_) | OutputTy::Bottom | OutputTy::Top => {
+                self.clone()
+            }
             OutputTy::List(inner) => OutputTy::List(f(&inner.0).into()),
             OutputTy::Lambda { param, body } => OutputTy::Lambda {
                 param: f(&param.0).into(),
@@ -206,7 +215,7 @@ impl OutputTy {
     /// (TyVar, Primitive) have no children, so `f` is never called on them.
     pub fn for_each_child(&self, f: &mut impl FnMut(&OutputTy)) {
         match self {
-            OutputTy::TyVar(_) | OutputTy::Primitive(_) | OutputTy::Bottom => {}
+            OutputTy::TyVar(_) | OutputTy::Primitive(_) | OutputTy::Bottom | OutputTy::Top => {}
             OutputTy::List(inner) => f(&inner.0),
             OutputTy::Lambda { param, body } => {
                 f(&param.0);
@@ -318,6 +327,7 @@ impl fmt::Display for OutputTy {
                 }
             }
             OutputTy::Bottom => write!(f, "never"),
+            OutputTy::Top => write!(f, "any"),
         }
     }
 }

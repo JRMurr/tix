@@ -100,7 +100,7 @@ fn analyze(
                 })
                 .or_insert_with(|| VarInfo::new(pol, type_path));
         }
-        OutputTy::Primitive(_) | OutputTy::Bottom => {}
+        OutputTy::Primitive(_) | OutputTy::Bottom | OutputTy::Top => {}
         OutputTy::List(inner) => {
             path.push(PathSegment::ListElem);
             analyze(&inner.0, positive, path, vars);
@@ -232,7 +232,7 @@ fn apply_simplification(
             let resolved = substitution.get(v).copied().unwrap_or(*v);
             OutputTy::TyVar(resolved)
         }
-        OutputTy::Primitive(_) | OutputTy::Bottom => ty.clone(),
+        OutputTy::Primitive(_) | OutputTy::Bottom | OutputTy::Top => ty.clone(),
         OutputTy::List(inner) => OutputTy::List(TyRef::from(apply_simplification(
             &inner.0,
             substitution,
@@ -280,9 +280,18 @@ fn apply_simplification(
                     if matches!(s, OutputTy::Bottom) {
                         return None;
                     }
+                    // Top is absorbing for union: A ∨ ⊤ = ⊤.
+                    if matches!(s, OutputTy::Top) {
+                        return Some(TyRef::from(OutputTy::Top));
+                    }
                     Some(TyRef::from(s))
                 })
                 .collect();
+
+            // Top is absorbing for union: if any member is Top, whole union is Top.
+            if simplified.iter().any(|m| matches!(&*m.0, OutputTy::Top)) {
+                return OutputTy::Top;
+            }
 
             match simplified.len() {
                 // All members were polar-only type variables. Keep the first
@@ -303,11 +312,12 @@ fn apply_simplification(
                     if is_removable_var_member(&m.0, substitution, removable) {
                         return None;
                     }
-                    Some(TyRef::from(apply_simplification(
-                        &m.0,
-                        substitution,
-                        removable,
-                    )))
+                    let s = apply_simplification(&m.0, substitution, removable);
+                    // Top is the identity for intersection: A ∧ ⊤ = A.
+                    if matches!(s, OutputTy::Top) {
+                        return None;
+                    }
+                    Some(TyRef::from(s))
                 })
                 .collect();
 
@@ -351,17 +361,20 @@ pub fn simplify(ty: &OutputTy) -> OutputTy {
     let mut path = Vec::new();
     analyze(ty, true, &mut path, &mut vars);
 
-    if vars.is_empty() {
-        return ty.clone();
-    }
+    let substitution = if vars.is_empty() {
+        FxHashMap::default()
+    } else {
+        build_cooccurrence_substitution(&vars)
+    };
+    let removable = if vars.is_empty() {
+        FxHashSet::default()
+    } else {
+        polar_only_vars(&vars)
+    };
 
-    let substitution = build_cooccurrence_substitution(&vars);
-    let removable = polar_only_vars(&vars);
-
-    if substitution.is_empty() && removable.is_empty() {
-        return ty.clone();
-    }
-
+    // Always run apply_simplification — even without variable work to do,
+    // it handles algebraic identities (Top in intersection, Top in union,
+    // Bottom in union/intersection).
     apply_simplification(ty, &substitution, &removable)
 }
 
@@ -515,6 +528,47 @@ mod tests {
         let ty = OutputTy::Neg(TyRef::from(OutputTy::Primitive(crate::PrimitiveTy::Null)));
         let result = simplify(&ty);
         assert_eq!(result, ty);
+    }
+
+    // ======================================================================
+    // Top type simplification
+    // ======================================================================
+
+    #[test]
+    fn simplify_top_absorbing_for_union() {
+        // Union(Int, Top) → Top. Top absorbs all union members.
+        let ty = OutputTy::Union(vec![
+            TyRef::from(OutputTy::Primitive(crate::PrimitiveTy::Int)),
+            TyRef::from(OutputTy::Top),
+        ]);
+        let result = simplify(&ty);
+        assert_eq!(result, OutputTy::Top);
+    }
+
+    #[test]
+    fn simplify_top_identity_for_intersection() {
+        // Intersection(Int, Top) → Int. Top is identity for intersection.
+        let ty = OutputTy::Intersection(vec![
+            TyRef::from(OutputTy::Primitive(crate::PrimitiveTy::Int)),
+            TyRef::from(OutputTy::Top),
+        ]);
+        let result = simplify(&ty);
+        assert_eq!(result, OutputTy::Primitive(crate::PrimitiveTy::Int));
+    }
+
+    #[test]
+    fn simplify_top_alone_in_intersection() {
+        // Intersection(Top) → Top. When Top is the only member, return Top.
+        // This shouldn't occur in practice (intersections have 2+ members),
+        // but verify the algebra is correct.
+        let ty = OutputTy::Intersection(vec![
+            TyRef::from(OutputTy::Top),
+            TyRef::from(OutputTy::TyVar(42)),
+        ]);
+        let result = simplify(&ty);
+        // TyVar(42) is negative-only (in intersection at top level) → removed.
+        // Top is also removed (identity). All members filtered → fallback.
+        assert_eq!(result, OutputTy::Top);
     }
 
     proptest::proptest! {

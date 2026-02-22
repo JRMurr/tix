@@ -98,6 +98,10 @@ macro_rules! arc_ty {
     (Bottom) => {
         $crate::OutputTy::Bottom
     };
+    // -- Top (universal / any type) -------------------------------------------
+    (Top) => {
+        $crate::OutputTy::Top
+    };
     // -- TyVar syntax: TyVar(N) --------------------------------------------
     (# $n:expr) => {
         $crate::OutputTy::TyVar($n)

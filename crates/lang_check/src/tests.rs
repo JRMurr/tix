@@ -4213,7 +4213,9 @@ fn narrow_or_combinator_else_narrowed() {
     let formatted = body.to_string();
     // Else-branch has x narrowed with ~string and ~int.
     assert!(
-        formatted.contains("~string") || formatted.contains("int") || matches!(*body, OutputTy::Primitive(_)),
+        formatted.contains("~string")
+            || formatted.contains("int")
+            || matches!(*body, OutputTy::Primitive(_)),
         "||: else-branch should contain narrowing info, got: {formatted}"
     );
 }
@@ -4229,9 +4231,16 @@ fn narrow_union_routing_null_into_union() {
     let (_param, body) = unwrap_lambda(&ty);
     match &*body {
         OutputTy::Union(members) => {
-            let has_null = members.iter().any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::Null)));
-            let has_int = members.iter().any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::Int)));
-            assert!(has_null && has_int, "body should be null | int, got: {body}");
+            let has_null = members
+                .iter()
+                .any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::Null)));
+            let has_int = members
+                .iter()
+                .any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::Int)));
+            assert!(
+                has_null && has_int,
+                "body should be null | int, got: {body}"
+            );
         }
         _ => panic!("expected Union(null, int), got: {body}"),
     }
@@ -4264,7 +4273,10 @@ fn narrow_inter_decomposition_no_spurious_error() {
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
     assert!(
-        matches!(&*body, OutputTy::Primitive(PrimitiveTy::Int) | OutputTy::Union(_)),
+        matches!(
+            &*body,
+            OutputTy::Primitive(PrimitiveTy::Int) | OutputTy::Union(_)
+        ),
         "body should be int or union with int, got: {body}"
     );
 }
@@ -4404,3 +4416,56 @@ test_case!(
     "let a = { x = 1; }; b = { y = 2; }; in (a // b).y",
     Int
 );
+
+// ==============================================================================
+// OutputTy::Top (tautology → any)
+// ==============================================================================
+
+/// When both branches of a type guard return the narrowed variable, the return
+/// type contains T | ~T (a tautology). This should canonicalize to `any` (Top)
+/// rather than a bare type variable.
+#[test]
+fn tautology_isint_both_branches_return_x_produces_top() {
+    let nix = indoc! {"
+        x: if builtins.isInt x then x else x
+    "};
+    let ty = get_inferred_root(nix);
+    let formatted = ty.to_string();
+    assert!(
+        formatted.contains("any"),
+        "int | ~int tautology should produce 'any' in return type, got: {formatted}"
+    );
+}
+
+/// Same tautology through a let-binding: narrowing survives generalization.
+#[test]
+fn tautology_let_generalized_produces_top() {
+    let nix = indoc! {"
+        let f = x: if builtins.isNull x then x else x; in f
+    "};
+    let ty = get_inferred_root(nix);
+    let formatted = ty.to_string();
+    assert!(
+        formatted.contains("any"),
+        "null | ~null tautology through let should produce 'any', got: {formatted}"
+    );
+}
+
+/// When a tautology is mixed with other members, Top absorbs everything.
+/// `if isString x then x else if isInt x then x else x` produces
+/// string | int | (~string & ~int) in the return position. This is NOT a
+/// pure tautology, so it should NOT produce Top.
+#[test]
+fn partial_narrowing_not_tautology() {
+    let nix = indoc! {"
+        x: if builtins.isString x then x else if builtins.isInt x then x else x
+    "};
+    let ty = get_inferred_root(nix);
+    let formatted = ty.to_string();
+    // This should NOT be `any` — the three branches don't form a complete tautology.
+    // String | Int | (~String & ~Int) is a valid union that restricts the type.
+    assert!(
+        !formatted.contains("any"),
+        "partial narrowing should not produce 'any', got: {formatted}"
+    );
+}
