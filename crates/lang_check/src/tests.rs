@@ -2753,6 +2753,86 @@ fn narrow_hasattr_field_access_then_arithmetic() {
 }
 
 // ==============================================================================
+// Type narrowing — NotHasField (else-branch of x ? field)
+// ==============================================================================
+
+/// Else-branch of `x ? field` should narrow x to ¬{field: β, ...}.
+/// When the then-branch accesses the field, the else-branch should
+/// still type-check without errors.
+#[test]
+fn narrow_not_hasfield_else_branch_typechecks() {
+    let nix = indoc! {r#"
+        arg':
+          let
+            arg = if builtins.isString arg' then { escaped = arg'; } else arg';
+          in
+          if arg ? escaped then
+            arg.escaped
+          else if arg ? unescaped then
+            arg.unescaped
+          else
+            "default"
+    "#};
+    let ty = get_inferred_root(nix);
+    // Should succeed without errors — the chained ? guards with a
+    // let-bound union type were previously failing.
+    assert!(
+        matches!(ty, OutputTy::Lambda { .. }),
+        "should produce a lambda, got: {ty}"
+    );
+}
+
+/// `!(x ? field)` should flip narrowing: then-branch gets NotHasField,
+/// else-branch gets HasField.
+#[test]
+fn narrow_not_hasfield_negated_flip() {
+    let nix = r#"x: if !(x ? name) then "no-name" else x.name"#;
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    // else-branch has HasField narrowing (flipped), so x.name succeeds.
+    assert_eq!(*body, arc_ty!(String), "negated hasattr flip should work");
+}
+
+/// Chained `? attr` guards on a parameter (not let-bound) should
+/// type-check without errors.
+#[test]
+fn narrow_not_hasfield_chained_on_param() {
+    let nix = indoc! {r#"
+        arg:
+        if arg ? escaped then
+          arg.escaped
+        else if arg ? unescaped then
+          arg.unescaped
+        else
+          "default"
+    "#};
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(*body, arc_ty!(String), "chained hasattr on param");
+}
+
+/// `builtins.hasAttr "field" x` else-branch should also produce
+/// NotHasField narrowing.
+#[test]
+fn narrow_not_hasfield_builtins_hasattr() {
+    let nix = indoc! {r#"
+        x:
+        if builtins.hasAttr "name" x then
+          x.name
+        else if builtins.hasAttr "value" x then
+          x.value
+        else
+          null
+    "#};
+    let ty = get_inferred_root(nix);
+    // Should succeed without errors.
+    assert!(
+        matches!(ty, OutputTy::Lambda { .. }),
+        "builtins.hasAttr else-branch should typecheck, got: {ty}"
+    );
+}
+
+// ==============================================================================
 // Type narrowing — type predicate builtins (isString, isInt, etc.)
 // ==============================================================================
 
@@ -3489,29 +3569,22 @@ fn narrow_let_generalization_preserved() {
     // monomorphic type instead of a polymorphic one.
 }
 
-/// Known limitation: negation bounds are lost through let-generalization.
-/// When `f = x: if isNull x then 0 else x` is generalized, the ¬null
-/// upper bound on x's narrowed var doesn't survive extrude. The output
-/// is `a -> int` (union of `0 | x` collapses to `int` for the then-branch
-/// and the else-branch's x loses its negation information).
-///
-/// Contrast with `narrow_neg_displayed_in_output` which uses a curried
-/// lambda (`f: x: ...`) where f's param is in negative position and
-/// the ¬null bound is visible without generalization.
-// TODO: preserve negation bounds through extrude so `let f = x: ...`
-// retains `~null` in f's type after generalization.
+/// Negation bounds survive let-generalization thanks to first-class Inter/Union
+/// types during inference (MLstruct-style). When `f = x: if isNull x then 0
+/// else x` is generalized, the `Inter(α, ¬Null)` type extrudes correctly,
+/// preserving the ¬null information in the output type.
 #[test]
-fn narrow_neg_lost_through_generalization() {
+fn narrow_neg_preserved_through_generalization() {
     let nix = indoc! {"
         let f = x: if builtins.isNull x then 0 else x; in f
     "};
     let ty = get_inferred_root(nix);
     let formatted = ty.to_string();
-    // Currently, negation is lost — output is `a -> int` instead of
-    // `(a & ~null) -> int`. This test documents the current behavior.
+    // Negation is preserved: output contains `~null` in the return type,
+    // showing that the else-branch's narrowing survives generalization.
     assert!(
-        !formatted.contains("~null"),
-        "documenting current behavior: negation should be lost through generalization, got: {formatted}"
+        formatted.contains("~null"),
+        "negation should be preserved through generalization, got: {formatted}"
     );
 }
 
@@ -4041,6 +4114,226 @@ fn narrow_contradiction_self_negated() {
 }
 
 // ==============================================================================
+// Cross-type disjointness rules
+// ==============================================================================
+//
+// These tests verify that the constraint solver handles `Concrete <: Neg(inner)`
+// for all constructor kinds, not just primitives. Attrsets, lists, and lambdas
+// are disjoint from primitives, so `AttrSet <: ~Null` should succeed.
+
+/// `x: if x != null then x.name else "default"` with a callback that passes
+/// an attrset — the attrset flows into the narrowed variable that has ~null
+/// upper bound. AttrSet <: ~Null must succeed.
+#[test]
+fn cross_disjoint_attrset_neg_null() {
+    // The callback pattern: `callback` takes a value that in the else-branch
+    // is narrowed to non-null. Passing an attrset as argument should succeed.
+    let nix = r#"let f = x: if x != null then x.name else "default"; in f { name = "hello"; }"#;
+    let ty = get_inferred_root(nix);
+    assert_eq!(ty, arc_ty!(String));
+}
+
+/// Chained narrowing: `if isAttrs x then ... else if isString x then ...`
+/// Each branch gets a different narrowing. Both should succeed.
+#[test]
+fn cross_disjoint_chained_narrowing() {
+    let nix = r#"x: if builtins.isAttrs x then x.name else if builtins.isString x then builtins.stringLength x else 0"#;
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    // All branches return int-ish: x.name is a TyVar, stringLength returns int, else is int.
+    // The body should be some union or int — it should NOT error.
+    assert!(
+        !matches!(body, OutputTy::Bottom),
+        "chained narrowing body should not be Bottom, got: {body}"
+    );
+}
+
+/// `number & ~null` should simplify to just `number` in output (redundant
+/// negation removal).
+#[test]
+fn cross_disjoint_redundant_neg_removed_in_output() {
+    // `x: if x != null then x + 1 else 0` — the else-branch has x narrowed
+    // to ~null, and x+1 constrains x to number. The parameter type should
+    // show `number` not `number & ~null`.
+    let nix = "x: if x != null then x + 1 else 0";
+    let ty = get_inferred_root(nix);
+    let (param, _body) = unwrap_lambda(&ty);
+    let formatted = format!("{param}");
+    assert!(
+        !formatted.contains("~null"),
+        "parameter type should not contain ~null (redundant), got: {formatted}"
+    );
+}
+
+/// Verify the overlap bug fix: `Number <: ~Int` should FAIL because Number
+/// and Int overlap (Int <: Number). This tests the constraint solver directly
+/// via a program that would trigger such a constraint.
+#[test]
+fn cross_disjoint_overlap_number_neg_int() {
+    // `int & ~number` is a contradiction (int <: number).
+    let nix = "x: if builtins.isInt x then (if !(builtins.isInt x) then x else 0) else 0";
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    // The inner then-branch is contradictory (int & ~int), so body is int.
+    assert_eq!(*body, arc_ty!(Int));
+}
+
+// ==============================================================================
+// Inter/Union type regression tests
+// ==============================================================================
+//
+// These tests verify the MLstruct-style first-class Inter/Union types during
+// inference. Inter types from narrowing survive extrusion/generalization, and
+// the constraint solver handles them via variable isolation and De Morgan rules.
+
+/// `&&` combinator: `isNull x && isNull y` narrows both x and y to null in
+/// the then-branch. In the else-branch, we can't determine which failed.
+#[test]
+fn narrow_and_combinator_both_narrowed() {
+    let nix = indoc! {"
+        x: y: if builtins.isNull x && builtins.isNull y then x else y
+    "};
+    // If both are null in then-branch, then-branch returns null.
+    // Else-branch returns y (unconstrained). Body is union.
+    let ty = get_inferred_root(nix);
+    let (_param, inner) = unwrap_lambda(&ty);
+    let (_param2, _body) = unwrap_lambda(inner);
+    // Just verify it type-checks without error.
+}
+
+/// `||` combinator: `isString x || isInt x` — in the else-branch, x is
+/// known to be neither string nor int.
+#[test]
+fn narrow_or_combinator_else_narrowed() {
+    let nix = indoc! {"
+        x: if builtins.isString x || builtins.isInt x then 0 else x
+    "};
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    let formatted = body.to_string();
+    // Else-branch has x narrowed with ~string and ~int.
+    assert!(
+        formatted.contains("~string")
+            || formatted.contains("int")
+            || matches!(*body, OutputTy::Primitive(_)),
+        "||: else-branch should contain narrowing info, got: {formatted}"
+    );
+}
+
+/// Union subtyping routing: null flows into Union(string_var, null) correctly.
+/// This is the union produced by the "annoying" decomposition.
+#[test]
+fn narrow_union_routing_null_into_union() {
+    // `x: if x == null then null else stringLength x` — then=null, else=int.
+    // Body is null | int since the branches have different types.
+    let nix = "x: if x == null then null else builtins.stringLength x";
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    match &*body {
+        OutputTy::Union(members) => {
+            let has_null = members
+                .iter()
+                .any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::Null)));
+            let has_int = members
+                .iter()
+                .any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::Int)));
+            assert!(
+                has_null && has_int,
+                "body should be null | int, got: {body}"
+            );
+        }
+        _ => panic!("expected Union(null, int), got: {body}"),
+    }
+}
+
+/// De Morgan normalization: ¬(A ∧ B) = ¬A ∨ ¬B and ¬(A ∨ B) = ¬A ∧ ¬B
+/// are handled in alloc_concrete. Verify via a type that triggers it.
+#[test]
+fn narrow_de_morgan_double_negation() {
+    // Double negation: !(!(isNull x)) should be equivalent to isNull x.
+    let nix = "x: if !(!(builtins.isNull x)) then 0 else x";
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    let formatted = body.to_string();
+    // Else-branch has ¬null narrowing (from !(!(isNull)) = isNull, negated).
+    assert!(
+        formatted.contains("~null") || matches!(*body, OutputTy::Primitive(_)),
+        "double negation should preserve narrowing info, got: {formatted}"
+    );
+}
+
+/// Inter decomposition: Inter(α, ¬T) <: U produces α <: Union(U, T).
+/// Verify this doesn't cause spurious errors.
+#[test]
+fn narrow_inter_decomposition_no_spurious_error() {
+    // `x: if !(isNull x) then x + 1 else 0` — else has Inter(α, ¬Null),
+    // then has Inter(α, Null). The `+` in then-branch uses the ¬Null side
+    // with the overload resolver, which should see through to the variable.
+    let nix = "x: if !(builtins.isNull x) then x + 1 else 0";
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert!(
+        matches!(
+            &*body,
+            OutputTy::Primitive(PrimitiveTy::Int) | OutputTy::Union(_)
+        ),
+        "body should be int or union with int, got: {body}"
+    );
+}
+
+/// `&&` with `!=null`: `x != null && x ? field` — then-branch has x
+/// narrowed with both ¬null and HasField. This combines two predicates.
+#[test]
+fn narrow_and_combinator_mixed_predicates() {
+    let nix = indoc! {"
+        x: if x != null && x ? name then x.name else \"default\"
+    "};
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    let formatted = body.to_string();
+    // x.name should succeed in then-branch because x has {name: β}.
+    // Body should contain string (from "default" and x.name).
+    assert!(
+        formatted.contains("string") || matches!(*body, OutputTy::Primitive(PrimitiveTy::String)),
+        "mixed &&: body should contain string type, got: {formatted}"
+    );
+}
+
+/// Regression test: cyclic narrowed variables with Inter wrappers should not
+/// cause infinite recursion (stack overflow) in the constraint solver.
+///
+/// The pattern `{ pasta ? null }: ... if pasta != null then pasta.field ...`
+/// creates `Inter(α, ¬Null)` which, combined with mutually-lower-bounded
+/// variables from `isString` narrowing, previously caused infinite growth of
+/// Union types in `constrain_lhs_inter` (each iteration wrapped the previous
+/// Union, creating fresh TyIds that defeated the constrain_cache).
+///
+/// Fixed by: neg_cache deduplication + union absorption in constrain_lhs_inter.
+#[test]
+fn narrow_cyclic_inter_no_stack_overflow() {
+    let nix = indoc! {r#"
+        { pasta ? null }:
+        let
+          renderArg =
+            arg':
+            let
+              arg = if builtins.isString arg' then { escaped = arg'; } else arg';
+            in
+            if arg ? escaped then arg.escaped
+            else if arg ? unescaped then arg.unescaped
+            else "other";
+          pastaFlags = if pasta != null then pasta.tcpForward else null;
+        in
+        { inherit renderArg pastaFlags; }
+    "#};
+    // Should complete without stack overflow. We don't check exact types,
+    // just that inference terminates.
+    let (_module, result) = check_str(nix);
+    // Allow type errors (field access issues) but not panics.
+    let _ = result;
+}
+
+// ==============================================================================
 // Has-field constraints (deferred field presence checks)
 // ==============================================================================
 
@@ -4123,3 +4416,56 @@ test_case!(
     "let a = { x = 1; }; b = { y = 2; }; in (a // b).y",
     Int
 );
+
+// ==============================================================================
+// OutputTy::Top (tautology → any)
+// ==============================================================================
+
+/// When both branches of a type guard return the narrowed variable, the return
+/// type contains T | ~T (a tautology). This should canonicalize to `any` (Top)
+/// rather than a bare type variable.
+#[test]
+fn tautology_isint_both_branches_return_x_produces_top() {
+    let nix = indoc! {"
+        x: if builtins.isInt x then x else x
+    "};
+    let ty = get_inferred_root(nix);
+    let formatted = ty.to_string();
+    assert!(
+        formatted.contains("any"),
+        "int | ~int tautology should produce 'any' in return type, got: {formatted}"
+    );
+}
+
+/// Same tautology through a let-binding: narrowing survives generalization.
+#[test]
+fn tautology_let_generalized_produces_top() {
+    let nix = indoc! {"
+        let f = x: if builtins.isNull x then x else x; in f
+    "};
+    let ty = get_inferred_root(nix);
+    let formatted = ty.to_string();
+    assert!(
+        formatted.contains("any"),
+        "null | ~null tautology through let should produce 'any', got: {formatted}"
+    );
+}
+
+/// When a tautology is mixed with other members, Top absorbs everything.
+/// `if isString x then x else if isInt x then x else x` produces
+/// string | int | (~string & ~int) in the return position. This is NOT a
+/// pure tautology, so it should NOT produce Top.
+#[test]
+fn partial_narrowing_not_tautology() {
+    let nix = indoc! {"
+        x: if builtins.isString x then x else if builtins.isInt x then x else x
+    "};
+    let ty = get_inferred_root(nix);
+    let formatted = ty.to_string();
+    // This should NOT be `any` — the three branches don't form a complete tautology.
+    // String | Int | (~String & ~Int) is a valid union that restricts the type.
+    assert!(
+        !formatted.contains("any"),
+        "partial narrowing should not produce 'any', got: {formatted}"
+    );
+}

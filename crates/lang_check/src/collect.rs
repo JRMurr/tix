@@ -16,7 +16,10 @@ use smol_str::SmolStr;
 
 use super::{CheckCtx, InferenceResult, Polarity, TyId};
 use crate::storage::{TypeEntry, TypeStorage};
-use lang_ty::{AttrSetTy, OutputTy, Ty, TyRef};
+use lang_ty::{
+    disjoint::{are_shapes_disjoint, ConstructorShape},
+    AttrSetTy, OutputTy, Ty, TyRef,
+};
 
 use Polarity::{Negative, Positive};
 
@@ -114,14 +117,15 @@ impl<'a> Canonicalizer<'a> {
             Negative => flatten_intersection(members),
         };
 
-        // 3. Filter bare TyVar (uninformative in either position) and Bottom
-        //    (identity for union, and won't appear as a raw bound in negative).
+        // 3. Filter bare TyVar (uninformative in either position), Bottom
+        //    (identity for union), and Top (identity for intersection).
         let concrete: Vec<OutputTy> = flattened
             .into_iter()
-            .filter(|m| !matches!(m, OutputTy::TyVar(_) | OutputTy::Bottom))
+            .filter(|m| !matches!(m, OutputTy::TyVar(_) | OutputTy::Bottom | OutputTy::Top))
             .collect();
 
         // 4. Polarity-specific normalization.
+        let had_concrete = !concrete.is_empty();
         let concrete = match polarity {
             Positive => {
                 // Tautology detection: A ∨ ¬A = ⊤, drop both.
@@ -131,8 +135,15 @@ impl<'a> Canonicalizer<'a> {
                 // Merge multiple attrsets into one (intersection of records =
                 // record with all fields).
                 let concrete = merge_attrset_intersection(concrete);
-                // Contradiction detection: Primitive(P) ∧ ¬Primitive(P) = ⊥.
-                if has_primitive_contradiction(&concrete) {
+                // Remove redundant negations: when an intersection contains a
+                // concrete type T and Neg(S) where T and S are provably disjoint,
+                // the negation adds no information. E.g. `{name: string} & ~null`
+                // simplifies to `{name: string}` because attrsets are inherently
+                // non-null. Only removes when the positive member has a known
+                // constructor (not a TyVar).
+                let concrete = remove_redundant_negations(concrete);
+                // Contradiction detection: T ∧ ¬S = ⊥ when T ⊆ S.
+                if has_type_contradiction(&concrete) {
                     return OutputTy::Bottom;
                 }
                 concrete
@@ -141,6 +152,11 @@ impl<'a> Canonicalizer<'a> {
 
         // 5. Build the result.
         match concrete.len() {
+            0 if had_concrete && polarity == Positive => {
+                // Tautology removal emptied the vec — all concrete members
+                // cancelled out (e.g. int | ~int). This is Top (any value).
+                OutputTy::Top
+            }
             0 => self.expand_bounds_empty_fallback(var_id, polarity),
             1 => concrete.into_iter().next().unwrap(),
             _ => match polarity {
@@ -225,6 +241,74 @@ impl<'a> Canonicalizer<'a> {
                 let c_inner = self.canonicalize(*inner, polarity.flip());
                 negate_output_ty(c_inner)
             }
+
+            // Intersection: canonicalize both members and flatten/normalize
+            // using the same logic as variable bound expansion.
+            Ty::Inter(a, b) => {
+                let ca = self.canonicalize(*a, polarity);
+                let cb = self.canonicalize(*b, polarity);
+                let members = flatten_intersection(vec![ca, cb]);
+                // Filter bare TyVar, Bottom, and Top. Keep all members
+                // around for fallback if every concrete member is filtered out.
+                let all_members = members.clone();
+                let concrete: Vec<OutputTy> = members
+                    .into_iter()
+                    .filter(|m| !matches!(m, OutputTy::TyVar(_) | OutputTy::Bottom | OutputTy::Top))
+                    .collect();
+                // Check for contradictions in all polarities for Inter types.
+                // Unlike variable-bound intersections (negative polarity only),
+                // Inter types from narrowing can appear in either polarity and
+                // may contain contradictions like String ∧ Int = ⊥.
+                if has_type_contradiction(&concrete) {
+                    return OutputTy::Bottom;
+                }
+                let had_concrete = !concrete.is_empty();
+                let concrete = match polarity {
+                    Positive => {
+                        let c = remove_redundant_negations(concrete);
+                        remove_tautological_pairs(c)
+                    }
+                    Negative => {
+                        let c = merge_attrset_intersection(concrete);
+                        remove_redundant_negations(c)
+                    }
+                };
+                match concrete.len() {
+                    // Tautology removal emptied a non-empty vec in positive
+                    // position — return Top.
+                    0 if had_concrete && polarity == Positive => OutputTy::Top,
+                    // All concrete members were filtered out. Fall back to
+                    // the first member before filtering (a TyVar or Bottom).
+                    0 => all_members.into_iter().next().unwrap_or(OutputTy::Bottom),
+                    1 => concrete.into_iter().next().unwrap(),
+                    _ => OutputTy::Intersection(concrete.into_iter().map(TyRef::from).collect()),
+                }
+            }
+
+            // Union: canonicalize both members and flatten/normalize.
+            Ty::Union(a, b) => {
+                let ca = self.canonicalize(*a, polarity);
+                let cb = self.canonicalize(*b, polarity);
+                let members = flatten_union(vec![ca, cb]);
+                let all_members = members.clone();
+                let concrete: Vec<OutputTy> = members
+                    .into_iter()
+                    .filter(|m| !matches!(m, OutputTy::TyVar(_) | OutputTy::Bottom | OutputTy::Top))
+                    .collect();
+                let had_concrete = !concrete.is_empty();
+                let concrete = match polarity {
+                    Positive => remove_tautological_pairs(concrete),
+                    Negative => concrete,
+                };
+                match concrete.len() {
+                    // Tautology removal emptied a non-empty vec in positive
+                    // position — return Top.
+                    0 if had_concrete && polarity == Positive => OutputTy::Top,
+                    0 => all_members.into_iter().next().unwrap_or(OutputTy::Bottom),
+                    1 => concrete.into_iter().next().unwrap(),
+                    _ => OutputTy::Union(concrete.into_iter().map(TyRef::from).collect()),
+                }
+            }
         }
     }
 }
@@ -280,86 +364,239 @@ fn negate_output_ty(inner: OutputTy) -> OutputTy {
     }
 }
 
-/// Remove tautological pairs from a union: `Primitive(P) ∨ Neg(Primitive(P))` = ⊤.
-/// When both a primitive and its negation appear, both are dropped since their
+/// Remove tautological pairs from a union: `T ∨ ¬T` = ⊤.
+/// When both a type and its negation appear, both are dropped since their
 /// union is the top type and adds no information to the overall union.
+///
+/// Handles all constructor kinds — primitives, attrsets, lists, lambdas — by
+/// checking structural equality between positive members and negated members.
+/// For primitives, also handles subtype tautologies (Int ∨ ¬Int).
 fn remove_tautological_pairs(members: Vec<OutputTy>) -> Vec<OutputTy> {
-    use lang_ty::PrimitiveTy;
-
-    // Collect which primitives appear positively and negatively.
-    let positives: HashSet<PrimitiveTy> = members
+    // Collect negated inner types.
+    let negated_inners: Vec<&OutputTy> = members
         .iter()
         .filter_map(|m| match m {
-            OutputTy::Primitive(p) => Some(*p),
+            OutputTy::Neg(inner) => Some(&*inner.0),
             _ => None,
         })
         .collect();
 
-    let negatives: HashSet<PrimitiveTy> = members
-        .iter()
-        .filter_map(|m| match m {
-            OutputTy::Neg(inner) => match &*inner.0 {
-                OutputTy::Primitive(p) => Some(*p),
-                _ => None,
-            },
-            _ => None,
-        })
-        .collect();
-
-    // Find primitives that appear in both positive and negative form.
-    let tautologies: HashSet<PrimitiveTy> = positives.intersection(&negatives).copied().collect();
-
-    if tautologies.is_empty() {
+    if negated_inners.is_empty() {
         return members;
     }
 
-    // Remove both P and ~P for each tautological primitive.
+    // Collect positive (non-negated, non-TyVar, non-Bottom, non-Top) members.
+    let positives: Vec<&OutputTy> = members
+        .iter()
+        .filter(|m| {
+            !matches!(
+                m,
+                OutputTy::Neg(_) | OutputTy::TyVar(_) | OutputTy::Bottom | OutputTy::Top
+            )
+        })
+        .collect();
+
+    // Find tautological pairs: a positive member whose negation also appears.
+    // T ∨ ¬T = ⊤ when T and the negated inner are structurally equal.
+    let mut tautological_positives: HashSet<usize> = HashSet::new();
+    let mut tautological_negatives: HashSet<usize> = HashSet::new();
+
+    for (pi, pos) in positives.iter().enumerate() {
+        for (ni, neg_inner) in negated_inners.iter().enumerate() {
+            if pos == neg_inner {
+                tautological_positives.insert(pi);
+                tautological_negatives.insert(ni);
+            }
+        }
+    }
+
+    if tautological_positives.is_empty() {
+        return members;
+    }
+
+    // Remove both T and ¬T for each tautological pair.
+    let mut pos_idx = 0;
+    let mut neg_idx = 0;
     members
         .into_iter()
         .filter(|m| match m {
-            OutputTy::Primitive(p) => !tautologies.contains(p),
-            OutputTy::Neg(inner) => match &*inner.0 {
-                OutputTy::Primitive(p) => !tautologies.contains(p),
-                _ => true,
-            },
-            _ => true,
+            OutputTy::Neg(_) => {
+                let keep = !tautological_negatives.contains(&neg_idx);
+                neg_idx += 1;
+                keep
+            }
+            OutputTy::TyVar(_) | OutputTy::Bottom | OutputTy::Top => true,
+            _ => {
+                let keep = !tautological_positives.contains(&pos_idx);
+                pos_idx += 1;
+                keep
+            }
         })
         .collect()
 }
 
-/// Check whether an intersection contains a contradictory pair:
-/// `Primitive(P)` and `Neg(Primitive(Q))` where `P == Q` or `P.is_subtype_of(Q)`.
-/// For example, `int & ~int` or `int & ~number` are contradictions (⊥).
-fn has_primitive_contradiction(members: &[OutputTy]) -> bool {
-    use lang_ty::PrimitiveTy;
-
-    // Collect positive primitives and negated primitives separately.
-    let mut positives: Vec<&PrimitiveTy> = Vec::new();
-    let mut negatives: Vec<&PrimitiveTy> = Vec::new();
+/// Check whether an intersection contains a contradictory pair.
+///
+/// Two kinds of contradictions:
+/// 1. `T ∧ ¬S` where `T <: S` (subsumption). E.g. `Int ∧ ¬Number = ⊥`
+///    because every Int is a Number. Note: `Number ∧ ¬Int` is NOT a
+///    contradiction — Number includes Float, which is not Int.
+/// 2. `T ∧ S` where `T` and `S` are provably disjoint. E.g. `Int ∧ String = ⊥`.
+///
+/// Examples:
+/// - `int & ~int` → contradiction (Int <: Int, reflexive)
+/// - `int & ~number` → contradiction (Int <: Number)
+/// - `{name: string} & ~{name: string}` → contradiction (structural equality)
+/// - `number & ~int` → NOT a contradiction (Number ⊄ Int)
+/// - `int & ~null` → NOT a contradiction (disjoint, handled by redundant neg removal)
+fn has_type_contradiction(members: &[OutputTy]) -> bool {
+    // Collect positive (non-negated) and negated inner types.
+    let mut positives: Vec<&OutputTy> = Vec::new();
+    let mut negated_inners: Vec<&OutputTy> = Vec::new();
 
     for m in members {
         match m {
-            OutputTy::Primitive(p) => positives.push(p),
-            OutputTy::Neg(inner) => {
-                if let OutputTy::Primitive(p) = &*inner.0 {
-                    negatives.push(p);
-                }
-            }
-            _ => {}
+            OutputTy::Neg(inner) => negated_inners.push(&inner.0),
+            OutputTy::TyVar(_) | OutputTy::Bottom | OutputTy::Top => {}
+            other => positives.push(other),
         }
     }
 
-    // A contradiction exists when a positive primitive is equal to or a
-    // subtype of a negated primitive: e.g. `int & ~number` is ⊥ because
-    // Int <: Number, so Int ∧ ¬Number = ⊥.
+    // A contradiction exists when a positive type is a subtype of (or equal
+    // to) a negated type: T ∧ ¬S = ⊥ iff T <: S. The previous check used
+    // "not disjoint" which conflated overlap with subsumption — e.g. it would
+    // incorrectly flag `Number ∧ ¬Int` as contradictory.
     for pos in &positives {
-        for neg in &negatives {
-            if pos == neg || pos.is_subtype_of(neg) {
+        for neg in &negated_inners {
+            if is_output_subtype_or_equal(pos, neg) {
                 return true;
             }
         }
     }
+
+    // Also check for mutually disjoint positives: String ∧ Int = ⊥
+    // because String and Int have no overlap.
+    for i in 0..positives.len() {
+        for j in (i + 1)..positives.len() {
+            if are_output_types_disjoint(positives[i], positives[j]) {
+                return true;
+            }
+        }
+    }
+
     false
+}
+
+/// Check whether `sub` is a subtype of (or structurally equal to) `sup` in the
+/// OutputTy representation. This is a conservative approximation — it returns
+/// true only when the relationship is provable from constructor shape alone.
+///
+/// Used by `has_type_contradiction` to determine whether `T ∧ ¬S = ⊥`.
+///
+/// Handles:
+/// - Primitive subtyping: `Int <: Number`, `Float <: Number`
+/// - Structural equality for compound types (attrsets, lists, lambdas)
+/// - Different constructors → not a subtype
+fn is_output_subtype_or_equal(sub: &OutputTy, sup: &OutputTy) -> bool {
+    match (sub, sup) {
+        (OutputTy::Primitive(p1), OutputTy::Primitive(p2)) => p1 == p2 || p1.is_subtype_of(p2),
+        // Same structural compound types → equal (conservative).
+        (a, b) if a == b => true,
+        // Different constructors or non-trivially-comparable → not a subtype.
+        _ => false,
+    }
+}
+
+/// Check whether two OutputTy values are provably disjoint (their intersection
+/// is uninhabited). Delegates to the shared `are_shapes_disjoint` logic in
+/// `lang_ty::disjoint`.
+///
+/// See `lang_ty::disjoint::are_shapes_disjoint` for the full disjointness rules.
+fn are_output_types_disjoint(a: &OutputTy, b: &OutputTy) -> bool {
+    // Build owned key maps for attrset shapes upfront so borrows outlive the
+    // shape references.
+    let a_keys: BTreeMap<SmolStr, ()>;
+    let b_keys: BTreeMap<SmolStr, ()>;
+
+    let a_shape = match a {
+        OutputTy::Primitive(p) => ConstructorShape::Primitive(*p),
+        OutputTy::AttrSet(attr) => {
+            a_keys = attr.fields.keys().map(|k| (k.clone(), ())).collect();
+            ConstructorShape::AttrSet {
+                fields: &a_keys,
+                open: attr.open,
+                optional: &attr.optional_fields,
+            }
+        }
+        OutputTy::List(_) => ConstructorShape::List,
+        OutputTy::Lambda { .. } => ConstructorShape::Lambda,
+        _ => ConstructorShape::Opaque,
+    };
+
+    let b_shape = match b {
+        OutputTy::Primitive(p) => ConstructorShape::Primitive(*p),
+        OutputTy::AttrSet(attr) => {
+            b_keys = attr.fields.keys().map(|k| (k.clone(), ())).collect();
+            ConstructorShape::AttrSet {
+                fields: &b_keys,
+                open: attr.open,
+                optional: &attr.optional_fields,
+            }
+        }
+        OutputTy::List(_) => ConstructorShape::List,
+        OutputTy::Lambda { .. } => ConstructorShape::Lambda,
+        _ => ConstructorShape::Opaque,
+    };
+
+    are_shapes_disjoint(&a_shape, &b_shape)
+}
+
+/// Remove redundant negations from an intersection. When the intersection
+/// contains a positive type `T` with a known constructor and `Neg(S)` where
+/// `T` and `S` are provably disjoint, the negation is redundant because `T`
+/// can never be `S` anyway.
+///
+/// Examples:
+/// - `{name: string} & ~null` → `{name: string}` (attrset ≠ null)
+/// - `[int] & ~string` → `[int]` (list ≠ string)
+/// - `number & ~null` → `number` (number ≠ null)
+///
+/// Does NOT remove when the only positive members are TyVars — `a & ~null`
+/// stays as-is because `a` could be null.
+fn remove_redundant_negations(members: Vec<OutputTy>) -> Vec<OutputTy> {
+    // Collect positive members that have a known constructor (not TyVar/Bottom/Neg).
+    let concrete_positives: Vec<OutputTy> = members
+        .iter()
+        .filter(|m| {
+            matches!(
+                m,
+                OutputTy::Primitive(_)
+                    | OutputTy::AttrSet(_)
+                    | OutputTy::List(_)
+                    | OutputTy::Lambda { .. }
+            )
+        })
+        .cloned()
+        .collect();
+
+    if concrete_positives.is_empty() {
+        return members;
+    }
+
+    members
+        .into_iter()
+        .filter(|m| {
+            if let OutputTy::Neg(inner) = m {
+                // Keep this negation only if it's NOT disjoint from all concrete
+                // positives. If it IS disjoint from every positive, it's redundant.
+                !concrete_positives
+                    .iter()
+                    .all(|pos| are_output_types_disjoint(pos, &inner.0))
+            } else {
+                true
+            }
+        })
+        .collect()
 }
 
 /// Flatten a nested composite type (union or intersection) and deduplicate members.
@@ -631,41 +868,48 @@ mod tests {
         assert_eq!(result, OutputTy::Neg(TyRef::from(arc_ty!(Int))));
     }
 
-    // -- has_primitive_contradiction tests -------------------------------------
+    // -- has_type_contradiction tests -------------------------------------
 
     #[test]
     fn contradiction_exact_match() {
         // Int ∧ ¬Int → contradiction
         let members = vec![arc_ty!(Int), OutputTy::Neg(TyRef::from(arc_ty!(Int)))];
-        assert!(has_primitive_contradiction(&members));
+        assert!(has_type_contradiction(&members));
     }
 
     #[test]
     fn contradiction_subtype() {
         // Int ∧ ¬Number → contradiction (Int <: Number)
         let members = vec![arc_ty!(Int), OutputTy::Neg(TyRef::from(arc_ty!(Number)))];
-        assert!(has_primitive_contradiction(&members));
+        assert!(has_type_contradiction(&members));
     }
 
     #[test]
     fn contradiction_float_subtype() {
         // Float ∧ ¬Number → contradiction (Float <: Number)
         let members = vec![arc_ty!(Float), OutputTy::Neg(TyRef::from(arc_ty!(Number)))];
-        assert!(has_primitive_contradiction(&members));
+        assert!(has_type_contradiction(&members));
     }
 
     #[test]
     fn no_contradiction_different_types() {
         // Int ∧ ¬String — no contradiction
         let members = vec![arc_ty!(Int), OutputTy::Neg(TyRef::from(arc_ty!(String)))];
-        assert!(!has_primitive_contradiction(&members));
+        assert!(!has_type_contradiction(&members));
     }
 
     #[test]
-    fn no_contradiction_no_negation() {
-        // Int ∧ String — no negation, no contradiction
+    fn contradiction_disjoint_positives() {
+        // Int ∧ String — disjoint primitives, IS a contradiction.
         let members = vec![arc_ty!(Int), arc_ty!(String)];
-        assert!(!has_primitive_contradiction(&members));
+        assert!(has_type_contradiction(&members));
+    }
+
+    #[test]
+    fn no_contradiction_same_positives() {
+        // Int ∧ Int — same type, no contradiction.
+        let members = vec![arc_ty!(Int), arc_ty!(Int)];
+        assert!(!has_type_contradiction(&members));
     }
 
     // -- remove_tautological_pairs tests --------------------------------------
@@ -728,7 +972,8 @@ mod tests {
     #[test]
     fn no_contradiction_string_neg_null() {
         // `string & ~null` is NOT a contradiction — string and null are
-        // unrelated types. The intersection should be preserved.
+        // disjoint types. The ~null is redundant (string is inherently
+        // non-null) and gets removed, leaving just `string`.
         use crate::storage::TypeStorage;
         use lang_ty::Ty;
 
@@ -743,10 +988,394 @@ mod tests {
 
         let provenance = std::collections::HashMap::new();
         let result = canonicalize_standalone(&table, &provenance, var_id, Negative);
-        // Should be an intersection, not a TyVar (not a contradiction).
-        assert!(
-            matches!(result, OutputTy::Intersection(_)),
-            "string & ~null should produce Intersection, got: {result}"
+        // ~null is redundant alongside string (disjoint constructors), so
+        // it gets removed, leaving just string.
+        assert_eq!(
+            result,
+            arc_ty!(String),
+            "string & ~null should simplify to string, got: {result}"
         );
+    }
+
+    // -- are_output_types_disjoint tests --------------------------------------
+
+    #[test]
+    fn disjoint_primitive_vs_primitive() {
+        assert!(are_output_types_disjoint(&arc_ty!(Int), &arc_ty!(String)));
+        assert!(are_output_types_disjoint(&arc_ty!(Null), &arc_ty!(Bool)));
+        assert!(are_output_types_disjoint(&arc_ty!(Path), &arc_ty!(Float)));
+    }
+
+    #[test]
+    fn not_disjoint_same_primitive() {
+        assert!(!are_output_types_disjoint(&arc_ty!(Int), &arc_ty!(Int)));
+        assert!(!are_output_types_disjoint(
+            &arc_ty!(String),
+            &arc_ty!(String)
+        ));
+    }
+
+    #[test]
+    fn not_disjoint_subtype_primitives() {
+        // Int and Number overlap (Int <: Number).
+        assert!(!are_output_types_disjoint(&arc_ty!(Int), &arc_ty!(Number)));
+        assert!(!are_output_types_disjoint(&arc_ty!(Number), &arc_ty!(Int)));
+        // Float and Number overlap (Float <: Number).
+        assert!(!are_output_types_disjoint(
+            &arc_ty!(Float),
+            &arc_ty!(Number)
+        ));
+    }
+
+    #[test]
+    fn disjoint_primitive_vs_attrset() {
+        let attrset = arc_ty!({ "name": String });
+        assert!(are_output_types_disjoint(&arc_ty!(Null), &attrset));
+        assert!(are_output_types_disjoint(&attrset, &arc_ty!(Null)));
+        assert!(are_output_types_disjoint(&arc_ty!(Int), &attrset));
+    }
+
+    #[test]
+    fn disjoint_primitive_vs_list() {
+        let list = arc_ty!([Int]);
+        assert!(are_output_types_disjoint(&arc_ty!(String), &list));
+        assert!(are_output_types_disjoint(&list, &arc_ty!(String)));
+    }
+
+    #[test]
+    fn disjoint_primitive_vs_lambda() {
+        let lambda = OutputTy::Lambda {
+            param: TyRef::from(arc_ty!(Int)),
+            body: TyRef::from(arc_ty!(String)),
+        };
+        assert!(are_output_types_disjoint(&arc_ty!(Null), &lambda));
+        assert!(are_output_types_disjoint(&lambda, &arc_ty!(Null)));
+    }
+
+    #[test]
+    fn disjoint_attrset_vs_list() {
+        let attrset = arc_ty!({ "x": Int });
+        let list = arc_ty!([Int]);
+        assert!(are_output_types_disjoint(&attrset, &list));
+        assert!(are_output_types_disjoint(&list, &attrset));
+    }
+
+    #[test]
+    fn disjoint_attrset_vs_lambda() {
+        let attrset = arc_ty!({ "x": Int });
+        let lambda = OutputTy::Lambda {
+            param: TyRef::from(arc_ty!(Int)),
+            body: TyRef::from(arc_ty!(String)),
+        };
+        assert!(are_output_types_disjoint(&attrset, &lambda));
+        assert!(are_output_types_disjoint(&lambda, &attrset));
+    }
+
+    #[test]
+    fn disjoint_list_vs_lambda() {
+        let list = arc_ty!([Int]);
+        let lambda = OutputTy::Lambda {
+            param: TyRef::from(arc_ty!(Int)),
+            body: TyRef::from(arc_ty!(String)),
+        };
+        assert!(are_output_types_disjoint(&list, &lambda));
+        assert!(are_output_types_disjoint(&lambda, &list));
+    }
+
+    #[test]
+    fn disjoint_closed_attrsets_different_required_fields() {
+        // Closed {x: Int} vs closed {y: String} — disjoint because
+        // each requires a field the other doesn't have.
+        let attrset1 = arc_ty!({ "x": Int });
+        let attrset2 = arc_ty!({ "y": String });
+        assert!(are_output_types_disjoint(&attrset1, &attrset2));
+    }
+
+    #[test]
+    fn not_disjoint_closed_attrsets_shared_field() {
+        // Closed {x: Int} vs closed {x: String} — NOT disjoint because
+        // both have field `x` (they overlap structurally, the field types
+        // could unify or not, but the attrset shapes aren't disjoint).
+        let attrset1 = arc_ty!({ "x": Int });
+        let attrset2 = arc_ty!({ "x": String });
+        assert!(!are_output_types_disjoint(&attrset1, &attrset2));
+    }
+
+    #[test]
+    fn disjoint_open_attrset_vs_closed_missing_required() {
+        // Open {x: Int, ...} vs closed {y: String} — disjoint because
+        // the open attrset requires `x` but the closed one doesn't have it.
+        let open = arc_ty!({ "x": Int; ... });
+        let closed = arc_ty!({ "y": String });
+        assert!(are_output_types_disjoint(&open, &closed));
+    }
+
+    #[test]
+    fn not_disjoint_open_attrsets() {
+        // Open {x: Int, ...} vs open {y: String, ...} — NOT disjoint because
+        // both are open, so a value with both fields could satisfy both.
+        let open1 = arc_ty!({ "x": Int; ... });
+        let open2 = arc_ty!({ "y": String; ... });
+        assert!(!are_output_types_disjoint(&open1, &open2));
+    }
+
+    #[test]
+    fn disjoint_closed_vs_open_attrset_missing_required_field() {
+        // Closed {x: Int} vs open {y: String, ...} — disjoint because
+        // the closed attrset doesn't have `y` which is required by the open one.
+        let closed = arc_ty!({ "x": Int });
+        let open = arc_ty!({ "y": String; ... });
+        assert!(are_output_types_disjoint(&closed, &open));
+    }
+
+    #[test]
+    fn not_disjoint_same_compound() {
+        let list1 = arc_ty!([Int]);
+        let list2 = arc_ty!([String]);
+        assert!(!are_output_types_disjoint(&list1, &list2));
+    }
+
+    #[test]
+    fn not_disjoint_tyvar() {
+        // TyVar could be anything — can't prove disjointness.
+        assert!(!are_output_types_disjoint(
+            &OutputTy::TyVar(0),
+            &arc_ty!(Int)
+        ));
+        assert!(!are_output_types_disjoint(
+            &arc_ty!(Int),
+            &OutputTy::TyVar(0)
+        ));
+    }
+
+    // -- has_type_contradiction cross-type tests ------------------------------
+
+    #[test]
+    fn contradiction_attrset_neg_attrset() {
+        // {x: int} ∧ ¬{x: int} → contradiction (same attrset).
+        let attrset = arc_ty!({ "x": Int });
+        let members = vec![attrset.clone(), OutputTy::Neg(TyRef::from(attrset))];
+        assert!(has_type_contradiction(&members));
+    }
+
+    #[test]
+    fn contradiction_list_neg_list() {
+        // [int] ∧ ¬[int] → contradiction.
+        let list = arc_ty!([Int]);
+        let members = vec![list.clone(), OutputTy::Neg(TyRef::from(list))];
+        assert!(has_type_contradiction(&members));
+    }
+
+    #[test]
+    fn no_contradiction_attrset_neg_null() {
+        // {x: int} ∧ ¬null — not contradictory (different constructors).
+        let members = vec![
+            arc_ty!({ "x": Int }),
+            OutputTy::Neg(TyRef::from(arc_ty!(Null))),
+        ];
+        assert!(!has_type_contradiction(&members));
+    }
+
+    #[test]
+    fn no_contradiction_list_neg_string() {
+        // [int] ∧ ¬string — not contradictory.
+        let members = vec![arc_ty!([Int]), OutputTy::Neg(TyRef::from(arc_ty!(String)))];
+        assert!(!has_type_contradiction(&members));
+    }
+
+    // -- remove_redundant_negations tests ------------------------------------
+
+    #[test]
+    fn redundant_neg_removed_attrset_neg_null() {
+        // {x: int} ∧ ¬null → {x: int} (attrset is inherently non-null).
+        let attrset = arc_ty!({ "x": Int });
+        let members = vec![attrset.clone(), OutputTy::Neg(TyRef::from(arc_ty!(Null)))];
+        let result = remove_redundant_negations(members);
+        assert_eq!(result, vec![attrset]);
+    }
+
+    #[test]
+    fn redundant_neg_removed_list_neg_string() {
+        // [int] ∧ ¬string → [int] (list is inherently non-string).
+        let list = arc_ty!([Int]);
+        let members = vec![list.clone(), OutputTy::Neg(TyRef::from(arc_ty!(String)))];
+        let result = remove_redundant_negations(members);
+        assert_eq!(result, vec![list]);
+    }
+
+    #[test]
+    fn redundant_neg_removed_number_neg_null() {
+        // number ∧ ¬null → number (number and null are disjoint).
+        let members = vec![arc_ty!(Number), OutputTy::Neg(TyRef::from(arc_ty!(Null)))];
+        let result = remove_redundant_negations(members);
+        assert_eq!(result, vec![arc_ty!(Number)]);
+    }
+
+    #[test]
+    fn redundant_neg_kept_when_only_tyvar() {
+        // a ∧ ¬null — TyVar could be null, so ¬null is not redundant.
+        let members = vec![
+            OutputTy::TyVar(0),
+            OutputTy::Neg(TyRef::from(arc_ty!(Null))),
+        ];
+        let result = remove_redundant_negations(members.clone());
+        assert_eq!(result, members);
+    }
+
+    #[test]
+    fn redundant_neg_not_removed_when_overlapping() {
+        // int ∧ ¬number — not redundant (Int <: Number, this is a contradiction,
+        // but the negation itself is NOT redundant — it carries information).
+        let members = vec![arc_ty!(Int), OutputTy::Neg(TyRef::from(arc_ty!(Number)))];
+        let result = remove_redundant_negations(members.clone());
+        assert_eq!(result, members);
+    }
+
+    // -- tautology detection for compound types -------------------------------
+
+    #[test]
+    fn tautology_attrset_neg_attrset() {
+        // {x: int} ∨ ¬{x: int} → empty (tautology).
+        let attrset = arc_ty!({ "x": Int });
+        let members = vec![attrset.clone(), OutputTy::Neg(TyRef::from(attrset))];
+        let result = remove_tautological_pairs(members);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn tautology_list_neg_list() {
+        // [int] ∨ ¬[int] → empty.
+        let list = arc_ty!([Int]);
+        let members = vec![list.clone(), OutputTy::Neg(TyRef::from(list))];
+        let result = remove_tautological_pairs(members);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn tautology_compound_preserves_others() {
+        // {x: int} ∨ ¬{x: int} ∨ string → string.
+        let attrset = arc_ty!({ "x": Int });
+        let members = vec![
+            attrset.clone(),
+            OutputTy::Neg(TyRef::from(attrset)),
+            arc_ty!(String),
+        ];
+        let result = remove_tautological_pairs(members);
+        assert_eq!(result, vec![arc_ty!(String)]);
+    }
+
+    // -- is_output_subtype_or_equal tests --------------------------------------
+
+    #[test]
+    fn subtype_int_number() {
+        assert!(is_output_subtype_or_equal(&arc_ty!(Int), &arc_ty!(Number)));
+    }
+
+    #[test]
+    fn subtype_float_number() {
+        assert!(is_output_subtype_or_equal(
+            &arc_ty!(Float),
+            &arc_ty!(Number)
+        ));
+    }
+
+    #[test]
+    fn subtype_reflexive() {
+        assert!(is_output_subtype_or_equal(&arc_ty!(Int), &arc_ty!(Int)));
+        assert!(is_output_subtype_or_equal(
+            &arc_ty!(String),
+            &arc_ty!(String)
+        ));
+    }
+
+    #[test]
+    fn not_subtype_number_int() {
+        // Number is NOT a subtype of Int — Number also includes Float.
+        assert!(!is_output_subtype_or_equal(&arc_ty!(Number), &arc_ty!(Int)));
+    }
+
+    #[test]
+    fn not_subtype_different_constructors() {
+        assert!(!is_output_subtype_or_equal(&arc_ty!(Int), &arc_ty!(String)));
+        assert!(!is_output_subtype_or_equal(
+            &arc_ty!(Int),
+            &arc_ty!({ "x": Int })
+        ));
+    }
+
+    #[test]
+    fn subtype_structural_equality_attrset() {
+        let a = arc_ty!({ "x": Int });
+        let b = arc_ty!({ "x": Int });
+        assert!(is_output_subtype_or_equal(&a, &b));
+    }
+
+    // -- Regression: Number ∧ ¬Int is NOT a contradiction ----------------------
+
+    #[test]
+    fn no_contradiction_number_neg_int() {
+        // Number ∧ ¬Int should NOT be a contradiction. Number includes Float,
+        // so Number ∧ ¬Int = Float (a valid, inhabited type). The old
+        // "not disjoint" check incorrectly flagged this as contradictory
+        // because Number and Int overlap.
+        let members = vec![arc_ty!(Number), OutputTy::Neg(TyRef::from(arc_ty!(Int)))];
+        assert!(
+            !has_type_contradiction(&members),
+            "Number ∧ ¬Int should NOT be a contradiction (Number ⊄ Int)"
+        );
+    }
+
+    #[test]
+    fn no_contradiction_number_neg_float() {
+        // Number ∧ ¬Float should NOT be a contradiction (Number ∧ ¬Float = Int).
+        let members = vec![arc_ty!(Number), OutputTy::Neg(TyRef::from(arc_ty!(Float)))];
+        assert!(
+            !has_type_contradiction(&members),
+            "Number ∧ ¬Float should NOT be a contradiction (Number ⊄ Float)"
+        );
+    }
+
+    // -- OutputTy::Top tests -------------------------------------------------
+
+    #[test]
+    fn tautology_produces_top_in_positive_canonicalization() {
+        // A variable whose lower bounds are `int` and `~int` produces a
+        // tautology (int | ~int = ⊤). In positive position, this should
+        // canonicalize to Top (any).
+        use crate::storage::TypeStorage;
+        use lang_ty::Ty;
+
+        let mut table = TypeStorage::new();
+        let var_id = table.new_var();
+        let int_ty = table.new_concrete(Ty::Primitive(lang_ty::PrimitiveTy::Int));
+        let neg_int = table.new_concrete(Ty::Neg(int_ty));
+
+        table.add_lower_bound(var_id, int_ty);
+        table.add_lower_bound(var_id, neg_int);
+
+        let provenance = std::collections::HashMap::new();
+        let result = canonicalize_standalone(&table, &provenance, var_id, Positive);
+        assert_eq!(
+            result,
+            arc_ty!(Top),
+            "int | ~int tautology should produce Top (any), got: {result}"
+        );
+    }
+
+    #[test]
+    fn top_displays_as_any() {
+        let top = arc_ty!(Top);
+        assert_eq!(top.to_string(), "any");
+    }
+
+    #[test]
+    fn top_identity_for_has_type_contradiction() {
+        // Top in a contradiction check should be ignored (like TyVar).
+        let members = vec![
+            arc_ty!(Top),
+            arc_ty!(Int),
+            OutputTy::Neg(TyRef::from(arc_ty!(String))),
+        ];
+        assert!(!has_type_contradiction(&members));
     }
 }

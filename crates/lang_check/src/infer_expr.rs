@@ -192,7 +192,12 @@ impl CheckCtx<'_> {
                     .map_err(|err| self.locate_err(err))?;
 
                 // Analyze the condition for type narrowing opportunities.
-                let narrow_info = self.analyze_condition(cond);
+                let narrow_info = lang_ast::narrow::analyze_condition(
+                    self.module,
+                    self.name_res,
+                    self.binding_exprs,
+                    cond,
+                );
 
                 let then_ty = self.infer_with_narrowing(then_body, &narrow_info, true)?;
                 let else_ty = self.infer_with_narrowing(else_body, &narrow_info, false)?;
@@ -277,14 +282,14 @@ impl CheckCtx<'_> {
                     // Only emit when there's no default (`or`) — defaulted field
                     // accesses are optional by design.
                     if !has_default {
-                        self.deferred.active.push(super::PendingConstraint::HasField(
-                            PendingHasField {
+                        self.deferred
+                            .active
+                            .push(super::PendingConstraint::HasField(PendingHasField {
                                 set_ty,
                                 field: opt_key,
                                 field_ty: value_ty,
                                 at_expr: self.current_expr,
-                            },
-                        ));
+                            }));
                     }
 
                     Ok::<TyId, LocatedError>(value_ty)
@@ -373,7 +378,12 @@ impl CheckCtx<'_> {
                 // Assert body only executes when the condition is true,
                 // so apply then-branch narrowings (e.g. `assert x != null;`
                 // narrows x to non-null in the body).
-                let narrow_info = self.analyze_condition(cond);
+                let narrow_info = lang_ast::narrow::analyze_condition(
+                    self.module,
+                    self.name_res,
+                    self.binding_exprs,
+                    cond,
+                );
                 self.infer_with_narrowing(body, &narrow_info, true)
             }
 
@@ -480,46 +490,42 @@ impl CheckCtx<'_> {
         &self,
         fun_expr: ExprId,
     ) -> Option<crate::narrow::NarrowInfo> {
-        let Expr::Apply {
-            fun: inner_fn,
-            arg: cond_expr,
-        } = &self.module[fun_expr]
-        else {
-            return None;
-        };
-
-        // Is the inner function a known conditional function?
-        self.detect_conditional_fn(*inner_fn)?;
-
-        // Extract narrowing from the condition argument.
-        let info = self.analyze_condition(*cond_expr);
-        if info.then_branch.is_empty() {
-            // The condition didn't produce any narrowing — no point
-            // wrapping the body inference.
-            return None;
-        }
-        Some(info)
-    }
-
-    /// Create a fresh type variable for narrowing, linked to the original
-    /// variable and a constraint via one-way upper bounds.
-    ///
-    /// Returns a fresh variable `β` where `β ≤ original` and `β ≤ constraint`.
-    /// Using `add_upper_bound` directly (instead of `constrain()`) avoids
-    /// bidirectional propagation — same technique as `link_extruded_var`.
-    fn narrow_fresh_var(&mut self, original: TyId, constraint: TyId) -> TyId {
-        let fresh = self.new_var();
-        self.types.storage.add_upper_bound(fresh, original);
-        self.types.storage.add_upper_bound(fresh, constraint);
-        fresh
+        lang_ast::narrow::detect_conditional_apply_narrowing(
+            self.module,
+            self.name_res,
+            self.binding_exprs,
+            fun_expr,
+        )
     }
 
     /// Compute the override TyId for a single NarrowBinding.
     ///
-    /// Given a predicate and the name it narrows, returns a fresh TyId that
-    /// represents the narrowed type. Shared by `infer_with_narrowing` (inline
-    /// branch narrowing) and `install_binding_narrowing` (SCC-group
-    /// narrowing for let-bindings under guard scopes).
+    /// Given a predicate and the name it narrows, returns a TyId representing
+    /// the narrowed type as `Inter(original, constraint)`. This is the
+    /// MLstruct-style approach: narrowing produces first-class intersection
+    /// types that survive extrusion/generalization, instead of the old
+    /// side-channel fresh variables with one-way bounds.
+    ///
+    /// Shared by `infer_with_narrowing` (inline branch narrowing) and
+    /// `install_binding_narrowing` (SCC-group narrowing for let-bindings
+    /// under guard scopes).
+    ///
+    /// ## Design note: `original_ty` vs `ty_for_name_direct`
+    ///
+    /// Most predicates use `name_slot_or_override(name)` as the "original"
+    /// type in the intersection. This resolves through existing narrow
+    /// overrides (for nested narrowing like `if isAttrs x then if x ? y`)
+    /// and through poly_type_env (for generalized names).
+    ///
+    /// `NotHasField` is the exception: it uses `ty_for_name_direct(name)`
+    /// — the raw pre-allocated variable slot — because the intersection
+    /// `Inter(var, Neg({field: β, ...}))` requires a type variable on the
+    /// left side for MLstruct-style variable isolation in
+    /// `constrain_lhs_inter`. If we used `name_slot_or_override`, a
+    /// generalized name would resolve to a concrete type (e.g. a closed
+    /// attrset), which lacks the variable needed for isolation and would
+    /// cause constraint failures. Other predicates don't have this issue
+    /// because their constraint side is always compatible with concrete types.
     pub(crate) fn compute_narrow_override(
         &mut self,
         binding: &crate::narrow::NarrowBinding,
@@ -528,14 +534,15 @@ impl CheckCtx<'_> {
 
         match binding.predicate {
             crate::narrow::NarrowPredicate::IsType(prim) => {
-                // α ∧ PrimType = PrimType for base types.
-                self.alloc_prim(prim)
+                // α ∧ PrimType — structural intersection with the primitive.
+                let prim_ty = self.alloc_prim(crate::narrow::narrow_prim_to_ty(prim));
+                self.alloc_concrete(Ty::Inter(original_ty, prim_ty))
             }
             crate::narrow::NarrowPredicate::IsNotType(prim) => {
-                // α ∧ ¬PrimType — fresh var linked to original and ¬Prim.
-                let prim_ty = self.alloc_prim(prim);
+                // α ∧ ¬PrimType — structural intersection with negation.
+                let prim_ty = self.alloc_prim(crate::narrow::narrow_prim_to_ty(prim));
                 let neg_ty = self.alloc_concrete(Ty::Neg(prim_ty));
-                self.narrow_fresh_var(original_ty, neg_ty)
+                self.alloc_concrete(Ty::Inter(original_ty, neg_ty))
             }
             crate::narrow::NarrowPredicate::HasField(ref field_name) => {
                 // α ∧ {field: β}
@@ -548,7 +555,28 @@ impl CheckCtx<'_> {
                     open: true,
                     optional_fields: BTreeSet::new(),
                 }));
-                self.narrow_fresh_var(original_ty, constraint)
+                self.alloc_concrete(Ty::Inter(original_ty, constraint))
+            }
+            crate::narrow::NarrowPredicate::NotHasField(ref field_name) => {
+                // α ∧ ¬{field: β, ...} — the variable does NOT have this field.
+                //
+                // Use the pre-allocated variable (not the resolved poly type)
+                // to ensure variable isolation works in constrain_lhs_inter.
+                // The poly_type_env entry may have been resolved to a concrete
+                // type (e.g. a closed attrset), which lacks the variable needed
+                // for MLstruct-style isolation.
+                let var_ty = self.ty_for_name_direct(binding.name);
+                let fresh_field_var = self.new_var();
+                let has_field_ty = self.alloc_concrete(Ty::AttrSet(AttrSetTy {
+                    fields: [(field_name.clone(), fresh_field_var)]
+                        .into_iter()
+                        .collect(),
+                    dyn_ty: None,
+                    open: true,
+                    optional_fields: BTreeSet::new(),
+                }));
+                let neg = self.alloc_concrete(Ty::Neg(has_field_ty));
+                self.alloc_concrete(Ty::Inter(var_ty, neg))
             }
             crate::narrow::NarrowPredicate::IsAttrSet => {
                 // α ∧ {..}
@@ -558,13 +586,13 @@ impl CheckCtx<'_> {
                     open: true,
                     optional_fields: BTreeSet::new(),
                 }));
-                self.narrow_fresh_var(original_ty, constraint)
+                self.alloc_concrete(Ty::Inter(original_ty, constraint))
             }
             crate::narrow::NarrowPredicate::IsList => {
                 // α ∧ [β]
                 let elem_var = self.new_var();
                 let constraint = self.alloc_concrete(Ty::List(elem_var));
-                self.narrow_fresh_var(original_ty, constraint)
+                self.alloc_concrete(Ty::Inter(original_ty, constraint))
             }
             crate::narrow::NarrowPredicate::IsFunction => {
                 // α ∧ (β → γ)
@@ -574,7 +602,7 @@ impl CheckCtx<'_> {
                     param: param_var,
                     body: body_var,
                 });
-                self.narrow_fresh_var(original_ty, constraint)
+                self.alloc_concrete(Ty::Inter(original_ty, constraint))
             }
         }
     }

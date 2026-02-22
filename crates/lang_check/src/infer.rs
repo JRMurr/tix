@@ -61,12 +61,6 @@ impl CheckCtx<'_> {
             self.new_var();
         }
 
-        // Pre-pass: detect which let-bindings sit inside narrowing scopes
-        // (if-then-else branches, assert bodies, conditional function args).
-        // This must run after pre-allocation (analyze_condition uses name
-        // resolution which indexes into the module) but before SCC iteration.
-        self.compute_binding_narrow_scopes();
-
         let mut errors = Vec::new();
 
         for group in groups {
@@ -181,13 +175,13 @@ impl CheckCtx<'_> {
         let mut inferred: Vec<(lang_ast::NameId, TyId)> = Vec::new();
 
         for def in group {
-            // If this binding was detected inside a narrowing scope by the
-            // pre-pass, install the narrowing overrides so that references
-            // to narrowed names (e.g. `pasta` after `pasta != null`) get the
-            // narrowed type instead of the original.
-            let narrow_bindings = self.binding_narrow_scopes.get(&def.name()).cloned();
-            let saved = if let Some(ref bindings) = narrow_bindings {
-                self.install_narrow_overrides(bindings)
+            // If this binding sits inside a narrowing scope (detected during
+            // SCC grouping in lang_ast), install the narrowing overrides so
+            // that references to narrowed names (e.g. `pasta` after
+            // `pasta != null`) get the narrowed type instead of the original.
+            let narrow_scope = def.narrow_scope();
+            let saved = if !narrow_scope.is_empty() {
+                self.install_narrow_overrides(narrow_scope)
             } else {
                 Vec::new()
             };
@@ -406,6 +400,20 @@ impl CheckCtx<'_> {
                         let e = self.extrude_inner(inner, polarity.flip(), cache);
                         self.alloc_concrete(Ty::Neg(e))
                     }
+                    // Intersection and Union: covariant — polarity preserved.
+                    // This is what makes narrowing survive generalization:
+                    // Inter(α, ¬T) extrudes to Inter(α', ¬T') where α' is
+                    // the fresh call-site copy.
+                    Ty::Inter(a, b) => {
+                        let ea = self.extrude_inner(a, polarity, cache);
+                        let eb = self.extrude_inner(b, polarity, cache);
+                        self.alloc_concrete(Ty::Inter(ea, eb))
+                    }
+                    Ty::Union(a, b) => {
+                        let ea = self.extrude_inner(a, polarity, cache);
+                        let eb = self.extrude_inner(b, polarity, cache);
+                        self.alloc_concrete(Ty::Union(ea, eb))
+                    }
                 };
 
                 // Propagate alias provenance through extrusion so that
@@ -535,8 +543,10 @@ impl CheckCtx<'_> {
     ) -> Result<OverloadProgress, InferenceError> {
         let c = &ov.constraint;
         let spec = crate::operators::overload_spec(ov.op);
-        let lhs_concrete = self.types.find_concrete(c.lhs);
-        let rhs_concrete = self.types.find_concrete(c.rhs);
+        // Use find_concrete_through_inter so narrowed types like
+        // Inter(α, Int) are visible to the overload resolver as Int.
+        let lhs_concrete = self.types.find_concrete_through_inter(c.lhs);
+        let rhs_concrete = self.types.find_concrete_through_inter(c.rhs);
 
         // ---- Phase 1: Full Resolution — both operands concrete ----
 
@@ -621,11 +631,10 @@ impl CheckCtx<'_> {
     /// a TypeMismatch was already reported by the original constrain call).
     /// Returns Ok(false) if still pending (set type not yet concrete, or still open).
     /// Returns Err if the set resolved to a closed attrset without the field.
-    fn try_resolve_has_field(
-        &mut self,
-        hf: &PendingHasField,
-    ) -> Result<bool, InferenceError> {
-        let Some(concrete) = self.types.find_concrete(hf.set_ty) else {
+    fn try_resolve_has_field(&mut self, hf: &PendingHasField) -> Result<bool, InferenceError> {
+        // Use find_concrete_through_inter so narrowed types like
+        // Inter(α, {field: β}) expose the attrset for field lookup.
+        let Some(concrete) = self.types.find_concrete_through_inter(hf.set_ty) else {
             return Ok(false); // not yet concrete
         };
 
@@ -661,13 +670,16 @@ impl CheckCtx<'_> {
     }
 
     fn try_resolve_merge(&mut self, mg: &PendingMerge) -> Result<bool, InferenceError> {
-        let lhs_concrete = self.types.find_concrete(mg.lhs);
-        let rhs_concrete = self.types.find_concrete(mg.rhs);
+        let lhs_concrete = self.types.find_concrete_through_inter(mg.lhs);
+        let rhs_concrete = self.types.find_concrete_through_inter(mg.rhs);
 
         match (&lhs_concrete, &rhs_concrete) {
             (Some(Ty::AttrSet(_)), Some(Ty::AttrSet(_))) => {}
             (Some(lhs), Some(rhs)) => {
-                return Err(InferenceError::InvalidAttrMerge(Box::new((lhs.clone(), rhs.clone()))));
+                return Err(InferenceError::InvalidAttrMerge(Box::new((
+                    lhs.clone(),
+                    rhs.clone(),
+                ))));
             }
             _ => return Ok(false),
         }

@@ -31,6 +31,13 @@ extrusion.
   loop for re-instantiation, interaction with constraint cache). Consider replacing
   with intersection-type-based overloading (see Future Enhancements).
 
+### CLI Display of Narrowed Lambda Types
+
+- RESOLVED: The CLI correctly displays narrowed lambda types (e.g.
+  `x: if isNull x then 0 else x` → `a -> int | ~null`). The earlier
+  observation of `a` was caused by a race condition in `scripts/tixc.sh`
+  where the temp file could be deleted before the binary finished reading it.
+
 ### Canonicalization / Type Display
 
 - Early canonicalization captures clean polymorphic types for name bindings, but the
@@ -154,28 +161,15 @@ extrusion.
   most entries. Could hoist the `enable` option's description up to the
   parent namespace, or synthesize a summary from child options.
 
-### Negation Normalization
+### Stubs `Any` Type Alias
 
-- `OutputTy::Top` / `OutputTy::Bottom` variants would allow proper representation
-  of contradictions and tautologies instead of falling back to `TyVar`. Currently
-  contradictions (`A ∧ ¬A`) produce a bare type variable as a stand-in for ⊥,
-  and tautologies (`A ∨ ¬A`) simply remove both members. Adding explicit Top/Bottom
-  would be more principled but touches every `match` on `OutputTy`.
-
-- Cross-type disjointness in `constrain.rs` (e.g., `AttrSet <: Neg(Primitive)`) is
-  a separate concern from normalization. Currently only primitive-vs-negated-primitive
-  contradictions are detected.
-
-- Type simplification (`simplify.rs`) only removes bare `TyVar` members from
-  unions/intersections. `Neg(TyVar)` members are not removed even when the
-  variable is single-polarity, because the removal check only pattern-matches
-  on `OutputTy::TyVar(v)`, not on `Neg(TyVar(v))`.
-
-- Negation bounds (`¬T` upper bounds on narrowed variables) don't survive
-  let-generalization. `let f = x: if isNull x then 0 else x; in f` produces
-  `a -> int` — the `¬null` on x's narrowed else-branch var is lost during extrude.
-  The non-let form (`f: x: if isNull x then 0 else f x`) preserves it because the
-  narrowed var flows directly into `f`'s param without generalization/extrusion.
+- The `.tix` stub type alias `Any` is currently interned as a fresh
+  unconstrained type variable (`new_var()`) rather than `OutputTy::Top`.
+  Each `Any` reference creates an independent variable, which is pragmatically
+  correct but displays as a bare type variable (`a`) instead of `any`.
+  Adding `Ty::Top` to the inference-time representation would fix this but
+  requires updates to `constrain.rs`. Low priority — the fresh-variable
+  approach gives correct inference behavior.
 
 ### Null-Default Field: Polymorphic Return Type Loses Default
 
@@ -200,26 +194,11 @@ extrusion.
 
 - Full intersection-type-based operator overloading (replace pragmatic deferred
   overload list with proper intersection types for overloaded functions)
-- Type narrowing: Phase 1 (null narrowing), Phase 2a (`?`/hasAttr, single-key
-  only), Phase 2b (all `is*` primitive predicates, `builtins.hasAttr`), and
-  `¬T` output display are implemented. `Neg(R)` type variant is wired through
-  the full pipeline (Ty, OutputTy, constrain, extrude, canonicalize, Display)
-  and emitted as upper bounds on narrowed variables. Nested redundant guards
-  (e.g. `if x != null then (if x != null then ...)`) are handled because
-  equality comparisons (`==`/`!=`) generate no type constraints — they just
-  return bool. `isAttrs`, `isFunction`, `isList` now have then-branch
-  narrowing (constraining to `{..}`, `[α]`, `α → β` respectively).
-  Else-branch narrowing for compound types is skipped (no `¬{..}`).
-  Remaining: else-branch for `HasField` (field absence), multi-key `?`
-  paths, `&&`/`||` combinators.
 - Literal / singleton types (`"circle"` as a type, not just `string`)
-- Type narrowing + arithmetic in narrowed branches: `x: if x == null then x else x - 1`
-  produces body type `null` rather than `null | number`. The narrowed else-branch creates
-  a fresh variable for x; arithmetic on that fresh variable produces a result whose
-  lower bounds don't survive canonicalization in the union with null. The unconstrained
-  result var in positive position is bottom, so `null | bottom = null`. This may be
-  correct from the type system's perspective but is surprising. Worth investigating
-  whether the arithmetic constraints should propagate lower bounds more eagerly.
+- Multi-key `?` attrpath narrowing (only single keys are currently supported)
+- Else-branch narrowing for compound types (`isAttrs`/`isList`/`isFunction`
+  only narrow the then-branch; else-branch is skipped because `¬{..}` etc.
+  are not representable)
 - Co-occurrence simplification: path-based co-occurrence grouping is strict —
   variables that appear at structurally different positions (e.g. different attrset
   fields) won't be merged. This could be relaxed to use "occurrence signature"

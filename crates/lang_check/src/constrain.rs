@@ -31,7 +31,10 @@
 
 use super::{CheckCtx, InferenceError, TyId};
 use crate::storage::TypeEntry;
-use lang_ty::{AttrSetTy, Ty};
+use lang_ty::{
+    disjoint::{are_shapes_disjoint, ConstructorShape},
+    AttrSetTy, Ty,
+};
 
 impl CheckCtx<'_> {
     /// Record that `sub <: sup` — `sub` is a subtype of `sup`.
@@ -96,13 +99,23 @@ impl CheckCtx<'_> {
             (TypeEntry::Concrete(sub_ty), TypeEntry::Concrete(sup_ty)) => {
                 let sub_ty = sub_ty.clone();
                 let sup_ty = sup_ty.clone();
-                self.constrain_concrete(&sub_ty, &sup_ty)
+                self.constrain_concrete(sub, sup, &sub_ty, &sup_ty)
             }
         }
     }
 
     /// Structural subtyping between two concrete types.
-    fn constrain_concrete(&mut self, sub: &Ty<TyId>, sup: &Ty<TyId>) -> Result<(), InferenceError> {
+    ///
+    /// `sub_id`/`sup_id` are the original TyIds from `constrain()` — passed
+    /// through so that Inter/Union decomposition reuses them instead of
+    /// allocating fresh copies (which would defeat the constrain_cache).
+    fn constrain_concrete(
+        &mut self,
+        sub_id: TyId,
+        sup_id: TyId,
+        sub: &Ty<TyId>,
+        sup: &Ty<TyId>,
+    ) -> Result<(), InferenceError> {
         match (sub, sup) {
             // Lambda: contravariant in param, covariant in body.
             (
@@ -145,26 +158,258 @@ impl CheckCtx<'_> {
             // Neg(A) <: Neg(B) iff B <: A (contravariant flip).
             (Ty::Neg(a), Ty::Neg(b)) => self.constrain(*b, *a),
 
-            // Primitive <: Neg(inner): succeeds when the primitive is disjoint
-            // from what's negated. E.g. Int <: ¬Null succeeds because Int ≠ Null.
-            (Ty::Primitive(p1), Ty::Neg(inner)) => {
+            // Concrete <: Neg(inner): succeeds when the concrete type is
+            // provably disjoint from the negated type. Handles all constructor
+            // kinds — primitives, attrsets, lists, lambdas — not just primitives.
+            // E.g. AttrSet <: ¬Null succeeds because attrsets and null are
+            // disjoint constructors; Int <: ¬Null succeeds because Int ≠ Null.
+            (sub, Ty::Neg(inner)) if !matches!(sub, Ty::Inter(..) | Ty::Union(..)) => {
                 match self.types.storage.get(*inner).clone() {
-                    TypeEntry::Concrete(Ty::Primitive(p2)) => {
-                        if p1 == &p2 || p1.is_subtype_of(&p2) {
-                            // Contradiction: e.g. Null <: ¬Null, or Int <: ¬Number.
-                            Err(InferenceError::TypeMismatch(Box::new((sub.clone(), sup.clone()))))
-                        } else {
-                            // Disjoint atoms: Int <: ¬Null is fine.
+                    TypeEntry::Concrete(inner_ty) => {
+                        if are_types_disjoint(sub, &inner_ty) {
                             Ok(())
+                        } else {
+                            Err(InferenceError::TypeMismatch(Box::new((
+                                sub.clone(),
+                                sup.clone(),
+                            ))))
                         }
                     }
-                    // Inner is a variable or non-primitive — conservatively fail.
-                    _ => Err(InferenceError::TypeMismatch(Box::new((sub.clone(), sup.clone())))),
+                    // Inner is a variable — conservatively fail.
+                    _ => Err(InferenceError::TypeMismatch(Box::new((
+                        sub.clone(),
+                        sup.clone(),
+                    )))),
                 }
             }
 
+            // ── Intersection / Union rules (MLstruct-style) ─────────────────
+
+            // Intersection on RHS: V <: A ∧ B → V <: A and V <: B
+            // Always decomposable regardless of what the sub-type is.
+            (_, Ty::Inter(a, b)) => {
+                let (a, b) = (*a, *b);
+                // Reuse original sub_id — don't allocate a fresh copy.
+                self.constrain(sub_id, a)?;
+                self.constrain(sub_id, b)
+            }
+
+            // Union on LHS: A ∨ B <: V → A <: V and B <: V
+            // Always decomposable regardless of what the super-type is.
+            (Ty::Union(a, b), _) => {
+                let (a, b) = (*a, *b);
+                self.constrain(a, sup_id)?;
+                self.constrain(b, sup_id)
+            }
+
+            // Intersection on LHS — the "annoying" case (MLstruct-style).
+            // Variable isolation: when one member is a variable, move the
+            // other across the <: boundary with negation flipped.
+            //   α ∧ C <: U → α <: U ∨ ¬C
+            (Ty::Inter(a, b), _) => {
+                let (a, b) = (*a, *b);
+                self.constrain_lhs_inter(a, b, sup_id, sup)
+            }
+
+            // Union on RHS: route concrete sub to the appropriate member.
+            (_, Ty::Union(a, b)) => {
+                let (a, b) = (*a, *b);
+                self.constrain_rhs_union(sub, a, b, sub_id)
+            }
+
             // Type mismatch.
-            _ => Err(InferenceError::TypeMismatch(Box::new((sub.clone(), sup.clone())))),
+            _ => Err(InferenceError::TypeMismatch(Box::new((
+                sub.clone(),
+                sup.clone(),
+            )))),
+        }
+    }
+
+    /// `Inter(a, b) <: sup` — the "annoying" case. Use variable isolation
+    /// (MLstruct-style) when one member is a variable.
+    ///
+    /// Before applying variable isolation, we check if the concrete member is
+    /// provably disjoint from the super-type. If so, the intersection is
+    /// uninhabitable and we fail immediately. This catches cases like
+    /// `Inter(α, Null) <: String` where Null and String are disjoint.
+    fn constrain_lhs_inter(
+        &mut self,
+        a: TyId,
+        b: TyId,
+        sup_id: TyId,
+        sup: &Ty<TyId>,
+    ) -> Result<(), InferenceError> {
+        // Determine if each side contains a variable (possibly nested in Inter).
+        let a_has_var = self.inter_contains_var(a);
+        let b_has_var = self.inter_contains_var(b);
+        let a_is_var = matches!(self.types.storage.get(a), TypeEntry::Variable(_));
+        let b_is_var = matches!(self.types.storage.get(b), TypeEntry::Variable(_));
+
+        match (
+            a_is_var || (a_has_var && !b_has_var),
+            b_is_var || (b_has_var && !a_has_var),
+        ) {
+            (true, false) => {
+                // Check: if b is concrete and provably disjoint from sup.
+                if let TypeEntry::Concrete(b_ty) = self.types.storage.get(b).clone() {
+                    if are_types_disjoint(&b_ty, sup) {
+                        return Err(InferenceError::TypeMismatch(Box::new((
+                            Ty::Inter(a, b),
+                            sup.clone(),
+                        ))));
+                    }
+                }
+                // α ∧ C <: U → α <: U ∨ ¬C (α side absorbs the constraint)
+                let neg_b = self.alloc_concrete(Ty::Neg(b));
+                // Union absorption: (A ∨ B) ∨ B = A ∨ B. If sup_id's union
+                // tree already contains neg_b, skip wrapping — the constraint
+                // is already captured. This prevents infinite growth when two
+                // mutually-lower-bounded variables both carry Inter wrappers
+                // (e.g. from narrowing), which would otherwise create ever-deeper
+                // Union nesting with fresh TyIds that defeat the constrain_cache.
+                let target = if self.union_contains_member(sup_id, neg_b) {
+                    sup_id
+                } else {
+                    self.alloc_concrete(Ty::Union(sup_id, neg_b))
+                };
+                self.constrain(a, target)
+            }
+            (false, true) => {
+                if let TypeEntry::Concrete(a_ty) = self.types.storage.get(a).clone() {
+                    if are_types_disjoint(&a_ty, sup) {
+                        return Err(InferenceError::TypeMismatch(Box::new((
+                            Ty::Inter(a, b),
+                            sup.clone(),
+                        ))));
+                    }
+                }
+                // C ∧ α <: U → α <: U ∨ ¬C
+                let neg_a = self.alloc_concrete(Ty::Neg(a));
+                let target = if self.union_contains_member(sup_id, neg_a) {
+                    sup_id
+                } else {
+                    self.alloc_concrete(Ty::Union(sup_id, neg_a))
+                };
+                self.constrain(b, target)
+            }
+            _ => {
+                // Both have variables or neither — can't isolate cleanly.
+                // Constrain each member individually. This is conservative.
+                self.constrain(a, sup_id)?;
+                self.constrain(b, sup_id)
+            }
+        }
+    }
+
+    /// Check if a TyId is or transitively contains a type variable
+    /// (through Inter nesting). Used to find the variable side for
+    /// MLstruct-style variable isolation.
+    fn inter_contains_var(&self, id: TyId) -> bool {
+        match self.types.storage.get(id) {
+            TypeEntry::Variable(_) => true,
+            TypeEntry::Concrete(Ty::Inter(a, b)) => {
+                self.inter_contains_var(*a) || self.inter_contains_var(*b)
+            }
+            _ => false,
+        }
+    }
+
+    /// Check if a Union type tree contains a specific TyId as a leaf member.
+    /// Used for union absorption: `(A ∨ B) ∨ B = A ∨ B`. When variable
+    /// isolation creates `Union(sup, neg_c)` and sup already contains neg_c,
+    /// wrapping would be redundant and cause infinite growth in cyclic variable
+    /// chains.
+    ///
+    /// Only checks TyId equality (not structural equivalence), which is
+    /// sufficient because `alloc_concrete(Neg(x))` is deduplicated via
+    /// `neg_cache` — the same `Neg(x)` always returns the same TyId.
+    fn union_contains_member(&self, id: TyId, target: TyId) -> bool {
+        if id == target {
+            return true;
+        }
+        match self.types.storage.get(id) {
+            TypeEntry::Concrete(Ty::Union(a, b)) => {
+                self.union_contains_member(*a, target) || self.union_contains_member(*b, target)
+            }
+            _ => false,
+        }
+    }
+
+    /// `sub <: Union(a, b)` — route the sub-type to the correct union member.
+    ///
+    /// Uses a two-phase approach: try concrete match first, fall to variable.
+    /// This avoids speculative constraint tries which would cause spurious
+    /// bounds (the constrain_cache is non-rollbackable).
+    fn constrain_rhs_union(
+        &mut self,
+        sub: &Ty<TyId>,
+        a: TyId,
+        b: TyId,
+        sub_id: TyId,
+    ) -> Result<(), InferenceError> {
+        let a_is_var = matches!(self.types.storage.get(a), TypeEntry::Variable(_));
+        let b_is_var = matches!(self.types.storage.get(b), TypeEntry::Variable(_));
+
+        match (a_is_var, b_is_var) {
+            // One variable, one concrete: route to concrete if compatible, else variable.
+            (false, true) => {
+                if is_concrete_compatible(sub, self.types.storage.get(a)) {
+                    self.constrain(sub_id, a)
+                } else {
+                    self.constrain(sub_id, b)
+                }
+            }
+            (true, false) => {
+                if is_concrete_compatible(sub, self.types.storage.get(b)) {
+                    self.constrain(sub_id, b)
+                } else {
+                    self.constrain(sub_id, a)
+                }
+            }
+            // Both concrete: use disjointness analysis.
+            (false, false) => {
+                let a_ty = match self.types.storage.get(a) {
+                    TypeEntry::Concrete(t) => t.clone(),
+                    _ => unreachable!(),
+                };
+                let b_ty = match self.types.storage.get(b) {
+                    TypeEntry::Concrete(t) => t.clone(),
+                    _ => unreachable!(),
+                };
+                let disjoint_a = are_types_disjoint(sub, &a_ty);
+                let disjoint_b = are_types_disjoint(sub, &b_ty);
+
+                match (disjoint_a, disjoint_b) {
+                    (true, false) => self.constrain(sub_id, b),
+                    (false, true) => self.constrain(sub_id, a),
+                    (true, true) => Err(InferenceError::TypeMismatch(Box::new((
+                        sub.clone(),
+                        Ty::Union(a, b),
+                    )))),
+                    (false, false) => {
+                        // Tiebreaker: same-constructor match.
+                        if discriminant_matches(sub, &a_ty) && !discriminant_matches(sub, &b_ty) {
+                            self.constrain(sub_id, a)
+                        } else if discriminant_matches(sub, &b_ty)
+                            && !discriminant_matches(sub, &a_ty)
+                        {
+                            self.constrain(sub_id, b)
+                        } else {
+                            // Can't route deterministically — constrain to both.
+                            // Sound but over-constraining.
+                            // TODO: snapshot/rollback for full DNF generality.
+                            self.constrain(sub_id, a)?;
+                            self.constrain(sub_id, b)
+                        }
+                    }
+                }
+            }
+            // Both variables: can't route deterministically.
+            (true, true) => {
+                // Conservative: constrain to both.
+                self.constrain(sub_id, a)?;
+                self.constrain(sub_id, b)
+            }
         }
     }
 
@@ -201,4 +446,69 @@ impl CheckCtx<'_> {
         }
         Ok(())
     }
+}
+
+/// Check if sub could be a subtype of target based on constructor shape.
+/// Read-only — no side effects. Used by `constrain_rhs_union` to decide
+/// which union member to route a concrete sub-type to.
+fn is_concrete_compatible(sub: &Ty<TyId>, target: &TypeEntry) -> bool {
+    match target {
+        TypeEntry::Variable(_) => true,
+        TypeEntry::Concrete(target_ty) => {
+            discriminant_matches(sub, target_ty)
+                || matches!(
+                    (sub, target_ty),
+                    (Ty::Primitive(p1), Ty::Primitive(p2)) if p1.is_subtype_of(p2)
+                )
+        }
+    }
+}
+
+/// Check if two types have the same top-level constructor (discriminant).
+fn discriminant_matches(a: &Ty<TyId>, b: &Ty<TyId>) -> bool {
+    std::mem::discriminant(a) == std::mem::discriminant(b)
+}
+
+/// Check whether two concrete types are provably disjoint (their intersection
+/// is uninhabited). Delegates to the shared `are_shapes_disjoint` logic in
+/// `lang_ty::disjoint`.
+///
+/// See `lang_ty::disjoint::are_shapes_disjoint` for the full disjointness rules.
+fn are_types_disjoint(a: &Ty<TyId>, b: &Ty<TyId>) -> bool {
+    // Build owned key maps for attrset shapes. These are allocated only when
+    // both types need shape projection (which involves attrsets).
+    let a_keys;
+    let b_keys;
+
+    let a_shape = match a {
+        Ty::Primitive(p) => ConstructorShape::Primitive(*p),
+        Ty::AttrSet(attr) => {
+            a_keys = attr.fields.keys().map(|k| (k.clone(), ())).collect();
+            ConstructorShape::AttrSet {
+                fields: &a_keys,
+                open: attr.open,
+                optional: &attr.optional_fields,
+            }
+        }
+        Ty::List(_) => ConstructorShape::List,
+        Ty::Lambda { .. } => ConstructorShape::Lambda,
+        _ => ConstructorShape::Opaque,
+    };
+
+    let b_shape = match b {
+        Ty::Primitive(p) => ConstructorShape::Primitive(*p),
+        Ty::AttrSet(attr) => {
+            b_keys = attr.fields.keys().map(|k| (k.clone(), ())).collect();
+            ConstructorShape::AttrSet {
+                fields: &b_keys,
+                open: attr.open,
+                optional: &attr.optional_fields,
+            }
+        }
+        Ty::List(_) => ConstructorShape::List,
+        Ty::Lambda { .. } => ConstructorShape::Lambda,
+        _ => ConstructorShape::Opaque,
+    };
+
+    are_shapes_disjoint(&a_shape, &b_shape)
 }

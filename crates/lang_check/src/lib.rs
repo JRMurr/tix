@@ -342,18 +342,6 @@ pub struct CheckCtx<'db> {
     /// to a branch-local TyId. Consulted in `infer_reference` before the
     /// normal name resolution path. Pushed/popped around branch inference.
     narrow_overrides: HashMap<NameId, TyId>,
-
-    /// Pre-computed narrowing scopes for let-bindings.
-    ///
-    /// When a let-binding's value expression sits inside a narrowing scope
-    /// (e.g. `if x != null then (let y = x.name; in y) else ""`), the SCC
-    /// group for `y` is inferred *before* the if-then-else installs overrides.
-    /// This map records which bindings need narrowing overrides installed
-    /// during SCC group processing, so `x` gets narrowed when inferring `y`.
-    ///
-    /// Built by `compute_binding_narrow_scopes()` — a purely syntactic
-    /// pre-pass that runs before SCC group iteration.
-    binding_narrow_scopes: HashMap<NameId, Vec<narrow::NarrowBinding>>,
 }
 
 /// Count the function arity (number of arrows along the spine) of a ParsedTy.
@@ -407,7 +395,6 @@ impl<'db> CheckCtx<'db> {
             alias_provenance: HashMap::new(),
             context_args,
             narrow_overrides: HashMap::new(),
-            binding_narrow_scopes: HashMap::new(),
         }
     }
 
@@ -558,6 +545,10 @@ impl<'db> CheckCtx<'db> {
             // a fresh variable with no bounds — it shouldn't appear in
             // importable type signatures in practice.
             OutputTy::Bottom => self.new_var(),
+            // Top (any): universal type from tautologies. Intern as a fresh
+            // unconstrained variable — equivalent to "any value" during
+            // inference.
+            OutputTy::Top => self.new_var(),
         }
     }
 

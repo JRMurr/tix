@@ -338,16 +338,33 @@ impl NameResolution {
 struct NameDependencies {
     edges: Vec<(NameId, NameId)>,
     name_to_expr: HashMap<NameId, ExprId>,
+    /// Narrowing scopes for each binding: records which NarrowBindings are
+    /// active when a let/rec-attrset binding is encountered. Populated by
+    /// traverse_expr as it walks through if-then-else, assert, and
+    /// conditional-apply scopes.
+    narrow_scopes: HashMap<NameId, Vec<crate::narrow::NarrowBinding>>,
 }
 
 impl NameDependencies {
-    pub fn new(module: &Module, name_res: &NameResolution) -> Self {
+    pub fn new(
+        module: &Module,
+        name_res: &NameResolution,
+        binding_exprs: &HashMap<NameId, ExprId>,
+    ) -> Self {
         let mut name_deps = Self {
             edges: Vec::with_capacity(module.exprs.len()),
             name_to_expr: HashMap::new(),
+            narrow_scopes: HashMap::new(),
         };
 
-        name_deps.traverse_expr(module, name_res, module.entry_expr, None);
+        name_deps.traverse_expr(
+            module,
+            name_res,
+            binding_exprs,
+            module.entry_expr,
+            None,
+            &[],
+        );
 
         name_deps
     }
@@ -356,8 +373,10 @@ impl NameDependencies {
         &mut self,
         module: &Module,
         name_res: &NameResolution,
+        binding_exprs: &HashMap<NameId, ExprId>,
         expr: ExprId,
         curr_binding: Option<NameId>,
+        active: &[crate::narrow::NarrowBinding],
     ) {
         match &module[expr] {
             // If we are not in a let block (ie not curr_binding)
@@ -387,24 +406,100 @@ impl NameDependencies {
                     }
                 }
             }
+
+            // ── IfThenElse — analyze condition, push narrowings per branch
+            Expr::IfThenElse {
+                cond,
+                then_body,
+                else_body,
+            } => {
+                self.traverse_expr(module, name_res, binding_exprs, *cond, curr_binding, active);
+                let info = crate::narrow::analyze_condition(module, name_res, binding_exprs, *cond);
+
+                let mut then_active = active.to_vec();
+                then_active.extend(info.then_branch);
+                self.traverse_expr(
+                    module,
+                    name_res,
+                    binding_exprs,
+                    *then_body,
+                    curr_binding,
+                    &then_active,
+                );
+
+                let mut else_active = active.to_vec();
+                else_active.extend(info.else_branch);
+                self.traverse_expr(
+                    module,
+                    name_res,
+                    binding_exprs,
+                    *else_body,
+                    curr_binding,
+                    &else_active,
+                );
+            }
+
+            // ── Assert — condition narrowing applies to body
+            Expr::Assert { cond, body } => {
+                self.traverse_expr(module, name_res, binding_exprs, *cond, curr_binding, active);
+                let info = crate::narrow::analyze_condition(module, name_res, binding_exprs, *cond);
+                let mut body_active = active.to_vec();
+                body_active.extend(info.then_branch);
+                self.traverse_expr(
+                    module,
+                    name_res,
+                    binding_exprs,
+                    *body,
+                    curr_binding,
+                    &body_active,
+                );
+            }
+
+            // ── Apply — detect conditional library functions
+            Expr::Apply { fun, arg } => {
+                let narrow_info = crate::narrow::detect_conditional_apply_narrowing(
+                    module,
+                    name_res,
+                    binding_exprs,
+                    *fun,
+                );
+
+                self.traverse_expr(module, name_res, binding_exprs, *fun, curr_binding, active);
+
+                if let Some(info) = narrow_info {
+                    let mut arg_active = active.to_vec();
+                    arg_active.extend(info.then_branch);
+                    self.traverse_expr(
+                        module,
+                        name_res,
+                        binding_exprs,
+                        *arg,
+                        curr_binding,
+                        &arg_active,
+                    );
+                } else {
+                    self.traverse_expr(module, name_res, binding_exprs, *arg, curr_binding, active);
+                }
+            }
+
             Expr::LetIn { bindings, body } => {
-                self.traverse_bindings(module, name_res, bindings);
-                self.traverse_expr(module, name_res, *body, curr_binding);
+                self.traverse_bindings(module, name_res, binding_exprs, bindings, active);
+                self.traverse_expr(module, name_res, binding_exprs, *body, curr_binding, active);
             }
             Expr::AttrSet { bindings, is_rec } => {
                 // if its not recursive we wont do generalization on each key
                 // TODO: this might be weird but seems like a good approach for now
                 if *is_rec {
-                    self.traverse_bindings(module, name_res, bindings)
+                    self.traverse_bindings(module, name_res, binding_exprs, bindings, active)
                 } else {
                     bindings.walk_child_exprs(|e| {
-                        self.traverse_expr(module, name_res, e, curr_binding)
+                        self.traverse_expr(module, name_res, binding_exprs, e, curr_binding, active)
                     });
                 }
             }
-            expr => {
-                expr.walk_child_exprs(|e| self.traverse_expr(module, name_res, e, curr_binding))
-            }
+            expr => expr.walk_child_exprs(|e| {
+                self.traverse_expr(module, name_res, binding_exprs, e, curr_binding, active)
+            }),
         }
     }
 
@@ -412,8 +507,9 @@ impl NameDependencies {
         &mut self,
         module: &Module,
         name_res: &NameResolution,
+        binding_exprs: &HashMap<NameId, ExprId>,
         bindings: &Bindings,
-        // expr: ExprId,
+        active: &[crate::narrow::NarrowBinding],
     ) {
         for (name, bv) in &bindings.statics {
             let expr = match bv {
@@ -423,14 +519,23 @@ impl NameDependencies {
             };
 
             self.name_to_expr.insert(*name, expr);
-            self.traverse_expr(module, name_res, expr, Some(*name));
+
+            // Record active narrowings for this binding (if any).
+            if !active.is_empty() {
+                self.narrow_scopes
+                    .entry(*name)
+                    .or_default()
+                    .extend(active.iter().cloned());
+            }
+
+            self.traverse_expr(module, name_res, binding_exprs, expr, Some(*name), active);
         }
         for &(name_expr, value_expr) in bindings.dynamics.iter() {
             // Dynamic bindings have runtime-computed keys — no static NameId
             // to record dependency edges for. Traverse sub-expressions so
             // any references they contain are still captured.
-            self.traverse_expr(module, name_res, name_expr, None);
-            self.traverse_expr(module, name_res, value_expr, None);
+            self.traverse_expr(module, name_res, binding_exprs, name_expr, None, active);
+            self.traverse_expr(module, name_res, binding_exprs, value_expr, None, active);
         }
     }
 }
@@ -439,6 +544,10 @@ impl NameDependencies {
 pub struct TypeDef {
     name: NameId,
     value: ExprId,
+    /// Narrowings active in this binding's scope (from enclosing
+    /// if-then-else/assert/conditional-apply). Empty when the binding
+    /// is not inside a narrowing scope.
+    narrow_scope: Vec<crate::narrow::NarrowBinding>,
 }
 
 impl TypeDef {
@@ -448,6 +557,10 @@ impl TypeDef {
 
     pub fn name(&self) -> NameId {
         self.name
+    }
+
+    pub fn narrow_scope(&self) -> &[crate::narrow::NarrowBinding] {
+        &self.narrow_scope
     }
 }
 
@@ -461,8 +574,9 @@ type DepGraph = DiGraph<NameId, ()>;
 pub fn group_def(db: &dyn crate::AstDb, file: NixFile) -> GroupedDefs {
     let module = module(db, file);
     let name_res = name_resolution(db, file);
+    let indices = crate::module_indices(db, file);
 
-    let name_deps = NameDependencies::new(&module, &name_res);
+    let name_deps = NameDependencies::new(&module, &name_res, &indices.binding_expr);
 
     let num_names = name_deps.name_to_expr.len();
     let num_refs = name_deps.edges.len();
@@ -498,7 +612,15 @@ pub fn group_def(db: &dyn crate::AstDb, file: NixFile) -> GroupedDefs {
                     let expr = name_deps.name_to_expr.get(&name);
                     // TODO: do this check earlier, at the very least could be done when we add edges
                     // If the expr is not found for the name then it was a func param we can ignore
-                    expr.map(|e| TypeDef { name, value: *e })
+                    expr.map(|e| TypeDef {
+                        name,
+                        value: *e,
+                        narrow_scope: name_deps
+                            .narrow_scopes
+                            .get(&name)
+                            .cloned()
+                            .unwrap_or_default(),
+                    })
                 })
                 .collect();
             if mapped_group.is_empty() {

@@ -258,6 +258,16 @@ fn canonicalize_ty_structural(
             let c_inner = canonicalize_standalone(table, provenance, *inner, Polarity::Positive);
             OutputTy::Neg(lang_ty::TyRef::from(c_inner))
         }
+        lang_ty::Ty::Inter(a, b) => {
+            let ca = canonicalize_standalone(table, provenance, *a, Polarity::Positive);
+            let cb = canonicalize_standalone(table, provenance, *b, Polarity::Positive);
+            OutputTy::Intersection(vec![lang_ty::TyRef::from(ca), lang_ty::TyRef::from(cb)])
+        }
+        lang_ty::Ty::Union(a, b) => {
+            let ca = canonicalize_standalone(table, provenance, *a, Polarity::Positive);
+            let cb = canonicalize_standalone(table, provenance, *b, Polarity::Positive);
+            OutputTy::Union(vec![lang_ty::TyRef::from(ca), lang_ty::TyRef::from(cb)])
+        }
     }
 }
 
