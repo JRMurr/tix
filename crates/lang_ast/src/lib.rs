@@ -7,6 +7,7 @@ mod comment;
 mod db;
 mod lower;
 pub mod nameres;
+pub mod narrow;
 
 #[cfg(any(test, feature = "proptest_support"))]
 pub mod arbitrary;

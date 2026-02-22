@@ -61,12 +61,6 @@ impl CheckCtx<'_> {
             self.new_var();
         }
 
-        // Pre-pass: detect which let-bindings sit inside narrowing scopes
-        // (if-then-else branches, assert bodies, conditional function args).
-        // This must run after pre-allocation (analyze_condition uses name
-        // resolution which indexes into the module) but before SCC iteration.
-        self.compute_binding_narrow_scopes();
-
         let mut errors = Vec::new();
 
         for group in groups {
@@ -181,13 +175,13 @@ impl CheckCtx<'_> {
         let mut inferred: Vec<(lang_ast::NameId, TyId)> = Vec::new();
 
         for def in group {
-            // If this binding was detected inside a narrowing scope by the
-            // pre-pass, install the narrowing overrides so that references
-            // to narrowed names (e.g. `pasta` after `pasta != null`) get the
-            // narrowed type instead of the original.
-            let narrow_bindings = self.binding_narrow_scopes.get(&def.name()).cloned();
-            let saved = if let Some(ref bindings) = narrow_bindings {
-                self.install_narrow_overrides(bindings)
+            // If this binding sits inside a narrowing scope (detected during
+            // SCC grouping in lang_ast), install the narrowing overrides so
+            // that references to narrowed names (e.g. `pasta` after
+            // `pasta != null`) get the narrowed type instead of the original.
+            let narrow_scope = def.narrow_scope();
+            let saved = if !narrow_scope.is_empty() {
+                self.install_narrow_overrides(narrow_scope)
             } else {
                 Vec::new()
             };

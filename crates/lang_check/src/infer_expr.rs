@@ -192,7 +192,12 @@ impl CheckCtx<'_> {
                     .map_err(|err| self.locate_err(err))?;
 
                 // Analyze the condition for type narrowing opportunities.
-                let narrow_info = self.analyze_condition(cond);
+                let narrow_info = lang_ast::narrow::analyze_condition(
+                    self.module,
+                    self.name_res,
+                    self.binding_exprs,
+                    cond,
+                );
 
                 let then_ty = self.infer_with_narrowing(then_body, &narrow_info, true)?;
                 let else_ty = self.infer_with_narrowing(else_body, &narrow_info, false)?;
@@ -373,7 +378,12 @@ impl CheckCtx<'_> {
                 // Assert body only executes when the condition is true,
                 // so apply then-branch narrowings (e.g. `assert x != null;`
                 // narrows x to non-null in the body).
-                let narrow_info = self.analyze_condition(cond);
+                let narrow_info = lang_ast::narrow::analyze_condition(
+                    self.module,
+                    self.name_res,
+                    self.binding_exprs,
+                    cond,
+                );
                 self.infer_with_narrowing(body, &narrow_info, true)
             }
 
@@ -480,25 +490,12 @@ impl CheckCtx<'_> {
         &self,
         fun_expr: ExprId,
     ) -> Option<crate::narrow::NarrowInfo> {
-        let Expr::Apply {
-            fun: inner_fn,
-            arg: cond_expr,
-        } = &self.module[fun_expr]
-        else {
-            return None;
-        };
-
-        // Is the inner function a known conditional function?
-        self.detect_conditional_fn(*inner_fn)?;
-
-        // Extract narrowing from the condition argument.
-        let info = self.analyze_condition(*cond_expr);
-        if info.then_branch.is_empty() {
-            // The condition didn't produce any narrowing — no point
-            // wrapping the body inference.
-            return None;
-        }
-        Some(info)
+        lang_ast::narrow::detect_conditional_apply_narrowing(
+            self.module,
+            self.name_res,
+            self.binding_exprs,
+            fun_expr,
+        )
     }
 
     /// Create a fresh type variable for narrowing, linked to the original
@@ -529,11 +526,11 @@ impl CheckCtx<'_> {
         match binding.predicate {
             crate::narrow::NarrowPredicate::IsType(prim) => {
                 // α ∧ PrimType = PrimType for base types.
-                self.alloc_prim(prim)
+                self.alloc_prim(crate::narrow::narrow_prim_to_ty(prim))
             }
             crate::narrow::NarrowPredicate::IsNotType(prim) => {
                 // α ∧ ¬PrimType — fresh var linked to original and ¬Prim.
-                let prim_ty = self.alloc_prim(prim);
+                let prim_ty = self.alloc_prim(crate::narrow::narrow_prim_to_ty(prim));
                 let neg_ty = self.alloc_concrete(Ty::Neg(prim_ty));
                 self.narrow_fresh_var(original_ty, neg_ty)
             }
