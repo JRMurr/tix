@@ -282,14 +282,14 @@ impl CheckCtx<'_> {
                     // Only emit when there's no default (`or`) — defaulted field
                     // accesses are optional by design.
                     if !has_default {
-                        self.deferred.active.push(super::PendingConstraint::HasField(
-                            PendingHasField {
+                        self.deferred
+                            .active
+                            .push(super::PendingConstraint::HasField(PendingHasField {
                                 set_ty,
                                 field: opt_key,
                                 field_ty: value_ty,
                                 at_expr: self.current_expr,
-                            },
-                        ));
+                            }));
                     }
 
                     Ok::<TyId, LocatedError>(value_ty)

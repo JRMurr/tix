@@ -169,11 +169,17 @@ impl CheckCtx<'_> {
                         if are_types_disjoint(sub, &inner_ty) {
                             Ok(())
                         } else {
-                            Err(InferenceError::TypeMismatch(Box::new((sub.clone(), sup.clone()))))
+                            Err(InferenceError::TypeMismatch(Box::new((
+                                sub.clone(),
+                                sup.clone(),
+                            ))))
                         }
                     }
                     // Inner is a variable — conservatively fail.
-                    _ => Err(InferenceError::TypeMismatch(Box::new((sub.clone(), sup.clone())))),
+                    _ => Err(InferenceError::TypeMismatch(Box::new((
+                        sub.clone(),
+                        sup.clone(),
+                    )))),
                 }
             }
 
@@ -212,7 +218,10 @@ impl CheckCtx<'_> {
             }
 
             // Type mismatch.
-            _ => Err(InferenceError::TypeMismatch(Box::new((sub.clone(), sup.clone())))),
+            _ => Err(InferenceError::TypeMismatch(Box::new((
+                sub.clone(),
+                sup.clone(),
+            )))),
         }
     }
 
@@ -236,7 +245,10 @@ impl CheckCtx<'_> {
         let a_is_var = matches!(self.types.storage.get(a), TypeEntry::Variable(_));
         let b_is_var = matches!(self.types.storage.get(b), TypeEntry::Variable(_));
 
-        match (a_is_var || (a_has_var && !b_has_var), b_is_var || (b_has_var && !a_has_var)) {
+        match (
+            a_is_var || (a_has_var && !b_has_var),
+            b_is_var || (b_has_var && !a_has_var),
+        ) {
             (true, false) => {
                 // Check: if b is concrete and provably disjoint from sup.
                 if let TypeEntry::Concrete(b_ty) = self.types.storage.get(b).clone() {
@@ -317,8 +329,7 @@ impl CheckCtx<'_> {
         }
         match self.types.storage.get(id) {
             TypeEntry::Concrete(Ty::Union(a, b)) => {
-                self.union_contains_member(*a, target)
-                    || self.union_contains_member(*b, target)
+                self.union_contains_member(*a, target) || self.union_contains_member(*b, target)
             }
             _ => false,
         }
@@ -377,9 +388,7 @@ impl CheckCtx<'_> {
                     )))),
                     (false, false) => {
                         // Tiebreaker: same-constructor match.
-                        if discriminant_matches(sub, &a_ty)
-                            && !discriminant_matches(sub, &b_ty)
-                        {
+                        if discriminant_matches(sub, &a_ty) && !discriminant_matches(sub, &b_ty) {
                             self.constrain(sub_id, a)
                         } else if discriminant_matches(sub, &b_ty)
                             && !discriminant_matches(sub, &a_ty)

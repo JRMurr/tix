@@ -357,7 +357,14 @@ impl NameDependencies {
             narrow_scopes: HashMap::new(),
         };
 
-        name_deps.traverse_expr(module, name_res, binding_exprs, module.entry_expr, None, &[]);
+        name_deps.traverse_expr(
+            module,
+            name_res,
+            binding_exprs,
+            module.entry_expr,
+            None,
+            &[],
+        );
 
         name_deps
     }
@@ -407,8 +414,7 @@ impl NameDependencies {
                 else_body,
             } => {
                 self.traverse_expr(module, name_res, binding_exprs, *cond, curr_binding, active);
-                let info =
-                    crate::narrow::analyze_condition(module, name_res, binding_exprs, *cond);
+                let info = crate::narrow::analyze_condition(module, name_res, binding_exprs, *cond);
 
                 let mut then_active = active.to_vec();
                 then_active.extend(info.then_branch);
@@ -436,8 +442,7 @@ impl NameDependencies {
             // ── Assert — condition narrowing applies to body
             Expr::Assert { cond, body } => {
                 self.traverse_expr(module, name_res, binding_exprs, *cond, curr_binding, active);
-                let info =
-                    crate::narrow::analyze_condition(module, name_res, binding_exprs, *cond);
+                let info = crate::narrow::analyze_condition(module, name_res, binding_exprs, *cond);
                 let mut body_active = active.to_vec();
                 body_active.extend(info.then_branch);
                 self.traverse_expr(
@@ -473,27 +478,13 @@ impl NameDependencies {
                         &arg_active,
                     );
                 } else {
-                    self.traverse_expr(
-                        module,
-                        name_res,
-                        binding_exprs,
-                        *arg,
-                        curr_binding,
-                        active,
-                    );
+                    self.traverse_expr(module, name_res, binding_exprs, *arg, curr_binding, active);
                 }
             }
 
             Expr::LetIn { bindings, body } => {
                 self.traverse_bindings(module, name_res, binding_exprs, bindings, active);
-                self.traverse_expr(
-                    module,
-                    name_res,
-                    binding_exprs,
-                    *body,
-                    curr_binding,
-                    active,
-                );
+                self.traverse_expr(module, name_res, binding_exprs, *body, curr_binding, active);
             }
             Expr::AttrSet { bindings, is_rec } => {
                 // if its not recursive we wont do generalization on each key
@@ -502,14 +493,7 @@ impl NameDependencies {
                     self.traverse_bindings(module, name_res, binding_exprs, bindings, active)
                 } else {
                     bindings.walk_child_exprs(|e| {
-                        self.traverse_expr(
-                            module,
-                            name_res,
-                            binding_exprs,
-                            e,
-                            curr_binding,
-                            active,
-                        )
+                        self.traverse_expr(module, name_res, binding_exprs, e, curr_binding, active)
                     });
                 }
             }

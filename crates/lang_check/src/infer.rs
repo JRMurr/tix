@@ -631,10 +631,7 @@ impl CheckCtx<'_> {
     /// a TypeMismatch was already reported by the original constrain call).
     /// Returns Ok(false) if still pending (set type not yet concrete, or still open).
     /// Returns Err if the set resolved to a closed attrset without the field.
-    fn try_resolve_has_field(
-        &mut self,
-        hf: &PendingHasField,
-    ) -> Result<bool, InferenceError> {
+    fn try_resolve_has_field(&mut self, hf: &PendingHasField) -> Result<bool, InferenceError> {
         // Use find_concrete_through_inter so narrowed types like
         // Inter(α, {field: β}) expose the attrset for field lookup.
         let Some(concrete) = self.types.find_concrete_through_inter(hf.set_ty) else {
@@ -679,7 +676,10 @@ impl CheckCtx<'_> {
         match (&lhs_concrete, &rhs_concrete) {
             (Some(Ty::AttrSet(_)), Some(Ty::AttrSet(_))) => {}
             (Some(lhs), Some(rhs)) => {
-                return Err(InferenceError::InvalidAttrMerge(Box::new((lhs.clone(), rhs.clone()))));
+                return Err(InferenceError::InvalidAttrMerge(Box::new((
+                    lhs.clone(),
+                    rhs.clone(),
+                ))));
             }
             _ => return Ok(false),
         }

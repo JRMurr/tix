@@ -7,9 +7,7 @@
 // This module re-exports the types for convenience and provides the conversion
 // from NarrowPrimitive (lang_ast-local) to PrimitiveTy (lang_ty).
 
-pub(crate) use lang_ast::narrow::{
-    NarrowBinding, NarrowInfo, NarrowPredicate, NarrowPrimitive,
-};
+pub(crate) use lang_ast::narrow::{NarrowBinding, NarrowInfo, NarrowPredicate, NarrowPrimitive};
 use lang_ty::PrimitiveTy;
 
 /// Convert a narrowing-specific primitive to the type system's PrimitiveTy.
