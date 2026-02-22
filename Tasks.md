@@ -215,7 +215,7 @@ there's a `body` to recurse into.
 
 ---
 
-### C2. Move narrowing scope detection into SCC grouping
+### ~~C2. Move narrowing scope detection into SCC grouping~~ ✅ Done
 
 **Effort**: High | **Impact**: High | **Risk reduction**: Eliminates the
 parallel AST walk
@@ -247,8 +247,9 @@ through scope-introducing expressions (if-then-else, assert).
    from the inference context.
 3. Then integrate the scope analysis into the SCC grouping pass.
 
-**Files touched**: `lang_ast/src/group_def.rs`, `lang_check/src/narrow.rs`,
-`lang_check/src/infer.rs`, `lang_check/src/lib.rs`
+**Files touched**: `lang_ast/src/narrow.rs` (new), `lang_ast/src/lib.rs`,
+`lang_ast/src/nameres.rs`, `lang_check/src/narrow.rs`, `lang_check/src/infer.rs`,
+`lang_check/src/infer_expr.rs`, `lang_check/src/lib.rs`
 
 ---
 
@@ -518,5 +519,5 @@ Larger refactors (plan before starting):
 
 11. ~~**B1** — Extract TypeTable~~ ✅
 12. ~~**E2** — Has-field constraints~~ ✅
-13. **C2** — Move narrowing into SCC grouping
+13. ~~**C2** — Move narrowing into SCC grouping~~ ✅
 14. **G1** — Cross-file import tests
