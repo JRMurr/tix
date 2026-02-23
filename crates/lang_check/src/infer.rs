@@ -7,6 +7,7 @@
 // type variables via SimpleSub's level-based approach (extrude).
 
 use std::collections::{HashMap, HashSet};
+use std::time::Instant;
 
 use super::{CheckCtx, InferenceError, InferenceResult, LocatedError, Polarity, TyId};
 use crate::collect::{canonicalize_standalone, Collector};
@@ -76,15 +77,27 @@ impl CheckCtx<'_> {
             errors.push(err);
         }
 
+        let n_groups = groups.len();
         for (i, group) in groups.into_iter().enumerate() {
             // Check deadline before each SCC group so a single file can't
             // block the LSP indefinitely. Partial results (types inferred
             // so far) are still returned.
             if self.deadline_exceeded || self.past_deadline() {
-                log::warn!("inference deadline exceeded after {i} SCC groups");
+                log::warn!("inference deadline exceeded after {i}/{n_groups} SCC groups");
                 break;
             }
-            if let Some(err) = self.infer_scc_group(group) {
+            let group_names: Vec<_> = group.iter().map(|d| self.module[d.name()].text.as_str().to_owned()).collect();
+            let t_group = Instant::now();
+            let err = self.infer_scc_group(group);
+            let elapsed = t_group.elapsed();
+            if elapsed.as_millis() > 50 {
+                log::info!(
+                    "SCC group {i}/{n_groups} ({}) took {:.1}ms",
+                    group_names.join(", "),
+                    elapsed.as_secs_f64() * 1000.0,
+                );
+            }
+            if let Some(err) = err {
                 errors.push(err);
             }
         }
@@ -104,8 +117,13 @@ impl CheckCtx<'_> {
             diagnostic::errors_to_diagnostics(&errors, &self.types.storage, &self.alias_provenance);
         diagnostics.extend(diagnostic::warnings_to_diagnostics(&warnings));
 
+        let t_canon = Instant::now();
         let mut collector = Collector::new(self);
         let result = collector.finalize_inference();
+        let canon_elapsed = t_canon.elapsed();
+        if canon_elapsed.as_millis() > 50 {
+            log::info!("canonicalization took {:.1}ms", canon_elapsed.as_secs_f64() * 1000.0);
+        }
         (result, diagnostics)
     }
 

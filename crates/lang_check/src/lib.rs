@@ -373,13 +373,15 @@ pub struct CheckCtx<'db> {
     /// prevent a single file from blocking the LSP indefinitely.
     deadline: Option<Instant>,
 
-    /// Expression counter for periodic deadline checks within infer_expr.
-    /// Calling Instant::now() on every expression would be too expensive,
-    /// so we only check every DEADLINE_CHECK_INTERVAL expressions.
-    expr_counter: u32,
+    /// Operation counter for periodic deadline checks. Incremented in
+    /// constrain() (the main hotspot for cascading work). Checked every
+    /// DEADLINE_CHECK_INTERVAL operations to avoid Instant::now() syscall
+    /// overhead on every call.
+    op_counter: u32,
 
-    /// Set when a periodic deadline check fires inside infer_expr. Once set,
-    /// all subsequent infer_expr calls short-circuit to a fresh variable.
+    /// Set when a periodic deadline check fires. Once set, constrain()
+    /// returns Ok(()) immediately, infer_expr short-circuits to a fresh
+    /// variable, and extrude returns the original type as-is.
     deadline_exceeded: bool,
 }
 
@@ -436,7 +438,7 @@ impl<'db> CheckCtx<'db> {
             narrow_overrides: HashMap::new(),
             pre_annotated_params: HashSet::new(),
             deadline: None,
-            expr_counter: 0,
+            op_counter: 0,
             deadline_exceeded: false,
         }
     }
