@@ -94,6 +94,11 @@ pub struct AnalysisState {
     pub project_config: Option<ProjectConfig>,
     /// Directory containing the tix.toml file (for resolving relative paths).
     pub config_dir: Option<PathBuf>,
+    /// Cross-file import type cache. Persists across `update_file()` calls so
+    /// files like `bwrap.nix` that are imported by many open files don't get
+    /// re-inferred each time. Invalidated per-path when that path is edited,
+    /// and fully cleared on registry reload.
+    import_cache: HashMap<PathBuf, OutputTy>,
 }
 
 impl AnalysisState {
@@ -104,6 +109,7 @@ impl AnalysisState {
             files: HashMap::new(),
             project_config: None,
             config_dir: None,
+            import_cache: HashMap::new(),
         }
     }
 
@@ -131,7 +137,11 @@ impl AnalysisState {
         // -- Phase 3: Import resolution --
         let t0 = Instant::now();
         let mut in_progress = HashSet::new();
-        let mut cache = HashMap::new();
+
+        // Invalidate this file's import cache entry since its contents just
+        // changed. Other files' cached types remain valid.
+        self.import_cache.remove(&path);
+
         let import_resolution = resolve_imports(
             &self.db,
             nix_file,
@@ -139,7 +149,7 @@ impl AnalysisState {
             &name_res,
             &self.registry,
             &mut in_progress,
-            &mut cache,
+            &mut self.import_cache,
         );
         // TODO: surface import_resolution.errors as LSP diagnostics.
 
@@ -251,6 +261,7 @@ impl AnalysisState {
     /// Used when stubs configuration changes at runtime.
     pub fn reload_registry(&mut self, registry: TypeAliasRegistry) {
         self.registry = registry;
+        self.import_cache.clear();
 
         // Re-analyze every open file with the new registry.
         let paths: Vec<PathBuf> = self.files.keys().cloned().collect();
