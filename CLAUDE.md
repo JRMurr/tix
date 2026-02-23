@@ -19,7 +19,9 @@ cargo clippy                         # Lint
 ./scripts/pbt.sh 100000              # PBT with custom case count
 ./scripts/cov.sh                     # Coverage report (cargo-tarpaulin)
 nix build .#                         # Build with nix
-echo 'let x = 1; in x' | ./scripts/tixc.sh  # Type-check Nix from stdin (debug build)
+./scripts/tixc.sh <<< 'let x = 1; in x'     # Type-check Nix from stdin (debug build)
+./scripts/tixc.sh test/basic.nix             # Type-check a local .nix file
+./scripts/tixc.sh nixpkgs:lib/strings.nix    # Type-check a nixpkgs file (requires nix)
 ./scripts/nixpkgs-lib-test.sh               # Run tix-cli on nixpkgs lib/ (requires nix)
 cargo test --package cli -- --ignored nixpkgs_lib  # Same, as a cargo integration test
 ```
@@ -30,7 +32,14 @@ cargo test --package lang_check -- test_name
 ```
 
 
-When debugging and you want to make tmp nix programs use `./scripts/tixc.sh`, you do not need to ask me for permission to run. It is safe to run always
+When debugging, always use `./scripts/tixc.sh` — it is safe to run and does not need permission. All commands must start with `./scripts/tixc.sh` so the Bash permission rule matches:
+```bash
+./scripts/tixc.sh <<'EOF'               # stdin (heredoc)
+let x = 1; in x
+EOF
+./scripts/tixc.sh test/basic.nix         # local file
+./scripts/tixc.sh nixpkgs:lib/strings.nix  # nixpkgs subpath
+```
 
 
 ## Must Do
