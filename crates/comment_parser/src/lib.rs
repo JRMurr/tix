@@ -15,8 +15,7 @@ use smol_str::SmolStr;
 #[grammar = "comment.pest"]
 pub struct CommentParser;
 
-// box the error since rust warning about error type being too big
-// TODO: is this normal for pest or is my grammar bad...
+// Box the error since the raw pest error type is large (clippy::result_large_err).
 type ParseError = Box<pest::error::Error<Rule>>;
 
 pub fn parse_comment_text(source: &str) -> Result<Pairs<'_, Rule>, ParseError> {

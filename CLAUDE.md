@@ -50,7 +50,7 @@ EOF
 
 ## Workspace Crates
 
-Five crates under `crates/`, listed in pipeline order:
+Six crates under `crates/`, listed in pipeline order:
 
 | Crate | Role |
 |-------|------|
@@ -58,6 +58,7 @@ Five crates under `crates/`, listed in pipeline order:
 | `lang_ty` | Type representation: `Ty<R, VarType>` for inference, `OutputTy` with Union/Intersection for output |
 | `comment_parser` | Parse type annotations from doc comments (pest grammar) |
 | `lang_check` | SimpleSub type inference engine — the core of the project |
+| `lsp` | LSP server: hover, completions, go-to-definition, rename, inlay hints, diagnostics |
 | `cli` | Thin binary entry point |
 
 ## Architecture & Pipeline
