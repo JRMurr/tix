@@ -645,10 +645,7 @@ impl<'db> CheckCtx<'db> {
             }
 
             let annotation_ty = self.intern_fresh_ty(known_ty);
-            self.constrain(ty, annotation_ty)
-                .map_err(|err| self.locate_err(err))?;
-            self.constrain(annotation_ty, ty)
-                .map_err(|err| self.locate_err(err))?;
+            self.constrain_equal(ty, annotation_ty)?;
 
             // Transfer alias provenance from the annotation to the expression
             // TyId so that early canonicalization wraps the name's type in

@@ -17,6 +17,26 @@ use lang_ty::{AttrSetTy, PrimitiveTy, Ty};
 use smol_str::SmolStr;
 
 impl CheckCtx<'_> {
+    /// Allocate an empty open attrset type `{ ... }`.
+    fn alloc_empty_open_attrset(&mut self) -> TyId {
+        self.alloc_concrete(Ty::AttrSet(AttrSetTy {
+            fields: BTreeMap::new(),
+            dyn_ty: None,
+            open: true,
+            optional_fields: BTreeSet::new(),
+        }))
+    }
+
+    /// Allocate an open attrset type with a single field `{ field: field_ty, ... }`.
+    fn alloc_single_field_open_attrset(&mut self, field: SmolStr, field_ty: TyId) -> TyId {
+        self.alloc_concrete(Ty::AttrSet(AttrSetTy {
+            fields: [(field, field_ty)].into_iter().collect(),
+            dyn_ty: None,
+            open: true,
+            optional_fields: BTreeSet::new(),
+        }))
+    }
+
     /// Infer the type of an expression and record it in the expr→type map.
     pub(super) fn infer_expr(&mut self, e: ExprId) -> Result<TyId, LocatedError> {
         // Track the current expression so errors from constrain() and
@@ -31,10 +51,7 @@ impl CheckCtx<'_> {
 
         // Record the inferred type for this expression.
         let expr_slot = self.ty_for_expr(e);
-        self.constrain(ty, expr_slot)
-            .map_err(|err| self.locate_err(err))?;
-        self.constrain(expr_slot, ty)
-            .map_err(|err| self.locate_err(err))?;
+        self.constrain_equal(ty, expr_slot)?;
 
         Ok(ty)
     }
@@ -84,8 +101,7 @@ impl CheckCtx<'_> {
                     param: arg_ty,
                     body: ret_ty,
                 });
-                self.constrain(fun_ty, lambda_ty)
-                    .map_err(|err| self.locate_err(err))?;
+                self.constrain_at(fun_ty, lambda_ty)?;
 
                 Ok(ret_ty)
             }
@@ -129,8 +145,7 @@ impl CheckCtx<'_> {
                             .storage
                             .set_var_level(name_ty, self.types.storage.current_level);
                         if let Some(default_ty) = default_ty {
-                            self.constrain(default_ty, name_ty)
-                                .map_err(|err| self.locate_err(err))?;
+                            self.constrain_at(default_ty, name_ty)?;
                         }
                         // Apply doc comment type annotations (e.g. /** type: x :: int */)
                         // to pattern fields. Without this, annotations on fields of
@@ -144,10 +159,7 @@ impl CheckCtx<'_> {
                         if let Some(ref ctx_args) = effective_context {
                             if let Some(ctx_ty) = ctx_args.get(&field_text).cloned() {
                                 let interned = self.intern_fresh_ty(ctx_ty);
-                                self.constrain(interned, name_ty)
-                                    .map_err(|err| self.locate_err(err))?;
-                                self.constrain(name_ty, interned)
-                                    .map_err(|err| self.locate_err(err))?;
+                                self.constrain_equal(interned, name_ty)?;
                             }
                         }
 
@@ -166,10 +178,7 @@ impl CheckCtx<'_> {
                         optional_fields: optional,
                     }));
 
-                    self.constrain(param_ty, attr)
-                        .map_err(|err| self.locate_err(err))?;
-                    self.constrain(attr, param_ty)
-                        .map_err(|err| self.locate_err(err))?;
+                    self.constrain_equal(param_ty, attr)?;
                 }
 
                 let body_ty = self.infer_expr(body)?;
@@ -205,8 +214,7 @@ impl CheckCtx<'_> {
             } => {
                 let cond_ty = self.infer_expr(cond)?;
                 let bool_ty = self.alloc_prim(PrimitiveTy::Bool);
-                self.constrain(cond_ty, bool_ty)
-                    .map_err(|err| self.locate_err(err))?;
+                self.constrain_at(cond_ty, bool_ty)?;
 
                 // Analyze the condition for type narrowing opportunities.
                 let narrow_info = lang_ast::narrow::analyze_condition(
@@ -222,10 +230,8 @@ impl CheckCtx<'_> {
                 // Both branches flow into a result variable — this is where
                 // union types naturally arise when branches have different types.
                 let result = self.new_var();
-                self.constrain(then_ty, result)
-                    .map_err(|err| self.locate_err(err))?;
-                self.constrain(else_ty, result)
-                    .map_err(|err| self.locate_err(err))?;
+                self.constrain_at(then_ty, result)?;
+                self.constrain_at(else_ty, result)?;
 
                 Ok(result)
             }
@@ -258,8 +264,7 @@ impl CheckCtx<'_> {
                 let ret_ty = attrpath.iter().try_fold(set_ty, |set_ty, &attr| {
                     let attr_ty = self.infer_expr(attr)?;
                     let str_ty = self.alloc_prim(PrimitiveTy::String);
-                    self.constrain(attr_ty, str_ty)
-                        .map_err(|err| self.locate_err(err))?;
+                    self.constrain_at(attr_ty, str_ty)?;
 
                     let opt_key = match &self.module[attr] {
                         Expr::Literal(Literal::String(key)) => key.clone(),
@@ -273,8 +278,7 @@ impl CheckCtx<'_> {
                                 open: true,
                                 optional_fields: BTreeSet::new(),
                             }));
-                            self.constrain(set_ty, dyn_attr)
-                                .map_err(|err| self.locate_err(err))?;
+                            self.constrain_at(set_ty, dyn_attr)?;
                             return Ok(dyn_ty);
                         }
                     };
@@ -291,8 +295,7 @@ impl CheckCtx<'_> {
                         open: true, // there may be more fields
                         optional_fields,
                     }));
-                    self.constrain(set_ty, field_attr)
-                        .map_err(|err| self.locate_err(err))?;
+                    self.constrain_at(set_ty, field_attr)?;
 
                     // Register a has-field obligation so that resolve_pending can
                     // re-check field presence after merges/overloads resolve.
@@ -316,10 +319,8 @@ impl CheckCtx<'_> {
                     let default_ty = self.infer_expr(default_expr)?;
                     // The result is the union of the field type and the default type.
                     let union_var = self.new_var();
-                    self.constrain(ret_ty, union_var)
-                        .map_err(|err| self.locate_err(err))?;
-                    self.constrain(default_ty, union_var)
-                        .map_err(|err| self.locate_err(err))?;
+                    self.constrain_at(ret_ty, union_var)?;
+                    self.constrain_at(default_ty, union_var)?;
                     Ok(union_var)
                 } else {
                     Ok(ret_ty)
@@ -332,8 +333,7 @@ impl CheckCtx<'_> {
                 let elem_ty = self.new_var();
                 for elem_expr in &inner {
                     let et = self.infer_expr(*elem_expr)?;
-                    self.constrain(et, elem_ty)
-                        .map_err(|err| self.locate_err(err))?;
+                    self.constrain_at(et, elem_ty)?;
                 }
                 Ok(self.alloc_concrete(Ty::List(elem_ty)))
             }
@@ -343,10 +343,7 @@ impl CheckCtx<'_> {
                 match op {
                     rnix::ast::UnaryOpKind::Invert => {
                         let bool_ty = self.alloc_prim(PrimitiveTy::Bool);
-                        self.constrain(ty, bool_ty)
-                            .map_err(|err| self.locate_err(err))?;
-                        self.constrain(bool_ty, ty)
-                            .map_err(|err| self.locate_err(err))?;
+                        self.constrain_equal(ty, bool_ty)?;
                         Ok(ty)
                     }
                     rnix::ast::UnaryOpKind::Negate => {
@@ -354,8 +351,7 @@ impl CheckCtx<'_> {
                         // This catches errors like `-"hello"` at inference time and
                         // gives `a: -a` the type `number -> number`.
                         let number = self.alloc_prim(PrimitiveTy::Number);
-                        self.constrain(ty, number)
-                            .map_err(|err| self.locate_err(err))?;
+                        self.constrain_at(ty, number)?;
                         Ok(ty)
                     }
                 }
@@ -369,19 +365,12 @@ impl CheckCtx<'_> {
                 for &attr in attrpath.iter() {
                     let attr_ty = self.infer_expr(attr)?;
                     let str_ty = self.alloc_prim(PrimitiveTy::String);
-                    self.constrain(attr_ty, str_ty)
-                        .map_err(|err| self.locate_err(err))?;
+                    self.constrain_at(attr_ty, str_ty)?;
                 }
 
                 // Constrain set_ty to be an (open) attrset.
-                let any_attr = self.alloc_concrete(Ty::AttrSet(AttrSetTy {
-                    fields: BTreeMap::new(),
-                    dyn_ty: None,
-                    open: true,
-                    optional_fields: BTreeSet::new(),
-                }));
-                self.constrain(set_ty, any_attr)
-                    .map_err(|err| self.locate_err(err))?;
+                let any_attr = self.alloc_empty_open_attrset();
+                self.constrain_at(set_ty, any_attr)?;
 
                 Ok(self.alloc_prim(PrimitiveTy::Bool))
             }
@@ -389,8 +378,7 @@ impl CheckCtx<'_> {
             Expr::Assert { cond, body } => {
                 let cond_ty = self.infer_expr(cond)?;
                 let bool_ty = self.alloc_prim(PrimitiveTy::Bool);
-                self.constrain(cond_ty, bool_ty)
-                    .map_err(|err| self.locate_err(err))?;
+                self.constrain_at(cond_ty, bool_ty)?;
 
                 // Assert body only executes when the condition is true,
                 // so apply then-branch narrowings (e.g. `assert x != null;`
@@ -482,14 +470,9 @@ impl CheckCtx<'_> {
 
                     let env_ty = self.ty_for_expr(env_id);
                     let value_ty = self.new_var();
-                    let field_attr = self.alloc_concrete(Ty::AttrSet(AttrSetTy {
-                        fields: [(var_name.clone(), value_ty)].into_iter().collect(),
-                        dyn_ty: None,
-                        open: true,
-                        optional_fields: BTreeSet::new(),
-                    }));
-                    self.constrain(env_ty, field_attr)
-                        .map_err(|err| self.locate_err(err))?;
+                    let field_attr =
+                        self.alloc_single_field_open_attrset(var_name.clone(), value_ty);
+                    self.constrain_at(env_ty, field_attr)?;
                     Ok(value_ty)
                 }
                 ResolveResult::Builtin(name) => self
@@ -574,14 +557,8 @@ impl CheckCtx<'_> {
             crate::narrow::NarrowPredicate::HasField(ref field_name) => {
                 // α ∧ {field: β}
                 let fresh_field_var = self.new_var();
-                let constraint = self.alloc_concrete(Ty::AttrSet(AttrSetTy {
-                    fields: [(field_name.clone(), fresh_field_var)]
-                        .into_iter()
-                        .collect(),
-                    dyn_ty: None,
-                    open: true,
-                    optional_fields: BTreeSet::new(),
-                }));
+                let constraint =
+                    self.alloc_single_field_open_attrset(field_name.clone(), fresh_field_var);
                 self.alloc_concrete(Ty::Inter(original_ty, constraint))
             }
             crate::narrow::NarrowPredicate::NotHasField(ref field_name) => {
@@ -594,25 +571,14 @@ impl CheckCtx<'_> {
                 // for MLstruct-style isolation.
                 let var_ty = self.ty_for_name_direct(binding.name);
                 let fresh_field_var = self.new_var();
-                let has_field_ty = self.alloc_concrete(Ty::AttrSet(AttrSetTy {
-                    fields: [(field_name.clone(), fresh_field_var)]
-                        .into_iter()
-                        .collect(),
-                    dyn_ty: None,
-                    open: true,
-                    optional_fields: BTreeSet::new(),
-                }));
+                let has_field_ty =
+                    self.alloc_single_field_open_attrset(field_name.clone(), fresh_field_var);
                 let neg = self.alloc_concrete(Ty::Neg(has_field_ty));
                 self.alloc_concrete(Ty::Inter(var_ty, neg))
             }
             crate::narrow::NarrowPredicate::IsAttrSet => {
                 // α ∧ {..}
-                let constraint = self.alloc_concrete(Ty::AttrSet(AttrSetTy {
-                    fields: BTreeMap::new(),
-                    dyn_ty: None,
-                    open: true,
-                    optional_fields: BTreeSet::new(),
-                }));
+                let constraint = self.alloc_empty_open_attrset();
                 self.alloc_concrete(Ty::Inter(original_ty, constraint))
             }
             crate::narrow::NarrowPredicate::IsList => {
@@ -704,8 +670,7 @@ impl CheckCtx<'_> {
         let bool_ty = self.alloc_prim(PrimitiveTy::Bool);
 
         let lhs_ty = self.infer_expr(lhs)?;
-        self.constrain(lhs_ty, bool_ty)
-            .map_err(|err| self.locate_err(err))?;
+        self.constrain_at(lhs_ty, bool_ty)?;
 
         // Analyze the LHS as a condition for narrowing.
         let narrow_info = lang_ast::narrow::analyze_condition(
@@ -717,8 +682,7 @@ impl CheckCtx<'_> {
 
         // Infer RHS under the appropriate narrowing branch.
         let rhs_ty = self.infer_with_narrowing(rhs, &narrow_info, is_and)?;
-        self.constrain(rhs_ty, bool_ty)
-            .map_err(|err| self.locate_err(err))?;
+        self.constrain_at(rhs_ty, bool_ty)?;
 
         Ok(bool_ty)
     }
@@ -738,12 +702,9 @@ impl CheckCtx<'_> {
                 // (e.g. `a: b: a - b` → `number -> number -> number`).
                 if let Some(bound) = spec.immediate_bound {
                     let bound_ty = self.alloc_prim(bound);
-                    self.constrain(lhs_ty, bound_ty)
-                        .map_err(|err| self.locate_err(err))?;
-                    self.constrain(rhs_ty, bound_ty)
-                        .map_err(|err| self.locate_err(err))?;
-                    self.constrain(ret_ty, bound_ty)
-                        .map_err(|err| self.locate_err(err))?;
+                    self.constrain_at(lhs_ty, bound_ty)?;
+                    self.constrain_at(rhs_ty, bound_ty)?;
+                    self.constrain_at(ret_ty, bound_ty)?;
                 }
 
                 // Still push the overload for deferred full resolution, which
@@ -765,10 +726,8 @@ impl CheckCtx<'_> {
 
             BinOP::Normal(NormalBinOp::Bool(_)) => {
                 let bool_ty = self.alloc_prim(PrimitiveTy::Bool);
-                self.constrain(lhs_ty, bool_ty)
-                    .map_err(|err| self.locate_err(err))?;
-                self.constrain(rhs_ty, bool_ty)
-                    .map_err(|err| self.locate_err(err))?;
+                self.constrain_at(lhs_ty, bool_ty)?;
+                self.constrain_at(rhs_ty, bool_ty)?;
                 Ok(bool_ty)
             }
 
@@ -782,10 +741,7 @@ impl CheckCtx<'_> {
             // Ordering — runtime errors on cross-type comparisons, so
             // bidirectional constraints are correct.
             BinOP::Normal(NormalBinOp::Expr(_)) => {
-                self.constrain(lhs_ty, rhs_ty)
-                    .map_err(|err| self.locate_err(err))?;
-                self.constrain(rhs_ty, lhs_ty)
-                    .map_err(|err| self.locate_err(err))?;
+                self.constrain_equal(lhs_ty, rhs_ty)?;
                 Ok(self.alloc_prim(PrimitiveTy::Bool))
             }
 
@@ -801,16 +757,12 @@ impl CheckCtx<'_> {
                 let rhs_list = self.alloc_concrete(Ty::List(rhs_elem));
 
                 // Constrain operands to be lists.
-                self.constrain(lhs_ty, lhs_list)
-                    .map_err(|err| self.locate_err(err))?;
-                self.constrain(rhs_ty, rhs_list)
-                    .map_err(|err| self.locate_err(err))?;
+                self.constrain_at(lhs_ty, lhs_list)?;
+                self.constrain_at(rhs_ty, rhs_list)?;
 
                 // Each side's elements flow into the result (directional, not bidirectional).
-                self.constrain(lhs_elem, result_elem)
-                    .map_err(|err| self.locate_err(err))?;
-                self.constrain(rhs_elem, result_elem)
-                    .map_err(|err| self.locate_err(err))?;
+                self.constrain_at(lhs_elem, result_elem)?;
+                self.constrain_at(rhs_elem, result_elem)?;
 
                 Ok(self.alloc_concrete(Ty::List(result_elem)))
             }
@@ -852,10 +804,7 @@ impl CheckCtx<'_> {
                 }
             };
             // Value type flows into the name slot.
-            self.constrain(value_ty, name_ty)
-                .map_err(|err| self.locate_err(err))?;
-            self.constrain(name_ty, value_ty)
-                .map_err(|err| self.locate_err(err))?;
+            self.constrain_equal(value_ty, name_ty)?;
         }
 
         Ok(())
@@ -891,10 +840,7 @@ impl CheckCtx<'_> {
                     self.infer_expr(e)?
                 }
             };
-            self.constrain(value_ty, name_ty)
-                .map_err(|err| self.locate_err(err))?;
-            self.constrain(name_ty, value_ty)
-                .map_err(|err| self.locate_err(err))?;
+            self.constrain_equal(value_ty, name_ty)?;
             fields.insert(name_text, value_ty);
         }
 

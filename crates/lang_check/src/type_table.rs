@@ -103,6 +103,19 @@ impl TypeTable {
         id
     }
 
+    /// Check if a TyId refers to a type variable (not a concrete type).
+    pub fn is_var(&self, id: TyId) -> bool {
+        matches!(self.storage.get(id), TypeEntry::Variable(_))
+    }
+
+    /// Get the concrete type for a TyId, panicking if it's a variable.
+    pub fn expect_concrete(&self, id: TyId) -> Ty<TyId> {
+        match self.storage.get(id) {
+            TypeEntry::Concrete(t) => t.clone(),
+            _ => unreachable!("expected concrete type for {id:?}"),
+        }
+    }
+
     /// Walk lower bounds transitively to find a Concrete entry and return its
     /// TyId. Used to resolve partial-application result variables (which point
     /// to a Lambda via lower bounds) so poly_type_env stores the structural type

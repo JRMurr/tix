@@ -29,7 +29,8 @@
 // directional constraints preserve the subtyping relationship and naturally
 // produce union/intersection types during canonicalization.
 
-use super::{CheckCtx, InferenceError, TyId};
+use super::{CheckCtx, InferenceError, LocatedError, TyId};
+
 use crate::storage::TypeEntry;
 use lang_ty::{
     disjoint::{are_shapes_disjoint, ConstructorShape},
@@ -37,6 +38,18 @@ use lang_ty::{
 };
 
 impl CheckCtx<'_> {
+    /// Constrain sub <: sup, locating any error at the current expression.
+    pub(crate) fn constrain_at(&mut self, sub: TyId, sup: TyId) -> Result<(), LocatedError> {
+        self.constrain(sub, sup).map_err(|err| self.locate_err(err))
+    }
+
+    /// Constrain a ≡ b (bidirectional: a <: b and b <: a), locating any error
+    /// at the current expression.
+    pub(crate) fn constrain_equal(&mut self, a: TyId, b: TyId) -> Result<(), LocatedError> {
+        self.constrain_at(a, b)?;
+        self.constrain_at(b, a)
+    }
+
     /// Record that `sub <: sup` — `sub` is a subtype of `sup`.
     pub fn constrain(&mut self, sub: TyId, sup: TyId) -> Result<(), InferenceError> {
         // Reflexivity: identical ids are trivially subtypes.
@@ -263,8 +276,8 @@ impl CheckCtx<'_> {
         // Determine if each side contains a variable (possibly nested in Inter).
         let a_has_var = self.inter_contains_var(a);
         let b_has_var = self.inter_contains_var(b);
-        let a_is_var = matches!(self.types.storage.get(a), TypeEntry::Variable(_));
-        let b_is_var = matches!(self.types.storage.get(b), TypeEntry::Variable(_));
+        let a_is_var = self.types.is_var(a);
+        let b_is_var = self.types.is_var(b);
 
         match (
             a_is_var || (a_has_var && !b_has_var),
@@ -368,8 +381,8 @@ impl CheckCtx<'_> {
         b: TyId,
         sub_id: TyId,
     ) -> Result<(), InferenceError> {
-        let a_is_var = matches!(self.types.storage.get(a), TypeEntry::Variable(_));
-        let b_is_var = matches!(self.types.storage.get(b), TypeEntry::Variable(_));
+        let a_is_var = self.types.is_var(a);
+        let b_is_var = self.types.is_var(b);
 
         match (a_is_var, b_is_var) {
             // One variable, one concrete: route to concrete if compatible, else variable.
@@ -389,14 +402,8 @@ impl CheckCtx<'_> {
             }
             // Both concrete: use disjointness analysis.
             (false, false) => {
-                let a_ty = match self.types.storage.get(a) {
-                    TypeEntry::Concrete(t) => t.clone(),
-                    _ => unreachable!(),
-                };
-                let b_ty = match self.types.storage.get(b) {
-                    TypeEntry::Concrete(t) => t.clone(),
-                    _ => unreachable!(),
-                };
+                let a_ty = self.types.expect_concrete(a);
+                let b_ty = self.types.expect_concrete(b);
                 let disjoint_a = are_types_disjoint(sub, &a_ty);
                 let disjoint_b = are_types_disjoint(sub, &b_ty);
 

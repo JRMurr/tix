@@ -207,16 +207,7 @@ impl CheckCtx<'_> {
 
             // Link the pre-allocated name slot to the inferred type.
             let name_slot = self.ty_for_name_direct(name_id);
-            if let Err(err) = self
-                .constrain(ty, name_slot)
-                .map_err(|e| self.locate_err(e))
-            {
-                return (inferred, Some(err));
-            }
-            if let Err(err) = self
-                .constrain(name_slot, ty)
-                .map_err(|e| self.locate_err(e))
-            {
+            if let Err(err) = self.constrain_equal(ty, name_slot) {
                 return (inferred, Some(err));
             }
 
