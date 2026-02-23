@@ -6,7 +6,7 @@
 // inferring each definition, resolving pending constraints, and generalizing
 // type variables via SimpleSub's level-based approach (extrude).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::{CheckCtx, InferenceError, InferenceResult, LocatedError, Polarity, TyId};
 use crate::collect::{canonicalize_standalone, Collector};
@@ -15,6 +15,7 @@ use crate::diagnostic::TixDiagnostic;
 use crate::infer_expr::{BinConstraint, PendingHasField, PendingMerge, PendingOverload};
 use crate::storage::TypeEntry;
 use lang_ast::nameres::{DependentGroup, GroupedDefs};
+use lang_ast::Expr;
 use lang_ty::simplify::simplify;
 use lang_ty::{AttrSetTy, PrimitiveTy, Ty};
 
@@ -63,6 +64,18 @@ impl CheckCtx<'_> {
 
         let mut errors = Vec::new();
 
+        // Pre-apply type annotations and context args on the entry Lambda's
+        // pattern fields BEFORE SCC groups run. Without this, parameter types
+        // (e.g. `lib :: Lib` from stubs) only flow in during infer_root()
+        // which runs AFTER the SCC groups. That's too late: bindings like
+        // `warnIf = lib.trivial.warnIf` would see an unconstrained `lib`
+        // variable, and the stub's polymorphic types would only propagate
+        // via plain constrain (not extrude), sharing type variables across
+        // all call sites.
+        if let Some(err) = self.pre_apply_entry_lambda_annotations() {
+            errors.push(err);
+        }
+
         for group in groups {
             if let Some(err) = self.infer_scc_group(group) {
                 errors.push(err);
@@ -89,6 +102,56 @@ impl CheckCtx<'_> {
         self.infer_expr(self.module.entry_expr)?;
         self.resolve_pending()?;
         Ok(())
+    }
+
+    /// Pre-apply type annotations and context args on the entry expression's
+    /// Lambda pattern fields. This runs before SCC groups so that parameter
+    /// types (e.g. `lib :: Lib` from stubs) are available when bindings like
+    /// `warnIf = lib.trivial.warnIf` are inferred.
+    ///
+    /// Without this, the annotations only flow in during `infer_root()` (after
+    /// all SCC groups), and the stub's polymorphic type variables propagate
+    /// via plain `constrain` rather than `extrude`, causing all call sites to
+    /// share the same type variables.
+    fn pre_apply_entry_lambda_annotations(&mut self) -> Option<LocatedError> {
+        let Expr::Lambda { pat: Some(pat), .. } = self.module[self.module.entry_expr].clone()
+        else {
+            return None;
+        };
+
+        // Determine effective context args: file-level context (tix.toml) or
+        // doc comment context (/** context: nixos */) on the entry Lambda.
+        let effective_context = if !self.context_args.is_empty() {
+            Some(self.context_args.clone())
+        } else {
+            self.resolve_doc_comment_context(self.module.entry_expr)
+        };
+
+        for &(name, _default_expr) in pat.fields.iter() {
+            let Some(name) = name else { continue };
+            let name_ty = self.ty_for_name_direct(name);
+
+            // Apply doc comment type annotations (e.g. /** type: lib :: Lib */).
+            if let Err(err) = self.apply_type_annotation(name, name_ty) {
+                return Some(err);
+            }
+
+            // Apply context arg types (from tix.toml or /** context: <name> */).
+            let field_text = self.module[name].text.clone();
+            if let Some(ref ctx_args) = effective_context {
+                if let Some(ctx_ty) = ctx_args.get(&field_text).cloned() {
+                    let interned = self.intern_fresh_ty(ctx_ty);
+                    if let Err(err) = self.constrain_equal(interned, name_ty) {
+                        return Some(err);
+                    }
+                }
+            }
+
+            // Record this name so Lambda inference in infer_root() skips it.
+            self.pre_annotated_params.insert(name);
+        }
+
+        None
     }
 
     /// Infer an SCC group, returning any error that occurred. Cleanup (level
@@ -147,6 +210,14 @@ impl CheckCtx<'_> {
             );
             let simplified = simplify(&output);
             self.early_canonical.insert(name_id, simplified);
+        }
+
+        // Lift any sub-level variables in the type graph to the current SCC
+        // level. Stub-interned variables (created at level 0 during annotation
+        // processing) would otherwise be treated as non-polymorphic by extrusion,
+        // causing all call sites to share the same type variables.
+        for &(_, ty) in &inferred {
+            self.lift_reachable_vars(ty);
         }
 
         self.types.storage.exit_level();
@@ -714,5 +785,66 @@ impl CheckCtx<'_> {
             .set_var_level(slot, self.types.storage.current_level);
         let e = self.module[expr].clone();
         e.walk_child_exprs(|child| self.lift_expr_slots(child));
+    }
+
+    /// Walk the type graph reachable from `ty_id` and lift any variables
+    /// below the current level to the current level. This ensures that
+    /// variables from stub types (interned at level 0 during annotation
+    /// processing) are treated as polymorphic during extrusion at consumer
+    /// call sites.
+    fn lift_reachable_vars(&mut self, ty_id: TyId) {
+        let mut visited = HashSet::new();
+        self.lift_reachable_vars_inner(ty_id, &mut visited);
+    }
+
+    fn lift_reachable_vars_inner(&mut self, ty_id: TyId, visited: &mut HashSet<TyId>) {
+        if !visited.insert(ty_id) {
+            return;
+        }
+        let entry = self.types.storage.get(ty_id).clone();
+        match entry {
+            TypeEntry::Variable(v) => {
+                if v.level < self.types.storage.current_level {
+                    self.types
+                        .storage
+                        .set_var_level(ty_id, self.types.storage.current_level);
+                }
+                // Recurse into bounds to lift any stub variables reachable
+                // through the bounds graph.
+                for i in 0..v.lower_bounds.len() {
+                    let bound = v.lower_bounds[i];
+                    self.lift_reachable_vars_inner(bound, visited);
+                }
+                for i in 0..v.upper_bounds.len() {
+                    let bound = v.upper_bounds[i];
+                    self.lift_reachable_vars_inner(bound, visited);
+                }
+            }
+            TypeEntry::Concrete(ty) => match ty {
+                Ty::Lambda { param, body } => {
+                    self.lift_reachable_vars_inner(param, visited);
+                    self.lift_reachable_vars_inner(body, visited);
+                }
+                Ty::List(elem) => {
+                    self.lift_reachable_vars_inner(elem, visited);
+                }
+                Ty::AttrSet(ref attr) => {
+                    for &field_ty in attr.fields.values() {
+                        self.lift_reachable_vars_inner(field_ty, visited);
+                    }
+                    if let Some(dyn_ty) = attr.dyn_ty {
+                        self.lift_reachable_vars_inner(dyn_ty, visited);
+                    }
+                }
+                Ty::Union(a, b) | Ty::Inter(a, b) => {
+                    self.lift_reachable_vars_inner(a, visited);
+                    self.lift_reachable_vars_inner(b, visited);
+                }
+                Ty::Neg(inner) => {
+                    self.lift_reachable_vars_inner(inner, visited);
+                }
+                Ty::Primitive(_) | Ty::TyVar(_) => {}
+            },
+        }
     }
 }

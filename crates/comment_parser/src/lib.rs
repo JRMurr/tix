@@ -180,6 +180,57 @@ impl ParsedTy {
         }
     }
 
+    /// Rename all `Generic` type variables by appending a suffix.
+    /// Each `val` declaration in a `.tix` module should have independently
+    /// scoped type variables — `a` in `val id :: a -> a` must be independent
+    /// from `a` in `val warn :: string -> a -> a`. This method renames
+    /// generics so they don't collide when multiple `val` types are combined
+    /// into a single module attrset.
+    pub fn rename_generics(&self, suffix: &str) -> ParsedTy {
+        match self {
+            ParsedTy::TyVar(TypeVarValue::Generic(name)) => {
+                ParsedTy::TyVar(TypeVarValue::Generic(SmolStr::from(format!("{name}${suffix}"))))
+            }
+            ParsedTy::TyVar(_) | ParsedTy::Primitive(_) => self.clone(),
+            ParsedTy::List(inner) => {
+                ParsedTy::List(ParsedTyRef::from(inner.0.rename_generics(suffix)))
+            }
+            ParsedTy::Lambda { param, body } => ParsedTy::Lambda {
+                param: ParsedTyRef::from(param.0.rename_generics(suffix)),
+                body: ParsedTyRef::from(body.0.rename_generics(suffix)),
+            },
+            ParsedTy::AttrSet(attr) => {
+                let fields = attr
+                    .fields
+                    .iter()
+                    .map(|(k, v)| (k.clone(), ParsedTyRef::from(v.0.rename_generics(suffix))))
+                    .collect();
+                let dyn_ty = attr
+                    .dyn_ty
+                    .as_ref()
+                    .map(|d| ParsedTyRef::from(d.0.rename_generics(suffix)));
+                ParsedTy::AttrSet(AttrSetTy {
+                    fields,
+                    dyn_ty,
+                    open: attr.open,
+                    optional_fields: attr.optional_fields.clone(),
+                })
+            }
+            ParsedTy::Union(members) => ParsedTy::Union(
+                members
+                    .iter()
+                    .map(|m| ParsedTyRef::from(m.0.rename_generics(suffix)))
+                    .collect(),
+            ),
+            ParsedTy::Intersection(members) => ParsedTy::Intersection(
+                members
+                    .iter()
+                    .map(|m| ParsedTyRef::from(m.0.rename_generics(suffix)))
+                    .collect(),
+            ),
+        }
+    }
+
     /// Returns true if this type contains any `Union` nodes. Used to detect
     /// annotations that require narrowing support (e.g. `string | [string]`
     /// as a function parameter) and skip them rather than producing false

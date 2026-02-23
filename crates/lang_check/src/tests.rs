@@ -5060,3 +5060,109 @@ fn builtin_store_path() {
     let ty = get_inferred_root(nix);
     assert_eq!(ty, arc_ty!(Path));
 }
+
+/// Stub-derived polymorphic types must be freshly instantiated at each use site.
+///
+/// Regression: `warnIf :: bool -> string -> a -> a` from a stub was interned at
+/// level 0. Multiple call sites (one passing string, one passing bool as the
+/// third arg) would share the same `a` variable, causing a spurious type mismatch.
+#[test]
+fn stub_polymorphic_fresh_instantiation() {
+    let registry = registry_from_tix(indoc! {"
+        module lib {
+            module trivial {
+                val warnIf :: bool -> string -> a -> a;
+            }
+        }
+    "});
+
+    let nix_src = indoc! { r#"
+        { /** type: lib :: Lib */ lib }:
+        let
+          warnIf = lib.trivial.warnIf;
+          normalizePath = s: warnIf true "warning" (s + "x");
+          hasPrefix = pref: str: warnIf true "warning" (str == pref);
+        in { inherit normalizePath hasPrefix; }
+    "# };
+
+    // Should type-check without error — each call to warnIf gets a fresh
+    // instantiation of `a`, so string and bool don't unify.
+    let (_module, result) = check_str_with_aliases(nix_src, &registry);
+    result.expect("stub polymorphic function should not produce type errors");
+}
+
+/// Same as above but using `rec { ... }` to match the nixpkgs lib/strings.nix
+/// structure. The `inherit` places warnIf in the outer let scope while the
+/// call sites are in the rec block, producing separate SCC groups.
+#[test]
+fn stub_polymorphic_fresh_instantiation_rec() {
+    let registry = registry_from_tix(indoc! {"
+        module lib {
+            module trivial {
+                val warnIf :: bool -> string -> a -> a;
+            }
+        }
+    "});
+
+    let nix_src = indoc! { r#"
+        { /** type: lib :: Lib */ lib }:
+        let
+          warnIf = lib.trivial.warnIf;
+        in
+        rec {
+          normalizePath = s: warnIf true "warning" (s + "x");
+          hasPrefix = pref: str: warnIf true "warning" (str == pref);
+        }
+    "# };
+
+    let (_module, result) = check_str_with_aliases(nix_src, &registry);
+    result.expect("stub polymorphic function in rec block should not produce type errors");
+}
+
+/// Full strings.nix-like pattern: rec block with doc comment annotations on
+/// the functions that call warnIf, plus builtins inherited into the rec block.
+#[test]
+fn stub_polymorphic_rec_with_annotations() {
+    let registry = registry_from_tix(indoc! {"
+        module lib {
+            module trivial {
+                val warnIf :: bool -> string -> a -> a;
+            }
+        }
+    "});
+
+    let nix_src = indoc! { r#"
+        { /** type: lib :: Lib */ lib }:
+        let
+          warnIf = lib.trivial.warnIf;
+        in
+        rec {
+          inherit (builtins) isPath stringLength substring;
+
+          /**
+            normalizePath :: string -> string
+          */
+          normalizePath =
+            s:
+            warnIf (isPath s)
+              "lib.strings.normalizePath: warning"
+              (s + "/normalized");
+
+          /**
+            hasSuffix :: string -> string -> bool
+          */
+          hasSuffix =
+            suffix: content:
+            let
+              lenContent = stringLength content;
+              lenSuffix = stringLength suffix;
+            in
+            warnIf (isPath suffix)
+              "lib.strings.hasSuffix: warning"
+              (lenContent >= lenSuffix && substring 0 lenSuffix content == suffix);
+        }
+    "# };
+
+    let (_module, result) = check_str_with_aliases(nix_src, &registry);
+    result.expect("annotated rec block functions with stub warnIf should not produce type errors");
+}

@@ -25,7 +25,7 @@ use infer_expr::{PendingHasField, PendingMerge, PendingOverload};
 use la_arena::ArenaMap;
 use lang_ast::{AstDb, Expr, ExprId, Module, NameId, NameResolution, NixFile, OverloadBinOp};
 use lang_ty::{OutputTy, PrimitiveTy, Ty};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 use type_table::TypeTable;
 
@@ -342,6 +342,12 @@ pub struct CheckCtx<'db> {
     /// to a branch-local TyId. Consulted in `infer_reference` before the
     /// normal name resolution path. Pushed/popped around branch inference.
     narrow_overrides: HashMap<NameId, TyId>,
+
+    /// Names whose type annotations and context args were pre-applied before
+    /// SCC groups (in `pre_apply_entry_lambda_annotations`). These names
+    /// should be skipped during Lambda inference in `infer_root` to avoid
+    /// double-applying the annotation.
+    pre_annotated_params: HashSet<NameId>,
 }
 
 /// Count the function arity (number of arrows along the spine) of a ParsedTy.
@@ -395,6 +401,7 @@ impl<'db> CheckCtx<'db> {
             alias_provenance: HashMap::new(),
             context_args,
             narrow_overrides: HashMap::new(),
+            pre_annotated_params: HashSet::new(),
         }
     }
 

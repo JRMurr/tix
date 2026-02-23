@@ -404,20 +404,42 @@ fn capitalize(s: &str) -> SmolStr {
 
 /// Convert a module's declarations into an open attrset ParsedTy.
 /// Val declarations become named fields; nested modules become nested attrset fields.
+///
+/// Each `val` declaration gets its own scope for generic type variables via
+/// `rename_generics`. Without this, `a` in `val id :: a -> a` and `a` in
+/// `val warn :: string -> a -> a` would share the same type variable when
+/// the module is interned, causing constraints from one field to leak into
+/// another.
 fn module_to_attrset(declarations: &[TixDeclaration]) -> ParsedTy {
+    let mut counter = 0usize;
+    module_to_attrset_inner(declarations, &mut counter)
+}
+
+fn module_to_attrset_inner(
+    declarations: &[TixDeclaration],
+    counter: &mut usize,
+) -> ParsedTy {
     let mut fields = std::collections::BTreeMap::new();
 
     for decl in declarations {
         match decl {
             TixDeclaration::ValDecl { name, ty, .. } => {
-                fields.insert(name.clone(), ParsedTyRef::from(ty.clone()));
+                // Each val declaration has its own scope for generic type
+                // variables. Rename generics with a unique suffix so that
+                // e.g. `a` in `val id :: a -> a` is independent from `a`
+                // in `val warn :: string -> a -> a`.
+                let scoped_ty = ty.rename_generics(&counter.to_string());
+                *counter += 1;
+                fields.insert(name.clone(), ParsedTyRef::from(scoped_ty));
             }
             TixDeclaration::Module {
                 name,
                 declarations: nested,
                 ..
             } => {
-                let nested_attrset = module_to_attrset(nested);
+                // Pass counter through so nested module vals also get unique
+                // suffixes (avoids collisions between parent and child vals).
+                let nested_attrset = module_to_attrset_inner(nested, counter);
                 fields.insert(name.clone(), ParsedTyRef::from(nested_attrset));
             }
             // Type aliases inside modules define types but don't add attrset fields.

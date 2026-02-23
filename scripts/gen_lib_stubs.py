@@ -52,7 +52,9 @@ MANUAL_OVERRIDES: dict[tuple[str | None, str], str] = {
     ("lists", "tail"): "[a] -> [a]",
     ("lists", "length"): "[a] -> int",
     ("lists", "elem"): "a -> [a] -> bool",
-    ("lists", "flatten"): "[a] -> [a]",
+    # flatten actually handles any nesting depth, but [[a]] -> [a] is the best
+    # approximation in a non-recursive type system (covers the common 1-level case).
+    ("lists", "flatten"): "[[a]] -> [a]",
     ("lists", "groupBy"): "(a -> string) -> [a] -> { _: [a], ... }",
     ("lists", "concatLists"): "[[a]] -> [a]",
     ("lists", "naturalSort"): "[string] -> [string]",
@@ -79,7 +81,7 @@ MANUAL_OVERRIDES: dict[tuple[str | None, str], str] = {
     (None, "tail"): "[a] -> [a]",
     (None, "length"): "[a] -> int",
     (None, "elem"): "a -> [a] -> bool",
-    (None, "flatten"): "[a] -> [a]",
+    (None, "flatten"): "[[a]] -> [a]",
     (None, "groupBy"): "(a -> string) -> [a] -> { _: [a], ... }",
     (None, "concatLists"): "[[a]] -> [a]",
     (None, "attrNames"): "{ ... } -> [string]",

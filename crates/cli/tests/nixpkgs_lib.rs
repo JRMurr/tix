@@ -109,9 +109,17 @@ fn nixpkgs_lib() {
     assert!(lib_dir.is_dir(), "{} is not a directory", lib_dir.display());
 
     let nix_files = collect_nix_files(&lib_dir);
-    assert!(!nix_files.is_empty(), "no .nix files found in {}", lib_dir.display());
+    assert!(
+        !nix_files.is_empty(),
+        "no .nix files found in {}",
+        lib_dir.display()
+    );
 
-    eprintln!("nixpkgs_lib: testing {} files in {}", nix_files.len(), lib_dir.display());
+    eprintln!(
+        "nixpkgs_lib: testing {} files in {}",
+        nix_files.len(),
+        lib_dir.display()
+    );
 
     let timeout = Duration::from_secs(60);
     let mut summary = Summary::default();
@@ -120,7 +128,9 @@ fn nixpkgs_lib() {
         let rel = file.strip_prefix(&nixpkgs).unwrap_or(file);
 
         let mut cmd = Command::new(tix_cli());
-        cmd.arg(file).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        cmd.arg(file)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
 
         match run_with_timeout(&mut cmd, timeout) {
             Some(status) => {
@@ -137,7 +147,9 @@ fn nixpkgs_lib() {
                     _ => {
                         eprintln!("  CRASH({code})  {}", rel.display());
                         summary.crash += 1;
-                        summary.crash_files.push(format!("{} (exit {code})", rel.display()));
+                        summary
+                            .crash_files
+                            .push(format!("{} (exit {code})", rel.display()));
                     }
                 }
             }
@@ -169,5 +181,9 @@ fn nixpkgs_lib() {
         }
     }
 
-    assert_eq!(summary.crash, 0, "{} file(s) caused tix-cli to crash", summary.crash);
+    assert_eq!(
+        summary.crash, 0,
+        "{} file(s) caused tix-cli to crash",
+        summary.crash
+    );
 }

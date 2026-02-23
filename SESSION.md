@@ -61,18 +61,16 @@ extrusion.
   `"builtins"`. This is correct but potentially expensive if `builtins` is
   referenced many times. Could cache the attrset structure and extrude it.
 
-- `test/strings.nix` has 1 remaining error + 1 annotation warning (down from 4):
-  - Lines 5-3168 (root expr): `lib.pipe` in `sanitizeDerivationName` (line 2904)
-    creates a heterogeneous function pipeline where intermediate types change
-    from `string` → `[a]` (via `split`) → `string` (via `concatMapStrings`).
-    Since `foldl'` requires a uniform accumulator type `b`, the type checker
-    produces `[...] vs string`. This is a fundamental limitation — `pipe` with
-    heterogeneous function types can't be typed in SimpleSub.
-  - `nameFromURL :: String -> String` annotation (line 2084): wrong arity
+- `test/strings.nix` has 0 errors + 1 annotation warning:
+  - `nameFromURL :: String -> String` annotation (line 2101): wrong arity
     (1 arg, function takes 2). Detected and skipped with a warning.
-  - Previously fixed: `getName`/`getVersion` errors resolved by locally-aliased
-    builtin narrowing. `nameFromURL` body error resolved by annotation arity
-    check preventing type table corruption.
+  - Previously fixed: `hasSuffix`/`hasPrefix`/`hasInfix` warnIf errors resolved
+    by per-val generic scoping in module stubs + pre-applying entry Lambda
+    annotations before SCC groups + lifting stub-level variables for extrusion.
+    `lib.pipe` in `sanitizeDerivationName` error resolved by the same fix
+    (stub polymorphic instantiation). `getName`/`getVersion` errors resolved
+    by locally-aliased builtin narrowing. `nameFromURL` body error resolved
+    by annotation arity check preventing type table corruption.
 
 ### Missing Features
 

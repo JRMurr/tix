@@ -147,19 +147,18 @@ impl CheckCtx<'_> {
                         if let Some(default_ty) = default_ty {
                             self.constrain_at(default_ty, name_ty)?;
                         }
-                        // Apply doc comment type annotations (e.g. /** type: x :: int */)
-                        // to pattern fields. Without this, annotations on fields of
-                        // top-level lambdas (not wrapped in a let binding) would be ignored.
-                        self.apply_type_annotation(name, name_ty)?;
-
-                        // Apply context arg types (from tix.toml or /** context: <name> */).
-                        // This constrains pattern fields to their declared types, e.g.
-                        // `lib` gets type `Lib`, `pkgs` gets type `Pkgs`.
+                        // Apply doc comment type annotations and context args, unless
+                        // this name was already pre-annotated before SCC groups
+                        // (to avoid double-applying and creating redundant constraint paths).
                         let field_text = self.module[name].text.clone();
-                        if let Some(ref ctx_args) = effective_context {
-                            if let Some(ctx_ty) = ctx_args.get(&field_text).cloned() {
-                                let interned = self.intern_fresh_ty(ctx_ty);
-                                self.constrain_equal(interned, name_ty)?;
+                        if !self.pre_annotated_params.contains(&name) {
+                            self.apply_type_annotation(name, name_ty)?;
+
+                            if let Some(ref ctx_args) = effective_context {
+                                if let Some(ctx_ty) = ctx_args.get(&field_text).cloned() {
+                                    let interned = self.intern_fresh_ty(ctx_ty);
+                                    self.constrain_equal(interned, name_ty)?;
+                                }
                             }
                         }
 
@@ -451,7 +450,8 @@ impl CheckCtx<'_> {
 
                     // If the name is in poly_type_env, instantiate via extrude.
                     if let Some(&poly_ty) = self.poly_type_env.get(name) {
-                        Ok(self.extrude(poly_ty, Polarity::Positive))
+                        let result = self.extrude(poly_ty, Polarity::Positive);
+                        Ok(result)
                     } else {
                         // Not yet generalized — return the pre-allocated TyId directly.
                         Ok(self.ty_for_name_direct(name))

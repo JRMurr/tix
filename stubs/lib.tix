@@ -340,7 +340,7 @@ module lib {
     val findSingle :: (a -> bool) -> a -> a -> [a] -> a;
     ## Flatten the argument into a single list; that is, nested lists are
     ## spliced into the top-level lists.
-    val flatten :: [a] -> [a];
+    val flatten :: [[a]] -> [a];
     ## “left fold”, like foldr, but from the left:
     val foldl :: (b -> a -> b) -> b -> [a] -> b;
     ## “right fold” a binary function op between successive elements of list
@@ -1165,7 +1165,7 @@ module lib {
   val fix :: (a -> a) -> a;
   val fixedWidthNumber :: int -> int -> string;
   val fixedWidthString :: int -> string -> string -> string;
-  val flatten :: [a] -> [a];
+  val flatten :: [[a]] -> [a];
   val flip :: (a -> b -> c) -> (b -> a -> c);
   val foldAttrs :: (Any -> Any -> Any) -> Any -> [{ ... }] -> Any;
   val foldl :: (b -> a -> b) -> b -> [a] -> b;
