@@ -37,8 +37,28 @@ impl CheckCtx<'_> {
         }))
     }
 
+    /// How often (in expression count) to check the deadline during inference.
+    /// 256 is frequent enough to bail out quickly (~1ms granularity on typical
+    /// hardware) without the Instant::now() syscall dominating inference time.
+    const DEADLINE_CHECK_INTERVAL: u32 = 256;
+
     /// Infer the type of an expression and record it in the expr→type map.
     pub(super) fn infer_expr(&mut self, e: ExprId) -> Result<TyId, LocatedError> {
+        // Periodic deadline check: bail out to a fresh variable if the
+        // deadline has been exceeded. This prevents deep expression trees
+        // (like infer_root on a large module) from running indefinitely.
+        if self.deadline.is_some() {
+            if self.deadline_exceeded {
+                return Ok(self.new_var());
+            }
+            self.expr_counter = self.expr_counter.wrapping_add(1);
+            if self.expr_counter % Self::DEADLINE_CHECK_INTERVAL == 0 && self.past_deadline() {
+                log::warn!("inference deadline exceeded during infer_expr (after {} expressions)", self.expr_counter);
+                self.deadline_exceeded = true;
+                return Ok(self.new_var());
+            }
+        }
+
         // Track the current expression so errors from constrain() and
         // sub-calls are attributed to the correct source location.
         self.current_expr = e;

@@ -350,11 +350,20 @@ pub struct CheckCtx<'db> {
     /// double-applying the annotation.
     pre_annotated_params: HashSet<NameId>,
 
-    /// Optional deadline for inference. Checked after each SCC group; if
-    /// exceeded, remaining groups are skipped and partial results returned.
-    /// Used by import resolution to prevent a single file from blocking
-    /// the LSP indefinitely.
+    /// Optional deadline for inference. Checked after each SCC group and
+    /// periodically during expression inference; if exceeded, remaining work
+    /// is skipped and partial results returned. Used by import resolution to
+    /// prevent a single file from blocking the LSP indefinitely.
     deadline: Option<Instant>,
+
+    /// Expression counter for periodic deadline checks within infer_expr.
+    /// Calling Instant::now() on every expression would be too expensive,
+    /// so we only check every DEADLINE_CHECK_INTERVAL expressions.
+    expr_counter: u32,
+
+    /// Set when a periodic deadline check fires inside infer_expr. Once set,
+    /// all subsequent infer_expr calls short-circuit to a fresh variable.
+    deadline_exceeded: bool,
 }
 
 /// Count the function arity (number of arrows along the spine) of a ParsedTy.
@@ -410,6 +419,8 @@ impl<'db> CheckCtx<'db> {
             narrow_overrides: HashMap::new(),
             pre_annotated_params: HashSet::new(),
             deadline: None,
+            expr_counter: 0,
+            deadline_exceeded: false,
         }
     }
 

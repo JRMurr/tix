@@ -80,7 +80,7 @@ impl CheckCtx<'_> {
             // Check deadline before each SCC group so a single file can't
             // block the LSP indefinitely. Partial results (types inferred
             // so far) are still returned.
-            if self.past_deadline() {
+            if self.deadline_exceeded || self.past_deadline() {
                 log::warn!("inference deadline exceeded after {i} SCC groups");
                 break;
             }
@@ -89,8 +89,12 @@ impl CheckCtx<'_> {
             }
         }
 
-        if let Err(err) = self.infer_root() {
-            errors.push(err);
+        if !self.deadline_exceeded && !self.past_deadline() {
+            if let Err(err) = self.infer_root() {
+                errors.push(err);
+            }
+        } else {
+            log::warn!("skipping infer_root due to deadline");
         }
 
         // Convert internal errors and warnings to display-ready diagnostics
@@ -260,7 +264,7 @@ impl CheckCtx<'_> {
         let mut inferred: Vec<(lang_ast::NameId, TyId)> = Vec::new();
 
         for def in group {
-            if self.past_deadline() {
+            if self.deadline_exceeded || self.past_deadline() {
                 break;
             }
 
@@ -583,7 +587,7 @@ impl CheckCtx<'_> {
     fn resolve_pending(&mut self) -> Result<(), LocatedError> {
         // Fixed-point loop: keep trying until no more progress.
         loop {
-            if self.past_deadline() {
+            if self.deadline_exceeded || self.past_deadline() {
                 break;
             }
 
