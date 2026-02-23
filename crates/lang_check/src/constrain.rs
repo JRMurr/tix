@@ -217,6 +217,27 @@ impl CheckCtx<'_> {
                 self.constrain_rhs_union(sub, a, b, sub_id)
             }
 
+            // ── __functor calling convention ──────────────────────────────
+            //
+            // In Nix, `{ __functor = self: x: body; ... }` can be called as
+            // a function. When an AttrSet with a `__functor` field flows into
+            // a Lambda constraint, we extract the functor and constrain it as
+            // `self -> (param -> body)` where `self` is the attrset itself.
+            (Ty::AttrSet(attr), Ty::Lambda { param, body }) if attr.fields.contains_key("__functor") => {
+                let functor_ty = attr.fields["__functor"];
+                // __functor has type `self -> arg -> result` in Nix.
+                // Constrain: functor_ty <: (sub_id -> Lambda { param, body })
+                let inner_lambda = self.alloc_concrete(Ty::Lambda {
+                    param: *param,
+                    body: *body,
+                });
+                let expected_functor = self.alloc_concrete(Ty::Lambda {
+                    param: sub_id,
+                    body: inner_lambda,
+                });
+                self.constrain(functor_ty, expected_functor)
+            }
+
             // Type mismatch.
             _ => Err(InferenceError::TypeMismatch(Box::new((
                 sub.clone(),
@@ -459,6 +480,11 @@ fn is_concrete_compatible(sub: &Ty<TyId>, target: &TypeEntry) -> bool {
                 || matches!(
                     (sub, target_ty),
                     (Ty::Primitive(p1), Ty::Primitive(p2)) if p1.is_subtype_of(p2)
+                )
+                // __functor attrsets are compatible with Lambda targets.
+                || matches!(
+                    (sub, target_ty),
+                    (Ty::AttrSet(attr), Ty::Lambda { .. }) if attr.fields.contains_key("__functor")
                 )
         }
     }

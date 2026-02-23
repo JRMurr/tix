@@ -2767,19 +2767,34 @@ fn narrow_null_guard_concrete_branches() {
 }
 
 /// `==` is a total function in Nix — it doesn't constrain operand types.
-/// So `x == null` doesn't force null into x's bounds, and `x.name` succeeds
-/// (x is unconstrained, field access just constrains it to an open attrset).
+/// `x == null` doesn't force null into x's bounds. When used outside of
+/// `&&`/`||` short-circuit contexts, x remains unconstrained.
+///
+/// Note: `(x == null) && x.name` now correctly fails because `&&`
+/// short-circuit narrowing means the RHS sees x as null (then-branch).
+/// The independent equality test is `equality_leaves_variable_unconstrained`.
 #[test]
 fn equality_does_not_constrain_operands() {
-    let nix = "x: (x == null) && x.name";
+    // `x == null` in a let binding doesn't constrain x.
+    let nix = "x: let _ = x == null; in x.name";
     let ty = get_inferred_root(nix);
-    // x is unconstrained by ==, so x.name constrains x to { name: a, ... }
-    // and && returns bool.
     let (_, body) = unwrap_lambda(&ty);
+    // x.name succeeds — x gets constrained to { name: a, ... } by the
+    // Select, not by the ==.
     assert!(
-        matches!(body, OutputTy::Primitive(PrimitiveTy::Bool)),
-        "equality should not constrain operands, got: {ty}"
+        !matches!(body, OutputTy::Primitive(PrimitiveTy::Bool)),
+        "equality should not constrain operands, x.name should return non-bool field type, got: {ty}"
     );
+}
+
+/// `(x == null) && x.name` correctly fails with short-circuit narrowing:
+/// the RHS of `&&` runs when `x == null` is true, so x is null and
+/// doesn't have a `.name` field.
+#[test]
+fn and_short_circuit_null_eq_then_field_access_fails() {
+    let nix = "x: (x == null) && x.name";
+    let _err = get_check_error(nix);
+    // Should produce a type error: null doesn't have field `name`.
 }
 
 /// Cross-type equality is valid in Nix: `1 == "hi"` → false.
@@ -4874,4 +4889,129 @@ fn if_chain_has_field_simplification() {
         formatted.contains("string"),
         "if-chain result should contain 'string', got: {formatted}"
     );
+}
+
+// ==============================================================================
+// __functor calling convention
+// ==============================================================================
+//
+// In Nix, `{ __functor = self: x: body; }` can be called as a function.
+// These tests verify that the type checker handles the __functor protocol.
+
+/// An attrset with `__functor` can be called as a function.
+#[test]
+fn functor_attrset_callable() {
+    let nix = indoc! {"
+        let
+            obj = { __functor = self: x: x + 1; value = 42; };
+        in
+        obj 10
+    "};
+    let ty = get_inferred_root(nix);
+    assert_eq!(ty, arc_ty!(Int));
+}
+
+/// An attrset with `__functor` can be passed where a function is expected.
+#[test]
+fn functor_attrset_as_function_arg() {
+    let nix = indoc! {"
+        let
+            apply = f: f 1;
+            obj = { __functor = self: x: x + 1; };
+        in
+        apply obj
+    "};
+    let ty = get_inferred_root(nix);
+    assert_eq!(ty, arc_ty!(Int));
+}
+
+/// `__functor`'s `self` parameter receives the attrset itself, allowing
+/// access to sibling fields.
+#[test]
+fn functor_self_accesses_fields() {
+    let nix = indoc! {"
+        let
+            obj = { __functor = self: x: self.base + x; base = 10; };
+        in
+        obj 5
+    "};
+    let ty = get_inferred_root(nix);
+    assert_eq!(ty, arc_ty!(Int));
+}
+
+/// An attrset without `__functor` cannot be called as a function.
+#[test]
+fn non_functor_attrset_not_callable() {
+    let nix = "let obj = { value = 1; }; in obj 10";
+    let _err = get_check_error(nix);
+}
+
+/// An attrset with `__functor` is still disjoint from primitives.
+#[test]
+fn functor_attrset_disjoint_from_primitives() {
+    let nix = indoc! {"
+        x:
+        if builtins.isNull x then x
+        else { __functor = self: y: y; }
+    "};
+    // Should type-check: null and {__functor: ...} are disjoint.
+    let _ty = get_inferred_root(nix);
+}
+
+// ==============================================================================
+// ||/&& short-circuit narrowing
+// ==============================================================================
+
+/// `||` short-circuit: RHS of `||` runs when LHS is false, so it gets
+/// else-branch narrowing. `x == null || x + 1 > 0` should succeed
+/// because x is non-null in the RHS.
+#[test]
+fn or_short_circuit_null_guard() {
+    let nix = "x: x == null || x + 1 > 0";
+    let ty = get_inferred_root(nix);
+    let (_, body) = unwrap_lambda(&ty);
+    assert_eq!(*body, arc_ty!(Bool));
+}
+
+/// `&&` short-circuit: RHS of `&&` runs when LHS is true, so it gets
+/// then-branch narrowing. `x != null && x.name` should succeed because
+/// x is non-null in the RHS, allowing field access.
+#[test]
+fn and_short_circuit_null_guard_field_access() {
+    let nix = r#"x: (x != null) && (builtins.isString x.name)"#;
+    let ty = get_inferred_root(nix);
+    let (_, body) = unwrap_lambda(&ty);
+    assert_eq!(*body, arc_ty!(Bool));
+}
+
+/// `||` with isNull: `isNull x || expr` — RHS gets else-branch narrowing
+/// (x is not null).
+#[test]
+fn or_short_circuit_isnull() {
+    let nix = "x: builtins.isNull x || x + 1 > 0";
+    let ty = get_inferred_root(nix);
+    let (_, body) = unwrap_lambda(&ty);
+    assert_eq!(*body, arc_ty!(Bool));
+}
+
+/// `&&` with isString: `isString x && stringLength x > 0` — RHS gets
+/// then-branch narrowing (x is string).
+#[test]
+fn and_short_circuit_isstring() {
+    let nix = "x: builtins.isString x && builtins.stringLength x > 0";
+    let ty = get_inferred_root(nix);
+    let (_, body) = unwrap_lambda(&ty);
+    assert_eq!(*body, arc_ty!(Bool));
+}
+
+// ==============================================================================
+// storePath builtin
+// ==============================================================================
+
+/// `builtins.storePath` should be typed as `path -> path`.
+#[test]
+fn builtin_store_path() {
+    let nix = "builtins.storePath /nix/store/abc";
+    let ty = get_inferred_root(nix);
+    assert_eq!(ty, arc_ty!(Path));
 }

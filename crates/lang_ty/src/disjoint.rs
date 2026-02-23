@@ -56,19 +56,24 @@ pub fn are_shapes_disjoint(a: &ConstructorShape, b: &ConstructorShape) -> bool {
             p1 != p2 && !p1.is_subtype_of(p2) && !p2.is_subtype_of(p1)
         }
 
-        // Different constructor kinds — always disjoint.
+        // Different constructor kinds — always disjoint, except AttrSet
+        // with `__functor` vs Lambda (Nix's callable attrset convention).
         (Primitive(_), AttrSet { .. })
         | (Primitive(_), List)
         | (Primitive(_), Lambda)
         | (AttrSet { .. }, Primitive(_))
         | (AttrSet { .. }, List)
-        | (AttrSet { .. }, Lambda)
         | (List, Primitive(_))
         | (List, AttrSet { .. })
         | (List, Lambda)
         | (Lambda, Primitive(_))
-        | (Lambda, AttrSet { .. })
         | (Lambda, List) => true,
+
+        // AttrSet vs Lambda: disjoint unless the attrset has a `__functor`
+        // field, which makes it callable in Nix.
+        (AttrSet { fields, .. }, Lambda) | (Lambda, AttrSet { fields, .. }) => {
+            !fields.contains_key(&SmolStr::from("__functor"))
+        }
 
         // Two attrsets: disjoint if one is closed and the other requires a field
         // the closed one doesn't have (a required field is one that's present in

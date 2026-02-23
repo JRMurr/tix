@@ -86,6 +86,7 @@ const ALL_BUILTIN_NAMES: &[&str] = &[
     "currentSystem",
     "currentTime",
     "storeDir",
+    "storePath",
 ];
 
 /// Build a fresh builtin type from a mini type expression.
@@ -235,6 +236,7 @@ impl CheckCtx<'_> {
             // =================================================================
             "langVersion" | "currentTime" => Ok(self.alloc_prim(PrimitiveTy::Int)),
             "nixVersion" | "currentSystem" | "storeDir" => Ok(self.alloc_prim(PrimitiveTy::String)),
+            "storePath" => synth_ty!(self; => Path -> Path),
 
             // Unknown builtins get a fresh type variable — graceful degradation.
             _ => Ok(self.new_var()),

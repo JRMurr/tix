@@ -10,8 +10,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::{CheckCtx, LocatedError, Polarity, TyId};
 use lang_ast::{
-    nameres::ResolveResult, BinOP, BindingValue, Bindings, Expr, ExprBinOp, ExprId, InterpolPart,
-    Literal, NameId, NormalBinOp, OverloadBinOp,
+    nameres::ResolveResult, BinOP, BindingValue, Bindings, BoolBinOp, Expr, ExprBinOp, ExprId,
+    InterpolPart, Literal, NameId, NormalBinOp, OverloadBinOp,
 };
 use lang_ty::{AttrSetTy, PrimitiveTy, Ty};
 use smol_str::SmolStr;
@@ -179,7 +179,24 @@ impl CheckCtx<'_> {
                 }))
             }
 
-            Expr::BinOp { lhs, rhs, op } => self.infer_bin_op(lhs, rhs, &op),
+            Expr::BinOp { lhs, rhs, op } => {
+                // Short-circuit narrowing for `&&` and `||`:
+                //
+                // `a && b` — b only evaluates when a is true, so b gets
+                // then-branch narrowing from a.
+                //
+                // `a || b` — b only evaluates when a is false, so b gets
+                // else-branch narrowing from a.
+                match op {
+                    BinOP::Normal(NormalBinOp::Bool(BoolBinOp::And)) => {
+                        self.infer_bool_short_circuit(lhs, rhs, true)
+                    }
+                    BinOP::Normal(NormalBinOp::Bool(BoolBinOp::Or)) => {
+                        self.infer_bool_short_circuit(lhs, rhs, false)
+                    }
+                    _ => self.infer_bin_op(lhs, rhs, &op),
+                }
+            }
 
             Expr::IfThenElse {
                 cond,
@@ -662,6 +679,38 @@ impl CheckCtx<'_> {
                 }
             }
         }
+    }
+
+    /// Infer `a && b` or `a || b` with short-circuit narrowing.
+    ///
+    /// `is_and = true` → `&&`: RHS gets then-branch narrowing (runs when LHS is true).
+    /// `is_and = false` → `||`: RHS gets else-branch narrowing (runs when LHS is false).
+    fn infer_bool_short_circuit(
+        &mut self,
+        lhs: ExprId,
+        rhs: ExprId,
+        is_and: bool,
+    ) -> Result<TyId, LocatedError> {
+        let bool_ty = self.alloc_prim(PrimitiveTy::Bool);
+
+        let lhs_ty = self.infer_expr(lhs)?;
+        self.constrain(lhs_ty, bool_ty)
+            .map_err(|err| self.locate_err(err))?;
+
+        // Analyze the LHS as a condition for narrowing.
+        let narrow_info = lang_ast::narrow::analyze_condition(
+            self.module,
+            self.name_res,
+            self.binding_exprs,
+            lhs,
+        );
+
+        // Infer RHS under the appropriate narrowing branch.
+        let rhs_ty = self.infer_with_narrowing(rhs, &narrow_info, is_and)?;
+        self.constrain(rhs_ty, bool_ty)
+            .map_err(|err| self.locate_err(err))?;
+
+        Ok(bool_ty)
     }
 
     fn infer_bin_op(&mut self, lhs: ExprId, rhs: ExprId, op: &BinOP) -> Result<TyId, LocatedError> {
