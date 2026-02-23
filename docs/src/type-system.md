@@ -30,6 +30,28 @@ negate = x: !x;
 
 Nix functions are curried — `f: x: f x` is a function that takes `f` and returns a function that takes `x`.
 
+### Callable attrsets (`__functor`)
+
+In Nix, an attrset with a `__functor` field can be called as a function. The `__functor` field must be a function that takes the attrset itself (`self`) as its first argument, followed by the actual parameter:
+
+```nix
+let
+  counter = {
+    __functor = self: x: self.base + x;
+    base = 10;
+  };
+in counter 5  # 15
+```
+
+Tix understands this calling convention. When an attrset with `__functor` flows into a function position, tix constrains `__functor` as `self -> (param -> result)` where `self` is the attrset itself. This means callable attrsets can be passed to higher-order functions that expect functions:
+
+```nix
+let
+  apply = f: f 1;
+  obj = { __functor = self: x: x + 1; };
+in apply obj  # 2
+```
+
 ## Union types
 
 When an expression can produce different types, tix infers a union.
@@ -122,6 +144,16 @@ dispatch = x:
 ```
 
 For `&&`, only the then-branch gets combined narrowings (we can't determine which guard failed in the else-branch). For `||`, only the else-branch gets combined narrowings (we can't determine which guard holds in the then-branch).
+
+Additionally, `&&` and `||` apply **short-circuit narrowing** to sub-expressions: since `a && b` only evaluates `b` when `a` is true, `b` is inferred under `a`'s then-branch narrowing. Similarly, `a || b` infers `b` under `a`'s else-branch narrowing:
+
+```nix
+# ||: x is non-null in the RHS (runs when x == null is false)
+safe = x: x == null || x + 1 > 0;
+
+# &&: x is non-null in the RHS (runs when x != null is true)
+safe = x: x != null && isString x.name;
+```
 
 ### Conditional library functions
 

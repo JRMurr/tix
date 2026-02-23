@@ -44,12 +44,22 @@ x: assert x != null; x.name
 
 Structural type predicates (`isAttrs`, `isFunction`, `isList`) have then-branch narrowing — `isAttrs x` narrows `x` to an attrset, `isList x` narrows to a list, and `isFunction x` narrows to a function. Else-branch narrowing for these compound types is not yet supported (no `¬{..}` / `¬[..]` / `¬(a → b)`).
 
+Short-circuit narrowing is supported for `&&` and `||`:
+
+```nix
+x: x == null || x + 1 > 0
+# RHS of || runs when x != null — x is narrowed to non-null
+
+x: x != null && builtins.isString x.name
+# RHS of && runs when x != null — x is narrowed to non-null
+```
+
 **Not yet supported:**
 - Else-branch narrowing for structural predicates (`isAttrs`, `isList`, `isFunction`)
 - Multi-element attrpaths in `?`: `x ? a.b.c` doesn't narrow
-- Compound conditions: `&&`, `||`
 - Value equality narrowing: `if x == "foo"` doesn't narrow `x` to the literal `"foo"` (tix has no literal types)
 - Per-component verification of intersection-of-function annotations (the declared overloaded type is trusted, not checked against each branch of the body)
+- Recursive functions with type-narrowed parameters: `isFunction x` in one branch + recursive call from another branch share the same type variable, causing false positive conflicts
 
 ### `inherit (builtins)` and dynamic field access
 

@@ -203,3 +203,38 @@ extrusion.
   variables that appear at structurally different positions (e.g. different attrset
   fields) won't be merged. This could be relaxed to use "occurrence signature"
   based grouping per the SimpleSub paper §4.2.
+
+### Recursive Function Narrowing Conflicts (modules.nix, generators.nix)
+
+- Recursive functions with `isFunction`/`isAttrs`/`isList` narrowing on the
+  same parameter produce false positives (3 errors in modules.nix:423, 2-3 in
+  generators.nix). Root cause: SCC-level inference shares a single type variable
+  for the parameter across all call sites, including recursive calls from other
+  branches. E.g. in `loadModule`:
+  ```
+  if isFunction m then ... m args ...
+  else if isAttrs m then loadModule ... { config = m; }
+  ```
+  The recursive call constrains `m` to accept attrsets, conflicting with the
+  function narrowing in the then-branch. Fix requires per-call-site flow
+  sensitivity, which is beyond the current SCC architecture.
+
+### `||` Short-Circuit Narrowing: Chained Null Guards
+
+- `elemType == null || lazy == null || placeholder == null` (types.nix:838)
+  produces a `~null` vs `null` error in the rightmost operand. Left-assoc `||`
+  applies else-branch narrowing from the compound LHS to the RHS, making
+  `placeholder` narrowed to `~null` from the outer `||`. The comparison
+  `placeholder == null` succeeds (== is total) but downstream code that expects
+  `placeholder` to potentially be null sees `~null`. Partial fix — most `||`
+  patterns work, but chained null guards on 3+ variables can surface this.
+
+### `resolve_to_concrete_id` Picks Arbitrary Lower Bound
+
+- `resolve_to_concrete_id` follows the first reachable lower bound to find a
+  concrete type. For variables with multiple distinct concrete lower bounds
+  (e.g. `null | int`), it picks one arbitrarily. This is used in poly_type_env
+  recording and early canonicalization. The narrowing fix (using
+  `ty_for_name_direct` instead of `name_slot_or_override`) works around this
+  for the narrowing case, but the underlying issue could cause other subtle
+  problems if poly_type_env entries are expected to represent the full type.
