@@ -236,7 +236,9 @@ impl CheckCtx<'_> {
             // a function. When an AttrSet with a `__functor` field flows into
             // a Lambda constraint, we extract the functor and constrain it as
             // `self -> (param -> body)` where `self` is the attrset itself.
-            (Ty::AttrSet(attr), Ty::Lambda { param, body }) if attr.fields.contains_key("__functor") => {
+            (Ty::AttrSet(attr), Ty::Lambda { param, body })
+                if attr.fields.contains_key("__functor") =>
+            {
                 let functor_ty = attr.fields["__functor"];
                 // __functor has type `self -> arg -> result` in Nix.
                 // Constrain: functor_ty <: (sub_id -> Lambda { param, body })
@@ -337,15 +339,22 @@ impl CheckCtx<'_> {
 
     /// Check if a TyId is or transitively contains a type variable
     /// (through Inter nesting). Used to find the variable side for
-    /// MLstruct-style variable isolation.
-    fn inter_contains_var(&self, id: TyId) -> bool {
-        match self.types.storage.get(id) {
+    /// MLstruct-style variable isolation. Results are cached since type
+    /// entries are append-only (immutable once allocated).
+    fn inter_contains_var(&mut self, id: TyId) -> bool {
+        if let Some(&cached) = self.types.inter_var_cache.get(&id) {
+            return cached;
+        }
+        let result = match self.types.storage.get(id) {
             TypeEntry::Variable(_) => true,
             TypeEntry::Concrete(Ty::Inter(a, b)) => {
-                self.inter_contains_var(*a) || self.inter_contains_var(*b)
+                let (a, b) = (*a, *b);
+                self.inter_contains_var(a) || self.inter_contains_var(b)
             }
             _ => false,
-        }
+        };
+        self.types.inter_var_cache.insert(id, result);
+        result
     }
 
     /// Check if a Union type tree contains a specific TyId as a leaf member.
@@ -357,16 +366,25 @@ impl CheckCtx<'_> {
     /// Only checks TyId equality (not structural equivalence), which is
     /// sufficient because `alloc_concrete(Neg(x))` is deduplicated via
     /// `neg_cache` — the same `Neg(x)` always returns the same TyId.
-    fn union_contains_member(&self, id: TyId, target: TyId) -> bool {
+    /// Results are cached since Union structure is immutable once allocated.
+    fn union_contains_member(&mut self, id: TyId, target: TyId) -> bool {
         if id == target {
             return true;
         }
-        match self.types.storage.get(id) {
+        if self.types.union_member_cache.contains(&(id, target)) {
+            return true;
+        }
+        let result = match self.types.storage.get(id) {
             TypeEntry::Concrete(Ty::Union(a, b)) => {
-                self.union_contains_member(*a, target) || self.union_contains_member(*b, target)
+                let (a, b) = (*a, *b);
+                self.union_contains_member(a, target) || self.union_contains_member(b, target)
             }
             _ => false,
+        };
+        if result {
+            self.types.union_member_cache.insert((id, target));
         }
+        result
     }
 
     /// `sub <: Union(a, b)` — route the sub-type to the correct union member.

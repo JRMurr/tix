@@ -190,6 +190,24 @@ extrusion.
   literal as `findFirst`'s default arg causes a `string vs null` mismatch because
   `findFirst` is not stubbed. Unrelated to narrowing.
 
+### Known Performance Characteristics
+
+The following O(n^2) patterns are intentional trade-offs, acceptable for typical
+Nix code sizes (hundreds of bindings per file, not millions):
+
+- **Deferred overload re-instantiation** (`infer.rs:257-261`): fixed-point loop
+  over carried overloads during extrusion. Each pass is O(carried.len()), and
+  the number of passes is bounded by the overload chain depth (typically 1-3).
+- **Attrset subsumption** (`collect.rs:457-514`): pairwise comparison of attrset
+  types in union simplification. k (number of attrset members) is small in
+  practice.
+- **Pending constraint resolution** (`infer.rs:488-545`): swap-and-filter loop
+  over pending constraints. Each pass processes the whole list; bounded by the
+  number of resolution steps (typically converges in 2-3 passes).
+- **Conservative union routing** (`constrain.rs:429-434`): when both union
+  members are variables, constraints are routed to both. Sound but may create
+  unnecessary bounds.
+
 ### Future Enhancements
 
 - Full intersection-type-based operator overloading (replace pragmatic deferred

@@ -262,19 +262,27 @@ impl CheckCtx<'_> {
         // may add new entries to the cache, which then makes other overloads
         // eligible for re-instantiation (e.g. when overload chains share
         // intermediate result vars like `(a + b) + (c + d)`).
-        let deferred = self.deferred.carried.clone();
-        let mut processed = vec![false; deferred.len()];
+        let num_carried = self.deferred.carried.len();
+        let mut processed = vec![false; num_carried];
         loop {
             let mut made_progress = false;
 
-            for (i, ov) in deferred.iter().enumerate() {
-                if processed[i] {
+            for (i, done) in processed.iter_mut().enumerate() {
+                if *done {
                     continue;
                 }
 
-                let any_extruded = cache.contains_key(&ov.constraint.lhs)
-                    || cache.contains_key(&ov.constraint.rhs)
-                    || cache.contains_key(&ov.constraint.ret);
+                // Extract fields by index to avoid holding a borrow on self.deferred
+                // while calling &mut self methods below.
+                let ov_lhs = self.deferred.carried[i].constraint.lhs;
+                let ov_rhs = self.deferred.carried[i].constraint.rhs;
+                let ov_ret = self.deferred.carried[i].constraint.ret;
+                let ov_op = self.deferred.carried[i].op;
+                let ov_at = self.deferred.carried[i].constraint.at_expr;
+
+                let any_extruded = cache.contains_key(&ov_lhs)
+                    || cache.contains_key(&ov_rhs)
+                    || cache.contains_key(&ov_ret);
 
                 if any_extruded {
                     // For each operand, use the cached fresh var if available,
@@ -288,23 +296,23 @@ impl CheckCtx<'_> {
                             }
                         };
 
-                    let new_lhs = get_or_extrude(ov.constraint.lhs, self, &mut cache);
-                    let new_rhs = get_or_extrude(ov.constraint.rhs, self, &mut cache);
-                    let new_ret = get_or_extrude(ov.constraint.ret, self, &mut cache);
+                    let new_lhs = get_or_extrude(ov_lhs, self, &mut cache);
+                    let new_rhs = get_or_extrude(ov_rhs, self, &mut cache);
+                    let new_ret = get_or_extrude(ov_ret, self, &mut cache);
 
                     self.deferred
                         .active
                         .push(super::PendingConstraint::Overload(PendingOverload {
-                            op: ov.op,
+                            op: ov_op,
                             constraint: BinConstraint {
                                 lhs: new_lhs,
                                 rhs: new_rhs,
                                 ret: new_ret,
-                                at_expr: ov.constraint.at_expr,
+                                at_expr: ov_at,
                             },
                         }));
 
-                    processed[i] = true;
+                    *done = true;
                     made_progress = true;
                 }
             }

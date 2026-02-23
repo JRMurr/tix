@@ -34,6 +34,16 @@ pub(crate) struct TypeTable {
 
     /// Primitive type cache for deduplication.
     pub(crate) prim_cache: HashMap<PrimitiveTy, TyId>,
+
+    /// Cache for `inter_contains_var`: maps TyId → whether it contains a
+    /// variable (directly or through nested Inter). Valid for the lifetime
+    /// of the inference run since type entries are append-only.
+    pub(crate) inter_var_cache: HashMap<TyId, bool>,
+
+    /// Cache for `union_contains_member`: stores (union_id, target_id) pairs
+    /// that returned true. Valid for the lifetime of the inference run since
+    /// Union structure is immutable once allocated.
+    pub(crate) union_member_cache: HashSet<(TyId, TyId)>,
 }
 
 impl TypeTable {
@@ -43,6 +53,8 @@ impl TypeTable {
             constrain_cache: HashSet::new(),
             neg_cache: HashMap::new(),
             prim_cache: HashMap::new(),
+            inter_var_cache: HashMap::new(),
+            union_member_cache: HashSet::new(),
         }
     }
 
