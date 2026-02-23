@@ -20,6 +20,8 @@ cargo clippy                         # Lint
 ./scripts/cov.sh                     # Coverage report (cargo-tarpaulin)
 nix build .#                         # Build with nix
 echo 'let x = 1; in x' | ./scripts/tixc.sh  # Type-check Nix from stdin (debug build)
+./scripts/nixpkgs-lib-test.sh               # Run tix-cli on nixpkgs lib/ (requires nix)
+cargo test --package cli -- --ignored nixpkgs_lib  # Same, as a cargo integration test
 ```
 
 Run a single test:

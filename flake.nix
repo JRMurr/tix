@@ -87,6 +87,7 @@
             rust-bin = rustAttrs.binary;
             stubs = tix-stubs;
             with-stubs = tix-with-stubs;
+            nixpkgs-src = nixpkgs.outPath;
             inherit tix-code tix-code-dev;
             docs = pkgs.stdenv.mkDerivation {
               name = "tix-docs";
