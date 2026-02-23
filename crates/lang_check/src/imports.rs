@@ -247,41 +247,52 @@ pub fn resolve_imports(
 
         log::info!("{indent}  {target_name}: inferring ({} SCC groups)...", target_grouped.len());
         let t0 = Instant::now();
-        match check.infer_prog(target_grouped) {
-            Ok(result) => {
-                let t_infer = t0.elapsed();
-                let t_total = t_import.elapsed();
-                log::info!(
-                    "{indent}  {target_name}: {:.1}ms (parse {:.1}ms, sub-imports {:.1}ms, infer {:.1}ms)",
-                    t_total.as_secs_f64() * 1000.0,
-                    t_parse.as_secs_f64() * 1000.0,
-                    t_sub_imports.as_secs_f64() * 1000.0,
-                    t_infer.as_secs_f64() * 1000.0,
-                );
+        // Use infer_prog_partial so we always get a result — even when
+        // inference hits the deadline or produces errors, partial results
+        // (the root expression type from successfully-inferred bindings)
+        // are still useful. This also ensures the result is always cached,
+        // preventing expensive re-inference when the same file is imported
+        // from multiple paths.
+        let (result, diagnostics) = check.infer_prog_partial(target_grouped);
 
-                let root_ty = result
-                    .expr_ty_map
-                    .get(target_module.entry_expr)
-                    .cloned()
-                    .unwrap_or(OutputTy::TyVar(0));
+        let t_infer = t0.elapsed();
+        let has_errors = diagnostics.iter().any(|d| !matches!(
+            d.kind,
+            crate::diagnostic::TixDiagnosticKind::UnresolvedName { .. }
+                | crate::diagnostic::TixDiagnosticKind::AnnotationArityMismatch { .. }
+                | crate::diagnostic::TixDiagnosticKind::AnnotationUnchecked { .. }
+        ));
 
-                cache.insert(target_path, root_ty.clone());
-                types.insert(apply_expr_id, root_ty);
-            }
-            Err(err) => {
-                let t_infer = t0.elapsed();
-                log::warn!(
-                    "{indent}  {target_name}: inference error after {:.1}ms (parse {:.1}ms, sub-imports {:.1}ms, infer {:.1}ms)",
-                    t_import.elapsed().as_secs_f64() * 1000.0,
-                    t_parse.as_secs_f64() * 1000.0,
-                    t_sub_imports.as_secs_f64() * 1000.0,
-                    t_infer.as_secs_f64() * 1000.0,
-                );
-                errors.push(ImportError {
-                    kind: ImportErrorKind::InferenceError(target_path, err),
-                    at_expr: apply_expr_id,
-                });
-            }
+        let root_ty = result
+            .expr_ty_map
+            .get(target_module.entry_expr)
+            .cloned()
+            .unwrap_or(OutputTy::TyVar(0));
+
+        // Always cache — even partial/errored results. Without this, a
+        // file that times out gets re-inferred (and re-times-out) every
+        // time it's imported from a different path.
+        cache.insert(target_path.clone(), root_ty.clone());
+        types.insert(apply_expr_id, root_ty);
+
+        if has_errors {
+            let t_total = t_import.elapsed();
+            log::warn!(
+                "{indent}  {target_name}: inference errors after {:.1}ms (parse {:.1}ms, sub-imports {:.1}ms, infer {:.1}ms)",
+                t_total.as_secs_f64() * 1000.0,
+                t_parse.as_secs_f64() * 1000.0,
+                t_sub_imports.as_secs_f64() * 1000.0,
+                t_infer.as_secs_f64() * 1000.0,
+            );
+        } else {
+            let t_total = t_import.elapsed();
+            log::info!(
+                "{indent}  {target_name}: {:.1}ms (parse {:.1}ms, sub-imports {:.1}ms, infer {:.1}ms)",
+                t_total.as_secs_f64() * 1000.0,
+                t_parse.as_secs_f64() * 1000.0,
+                t_sub_imports.as_secs_f64() * 1000.0,
+                t_infer.as_secs_f64() * 1000.0,
+            );
         }
     }
 
