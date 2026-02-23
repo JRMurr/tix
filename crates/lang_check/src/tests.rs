@@ -2066,8 +2066,17 @@ use smol_str::SmolStr;
 use std::collections::HashMap;
 
 /// Helper to type-check a string with context args applied to the root lambda.
-fn check_str_with_context(
+pub fn check_str_with_context(
     src: &str,
+    context_args: HashMap<SmolStr, ParsedTy>,
+) -> (Module, crate::CheckResult) {
+    check_str_with_aliases_and_context(src, &TypeAliasRegistry::with_builtins(), context_args)
+}
+
+/// Type-check with both custom aliases and context args.
+pub fn check_str_with_aliases_and_context(
+    src: &str,
+    aliases: &TypeAliasRegistry,
     context_args: HashMap<SmolStr, ParsedTy>,
 ) -> (Module, crate::CheckResult) {
     let (db, file) = TestDatabase::single_file(src).unwrap();
@@ -2075,15 +2084,33 @@ fn check_str_with_context(
     let result = crate::check_file_collecting(
         &db,
         file,
-        &TypeAliasRegistry::with_builtins(),
+        aliases,
         HashMap::new(),
         context_args,
     );
     (module, result)
 }
 
-fn get_inferred_root_with_context(src: &str, context_args: HashMap<SmolStr, ParsedTy>) -> OutputTy {
+pub fn get_inferred_root_with_context(
+    src: &str,
+    context_args: HashMap<SmolStr, ParsedTy>,
+) -> OutputTy {
     let (module, result) = check_str_with_context(src, context_args);
+    result
+        .inference
+        .expect("inference should succeed")
+        .expr_ty_map
+        .get(module.entry_expr)
+        .expect("root expr should have a type")
+        .clone()
+}
+
+pub fn get_inferred_root_with_aliases_and_context(
+    src: &str,
+    aliases: &TypeAliasRegistry,
+    context_args: HashMap<SmolStr, ParsedTy>,
+) -> OutputTy {
+    let (module, result) = check_str_with_aliases_and_context(src, aliases, context_args);
     result
         .inference
         .expect("inference should succeed")

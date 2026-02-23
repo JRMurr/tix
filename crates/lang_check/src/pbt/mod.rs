@@ -17,6 +17,8 @@
 //   from the arb_prim strategy. Path literals require valid filesystem syntax
 //   and Uri is rarely used.
 
+mod stub_compose;
+
 use std::collections::{BTreeMap, HashSet};
 
 use lang_ast::{BoolBinOp, OverloadBinOp};
