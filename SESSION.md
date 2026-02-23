@@ -188,6 +188,15 @@ extrusion.
   literal as `findFirst`'s default arg causes a `string vs null` mismatch because
   `findFirst` is not stubbed. Unrelated to narrowing.
 
+### `infer_expr_inner` Expr Clone
+
+- `infer_expr_inner` clones the entire Expr enum from `self.module[e]` to release
+  the borrow on `self.module` before calling `&mut self` methods. This is required
+  by Rust's borrow checker but could be avoided by matching on `&Expr` and collecting
+  needed data into local Copy variables. The refactor is non-trivial because some arms
+  (StringInterpolation) re-reference the original `expr`. Low priority — the clone
+  cost is dominated by Bindings/Pat variants which are infrequent in typical code.
+
 ### Known Performance Characteristics
 
 The following O(n^2) patterns are intentional trade-offs, acceptable for typical

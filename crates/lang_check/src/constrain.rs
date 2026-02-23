@@ -62,13 +62,15 @@ impl CheckCtx<'_> {
             return Ok(());
         }
 
-        // Clone entries to avoid borrow conflicts with &mut self.
-        let sub_entry = self.types.storage.get(sub).clone();
-        let sup_entry = self.types.storage.get(sup).clone();
+        // Check entry discriminants without cloning. We only clone the data
+        // we actually need for each case: bounds Vecs for variables (cheap —
+        // Vec<TyId> is Vec<u32>), or the full Ty for concrete types.
+        let sub_is_var = self.types.is_var(sub);
+        let sup_is_var = self.types.is_var(sup);
 
-        match (&sub_entry, &sup_entry) {
+        match (sub_is_var, sup_is_var) {
             // sub is a variable — record sup as upper bound, propagate to existing lower bounds.
-            (TypeEntry::Variable(_), _) => {
+            (true, _) => {
                 // If this variable was pre-allocated for an expression, update
                 // current_expr so that any mismatch discovered during propagation
                 // is attributed to a specific sub-expression rather than a distant
@@ -77,6 +79,8 @@ impl CheckCtx<'_> {
                     self.current_expr = expr;
                 }
                 self.types.storage.add_upper_bound(sub, sup);
+                // Clone just the bounds Vec (Vec<TyId> ~ Vec<u32>, cheap)
+                // to release the borrow on storage before recursive calls.
                 let lower_bounds = self
                     .types
                     .storage
@@ -90,7 +94,7 @@ impl CheckCtx<'_> {
                 Ok(())
             }
             // sup is a variable — record sub as lower bound, propagate to existing upper bounds.
-            (_, TypeEntry::Variable(_)) => {
+            (_, true) => {
                 if let Some(expr) = self.expr_for_ty(sup) {
                     self.current_expr = expr;
                 }
@@ -108,10 +112,10 @@ impl CheckCtx<'_> {
                 Ok(())
             }
 
-            // Both concrete — structural subtyping.
-            (TypeEntry::Concrete(sub_ty), TypeEntry::Concrete(sup_ty)) => {
-                let sub_ty = sub_ty.clone();
-                let sup_ty = sup_ty.clone();
+            // Both concrete — structural subtyping. Clone only the Ty values.
+            (false, false) => {
+                let sub_ty = self.types.expect_concrete(sub);
+                let sup_ty = self.types.expect_concrete(sup);
                 self.constrain_concrete(sub, sup, &sub_ty, &sup_ty)
             }
         }
@@ -177,22 +181,18 @@ impl CheckCtx<'_> {
             // E.g. AttrSet <: ¬Null succeeds because attrsets and null are
             // disjoint constructors; Int <: ¬Null succeeds because Int ≠ Null.
             (sub, Ty::Neg(inner)) if !matches!(sub, Ty::Inter(..) | Ty::Union(..)) => {
-                match self.types.storage.get(*inner).clone() {
-                    TypeEntry::Concrete(inner_ty) => {
-                        if are_types_disjoint(sub, &inner_ty) {
-                            Ok(())
-                        } else {
-                            Err(InferenceError::TypeMismatch(Box::new((
-                                sub.clone(),
-                                sup.clone(),
-                            ))))
-                        }
-                    }
-                    // Inner is a variable — conservatively fail.
-                    _ => Err(InferenceError::TypeMismatch(Box::new((
+                // Check disjointness without cloning the inner entry.
+                let disjoint = matches!(
+                    self.types.storage.get(*inner),
+                    TypeEntry::Concrete(inner_ty) if are_types_disjoint(sub, inner_ty)
+                );
+                if disjoint {
+                    Ok(())
+                } else {
+                    Err(InferenceError::TypeMismatch(Box::new((
                         sub.clone(),
                         sup.clone(),
-                    )))),
+                    ))))
                 }
             }
 
@@ -287,13 +287,12 @@ impl CheckCtx<'_> {
         ) {
             (true, false) => {
                 // Check: if b is concrete and provably disjoint from sup.
-                if let TypeEntry::Concrete(b_ty) = self.types.storage.get(b).clone() {
-                    if are_types_disjoint(&b_ty, sup) {
-                        return Err(InferenceError::TypeMismatch(Box::new((
-                            Ty::Inter(a, b),
-                            sup.clone(),
-                        ))));
-                    }
+                if matches!(self.types.storage.get(b), TypeEntry::Concrete(b_ty) if are_types_disjoint(b_ty, sup))
+                {
+                    return Err(InferenceError::TypeMismatch(Box::new((
+                        Ty::Inter(a, b),
+                        sup.clone(),
+                    ))));
                 }
                 // α ∧ C <: U → α <: U ∨ ¬C (α side absorbs the constraint)
                 let neg_b = self.alloc_concrete(Ty::Neg(b));
@@ -311,13 +310,12 @@ impl CheckCtx<'_> {
                 self.constrain(a, target)
             }
             (false, true) => {
-                if let TypeEntry::Concrete(a_ty) = self.types.storage.get(a).clone() {
-                    if are_types_disjoint(&a_ty, sup) {
-                        return Err(InferenceError::TypeMismatch(Box::new((
-                            Ty::Inter(a, b),
-                            sup.clone(),
-                        ))));
-                    }
+                if matches!(self.types.storage.get(a), TypeEntry::Concrete(a_ty) if are_types_disjoint(a_ty, sup))
+                {
+                    return Err(InferenceError::TypeMismatch(Box::new((
+                        Ty::Inter(a, b),
+                        sup.clone(),
+                    ))));
                 }
                 // C ∧ α <: U → α <: U ∨ ¬C
                 let neg_a = self.alloc_concrete(Ty::Neg(a));

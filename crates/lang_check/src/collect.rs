@@ -69,15 +69,23 @@ impl<'a> Canonicalizer<'a> {
     }
 
     fn canonicalize_inner(&mut self, ty_id: TyId, polarity: Polarity) -> OutputTy {
-        let entry = self.table.get(ty_id).clone();
         let alias_name = self.alias_provenance.get(&ty_id).cloned();
 
-        let result = match entry {
-            TypeEntry::Variable(v) => match polarity {
-                Positive => self.expand_bounds(&v.lower_bounds, ty_id, Positive),
-                Negative => self.expand_bounds(&v.upper_bounds, ty_id, Negative),
-            },
-            TypeEntry::Concrete(ty) => self.canonicalize_concrete(&ty, polarity),
+        // Clone only the data we need: for variables, just the relevant bounds
+        // Vec (Vec<TyId> ~ Vec<u32>, cheap); for concrete types, the Ty value.
+        // This avoids cloning the unused bounds Vec for variables.
+        let result = if let Some(v) = self.table.get_var(ty_id) {
+            let bounds = match polarity {
+                Positive => v.lower_bounds.clone(),
+                Negative => v.upper_bounds.clone(),
+            };
+            self.expand_bounds(&bounds, ty_id, polarity)
+        } else {
+            let ty = match self.table.get(ty_id) {
+                TypeEntry::Concrete(ty) => ty.clone(),
+                _ => unreachable!(),
+            };
+            self.canonicalize_concrete(&ty, polarity)
         };
 
         // If this TyId originated from a type alias, wrap the canonical form
@@ -748,10 +756,24 @@ fn are_output_types_disjoint(a: &OutputTy, b: &OutputTy) -> bool {
 /// Does NOT remove when the only positive members are TyVars — `a & ~null`
 /// stays as-is because `a` could be null.
 fn remove_redundant_negations(members: Vec<OutputTy>) -> Vec<OutputTy> {
-    // Collect positive members that have a known constructor (not TyVar/Bottom/Neg).
-    let concrete_positives: Vec<OutputTy> = members
+    // Check for positive members with known constructors (not TyVar/Bottom/Neg).
+    // Use indices to avoid cloning — are_output_types_disjoint takes references.
+    let has_concrete = members.iter().any(|m| {
+        matches!(
+            m,
+            OutputTy::Primitive(_) | OutputTy::AttrSet(_) | OutputTy::List(_) | OutputTy::Lambda { .. }
+        )
+    });
+
+    if !has_concrete {
+        return members;
+    }
+
+    // Collect indices of concrete positive members to avoid cloning.
+    let concrete_indices: Vec<usize> = members
         .iter()
-        .filter(|m| {
+        .enumerate()
+        .filter_map(|(i, m)| {
             matches!(
                 m,
                 OutputTy::Primitive(_)
@@ -759,27 +781,31 @@ fn remove_redundant_negations(members: Vec<OutputTy>) -> Vec<OutputTy> {
                     | OutputTy::List(_)
                     | OutputTy::Lambda { .. }
             )
+            .then_some(i)
         })
-        .cloned()
         .collect();
 
-    if concrete_positives.is_empty() {
-        return members;
-    }
-
-    members
-        .into_iter()
-        .filter(|m| {
+    // Determine which members to keep. We can't filter in-place because the
+    // filter closure needs to reference members by index.
+    let keep: Vec<bool> = members
+        .iter()
+        .map(|m| {
             if let OutputTy::Neg(inner) = m {
                 // Keep this negation only if it's NOT disjoint from all concrete
                 // positives. If it IS disjoint from every positive, it's redundant.
-                !concrete_positives
+                !concrete_indices
                     .iter()
-                    .all(|pos| are_output_types_disjoint(pos, &inner.0))
+                    .all(|&i| are_output_types_disjoint(&members[i], &inner.0))
             } else {
                 true
             }
         })
+        .collect();
+
+    members
+        .into_iter()
+        .zip(keep)
+        .filter_map(|(m, k)| k.then_some(m))
         .collect()
 }
 
@@ -797,12 +823,16 @@ fn flatten_composite(
     for m in members {
         if let Some(inner) = extract_nested(&m) {
             for sub in inner {
-                let sub_ty = (*sub.0).clone();
-                if seen.insert(sub_ty.clone()) {
+                // Check containment first (by ref, no clone) to avoid cloning
+                // items we've already seen.
+                if !seen.contains(&*sub.0) {
+                    let sub_ty = (*sub.0).clone();
+                    seen.insert(sub_ty.clone());
                     result.push(sub_ty);
                 }
             }
-        } else if seen.insert(m.clone()) {
+        } else if !seen.contains(&m) {
+            seen.insert(m.clone());
             result.push(m);
         }
     }

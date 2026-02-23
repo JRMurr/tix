@@ -406,6 +406,20 @@ impl CheckCtx<'_> {
             return cached;
         }
 
+        // Fast path: non-polymorphic variables (at or below current level) and
+        // primitive/TyVar concrete types are returned as-is without cloning.
+        match self.types.storage.get(ty_id) {
+            TypeEntry::Variable(v) if v.level < self.types.storage.current_level => {
+                return ty_id;
+            }
+            TypeEntry::Concrete(Ty::Primitive(_) | Ty::TyVar(_)) => {
+                return ty_id;
+            }
+            _ => {}
+        }
+
+        // For polymorphic variables and structural concrete types, clone to
+        // release the borrow on storage before calling &mut self methods.
         let entry = self.types.storage.get(ty_id).clone();
 
         match entry {
@@ -432,8 +446,8 @@ impl CheckCtx<'_> {
                 fresh
             }
             TypeEntry::Variable(_) => {
-                // Variable at current level or shallower — not polymorphic, return as-is.
-                ty_id
+                // Non-polymorphic variables are handled by the fast path above.
+                unreachable!()
             }
             TypeEntry::Concrete(ty) => {
                 let result = match ty {
@@ -470,8 +484,8 @@ impl CheckCtx<'_> {
                             optional_fields: attr.optional_fields.clone(),
                         }))
                     }
-                    Ty::Primitive(_) => ty_id,
-                    Ty::TyVar(_) => ty_id,
+                    // Primitives and TyVar are handled by the fast path above.
+                    Ty::Primitive(_) | Ty::TyVar(_) => unreachable!(),
                     // Negation flips polarity, same as Lambda param.
                     Ty::Neg(inner) => {
                         let e = self.extrude_inner(inner, polarity.flip(), cache);
@@ -783,8 +797,12 @@ impl CheckCtx<'_> {
         self.types
             .storage
             .set_var_level(slot, self.types.storage.current_level);
-        let e = self.module[expr].clone();
-        e.walk_child_exprs(|child| self.lift_expr_slots(child));
+        // Collect child ExprIds (all Copy) to avoid cloning the full Expr.
+        let mut children = Vec::new();
+        self.module[expr].walk_child_exprs(|child| children.push(child));
+        for child in children {
+            self.lift_expr_slots(child);
+        }
     }
 
     /// Walk the type graph reachable from `ty_id` and lift any variables
@@ -801,26 +819,33 @@ impl CheckCtx<'_> {
         if !visited.insert(ty_id) {
             return;
         }
-        let entry = self.types.storage.get(ty_id).clone();
-        match entry {
-            TypeEntry::Variable(v) => {
-                if v.level < self.types.storage.current_level {
-                    self.types
-                        .storage
-                        .set_var_level(ty_id, self.types.storage.current_level);
-                }
-                // Recurse into bounds to lift any stub variables reachable
-                // through the bounds graph.
-                for i in 0..v.lower_bounds.len() {
-                    let bound = v.lower_bounds[i];
-                    self.lift_reachable_vars_inner(bound, visited);
-                }
-                for i in 0..v.upper_bounds.len() {
-                    let bound = v.upper_bounds[i];
-                    self.lift_reachable_vars_inner(bound, visited);
-                }
+
+        if let Some(v) = self.types.storage.get_var(ty_id) {
+            let needs_lift = v.level < self.types.storage.current_level;
+            // Clone just the bounds (Vec<TyId> ~ Vec<u32>, cheap) to release borrow.
+            let lower: Vec<TyId> = v.lower_bounds.clone();
+            let upper: Vec<TyId> = v.upper_bounds.clone();
+
+            if needs_lift {
+                self.types
+                    .storage
+                    .set_var_level(ty_id, self.types.storage.current_level);
             }
-            TypeEntry::Concrete(ty) => match ty {
+            // Recurse into bounds to lift any stub variables reachable
+            // through the bounds graph.
+            for bound in lower {
+                self.lift_reachable_vars_inner(bound, visited);
+            }
+            for bound in upper {
+                self.lift_reachable_vars_inner(bound, visited);
+            }
+            return;
+        }
+
+        // Concrete type — clone and recurse into children.
+        let entry = self.types.storage.get(ty_id).clone();
+        if let TypeEntry::Concrete(ty) = entry {
+            match ty {
                 Ty::Lambda { param, body } => {
                     self.lift_reachable_vars_inner(param, visited);
                     self.lift_reachable_vars_inner(body, visited);
@@ -844,7 +869,7 @@ impl CheckCtx<'_> {
                     self.lift_reachable_vars_inner(inner, visited);
                 }
                 Ty::Primitive(_) | Ty::TyVar(_) => {}
-            },
+            }
         }
     }
 }
