@@ -33,6 +33,14 @@ parking_lot = "0.12"
 tower-lsp = "0.20"
 tokio = { version = "1", features = ["full"] }
 
+# Optimize all dependencies in test profile. PBT tests run 450k+ iterations
+# through parsing → lowering → inference, so unoptimized code is a major
+# bottleneck. opt-level = 1 adds minimal compile time but significant runtime
+# improvement from inlining and basic optimizations.
+[profile.test]
+opt-level = 1
+
+# Further optimize proptest's random generation since it's called per-case.
 [profile.test.package.proptest]
 opt-level = 3
 
