@@ -527,27 +527,37 @@ impl CheckCtx<'_> {
     /// `install_binding_narrowing` (SCC-group narrowing for let-bindings
     /// under guard scopes).
     ///
-    /// ## Design note: `original_ty` vs `ty_for_name_direct`
+    /// ## Design note: always using `ty_for_name_direct`
     ///
-    /// Most predicates use `name_slot_or_override(name)` as the "original"
-    /// type in the intersection. This resolves through existing narrow
-    /// overrides (for nested narrowing like `if isAttrs x then if x ? y`)
-    /// and through poly_type_env (for generalized names).
+    /// All predicates use the pre-allocated name slot (`ty_for_name_direct`)
+    /// as the base type in the intersection, checking existing overrides
+    /// first for nested narrowing support.
     ///
-    /// `NotHasField` is the exception: it uses `ty_for_name_direct(name)`
-    /// — the raw pre-allocated variable slot — because the intersection
-    /// `Inter(var, Neg({field: β, ...}))` requires a type variable on the
-    /// left side for MLstruct-style variable isolation in
-    /// `constrain_lhs_inter`. If we used `name_slot_or_override`, a
-    /// generalized name would resolve to a concrete type (e.g. a closed
-    /// attrset), which lacks the variable needed for isolation and would
-    /// cause constraint failures. Other predicates don't have this issue
-    /// because their constraint side is always compatible with concrete types.
+    /// We intentionally bypass `poly_type_env` here because
+    /// `resolve_to_concrete_id` may have collapsed a union-typed variable
+    /// (e.g. `null | int`) to a single concrete type (`null`), which would
+    /// make `Inter(null, ~null)` contradictory. The raw name slot variable
+    /// retains all lower bounds, so the intersection correctly narrows the
+    /// full type.
     pub(crate) fn compute_narrow_override(
         &mut self,
         binding: &crate::narrow::NarrowBinding,
     ) -> TyId {
-        let original_ty = self.name_slot_or_override(binding.name);
+        // For narrowing, use the pre-allocated name slot (raw variable) rather
+        // than the poly_type_env entry. The poly_type_env entry may have been
+        // resolved to a single concrete type via `resolve_to_concrete_id`,
+        // which picks one of potentially many lower bounds (e.g. resolving to
+        // `null` when the actual type is `null | int`). The name slot variable
+        // retains all lower bounds, so `Inter(name_slot, ~Null)` correctly
+        // represents "the original type minus null".
+        //
+        // For nested narrowing (e.g. `if isAttrs x then if x ? y`), check
+        // existing overrides first so the inner narrowing builds on top.
+        let original_ty = if let Some(&overridden) = self.narrow_overrides.get(&binding.name) {
+            overridden
+        } else {
+            self.ty_for_name_direct(binding.name)
+        };
 
         match binding.predicate {
             crate::narrow::NarrowPredicate::IsType(prim) => {

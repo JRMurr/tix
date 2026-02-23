@@ -5008,6 +5008,51 @@ fn and_short_circuit_isstring() {
 // storePath builtin
 // ==============================================================================
 
+// ==============================================================================
+// Null narrowing for let-bound variables (poly_type_env interaction)
+// ==============================================================================
+
+/// When a let-bound variable gets a union type (null | int) from a generalized
+/// function call, null narrowing should still work in if-then-else branches.
+/// Regression: `resolve_to_concrete_id` collapsed `null | int` to just `null`,
+/// making `Inter(null, ~null)` contradictory in the else-branch.
+#[test]
+fn narrow_null_let_bound_from_generalized_fn() {
+    let nix = indoc! {"
+        let
+          f = default: if true then default else 0;
+          index = f null;
+        in
+        if index == null then 99 else index + 1
+    "};
+    let ty = get_inferred_root(nix);
+    assert_eq!(ty, arc_ty!(Int));
+}
+
+/// Same pattern with a recursive function — the SCC grouping and generalization
+/// must preserve the union type through to the narrowing site.
+#[test]
+fn narrow_null_let_bound_recursive_fn() {
+    let nix = indoc! {"
+        let
+          findFirstIndex = pred: default: list:
+            let
+              len = builtins.length list;
+              go = i:
+                if i >= len then default
+                else if pred (builtins.elemAt list i) then i
+                else go (i + 1);
+            in go 0;
+        in
+        pred: default: list:
+          let index = findFirstIndex pred null list;
+          in if index == null then default else builtins.elemAt list index
+    "};
+    // Should type-check without error. The narrowing eliminates null in
+    // the else-branch, allowing elemAt (which expects int) to succeed.
+    let _ty = get_inferred_root(nix);
+}
+
 /// `builtins.storePath` should be typed as `path -> path`.
 #[test]
 fn builtin_store_path() {

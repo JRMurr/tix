@@ -153,6 +153,13 @@ impl CheckCtx<'_> {
 
         // Record the inferred type in poly_type_env for successfully-inferred
         // names, resolving Variables to their concrete type where possible.
+        //
+        // Only resolve to a concrete type when the variable has a SINGLE
+        // concrete lower bound. A variable with multiple concrete lower bounds
+        // represents a union type (e.g. `null | int`), and resolving to just
+        // one member would lose the union semantics. This matters for type
+        // narrowing: `if x == null then ... else x + 1` needs the variable
+        // to contain both null and int so that narrowing can exclude null.
         for (name_id, ty) in inferred {
             if self.poly_type_env.contains_idx(name_id) {
                 continue;

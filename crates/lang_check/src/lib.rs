@@ -823,19 +823,6 @@ impl<'db> CheckCtx<'db> {
         }
     }
 
-    /// Get the current type for a name — either a narrowing override (if we're
-    /// inside a narrowed branch) or the name's original pre-allocated TyId slot.
-    /// Used by narrowing to link fresh branch variables to the original α.
-    fn name_slot_or_override(&self, name: NameId) -> TyId {
-        if let Some(&overridden) = self.narrow_overrides.get(&name) {
-            overridden
-        } else if let Some(&poly_ty) = self.poly_type_env.get(name) {
-            poly_ty
-        } else {
-            self.ty_for_name_direct(name)
-        }
-    }
-
     /// Wrap a bare `InferenceError` with the current expression location.
     fn locate_err(&self, err: InferenceError) -> LocatedError {
         Located {
