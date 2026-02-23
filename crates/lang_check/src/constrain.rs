@@ -72,8 +72,10 @@ impl CheckCtx<'_> {
             self.op_counter = self.op_counter.wrapping_add(1);
             if self.op_counter % Self::DEADLINE_CHECK_INTERVAL == 0 && self.past_deadline() {
                 log::warn!(
-                    "inference deadline exceeded during constrain (after {} operations)",
-                    self.op_counter
+                    "inference deadline exceeded during constrain (after {} operations, {} cache entries, {} type slots)",
+                    self.op_counter,
+                    self.types.constrain_cache.len(),
+                    self.types.storage.len(),
                 );
                 self.deadline_exceeded = true;
                 return Ok(());
