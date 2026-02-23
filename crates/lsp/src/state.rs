@@ -8,7 +8,9 @@
 // (via spawn_blocking).
 
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use lang_ast::{
     module_and_source_maps, Expr, ExprId, Literal, Module, ModuleIndices, ModuleScopes,
@@ -57,6 +59,31 @@ impl FileAnalysis {
     }
 }
 
+/// Timing breakdown for a single `update_file` call.
+pub struct AnalysisTiming {
+    pub parse: Duration,
+    pub lower: Duration,
+    pub name_res: Duration,
+    pub imports: Duration,
+    pub type_check: Duration,
+    pub total: Duration,
+}
+
+impl fmt::Display for AnalysisTiming {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "total {:.1}ms (parse {:.1}ms, lower {:.1}ms, nameres {:.1}ms, imports {:.1}ms, check {:.1}ms)",
+            self.total.as_secs_f64() * 1000.0,
+            self.parse.as_secs_f64() * 1000.0,
+            self.lower.as_secs_f64() * 1000.0,
+            self.name_res.as_secs_f64() * 1000.0,
+            self.imports.as_secs_f64() * 1000.0,
+            self.type_check.as_secs_f64() * 1000.0,
+        )
+    }
+}
+
 /// All mutable state for the LSP's analysis pipeline.
 pub struct AnalysisState {
     pub db: RootDatabase,
@@ -80,19 +107,29 @@ impl AnalysisState {
         }
     }
 
-    /// Update file contents and re-run analysis. Returns the path key used
-    /// for cache lookup (the same PathBuf passed in).
-    pub fn update_file(&mut self, path: PathBuf, contents: String) -> &FileAnalysis {
+    /// Update file contents and re-run analysis. Returns the cached analysis
+    /// and a timing breakdown of each pipeline phase.
+    pub fn update_file(&mut self, path: PathBuf, contents: String) -> (&FileAnalysis, AnalysisTiming) {
+        let t_total = Instant::now();
+
+        // -- Phase 1: Parse --
+        let t0 = Instant::now();
         let line_index = LineIndex::new(&contents);
         let parsed = rnix::Root::parse(&contents);
         let nix_file = self.db.set_file_contents(path.clone(), contents);
+        let t_parse = t0.elapsed();
 
+        // -- Phase 2: Lower to Tix AST + name resolution --
+        let t0 = Instant::now();
         let (module, source_map) = module_and_source_maps(&self.db, nix_file);
         let module_indices = lang_ast::module_indices(&self.db, nix_file);
         let name_res = lang_ast::name_resolution(&self.db, nix_file);
         let scopes = lang_ast::scopes(&self.db, nix_file);
+        let grouped = lang_ast::group_def(&self.db, nix_file);
+        let t_lower = t0.elapsed();
 
-        // Resolve literal imports before type-checking.
+        // -- Phase 3: Import resolution --
+        let t0 = Instant::now();
         let mut in_progress = HashSet::new();
         let mut cache = HashMap::new();
         let import_resolution = resolve_imports(
@@ -116,7 +153,6 @@ impl AnalysisState {
         // We chase through Apply chains because `import ./foo.nix { ... }` desugars
         // to Apply(Apply(import, ./foo.nix), { ... }) — the outer Apply isn't in
         // import_targets, but its inner function is.
-        let grouped = lang_ast::group_def(&self.db, nix_file);
         let file_dir = path.parent().map(|p| p.to_path_buf());
         let mut name_to_import = HashMap::new();
         for group in grouped.iter() {
@@ -162,7 +198,10 @@ impl AnalysisState {
                 (name.clone(), output_ty)
             })
             .collect();
+        let t_imports = t0.elapsed();
 
+        // -- Phase 4: Type inference --
+        let t0 = Instant::now();
         let check_result = lang_check::check_file_collecting(
             &self.db,
             nix_file,
@@ -170,6 +209,9 @@ impl AnalysisState {
             import_resolution.types,
             context_args,
         );
+        let t_check = t0.elapsed();
+
+        let t_total = t_total.elapsed();
 
         self.files.insert(
             path.clone(),
@@ -189,7 +231,16 @@ impl AnalysisState {
             },
         );
 
-        self.files.get(&path).unwrap()
+        let timing = AnalysisTiming {
+            parse: t_parse,
+            lower: t_lower,
+            name_res: Duration::ZERO, // folded into lower for now
+            imports: t_imports,
+            type_check: t_check,
+            total: t_total,
+        };
+
+        (self.files.get(&path).unwrap(), timing)
     }
 
     pub fn get_file(&self, path: &PathBuf) -> Option<&FileAnalysis> {
@@ -210,7 +261,8 @@ impl AnalysisState {
                 let analysis = self.files.get(&path).unwrap();
                 analysis.nix_file.contents(&self.db).to_owned()
             };
-            self.update_file(path, contents);
+            let (_analysis, timing) = self.update_file(path.clone(), contents);
+            log::info!("re-analyzed {}: {timing}", path.display());
         }
     }
 }

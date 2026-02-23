@@ -254,6 +254,16 @@ Nix code sizes (hundreds of bindings per file, not millions):
   `placeholder` to potentially be null sees `~null`. Partial fix — most `||`
   patterns work, but chained null guards on 3+ variables can surface this.
 
+### LSP Blocks on Large Repos (Serial didOpen Processing)
+
+- The LSP processes `didOpen` events serially while holding the `Mutex<AnalysisState>`
+  lock. When the editor opens many files at once (large workspace), each file runs the
+  full pipeline (parse → lower → name res → import resolution → type inference) before
+  the next can start. No debouncing, no background processing, no cancellation.
+  Potential fixes: (a) debounce `didOpen`/`didChange` to skip stale requests,
+  (b) move analysis to a background task and cancel on new edits,
+  (c) lazy analysis (only analyze on first hover/completion, not on open).
+
 ### `resolve_to_concrete_id` Picks Arbitrary Lower Bound
 
 - `resolve_to_concrete_id` follows the first reachable lower bound to find a
