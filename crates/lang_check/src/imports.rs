@@ -183,7 +183,7 @@ pub fn resolve_imports(
 
         // Check cache.
         if let Some(cached_ty) = cache.get(&target_path) {
-            log::debug!("{indent}  {target_name}: cached");
+            log::info!("{indent}  {target_name}: cached");
             types.insert(apply_expr_id, cached_ty.clone());
             continue;
         }
@@ -241,6 +241,7 @@ pub fn resolve_imports(
             std::collections::HashMap::new(),
         );
 
+        log::info!("{indent}  {target_name}: inferring ({} SCC groups)...", target_grouped.len());
         let t0 = Instant::now();
         match check.infer_prog(target_grouped) {
             Ok(result) => {
