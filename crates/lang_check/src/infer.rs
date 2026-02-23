@@ -421,6 +421,13 @@ impl CheckCtx<'_> {
             return cached;
         }
 
+        // Bail out early if the deadline was exceeded. Return the original
+        // type as-is — extrusion results will be incomplete but we avoid
+        // spending unbounded time in the bounds-copying loop.
+        if self.deadline_exceeded {
+            return ty_id;
+        }
+
         // Fast path: non-polymorphic variables (at or below current level) and
         // primitive/TyVar concrete types are returned as-is without cloning.
         match self.types.storage.get(ty_id) {

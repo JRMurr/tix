@@ -52,6 +52,14 @@ impl CheckCtx<'_> {
 
     /// Record that `sub <: sup` — `sub` is a subtype of `sup`.
     pub fn constrain(&mut self, sub: TyId, sup: TyId) -> Result<(), InferenceError> {
+        // Bail out if inference deadline was exceeded. Returning Ok(()) is
+        // sound — we just stop adding constraints, producing incomplete (but
+        // not unsound) types. This prevents cascading constraint propagation
+        // from running indefinitely after the deadline fires in infer_expr.
+        if self.deadline_exceeded {
+            return Ok(());
+        }
+
         // Reflexivity: identical ids are trivially subtypes.
         if sub == sup {
             return Ok(());
