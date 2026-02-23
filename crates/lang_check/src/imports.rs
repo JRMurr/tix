@@ -239,7 +239,11 @@ pub fn resolve_imports(
             aliases.clone(),
             target_imports.types,
             std::collections::HashMap::new(),
-        );
+        )
+        // 5-second deadline per imported file. If inference hangs (e.g. due
+        // to pathological constraint propagation), bail out with partial
+        // results rather than blocking the LSP indefinitely.
+        .with_deadline(Instant::now() + std::time::Duration::from_secs(5));
 
         log::info!("{indent}  {target_name}: inferring ({} SCC groups)...", target_grouped.len());
         let t0 = Instant::now();

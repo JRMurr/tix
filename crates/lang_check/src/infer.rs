@@ -76,7 +76,14 @@ impl CheckCtx<'_> {
             errors.push(err);
         }
 
-        for group in groups {
+        for (i, group) in groups.into_iter().enumerate() {
+            // Check deadline before each SCC group so a single file can't
+            // block the LSP indefinitely. Partial results (types inferred
+            // so far) are still returned.
+            if self.past_deadline() {
+                log::warn!("inference deadline exceeded after {i} SCC groups");
+                break;
+            }
             if let Some(err) = self.infer_scc_group(group) {
                 errors.push(err);
             }
@@ -253,6 +260,10 @@ impl CheckCtx<'_> {
         let mut inferred: Vec<(lang_ast::NameId, TyId)> = Vec::new();
 
         for def in group {
+            if self.past_deadline() {
+                break;
+            }
+
             // If this binding sits inside a narrowing scope (detected during
             // SCC grouping in lang_ast), install the narrowing overrides so
             // that references to narrowed names (e.g. `pasta` after
@@ -572,6 +583,10 @@ impl CheckCtx<'_> {
     fn resolve_pending(&mut self) -> Result<(), LocatedError> {
         // Fixed-point loop: keep trying until no more progress.
         loop {
+            if self.past_deadline() {
+                break;
+            }
+
             let mut made_progress = false;
 
             let pending = std::mem::take(&mut self.deferred.active);

@@ -26,6 +26,7 @@ use la_arena::ArenaMap;
 use lang_ast::{AstDb, Expr, ExprId, Module, NameId, NameResolution, NixFile, OverloadBinOp};
 use lang_ty::{OutputTy, PrimitiveTy, Ty};
 use std::collections::{HashMap, HashSet};
+use std::time::Instant;
 use thiserror::Error;
 use type_table::TypeTable;
 
@@ -348,6 +349,12 @@ pub struct CheckCtx<'db> {
     /// should be skipped during Lambda inference in `infer_root` to avoid
     /// double-applying the annotation.
     pre_annotated_params: HashSet<NameId>,
+
+    /// Optional deadline for inference. Checked after each SCC group; if
+    /// exceeded, remaining groups are skipped and partial results returned.
+    /// Used by import resolution to prevent a single file from blocking
+    /// the LSP indefinitely.
+    deadline: Option<Instant>,
 }
 
 /// Count the function arity (number of arrows along the spine) of a ParsedTy.
@@ -402,7 +409,19 @@ impl<'db> CheckCtx<'db> {
             context_args,
             narrow_overrides: HashMap::new(),
             pre_annotated_params: HashSet::new(),
+            deadline: None,
         }
+    }
+
+    /// Set a deadline after which inference will bail out with partial results.
+    pub fn with_deadline(mut self, deadline: Instant) -> Self {
+        self.deadline = Some(deadline);
+        self
+    }
+
+    /// Check whether the inference deadline has been exceeded.
+    fn past_deadline(&self) -> bool {
+        self.deadline.is_some_and(|d| Instant::now() > d)
     }
 
     /// Allocate a fresh type variable at the current level.
