@@ -59,11 +59,19 @@ impl TixLanguageServer {
         // We gather the LSP-safe results (diagnostics) inside the blocking
         // closure and publish them afterwards. We always run analysis (needed
         // for hover, completion, etc.) but only collect diagnostics if enabled.
-        let diagnostics = {
-            let mut state = self.state.lock();
-            let analysis = state.update_file(path, text);
+        let file_name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
 
-            if diagnostics_enabled {
+        let (diagnostics, timing_msg) = {
+            let mut state = self.state.lock();
+            let (analysis, timing) = state.update_file(path, text);
+
+            let timing_msg = format!("{file_name}: {timing}");
+            log::info!("{timing_msg}");
+
+            let diags = if diagnostics_enabled {
                 let root = analysis.parsed.tree();
 
                 crate::diagnostics::to_lsp_diagnostics(
@@ -74,8 +82,15 @@ impl TixLanguageServer {
                 )
             } else {
                 vec![]
-            }
+            };
+
+            (diags, timing_msg)
         };
+
+        // Send timing to the editor's output panel via the LSP protocol.
+        self.client
+            .log_message(MessageType::INFO, &timing_msg)
+            .await;
 
         self.client
             .publish_diagnostics(uri, diagnostics, None)
@@ -275,23 +290,19 @@ impl LanguageServer for TixLanguageServer {
     }
 
     async fn initialized(&self, _: InitializedParams) {
-        let state = self.state.lock();
-        let config = self.config.lock();
-        log::info!(
-            "Ready — {} type aliases, {} global vals, diagnostics {}, inlay hints {}",
-            state.registry.alias_count(),
-            state.registry.global_vals().len(),
-            if config.diagnostics.enable {
-                "on"
-            } else {
-                "off"
-            },
-            if config.inlay_hints.enable {
-                "on"
-            } else {
-                "off"
-            },
-        );
+        let msg = {
+            let state = self.state.lock();
+            let config = self.config.lock();
+            format!(
+                "tix-lsp ready — {} type aliases, {} global vals, diagnostics {}, inlay hints {}",
+                state.registry.alias_count(),
+                state.registry.global_vals().len(),
+                if config.diagnostics.enable { "on" } else { "off" },
+                if config.inlay_hints.enable { "on" } else { "off" },
+            )
+        };
+        log::info!("{msg}");
+        self.client.log_message(MessageType::INFO, msg).await;
     }
 
     async fn shutdown(&self) -> Result<()> {

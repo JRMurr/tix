@@ -15,6 +15,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use lang_ast::nameres::ResolveResult;
 use lang_ast::{AstDb, Expr, ExprId, Literal, Module, NameResolution, NixFile};
@@ -140,12 +141,27 @@ pub fn resolve_imports(
     let mut errors = Vec::new();
     let mut targets = HashMap::new();
 
+    let depth = in_progress.len();
+    let indent = "  ".repeat(depth);
+    if !literal_imports.is_empty() {
+        log::info!(
+            "{indent}resolve_imports: {} literal import(s) from {}",
+            literal_imports.len(),
+            file_path.display(),
+        );
+    }
+
     for (apply_expr_id, target_path) in literal_imports {
         // Canonicalize the path so cycle detection and caching work correctly
         // even with symlinks or `..` components. Fall back to the raw path
         // when canonicalization fails (e.g. in-memory test databases where
         // the path doesn't exist on disk).
         let target_path = target_path.canonicalize().unwrap_or(target_path);
+
+        let target_name = target_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| target_path.display().to_string());
 
         // Record navigation targets for the LSP before any cycle/cache/load
         // checks, so even failed imports get jump-to-definition support.
@@ -157,6 +173,7 @@ pub fn resolve_imports(
 
         // Check for cycles.
         if in_progress.contains(&target_path) {
+            log::info!("{indent}  {target_name}: cycle detected, skipping");
             errors.push(ImportError {
                 kind: ImportErrorKind::CyclicImport(target_path),
                 at_expr: apply_expr_id,
@@ -166,12 +183,17 @@ pub fn resolve_imports(
 
         // Check cache.
         if let Some(cached_ty) = cache.get(&target_path) {
+            log::info!("{indent}  {target_name}: cached");
             types.insert(apply_expr_id, cached_ty.clone());
             continue;
         }
 
+        log::info!("{indent}  {target_name}: loading...");
+        let t_import = Instant::now();
+
         // Load and infer the target file.
         let Some(target_file) = db.load_file(&target_path) else {
+            log::info!("{indent}  {target_name}: file not found");
             errors.push(ImportError {
                 kind: ImportErrorKind::FileNotFound(target_path),
                 at_expr: apply_expr_id,
@@ -179,14 +201,17 @@ pub fn resolve_imports(
             continue;
         };
 
+        let t0 = Instant::now();
         let target_module = lang_ast::module(db, target_file);
         let target_name_res = lang_ast::name_resolution(db, target_file);
         let target_grouped = lang_ast::group_def(db, target_file);
+        let t_parse = t0.elapsed();
 
         // Mark as in-progress before recursing to detect cycles.
         in_progress.insert(target_path.clone());
 
         // Recursively resolve imports in the target file.
+        let t0 = Instant::now();
         let target_imports = resolve_imports(
             db,
             target_file,
@@ -196,6 +221,7 @@ pub fn resolve_imports(
             in_progress,
             cache,
         );
+        let t_sub_imports = t0.elapsed();
 
         in_progress.remove(&target_path);
 
@@ -213,25 +239,60 @@ pub fn resolve_imports(
             aliases.clone(),
             target_imports.types,
             std::collections::HashMap::new(),
-        );
+        )
+        // 5-second deadline per imported file. If inference hangs (e.g. due
+        // to pathological constraint propagation), bail out with partial
+        // results rather than blocking the LSP indefinitely.
+        .with_deadline(Instant::now() + std::time::Duration::from_secs(5));
 
-        match check.infer_prog(target_grouped) {
-            Ok(result) => {
-                let root_ty = result
-                    .expr_ty_map
-                    .get(target_module.entry_expr)
-                    .cloned()
-                    .unwrap_or(OutputTy::TyVar(0));
+        log::info!("{indent}  {target_name}: inferring ({} SCC groups)...", target_grouped.len());
+        let t0 = Instant::now();
+        // Use infer_prog_partial so we always get a result — even when
+        // inference hits the deadline or produces errors, partial results
+        // (the root expression type from successfully-inferred bindings)
+        // are still useful. This also ensures the result is always cached,
+        // preventing expensive re-inference when the same file is imported
+        // from multiple paths.
+        let (result, diagnostics) = check.infer_prog_partial(target_grouped);
 
-                cache.insert(target_path, root_ty.clone());
-                types.insert(apply_expr_id, root_ty);
-            }
-            Err(err) => {
-                errors.push(ImportError {
-                    kind: ImportErrorKind::InferenceError(target_path, err),
-                    at_expr: apply_expr_id,
-                });
-            }
+        let t_infer = t0.elapsed();
+        let has_errors = diagnostics.iter().any(|d| !matches!(
+            d.kind,
+            crate::diagnostic::TixDiagnosticKind::UnresolvedName { .. }
+                | crate::diagnostic::TixDiagnosticKind::AnnotationArityMismatch { .. }
+                | crate::diagnostic::TixDiagnosticKind::AnnotationUnchecked { .. }
+        ));
+
+        let root_ty = result
+            .expr_ty_map
+            .get(target_module.entry_expr)
+            .cloned()
+            .unwrap_or(OutputTy::TyVar(0));
+
+        // Always cache — even partial/errored results. Without this, a
+        // file that times out gets re-inferred (and re-times-out) every
+        // time it's imported from a different path.
+        cache.insert(target_path.clone(), root_ty.clone());
+        types.insert(apply_expr_id, root_ty);
+
+        if has_errors {
+            let t_total = t_import.elapsed();
+            log::warn!(
+                "{indent}  {target_name}: inference errors after {:.1}ms (parse {:.1}ms, sub-imports {:.1}ms, infer {:.1}ms)",
+                t_total.as_secs_f64() * 1000.0,
+                t_parse.as_secs_f64() * 1000.0,
+                t_sub_imports.as_secs_f64() * 1000.0,
+                t_infer.as_secs_f64() * 1000.0,
+            );
+        } else {
+            let t_total = t_import.elapsed();
+            log::info!(
+                "{indent}  {target_name}: {:.1}ms (parse {:.1}ms, sub-imports {:.1}ms, infer {:.1}ms)",
+                t_total.as_secs_f64() * 1000.0,
+                t_parse.as_secs_f64() * 1000.0,
+                t_sub_imports.as_secs_f64() * 1000.0,
+                t_infer.as_secs_f64() * 1000.0,
+            );
         }
     }
 

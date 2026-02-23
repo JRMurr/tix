@@ -39,6 +39,13 @@ impl CheckCtx<'_> {
 
     /// Infer the type of an expression and record it in the expr→type map.
     pub(super) fn infer_expr(&mut self, e: ExprId) -> Result<TyId, LocatedError> {
+        // Bail out if the deadline was exceeded (flag set by constrain()'s
+        // periodic check). Return a fresh variable so callers still get a
+        // valid TyId.
+        if self.deadline_exceeded {
+            return Ok(self.new_var());
+        }
+
         // Track the current expression so errors from constrain() and
         // sub-calls are attributed to the correct source location.
         self.current_expr = e;

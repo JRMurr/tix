@@ -50,8 +50,38 @@ impl CheckCtx<'_> {
         self.constrain_at(b, a)
     }
 
+    /// How often (in constrain() calls) to check the deadline. constrain() is
+    /// the main hotspot for cascading work, so checking here gives much finer
+    /// granularity than checking in infer_expr (which may only be called once
+    /// before a huge constrain cascade runs).
+    const DEADLINE_CHECK_INTERVAL: u32 = 1024;
+
     /// Record that `sub <: sup` — `sub` is a subtype of `sup`.
     pub fn constrain(&mut self, sub: TyId, sup: TyId) -> Result<(), InferenceError> {
+        // Bail out if inference deadline was exceeded. Returning Ok(()) is
+        // sound — we just stop adding constraints, producing incomplete (but
+        // not unsound) types.
+        if self.deadline_exceeded {
+            return Ok(());
+        }
+
+        // Periodic deadline check inside the constraint propagation hotpath.
+        // This catches cases where a single infer_expr call triggers a huge
+        // constrain() cascade (e.g. structural subtyping on large attrsets).
+        if self.deadline.is_some() {
+            self.op_counter = self.op_counter.wrapping_add(1);
+            if self.op_counter % Self::DEADLINE_CHECK_INTERVAL == 0 && self.past_deadline() {
+                log::warn!(
+                    "inference deadline exceeded during constrain (after {} operations, {} cache entries, {} type slots)",
+                    self.op_counter,
+                    self.types.constrain_cache.len(),
+                    self.types.storage.len(),
+                );
+                self.deadline_exceeded = true;
+                return Ok(());
+            }
+        }
+
         // Reflexivity: identical ids are trivially subtypes.
         if sub == sup {
             return Ok(());

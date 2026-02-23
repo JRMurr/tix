@@ -26,6 +26,7 @@ use la_arena::ArenaMap;
 use lang_ast::{AstDb, Expr, ExprId, Module, NameId, NameResolution, NixFile, OverloadBinOp};
 use lang_ty::{OutputTy, PrimitiveTy, Ty};
 use std::collections::{HashMap, HashSet};
+use std::time::Instant;
 use thiserror::Error;
 use type_table::TypeTable;
 
@@ -242,11 +243,25 @@ pub fn check_file_collecting(
     import_types: HashMap<ExprId, OutputTy>,
     context_args: HashMap<smol_str::SmolStr, ParsedTy>,
 ) -> CheckResult {
+    check_file_collecting_with_deadline(db, file, aliases, import_types, context_args, None)
+}
+
+/// Like `check_file_collecting` but with an optional deadline. When the
+/// deadline is exceeded, inference bails out with partial results rather
+/// than running indefinitely.
+pub fn check_file_collecting_with_deadline(
+    db: &dyn AstDb,
+    file: NixFile,
+    aliases: &TypeAliasRegistry,
+    import_types: HashMap<ExprId, OutputTy>,
+    context_args: HashMap<smol_str::SmolStr, ParsedTy>,
+    deadline: Option<Instant>,
+) -> CheckResult {
     let module = lang_ast::module(db, file);
     let name_res = lang_ast::name_resolution(db, file);
     let indices = lang_ast::module_indices(db, file);
     let grouped_defs = lang_ast::group_def(db, file);
-    let check = CheckCtx::new(
+    let mut check = CheckCtx::new(
         &module,
         &name_res,
         &indices.binding_expr,
@@ -254,6 +269,9 @@ pub fn check_file_collecting(
         import_types,
         context_args,
     );
+    if let Some(d) = deadline {
+        check = check.with_deadline(d);
+    }
     let (inference, diagnostics) = check.infer_prog_partial(grouped_defs);
     CheckResult {
         inference: Some(inference),
@@ -348,6 +366,23 @@ pub struct CheckCtx<'db> {
     /// should be skipped during Lambda inference in `infer_root` to avoid
     /// double-applying the annotation.
     pre_annotated_params: HashSet<NameId>,
+
+    /// Optional deadline for inference. Checked after each SCC group and
+    /// periodically during expression inference; if exceeded, remaining work
+    /// is skipped and partial results returned. Used by import resolution to
+    /// prevent a single file from blocking the LSP indefinitely.
+    deadline: Option<Instant>,
+
+    /// Operation counter for periodic deadline checks. Incremented in
+    /// constrain() (the main hotspot for cascading work). Checked every
+    /// DEADLINE_CHECK_INTERVAL operations to avoid Instant::now() syscall
+    /// overhead on every call.
+    op_counter: u32,
+
+    /// Set when a periodic deadline check fires. Once set, constrain()
+    /// returns Ok(()) immediately, infer_expr short-circuits to a fresh
+    /// variable, and extrude returns the original type as-is.
+    deadline_exceeded: bool,
 }
 
 /// Count the function arity (number of arrows along the spine) of a ParsedTy.
@@ -402,7 +437,21 @@ impl<'db> CheckCtx<'db> {
             context_args,
             narrow_overrides: HashMap::new(),
             pre_annotated_params: HashSet::new(),
+            deadline: None,
+            op_counter: 0,
+            deadline_exceeded: false,
         }
+    }
+
+    /// Set a deadline after which inference will bail out with partial results.
+    pub fn with_deadline(mut self, deadline: Instant) -> Self {
+        self.deadline = Some(deadline);
+        self
+    }
+
+    /// Check whether the inference deadline has been exceeded.
+    fn past_deadline(&self) -> bool {
+        self.deadline.is_some_and(|d| Instant::now() > d)
     }
 
     /// Allocate a fresh type variable at the current level.

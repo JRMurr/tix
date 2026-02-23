@@ -94,6 +94,16 @@ extrusion.
   but don't support cross-file mutual recursion. A future extension could merge
   cyclic file modules into a combined module for joint SCC inference.
 
+### Unconstrained Variables Cause Pathological Constraint Propagation
+
+- Files with heavily-used variables like `pkgs` and `lib` that lack type
+  annotations suffer exponential constraint propagation. Without `/** type:
+  lib :: Lib */`, every `lib.foo` access adds a field bound to the variable.
+  By SCC group 50, the bounds graph is so interconnected that a single
+  `constrain()` call cascades through 18M+ operations. Adding type annotations
+  reduces inference from 80 seconds to 400ms. The deadline mechanism (5s for
+  imports, 10s for top-level) acts as a safety net but the real fix is stubs.
+
 ### LSP Auto-Completion
 
 - Lambda parameter completion is limited: when typing `pkgs.` inside a lambda
@@ -253,6 +263,16 @@ Nix code sizes (hundreds of bindings per file, not millions):
   `placeholder == null` succeeds (== is total) but downstream code that expects
   `placeholder` to potentially be null sees `~null`. Partial fix — most `||`
   patterns work, but chained null guards on 3+ variables can surface this.
+
+### LSP Blocks on Large Repos (Serial didOpen Processing)
+
+- The LSP processes `didOpen` events serially while holding the `Mutex<AnalysisState>`
+  lock. When the editor opens many files at once (large workspace), each file runs the
+  full pipeline (parse → lower → name res → import resolution → type inference) before
+  the next can start. No debouncing, no background processing, no cancellation.
+  Potential fixes: (a) debounce `didOpen`/`didChange` to skip stale requests,
+  (b) move analysis to a background task and cancel on new edits,
+  (c) lazy analysis (only analyze on first hover/completion, not on open).
 
 ### `resolve_to_concrete_id` Picks Arbitrary Lower Bound
 

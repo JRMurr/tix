@@ -952,6 +952,8 @@ impl<'db> Collector<'db> {
     }
 
     pub fn finalize_inference(&mut self) -> InferenceResult {
+        let deadline_exceeded = self.ctx.deadline_exceeded;
+
         let name_tys: Vec<_> = self
             .ctx
             .module
@@ -959,16 +961,6 @@ impl<'db> Collector<'db> {
             .map(|(name, _)| {
                 let ty: TyId = (u32::from(name.into_raw())).into();
                 (name, ty)
-            })
-            .collect();
-
-        let expr_tys: Vec<_> = self
-            .ctx
-            .module
-            .exprs()
-            .map(|(expr, _)| {
-                let ty = self.ctx.ty_for_expr(expr);
-                (expr, ty)
             })
             .collect();
 
@@ -999,12 +991,30 @@ impl<'db> Collector<'db> {
             name_ty_map.insert(name, output.normalize_vars());
         }
 
-        for (expr, ty) in expr_tys {
-            let mut output = canon.canonicalize(ty, Positive);
-            if expr == self.ctx.module.entry_expr {
-                output = output.normalize_vars();
+        // When the inference deadline was exceeded, skip expression-level
+        // canonicalization. It iterates over every expression in the module
+        // and can be very expensive when the type graph has degenerate bounds
+        // from partial inference. Name-level types (above) are sufficient for
+        // hover/completion; expr-level types are mainly used for diagnostics
+        // and inlay hints, which are less critical on timed-out files.
+        if !deadline_exceeded {
+            let expr_tys: Vec<_> = self
+                .ctx
+                .module
+                .exprs()
+                .map(|(expr, _)| {
+                    let ty = self.ctx.ty_for_expr(expr);
+                    (expr, ty)
+                })
+                .collect();
+
+            for (expr, ty) in expr_tys {
+                let mut output = canon.canonicalize(ty, Positive);
+                if expr == self.ctx.module.entry_expr {
+                    output = output.normalize_vars();
+                }
+                expr_ty_map.insert(expr, output);
             }
-            expr_ty_map.insert(expr, output);
         }
 
         InferenceResult {
