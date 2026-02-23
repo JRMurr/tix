@@ -128,12 +128,15 @@ module pkgs {
 }
 "#;
 
-fn composable_registry() -> TypeAliasRegistry {
-    let file = comment_parser::parse_tix_file(COMPOSABLE_STUBS).expect("parse composable stubs");
-    let mut registry = TypeAliasRegistry::new();
-    registry.load_tix_file(&file);
-    registry
-}
+/// Parsed once at process startup, shared by all test cases.
+static COMPOSABLE_REGISTRY: std::sync::LazyLock<TypeAliasRegistry> =
+    std::sync::LazyLock::new(|| {
+        let file =
+            comment_parser::parse_tix_file(COMPOSABLE_STUBS).expect("parse composable stubs");
+        let mut registry = TypeAliasRegistry::new();
+        registry.load_tix_file(&file);
+        registry
+    });
 
 // ==============================================================================
 // Simplified Type Tracking
@@ -846,10 +849,10 @@ fn arb_stub_compose_deep() -> impl Strategy<Value = (AccessPattern, String)> {
 // ==============================================================================
 // Property Tests
 // ==============================================================================
-
+//
 proptest! {
     #![proptest_config(ProptestConfig {
-        cases: 256,
+        cases: 512,
         .. ProptestConfig::default()
     })]
 
@@ -860,7 +863,7 @@ proptest! {
     fn test_stub_direct_apply_with_stubs(
         (pattern, nix_src, expected_ty) in arb_stub_direct_apply()
     ) {
-        let registry = composable_registry();
+        let registry = &*COMPOSABLE_REGISTRY;
         let inferred = check_composed_expr(&nix_src, pattern, &registry);
 
         // For concrete result types, assert exact match.
@@ -892,7 +895,7 @@ proptest! {
     fn test_stub_pipeline_with_stubs(
         (pattern, nix_src, expected_ty) in arb_stub_pipeline()
     ) {
-        let registry = composable_registry();
+        let registry = &*COMPOSABLE_REGISTRY;
         let inferred = check_composed_expr(&nix_src, pattern, &registry);
 
         if let Some(expected) = expected_ty.to_output_ty() {
@@ -920,7 +923,7 @@ proptest! {
     fn test_stub_hof_with_stubs(
         (pattern, nix_src, expected_ty) in arb_stub_hof()
     ) {
-        let registry = composable_registry();
+        let registry = &*COMPOSABLE_REGISTRY;
         let inferred = check_composed_expr(&nix_src, pattern, &registry);
 
         if let Some(expected) = expected_ty.to_output_ty() {
@@ -944,7 +947,7 @@ proptest! {
 
 proptest! {
     #![proptest_config(ProptestConfig {
-        cases: 128,
+        cases: 256,
         .. ProptestConfig::default()
     })]
 
@@ -955,8 +958,8 @@ proptest! {
     fn test_stub_compose_deep_with_stubs(
         (pattern, nix_src) in arb_stub_compose_deep()
     ) {
-        let registry = composable_registry();
-        check_no_crash_with_context(&nix_src, pattern, Some(&registry));
+        let registry = &*COMPOSABLE_REGISTRY;
+        check_no_crash_with_context(&nix_src, pattern, Some(registry));
     }
 
     // -------------------------------------------------------------------------
