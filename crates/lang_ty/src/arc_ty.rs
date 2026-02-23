@@ -74,9 +74,83 @@ pub enum OutputTy {
 #[debug("{_0:?}")]
 pub struct TyRef(pub Arc<OutputTy>);
 
+impl PartialOrd for TyRef {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for TyRef {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.cmp(&other.0)
+    }
+}
+
 impl From<OutputTy> for TyRef {
     fn from(value: OutputTy) -> Self {
         TyRef(Arc::new(value))
+    }
+}
+
+impl PartialOrd for OutputTy {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for OutputTy {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+
+        /// Discriminant index for ordering OutputTy variants.
+        fn disc(ty: &OutputTy) -> u8 {
+            match ty {
+                OutputTy::Bottom => 0,
+                OutputTy::Top => 1,
+                OutputTy::Primitive(_) => 2,
+                OutputTy::TyVar(_) => 3,
+                OutputTy::List(_) => 4,
+                OutputTy::Lambda { .. } => 5,
+                OutputTy::AttrSet(_) => 6,
+                OutputTy::Union(_) => 7,
+                OutputTy::Intersection(_) => 8,
+                OutputTy::Named(..) => 9,
+                OutputTy::Neg(_) => 10,
+            }
+        }
+
+        let d = disc(self).cmp(&disc(other));
+        if d != Ordering::Equal {
+            return d;
+        }
+
+        match (self, other) {
+            (OutputTy::Bottom, OutputTy::Bottom) | (OutputTy::Top, OutputTy::Top) => {
+                Ordering::Equal
+            }
+            (OutputTy::Primitive(a), OutputTy::Primitive(b)) => a.cmp(b),
+            (OutputTy::TyVar(a), OutputTy::TyVar(b)) => a.cmp(b),
+            (OutputTy::List(a), OutputTy::List(b)) => a.cmp(b),
+            (
+                OutputTy::Lambda {
+                    param: pa,
+                    body: ba,
+                },
+                OutputTy::Lambda {
+                    param: pb,
+                    body: bb,
+                },
+            ) => pa.cmp(pb).then_with(|| ba.cmp(bb)),
+            (OutputTy::AttrSet(a), OutputTy::AttrSet(b)) => a.cmp(b),
+            (OutputTy::Union(a), OutputTy::Union(b))
+            | (OutputTy::Intersection(a), OutputTy::Intersection(b)) => a.cmp(b),
+            (OutputTy::Named(na, ta), OutputTy::Named(nb, tb)) => {
+                na.cmp(nb).then_with(|| ta.cmp(tb))
+            }
+            (OutputTy::Neg(a), OutputTy::Neg(b)) => a.cmp(b),
+            // Same discriminant → same variant; already handled above.
+            _ => unreachable!(),
+        }
     }
 }
 

@@ -106,6 +106,22 @@ impl<RefType: Clone + Debug> AttrSetTy<RefType> {
     }
 }
 
+impl PartialOrd for AttrSetTy<TyRef> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for AttrSetTy<TyRef> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.fields
+            .cmp(&other.fields)
+            .then_with(|| self.dyn_ty.cmp(&other.dyn_ty))
+            .then_with(|| self.open.cmp(&other.open))
+            .then_with(|| self.optional_fields.cmp(&other.optional_fields))
+    }
+}
+
 impl AttrSetTy<TyRef> {
     pub fn from_internal<'a>(
         iter: impl IntoIterator<Item = (&'a str, crate::OutputTy)>,

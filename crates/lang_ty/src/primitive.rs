@@ -2,7 +2,7 @@ use super::{RefType, Ty};
 
 use lang_ast::Literal;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum PrimitiveTy {
     Null,
     Bool,

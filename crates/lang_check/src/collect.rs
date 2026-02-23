@@ -103,6 +103,8 @@ impl<'a> Canonicalizer<'a> {
     /// checks for atom-only upper bounds — `ret <: Number` becomes `number`
     /// rather than a bare type variable.
     fn expand_bounds(&mut self, bounds: &[TyId], var_id: TyId, polarity: Polarity) -> OutputTy {
+        // Copy TyIds into a local Vec to release the borrow on `bounds`
+        // before calling `self.canonicalize()` which needs `&mut self`.
         let bounds = bounds.to_vec();
 
         // 1. Canonicalize each bound at the given polarity.
@@ -586,9 +588,7 @@ fn factor_shared_from_intersection(members: Vec<OutputTy>) -> Vec<OutputTy> {
 
     // Build the factored result: shared | (remainders & non_unions)
     let mut shared_vec: Vec<OutputTy> = shared.into_iter().collect();
-    // Sort for deterministic output (OutputTy derives Eq+Hash but ordering
-    // is by Debug representation — stable enough for display).
-    shared_vec.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
+    shared_vec.sort();
 
     // Build the intersection of remainders + non_unions.
     let mut intersection_parts: Vec<OutputTy> = remainders;
