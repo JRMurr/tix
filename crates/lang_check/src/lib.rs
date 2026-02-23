@@ -243,11 +243,25 @@ pub fn check_file_collecting(
     import_types: HashMap<ExprId, OutputTy>,
     context_args: HashMap<smol_str::SmolStr, ParsedTy>,
 ) -> CheckResult {
+    check_file_collecting_with_deadline(db, file, aliases, import_types, context_args, None)
+}
+
+/// Like `check_file_collecting` but with an optional deadline. When the
+/// deadline is exceeded, inference bails out with partial results rather
+/// than running indefinitely.
+pub fn check_file_collecting_with_deadline(
+    db: &dyn AstDb,
+    file: NixFile,
+    aliases: &TypeAliasRegistry,
+    import_types: HashMap<ExprId, OutputTy>,
+    context_args: HashMap<smol_str::SmolStr, ParsedTy>,
+    deadline: Option<Instant>,
+) -> CheckResult {
     let module = lang_ast::module(db, file);
     let name_res = lang_ast::name_resolution(db, file);
     let indices = lang_ast::module_indices(db, file);
     let grouped_defs = lang_ast::group_def(db, file);
-    let check = CheckCtx::new(
+    let mut check = CheckCtx::new(
         &module,
         &name_res,
         &indices.binding_expr,
@@ -255,6 +269,9 @@ pub fn check_file_collecting(
         import_types,
         context_args,
     );
+    if let Some(d) = deadline {
+        check = check.with_deadline(d);
+    }
     let (inference, diagnostics) = check.infer_prog_partial(grouped_defs);
     CheckResult {
         inference: Some(inference),

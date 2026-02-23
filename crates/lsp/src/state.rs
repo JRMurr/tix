@@ -211,13 +211,18 @@ impl AnalysisState {
         let t_imports = t0.elapsed();
 
         // -- Phase 4: Type inference --
+        // 10-second deadline for the top-level file. If inference hangs (e.g.
+        // due to pathological constraint propagation on complex files), bail
+        // out with partial results rather than blocking the LSP indefinitely.
         let t0 = Instant::now();
-        let check_result = lang_check::check_file_collecting(
+        let deadline = Some(Instant::now() + Duration::from_secs(10));
+        let check_result = lang_check::check_file_collecting_with_deadline(
             &self.db,
             nix_file,
             &self.registry,
             import_resolution.types,
             context_args,
+            deadline,
         );
         let t_check = t0.elapsed();
 
