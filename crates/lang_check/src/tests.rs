@@ -883,14 +883,68 @@ test_case!(
     { "a": Int, "b": String }
 );
 
-// Nested `with` with disjoint envs: only the innermost is constrained,
-// so names from the outer `with` that aren't in the inner one produce errors.
-// TODO: multi-`with` fallthrough would resolve `x` from the outer env.
-error_case!(
-    with_nested_disjoint_errors,
+// Nested `with` with disjoint envs: names resolve through fallthrough to
+// outer `with` environments when the inner one doesn't have the field.
+test_case!(
+    with_nested_disjoint_envs,
     r#"with { x = 1; }; with { y = "hi"; }; { a = x; b = y; }"#,
+    { "a": Int, "b": String }
+);
+
+// Triple-nested `with` with disjoint envs: fallthrough resolves through
+// multiple layers.
+test_case!(
+    with_triple_nested_disjoint,
+    r#"with { x = 1; }; with { y = "hi"; }; with { z = 3.14; }; { a = x; b = y; c = z; }"#,
+    { "a": Int, "b": String, "c": Float }
+);
+
+// Nested `with` where inner env shadows a field from the outer env.
+// The innermost scope wins, matching Nix runtime semantics.
+test_case!(
+    with_nested_shadow,
+    r#"with { x = 1; }; with { x = "hi"; }; x"#,
+    String
+);
+
+// Nested `with` where no env has the field — should produce an error.
+error_case!(
+    with_nested_all_missing,
+    r#"with { x = 1; }; with { y = "hi"; }; z"#,
     matches TixDiagnosticKind::MissingField { .. }
 );
+
+// Single `with` still works (fast-path, no fallback needed).
+test_case!(with_single_unchanged, "with { x = 42; }; x", Int);
+
+// Nested `with` with overlapping envs — inner env has the field, outer also
+// has it with a different type. Inner should take precedence.
+test_case!(
+    with_nested_overlap_inner_wins,
+    r#"with { x = 1; y = true; }; with { x = "hi"; }; { a = x; b = y; }"#,
+    { "a": String, "b": Bool }
+);
+
+// Nested `with` inside a let binding — `with` envs are computed from let-bound vars.
+#[test]
+fn with_nested_let_bound_envs() {
+    let ty = get_inferred_root(
+        r#"let pkgs = { mkShell = 1; }; lib = { id = x: x; }; in with pkgs; with lib; { a = mkShell; b = id; }"#,
+    );
+    match &ty {
+        OutputTy::AttrSet(attr) => {
+            assert!(attr.fields.contains_key("a"), "should have field a");
+            assert!(attr.fields.contains_key("b"), "should have field b");
+            assert_eq!(*attr.fields["a"].0, OutputTy::Primitive(PrimitiveTy::Int));
+            assert!(
+                matches!(&*attr.fields["b"].0, OutputTy::Lambda { .. }),
+                "b should be a lambda, got: {}",
+                &*attr.fields["b"].0
+            );
+        }
+        _ => panic!("expected attrset, got: {ty}"),
+    }
+}
 
 // ==============================================================================
 // Recursive / self-referential types

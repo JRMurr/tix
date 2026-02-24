@@ -16,6 +16,28 @@ use lang_ast::{
 use lang_ty::{AttrSetTy, PrimitiveTy, Ty};
 use smol_str::SmolStr;
 
+/// A deferred `with`-fallback constraint: the name must be found in at least
+/// one of the `with` environments (tried inner-to-outer at runtime).
+///
+/// Each entry in `envs` is `(env_ty, value_ty)` where `env_ty` is the
+/// environment's attrset type and `value_ty` is the fresh variable for the
+/// field in that env. The field constraint was already added as optional, so
+/// no immediate error occurs if an env doesn't have the field. During
+/// `resolve_pending`, the innermost env that has the field has its value_ty
+/// connected to `result`, preserving Nix's shadowing semantics.
+#[derive(Debug, Clone)]
+pub struct PendingWithFallback {
+    /// The field name being looked up.
+    pub field: SmolStr,
+    /// Per-env type pairs `(env_ty, value_ty)`, ordered inner-to-outer.
+    pub envs: Vec<(TyId, TyId)>,
+    /// The result type variable. Connected to the winning env's value_ty
+    /// during resolution.
+    pub result: TyId,
+    /// Location for error reporting.
+    pub at_expr: ExprId,
+}
+
 impl CheckCtx<'_> {
     /// Allocate an empty open attrset type `{ ... }`.
     fn alloc_empty_open_attrset(&mut self) -> TyId {
@@ -464,23 +486,81 @@ impl CheckCtx<'_> {
                         Ok(self.ty_for_name_direct(name))
                     }
                 }
-                ResolveResult::WithExprs(innermost, _rest) => {
-                    // Use the innermost `with` scope. Nix checks inner-to-outer at
-                    // runtime, but statically we can only constrain one env. The
-                    // innermost is the right choice for the common single-`with` case.
-                    // TODO: multi-`with` fallthrough (outer env when inner lacks the field)
-                    let with_expr_id = *innermost;
-                    let env_id = match &self.module[with_expr_id] {
-                        Expr::With { env, .. } => *env,
-                        _ => unreachable!("WithExprs should reference With nodes"),
-                    };
+                ResolveResult::WithExprs(innermost, rest) => {
+                    // Nix evaluates nested `with` scopes inner-to-outer at
+                    // runtime: the innermost scope that has the field wins.
+                    //
+                    // For a single `with`, we eagerly constrain as before.
+                    // For multiple nested `with` scopes, we constrain each env
+                    // with the field marked as optional (preventing immediate
+                    // MissingField errors), and defer the selection of which
+                    // env actually provides the value to `resolve_pending`.
+                    // This preserves Nix's shadowing semantics: the innermost
+                    // env that has the field wins.
 
-                    let env_ty = self.ty_for_expr(env_id);
-                    let value_ty = self.new_var();
-                    let field_attr =
-                        self.alloc_single_field_open_attrset(var_name.clone(), value_ty);
-                    self.constrain_at(env_ty, field_attr)?;
-                    Ok(value_ty)
+                    let all_with_exprs: Vec<ExprId> = std::iter::once(*innermost)
+                        .chain(rest.iter().copied())
+                        .collect();
+
+                    // Single `with`: fast path — no fallback needed.
+                    if all_with_exprs.len() == 1 {
+                        let env_id = match &self.module[all_with_exprs[0]] {
+                            Expr::With { env, .. } => *env,
+                            _ => unreachable!("WithExprs should reference With nodes"),
+                        };
+                        let env_ty = self.ty_for_expr(env_id);
+                        let value_ty = self.new_var();
+                        let field_attr =
+                            self.alloc_single_field_open_attrset(var_name.clone(), value_ty);
+                        self.constrain_at(env_ty, field_attr)?;
+                        return Ok(value_ty);
+                    }
+
+                    // Multi-`with`: constrain each env with the field as
+                    // optional, and collect per-env value variables. The
+                    // value variables are NOT connected to the result yet —
+                    // that happens in resolve_pending when we know which env
+                    // actually has the field.
+                    let result_ty = self.new_var();
+                    let mut env_pairs: Vec<(TyId, TyId)> = Vec::new();
+
+                    for with_expr_id in &all_with_exprs {
+                        let env_id = match &self.module[*with_expr_id] {
+                            Expr::With { env, .. } => *env,
+                            _ => unreachable!("WithExprs should reference With nodes"),
+                        };
+                        let env_ty = self.ty_for_expr(env_id);
+                        let value_ty = self.new_var();
+
+                        // Mark the field as optional so a closed attrset without
+                        // the field doesn't produce an immediate MissingField error.
+                        let mut optional_fields = BTreeSet::new();
+                        optional_fields.insert(var_name.clone());
+                        let field_attr = self.alloc_concrete(Ty::AttrSet(AttrSetTy {
+                            fields: [(var_name.clone(), value_ty)].into_iter().collect(),
+                            dyn_ty: None,
+                            open: true,
+                            optional_fields,
+                        }));
+                        self.constrain_at(env_ty, field_attr)?;
+
+                        env_pairs.push((env_ty, value_ty));
+                    }
+
+                    // Deferred: find the innermost env that has the field and
+                    // connect its value variable to the result.
+                    self.deferred
+                        .active
+                        .push(super::PendingConstraint::WithFallback(
+                            PendingWithFallback {
+                                field: var_name.clone(),
+                                envs: env_pairs,
+                                result: result_ty,
+                                at_expr: self.current_expr,
+                            },
+                        ));
+
+                    Ok(result_ty)
                 }
                 ResolveResult::Builtin(name) => self
                     .synthesize_builtin(name)

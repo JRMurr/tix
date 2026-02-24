@@ -74,9 +74,14 @@ extrusion.
 
 ### Missing Features
 
-- Multi-`with` fallthrough: only the innermost `with` env is constrained for
-  unresolved names. Nix semantics would check outer `with` scopes when the inner
-  one lacks the attribute, but that requires runtime-like dynamic dispatch.
+- `true`, `false`, `null` keywords inside `with` bodies are resolved as
+  `WithExprs(...)` instead of falling through to the special-case handler in
+  `infer_reference`. Name resolution doesn't treat them as builtins, so they
+  enter the `with` lookup path. Single `with` works because the env attrset
+  typically doesn't have a `true` field and the open constraint passes, but
+  nested `with` with a closed outer env can produce spurious MissingField errors.
+  Fix: either add `true`/`false`/`null` to `GLOBAL_BUILTIN_NAMES` in nameres, or
+  check for them before the `WithExprs` path in `infer_reference`.
 - `merge_attrset_intersection` field overlap: when one field is a TyVar, the other
   is preferred unconditionally rather than producing a proper intersection.
 
