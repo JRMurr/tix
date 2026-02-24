@@ -59,6 +59,8 @@ Code actions (quick fixes / refactorings) are offered based on diagnostics and c
 
 `didChange` notifications are debounced with a 300ms delay. Rapid keystrokes only trigger a single analysis run using the latest file contents, rather than one analysis per keystroke. `didOpen` uses a shorter 50ms delay for faster initial feedback while still coalescing rapid multi-file opens (e.g. when an editor restores a session).
 
+Completion on trigger characters (`.`) works immediately despite the debounce: the server stores the latest document text on every edit and re-parses it on the fly when a completion request arrives before analysis finishes. Type inference results from the previous analysis remain valid because the base expression's text range hasn't changed.
+
 ### Cancellation
 
 When a new edit arrives for a file that's currently being analyzed, the in-flight analysis is cancelled via a cooperative cancellation flag. The inference engine checks this flag at the same points it checks the 10-second deadline (between SCC groups and periodically during constraint propagation), so cancellation typically takes effect within milliseconds. This avoids the previous behavior of blocking the editor for up to 10 seconds while waiting for a stale analysis to hit the deadline.

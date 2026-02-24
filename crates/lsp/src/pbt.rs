@@ -232,7 +232,7 @@ proptest! {
         let positions = interesting_positions(analysis, &t.root);
         for ip in &positions {
             let pos = analysis.line_index.position(ip.byte_offset());
-            let _ = completion(analysis, pos, &t.root, &docs);
+            let _ = completion(analysis, pos, &t.root, &docs, &analysis.line_index);
         }
     }
 

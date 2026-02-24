@@ -65,6 +65,11 @@ pub struct TixLanguageServer {
     no_default_stubs: bool,
     /// Per-file debounce workers. Keyed by canonical file path.
     debounce_workers: Mutex<HashMap<PathBuf, DebounceWorker>>,
+    /// Latest document text received via didChange/didOpen, stored immediately
+    /// before debouncing. Completion handlers check this to get a fresh parse
+    /// tree when the debounced analysis hasn't completed yet. Cleared once
+    /// analysis catches up.
+    pending_text: Arc<Mutex<HashMap<PathBuf, String>>>,
 }
 
 impl TixLanguageServer {
@@ -81,17 +86,27 @@ impl TixLanguageServer {
             cli_stub_paths,
             no_default_stubs,
             debounce_workers: Mutex::new(HashMap::new()),
+            pending_text: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     /// Schedule analysis for a file. The actual analysis is debounced: rapid
     /// calls within the debounce window only trigger a single analysis run
     /// using the latest content.
+    ///
+    /// The text is stored immediately in `pending_text` so that request
+    /// handlers (e.g. completion) can re-parse it on the fly while the
+    /// debounce timer is still running.
     fn schedule_analysis(&self, uri: Url, text: String, debounce_delay: Duration) {
         let path = match uri_to_path(&uri) {
             Some(p) => p,
             None => return,
         };
+
+        // Store the latest text immediately so completion can use it.
+        self.pending_text
+            .lock()
+            .insert(path.clone(), text.clone());
 
         let mut workers = self.debounce_workers.lock();
 
@@ -133,7 +148,16 @@ impl TixLanguageServer {
         let state = self.state.clone();
         let diagnostics_enabled = self.config.lock().diagnostics.enable;
 
-        self.spawn_debounce_worker(path, rx, cancel_flag, client, state, diagnostics_enabled);
+        let pending_text = self.pending_text.clone();
+        self.spawn_debounce_worker(
+            path,
+            rx,
+            cancel_flag,
+            client,
+            state,
+            diagnostics_enabled,
+            pending_text,
+        );
     }
 
     /// Spawn a background task that debounces edits for a single file and
@@ -146,6 +170,7 @@ impl TixLanguageServer {
         client: Client,
         state: Arc<Mutex<AnalysisState>>,
         diagnostics_enabled: bool,
+        pending_text: Arc<Mutex<HashMap<PathBuf, String>>>,
     ) {
         tokio::spawn(async move {
             // The cancel flag for the current analysis run. Updated each time
@@ -226,6 +251,15 @@ impl TixLanguageServer {
                 // version is already queued.
                 if was_cancelled {
                     continue;
+                }
+
+                // Analysis completed successfully — clear pending_text, but
+                // only if the text hasn't been superseded by an even newer edit.
+                {
+                    let mut pt = pending_text.lock();
+                    if pt.get(&path).map_or(false, |t| *t == text) {
+                        pt.remove(&path);
+                    }
                 }
 
                 // Send timing to the editor's output panel.
@@ -500,6 +534,8 @@ impl LanguageServer for TixLanguageServer {
                 }
             }
 
+            self.pending_text.lock().remove(&path);
+
             let mut state = self.state.lock();
             state.files.remove(&path);
         }
@@ -592,9 +628,34 @@ impl LanguageServer for TixLanguageServer {
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
         let uri = &params.text_document_position.text_document.uri;
         let pos = params.text_document_position.position;
+
+        // Check if we have fresher text than the last completed analysis.
+        // This happens when `.` triggers completion before the debounce timer
+        // fires — the stale analysis doesn't contain the `.` token, so we
+        // re-parse the latest text to get a fresh syntax tree and LineIndex.
+        let fresh_text = uri_to_path(uri).and_then(|p| self.pending_text.lock().get(&p).cloned());
+
         self.with_analysis(uri, |state, analysis| {
-            let root = analysis.parsed.tree();
-            crate::completion::completion(analysis, pos, &root, &state.registry.docs)
+            if let Some(ref text) = fresh_text {
+                let root = rnix::Root::parse(text).tree();
+                let line_index = crate::convert::LineIndex::new(text);
+                crate::completion::completion(
+                    analysis,
+                    pos,
+                    &root,
+                    &state.registry.docs,
+                    &line_index,
+                )
+            } else {
+                let root = analysis.parsed.tree();
+                crate::completion::completion(
+                    analysis,
+                    pos,
+                    &root,
+                    &state.registry.docs,
+                    &analysis.line_index,
+                )
+            }
         })
     }
 

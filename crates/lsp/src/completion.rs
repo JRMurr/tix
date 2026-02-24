@@ -36,17 +36,26 @@ use tower_lsp::lsp_types::{
     MarkupKind, Position,
 };
 
+use crate::convert::LineIndex;
 use crate::state::FileAnalysis;
 
 /// Entry point: try to produce completions for the given cursor position.
+///
+/// `line_index` and `root` may come from a fresher parse than `analysis` —
+/// when the user types a trigger character like `.`, the editor sends
+/// completion before the debounced analysis finishes. The caller can re-parse
+/// the latest text to get a fresh tree+LineIndex while still using the stale
+/// `analysis` for type inference results (which remain valid because the base
+/// expression's text range hasn't changed).
 pub fn completion(
     analysis: &FileAnalysis,
     pos: Position,
     root: &rnix::Root,
     docs: &DocIndex,
+    line_index: &LineIndex,
 ) -> Option<CompletionResponse> {
     let inference = analysis.inference()?;
-    let offset = analysis.line_index.offset(pos);
+    let offset = line_index.offset(pos);
     let token = root
         .syntax()
         .token_at_offset(rowan::TextSize::from(offset))
@@ -733,7 +742,7 @@ mod tests {
         let pos = analysis.line_index.position(offset);
         let docs = DocIndex::new();
 
-        match completion(analysis, pos, &t.root, &docs) {
+        match completion(analysis, pos, &t.root, &docs, &analysis.line_index) {
             Some(CompletionResponse::Array(items)) => items,
             _ => Vec::new(),
         }
@@ -756,7 +765,7 @@ mod tests {
             .into_iter()
             .map(|(num, offset)| {
                 let pos = analysis.line_index.position(offset);
-                let items = match completion(analysis, pos, &t.root, &docs) {
+                let items = match completion(analysis, pos, &t.root, &docs, &analysis.line_index) {
                     Some(CompletionResponse::Array(items)) => items,
                     _ => Vec::new(),
                 };
@@ -899,6 +908,51 @@ mod tests {
         assert!(
             names.contains(&"name"),
             "should complete name from within-body usage, got: {names:?}"
+        );
+    }
+
+    /// Regression test: dot completion works when using a fresh parse tree
+    /// against stale analysis results. This simulates the real LSP scenario
+    /// where the user types `.` (a trigger character) and the editor sends
+    /// completion before the debounced analysis finishes.
+    #[test]
+    fn dot_completion_with_stale_analysis() {
+        use crate::convert::LineIndex;
+
+        // Step 1: Analyze the file WITHOUT the trailing dot.
+        let stale_src = indoc! {r#"
+            let lib = { x = 1; y = "hello"; };
+            in lib
+        "#};
+        let t = TestAnalysis::new(stale_src);
+        let stale_analysis = t.analysis();
+
+        // Step 2: The user types `.` — fresh text has `lib.` but analysis
+        // is still from the pre-dot version.
+        let fresh_src = indoc! {r#"
+            let lib = { x = 1; y = "hello"; };
+            in lib.
+        "#};
+        let fresh_root = rnix::Root::parse(fresh_src).tree();
+        let fresh_line_index = LineIndex::new(fresh_src);
+
+        // Cursor is right after the `.`
+        let dot_offset = fresh_src.rfind('.').unwrap() as u32 + 1;
+        let pos = fresh_line_index.position(dot_offset);
+        let docs = DocIndex::new();
+
+        let items = match completion(stale_analysis, pos, &fresh_root, &docs, &fresh_line_index) {
+            Some(CompletionResponse::Array(items)) => items,
+            _ => Vec::new(),
+        };
+        let names = labels(&items);
+        assert!(
+            names.contains(&"x"),
+            "stale analysis + fresh parse should complete x, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"y"),
+            "stale analysis + fresh parse should complete y, got: {names:?}"
         );
     }
 
@@ -1129,7 +1183,7 @@ mod tests {
             .into_iter()
             .map(|(num, offset)| {
                 let pos = analysis.line_index.position(offset);
-                let items = match completion(analysis, pos, &root, docs) {
+                let items = match completion(analysis, pos, &root, docs, &analysis.line_index) {
                     Some(CompletionResponse::Array(items)) => items,
                     _ => Vec::new(),
                 };
@@ -1615,7 +1669,7 @@ mod tests {
                 .into_iter()
                 .map(|(num, offset)| {
                     let pos = analysis.line_index.position(offset);
-                    let items = match completion(analysis, pos, &root, docs) {
+                    let items = match completion(analysis, pos, &root, docs, &analysis.line_index) {
                         Some(CompletionResponse::Array(items)) => items,
                         _ => Vec::new(),
                     };
@@ -2031,7 +2085,7 @@ mod tests {
         let docs = &state.registry.docs;
         let markers = parse_markers(src);
         let pos = analysis.line_index.position(markers[&1]);
-        let items = match completion(analysis, pos, &root, docs) {
+        let items = match completion(analysis, pos, &root, docs, &analysis.line_index) {
             Some(CompletionResponse::Array(items)) => items,
             _ => Vec::new(),
         };
@@ -2108,7 +2162,7 @@ mod tests {
             .into_iter()
             .map(|(num, offset)| {
                 let pos = analysis.line_index.position(offset);
-                let items = match completion(analysis, pos, &root, docs) {
+                let items = match completion(analysis, pos, &root, docs, &analysis.line_index) {
                     Some(CompletionResponse::Array(items)) => items,
                     _ => Vec::new(),
                 };
