@@ -548,10 +548,36 @@ impl LanguageServer for TixLanguageServer {
         let uri = params.text_document_position.text_document.uri;
         let pos = params.text_document_position.position;
         let new_name = params.new_name;
-        self.with_analysis(&uri, |_, analysis| {
-            let root = analysis.parsed.tree();
-            crate::rename::rename(analysis, pos, &new_name, &uri, &root)
-        })
+        let path = uri_to_path(&uri);
+
+        let (edit, warning) = {
+            let result = self.with_analysis(&uri, |state, analysis| {
+                let root = analysis.parsed.tree();
+                crate::rename::rename(
+                    analysis,
+                    pos,
+                    &new_name,
+                    &uri,
+                    &root,
+                    Some(state),
+                    path.as_ref(),
+                )
+            })?;
+
+            match result {
+                Some(r) => (Some(r.edit), r.warning),
+                None => (None, None),
+            }
+        };
+
+        // Surface the cross-file rename warning in the editor's output panel.
+        if let Some(msg) = warning {
+            self.client
+                .show_message(MessageType::WARNING, &msg)
+                .await;
+        }
+
+        Ok(edit)
     }
 
     async fn semantic_tokens_full(

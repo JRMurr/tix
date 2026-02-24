@@ -19,7 +19,7 @@ Communicates over stdin/stdout. Same stub flags as `tix-cli`.
 | **Signature Help** | Parameter names and types when calling functions; highlights the active parameter for curried calls |
 | **Go to Definition** | Jump to let bindings, lambda params, imports, and cross-file field definitions (including `callPackage`-style patterns) |
 | **Find References** | All uses of a name in the file |
-| **Rename** | Refactor bindings and their references |
+| **Rename** | Refactor bindings and their references; cross-file rename updates `x.field` select expressions in open files that import the renamed file |
 | **Inlay Hints** | Inline type annotations after binding names |
 | **Document Symbols** | Outline of let bindings and lambda params |
 | **Workspace Symbols** | Search for symbols across all open files |
