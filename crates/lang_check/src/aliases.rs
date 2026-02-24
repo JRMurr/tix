@@ -421,10 +421,7 @@ fn module_to_attrset(declarations: &[TixDeclaration]) -> ParsedTy {
     module_to_attrset_inner(declarations, &mut counter)
 }
 
-fn module_to_attrset_inner(
-    declarations: &[TixDeclaration],
-    counter: &mut usize,
-) -> ParsedTy {
+fn module_to_attrset_inner(declarations: &[TixDeclaration], counter: &mut usize) -> ParsedTy {
     let mut fields = std::collections::BTreeMap::new();
 
     for decl in declarations {

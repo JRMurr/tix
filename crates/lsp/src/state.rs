@@ -118,7 +118,11 @@ impl AnalysisState {
 
     /// Update file contents and re-run analysis. Returns the cached analysis
     /// and a timing breakdown of each pipeline phase.
-    pub fn update_file(&mut self, path: PathBuf, contents: String) -> (&FileAnalysis, AnalysisTiming) {
+    pub fn update_file(
+        &mut self,
+        path: PathBuf,
+        contents: String,
+    ) -> (&FileAnalysis, AnalysisTiming) {
         self.update_file_inner(path, contents, None)
     }
 
@@ -465,14 +469,12 @@ mod tests {
     #[test]
     fn missing_import_surfaces_as_diagnostic() {
         // Create a project with a Nix file that imports a non-existent file.
-        let project = crate::test_util::TempProject::new(&[(
-            "main.nix",
-            "import ./missing.nix",
-        )]);
+        let project = crate::test_util::TempProject::new(&[("main.nix", "import ./missing.nix")]);
         let nix_path = project.path("main.nix");
 
         let mut state = AnalysisState::new(TypeAliasRegistry::default());
-        let (analysis, _timing) = state.update_file(nix_path.clone(), "import ./missing.nix".to_string());
+        let (analysis, _timing) =
+            state.update_file(nix_path.clone(), "import ./missing.nix".to_string());
 
         // There should be at least one diagnostic about the missing import.
         let import_diags: Vec<_> = analysis
@@ -484,7 +486,12 @@ mod tests {
         assert!(
             !import_diags.is_empty(),
             "expected an ImportNotFound diagnostic, got: {:?}",
-            analysis.check_result.diagnostics.iter().map(|d| &d.kind).collect::<Vec<_>>()
+            analysis
+                .check_result
+                .diagnostics
+                .iter()
+                .map(|d| &d.kind)
+                .collect::<Vec<_>>()
         );
 
         // Verify the diagnostic message includes the file name.
@@ -498,10 +505,8 @@ mod tests {
     #[test]
     fn missing_import_converts_to_lsp_diagnostic() {
         // Verify the full LSP pipeline: import error -> TixDiagnostic -> LSP Diagnostic.
-        let project = crate::test_util::TempProject::new(&[(
-            "main.nix",
-            "import ./nonexistent.nix",
-        )]);
+        let project =
+            crate::test_util::TempProject::new(&[("main.nix", "import ./nonexistent.nix")]);
         let nix_path = project.path("main.nix");
         let src = "import ./nonexistent.nix".to_string();
 
@@ -554,7 +559,12 @@ mod tests {
         assert!(
             !cycle_diags.is_empty(),
             "expected an ImportCyclic diagnostic, got: {:?}",
-            analysis.check_result.diagnostics.iter().map(|d| &d.kind).collect::<Vec<_>>()
+            analysis
+                .check_result
+                .diagnostics
+                .iter()
+                .map(|d| &d.kind)
+                .collect::<Vec<_>>()
         );
     }
 

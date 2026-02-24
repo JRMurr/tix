@@ -47,8 +47,11 @@ struct Cli {
 async fn main() {
     // Default to info-level for tix/lang crates, warn for everything else.
     // RUST_LOG env var overrides this if set.
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn,tix_lsp=info,lang_check=info,lang_ast=info"))
-        .init();
+    env_logger::Builder::from_env(
+        env_logger::Env::default()
+            .default_filter_or("warn,tix_lsp=info,lang_check=info,lang_ast=info"),
+    )
+    .init();
 
     let args = Cli::parse();
 

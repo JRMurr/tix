@@ -71,7 +71,11 @@ impl CheckCtx<'_> {
         // or when the LSP cancels analysis because a newer edit arrived.
         if self.deadline.is_some() || self.cancel_flag.is_some() {
             self.op_counter = self.op_counter.wrapping_add(1);
-            if self.op_counter.is_multiple_of(Self::DEADLINE_CHECK_INTERVAL) && self.past_deadline() {
+            if self
+                .op_counter
+                .is_multiple_of(Self::DEADLINE_CHECK_INTERVAL)
+                && self.past_deadline()
+            {
                 log::warn!(
                     "inference aborted during constrain (after {} operations, {} cache entries, {} type slots)",
                     self.op_counter,

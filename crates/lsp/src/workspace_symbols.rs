@@ -161,10 +161,7 @@ mod tests {
 
     #[test]
     fn empty_query_returns_all_symbols() {
-        let results = query_workspace(
-            &[("a.nix", "let x = 1; y = 2; in x")],
-            "",
-        );
+        let results = query_workspace(&[("a.nix", "let x = 1; y = 2; in x")], "");
         let names: Vec<&str> = results.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"x"), "should contain x, got: {names:?}");
         assert!(names.contains(&"y"), "should contain y, got: {names:?}");
@@ -172,10 +169,7 @@ mod tests {
 
     #[test]
     fn filters_by_substring() {
-        let results = query_workspace(
-            &[("a.nix", "let fooBar = 1; bazQux = 2; in fooBar")],
-            "bar",
-        );
+        let results = query_workspace(&[("a.nix", "let fooBar = 1; bazQux = 2; in fooBar")], "bar");
         let names: Vec<&str> = results.iter().map(|s| s.name.as_str()).collect();
         assert!(
             names.contains(&"fooBar"),
@@ -189,10 +183,7 @@ mod tests {
 
     #[test]
     fn case_insensitive_match() {
-        let results = query_workspace(
-            &[("a.nix", "let MyFunc = x: x; in MyFunc")],
-            "myfunc",
-        );
+        let results = query_workspace(&[("a.nix", "let MyFunc = x: x; in MyFunc")], "myfunc");
         let names: Vec<&str> = results.iter().map(|s| s.name.as_str()).collect();
         assert!(
             names.contains(&"MyFunc"),
@@ -216,10 +207,7 @@ mod tests {
 
     #[test]
     fn exact_match_sorts_before_prefix() {
-        let results = query_workspace(
-            &[("a.nix", "let id = 1; identity = 2; in id")],
-            "id",
-        );
+        let results = query_workspace(&[("a.nix", "let id = 1; identity = 2; in id")], "id");
         let names: Vec<&str> = results.iter().map(|s| s.name.as_str()).collect();
         // "id" is an exact match; "identity" is a prefix match.
         // Exact should come first.
@@ -252,10 +240,7 @@ mod tests {
 
     #[test]
     fn nested_attrset_children_are_flattened() {
-        let results = query_workspace(
-            &[("a.nix", "{ outer = { inner = 42; }; }")],
-            "inner",
-        );
+        let results = query_workspace(&[("a.nix", "{ outer = { inner = 42; }; }")], "inner");
         let names: Vec<&str> = results.iter().map(|s| s.name.as_str()).collect();
         assert!(
             names.contains(&"inner"),
@@ -272,23 +257,25 @@ mod tests {
 
     #[test]
     fn symbol_kinds_preserved() {
-        let results = query_workspace(
-            &[("a.nix", "let f = x: x; y = 1; in f y")],
-            "",
-        );
+        let results = query_workspace(&[("a.nix", "let f = x: x; y = 1; in f y")], "");
         let func = results.iter().find(|s| s.name == "f").unwrap();
-        assert_eq!(func.kind, SymbolKind::FUNCTION, "lambda binding should be FUNCTION");
+        assert_eq!(
+            func.kind,
+            SymbolKind::FUNCTION,
+            "lambda binding should be FUNCTION"
+        );
 
         let var = results.iter().find(|s| s.name == "y").unwrap();
-        assert_eq!(var.kind, SymbolKind::VARIABLE, "let binding should be VARIABLE");
+        assert_eq!(
+            var.kind,
+            SymbolKind::VARIABLE,
+            "let binding should be VARIABLE"
+        );
     }
 
     #[test]
     fn no_match_returns_empty() {
-        let results = query_workspace(
-            &[("a.nix", "let x = 1; in x")],
-            "zzzznotfound",
-        );
+        let results = query_workspace(&[("a.nix", "let x = 1; in x")], "zzzznotfound");
         assert!(results.is_empty(), "non-matching query should return empty");
     }
 
@@ -296,7 +283,10 @@ mod tests {
     fn match_quality_fn_works_correctly() {
         assert_eq!(match_quality("foo", "foo"), Some(MatchQuality::Exact));
         assert_eq!(match_quality("foobar", "foo"), Some(MatchQuality::Prefix));
-        assert_eq!(match_quality("barfoo", "foo"), Some(MatchQuality::Substring));
+        assert_eq!(
+            match_quality("barfoo", "foo"),
+            Some(MatchQuality::Substring)
+        );
         assert_eq!(match_quality("bar", "foo"), None);
         assert_eq!(match_quality("anything", ""), Some(MatchQuality::Substring));
     }

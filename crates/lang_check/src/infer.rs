@@ -91,7 +91,10 @@ impl CheckCtx<'_> {
                 log::warn!("inference deadline exceeded after {i}/{n_groups} SCC groups");
                 break;
             }
-            let group_names: Vec<_> = group.iter().map(|d| self.module[d.name()].text.as_str().to_owned()).collect();
+            let group_names: Vec<_> = group
+                .iter()
+                .map(|d| self.module[d.name()].text.as_str().to_owned())
+                .collect();
             let t_group = Instant::now();
             let err = self.infer_scc_group(group);
             let elapsed = t_group.elapsed();
@@ -130,7 +133,10 @@ impl CheckCtx<'_> {
         let result = collector.finalize_inference();
         let canon_elapsed = t_canon.elapsed();
         if canon_elapsed.as_millis() > 50 {
-            log::info!("canonicalization took {:.1}ms", canon_elapsed.as_secs_f64() * 1000.0);
+            log::info!(
+                "canonicalization took {:.1}ms",
+                canon_elapsed.as_secs_f64() * 1000.0
+            );
         }
         (result, diagnostics, timed_out)
     }
@@ -674,9 +680,7 @@ impl CheckCtx<'_> {
                             .map_err(|err| self.locate_err(err))?
                         {
                             true => made_progress = true,
-                            false => {
-                                remaining.push(super::PendingConstraint::WithFallback(wf))
-                            }
+                            false => remaining.push(super::PendingConstraint::WithFallback(wf)),
                         }
                     }
                 }

@@ -2135,13 +2135,7 @@ pub fn check_str_with_aliases_and_context(
 ) -> (Module, crate::CheckResult) {
     let (db, file) = TestDatabase::single_file(src).unwrap();
     let module = module(&db, file);
-    let result = crate::check_file_collecting(
-        &db,
-        file,
-        aliases,
-        HashMap::new(),
-        context_args,
-    );
+    let result = crate::check_file_collecting(&db, file, aliases, HashMap::new(), context_args);
     (module, result)
 }
 
@@ -5429,7 +5423,11 @@ fn duplicate_key_in_attrset() {
         .iter()
         .filter(|d| matches!(&d.kind, TixDiagnosticKind::DuplicateKey { .. }))
         .collect();
-    assert_eq!(dup_diags.len(), 1, "expected exactly one DuplicateKey diagnostic");
+    assert_eq!(
+        dup_diags.len(),
+        1,
+        "expected exactly one DuplicateKey diagnostic"
+    );
     match &dup_diags[0].kind {
         TixDiagnosticKind::DuplicateKey { key, .. } => {
             assert_eq!(key.as_str(), "a");
@@ -5505,7 +5503,11 @@ fn duplicate_key_multiple_duplicates() {
         .iter()
         .filter(|d| matches!(&d.kind, TixDiagnosticKind::DuplicateKey { .. }))
         .collect();
-    assert_eq!(dup_diags.len(), 2, "both `a` and `b` should have duplicates");
+    assert_eq!(
+        dup_diags.len(),
+        2,
+        "both `a` and `b` should have duplicates"
+    );
 }
 
 #[test]

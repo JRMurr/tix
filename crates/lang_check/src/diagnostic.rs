@@ -413,11 +413,7 @@ pub fn lower_diagnostics_to_tix(
     lower_diags
         .iter()
         .map(|ld| match ld {
-            lang_ast::LowerDiagnostic::DuplicateKey {
-                key,
-                first,
-                second,
-            } => TixDiagnostic {
+            lang_ast::LowerDiagnostic::DuplicateKey { key, first, second } => TixDiagnostic {
                 at_expr: fallback_expr,
                 kind: TixDiagnosticKind::DuplicateKey {
                     key: key.clone(),

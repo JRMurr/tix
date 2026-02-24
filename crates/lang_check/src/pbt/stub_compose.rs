@@ -358,7 +358,11 @@ fn fn_ref(stub: &StubFn, pattern: AccessPattern) -> String {
             stub.module_paths
                 .iter()
                 .find(|p| p.matches('.').count() == 2)
-                .or_else(|| stub.module_paths.iter().find(|p| p.matches('.').count() == 1))
+                .or_else(|| {
+                    stub.module_paths
+                        .iter()
+                        .find(|p| p.matches('.').count() == 1)
+                })
                 .unwrap_or(&stub.module_paths[0])
                 .to_string()
         }
@@ -489,7 +493,7 @@ fn resolve_result(stub: &StubFn, arg_ty: Ty) -> Ty {
             // Polymorphic — result type follows from the argument.
             if stub.params.len() == 1 {
                 match stub.params[0] {
-                    Ty::Any => arg_ty,              // id :: a -> a
+                    Ty::Any => arg_ty,                   // id :: a -> a
                     Ty::ListAny => list_element(arg_ty), // head :: [a] -> a
                     _ => Ty::Any,
                 }
@@ -583,23 +587,100 @@ struct PipelineFn {
 
 const PIPELINE_FNS: &[PipelineFn] = &[
     // string -> string
-    PipelineFn { bare_name: "toLower", module_path: "lib.strings.toLower", extra_args: "", input: Ty::String, output: Ty::String, has_global_val: true },
-    PipelineFn { bare_name: "toUpper", module_path: "lib.strings.toUpper", extra_args: "", input: Ty::String, output: Ty::String, has_global_val: true },
-    PipelineFn { bare_name: "trim", module_path: "lib.strings.trim", extra_args: "", input: Ty::String, output: Ty::String, has_global_val: true },
+    PipelineFn {
+        bare_name: "toLower",
+        module_path: "lib.strings.toLower",
+        extra_args: "",
+        input: Ty::String,
+        output: Ty::String,
+        has_global_val: true,
+    },
+    PipelineFn {
+        bare_name: "toUpper",
+        module_path: "lib.strings.toUpper",
+        extra_args: "",
+        input: Ty::String,
+        output: Ty::String,
+        has_global_val: true,
+    },
+    PipelineFn {
+        bare_name: "trim",
+        module_path: "lib.strings.trim",
+        extra_args: "",
+        input: Ty::String,
+        output: Ty::String,
+        has_global_val: true,
+    },
     // string -> int
-    PipelineFn { bare_name: "stringLength", module_path: "lib.strings.stringLength", extra_args: "", input: Ty::String, output: Ty::Int, has_global_val: true },
+    PipelineFn {
+        bare_name: "stringLength",
+        module_path: "lib.strings.stringLength",
+        extra_args: "",
+        input: Ty::String,
+        output: Ty::Int,
+        has_global_val: true,
+    },
     // string -> bool (only in module, not a top-level val)
-    PipelineFn { bare_name: "hasPrefix", module_path: "lib.strings.hasPrefix", extra_args: "\"x\"", input: Ty::String, output: Ty::Bool, has_global_val: false },
+    PipelineFn {
+        bare_name: "hasPrefix",
+        module_path: "lib.strings.hasPrefix",
+        extra_args: "\"x\"",
+        input: Ty::String,
+        output: Ty::Bool,
+        has_global_val: false,
+    },
     // string -> [string] (only in module)
-    PipelineFn { bare_name: "splitString", module_path: "lib.strings.splitString", extra_args: "\",\"", input: Ty::String, output: Ty::ListString, has_global_val: false },
-    PipelineFn { bare_name: "stringToCharacters", module_path: "lib.strings.stringToCharacters", extra_args: "", input: Ty::String, output: Ty::ListString, has_global_val: false },
+    PipelineFn {
+        bare_name: "splitString",
+        module_path: "lib.strings.splitString",
+        extra_args: "\",\"",
+        input: Ty::String,
+        output: Ty::ListString,
+        has_global_val: false,
+    },
+    PipelineFn {
+        bare_name: "stringToCharacters",
+        module_path: "lib.strings.stringToCharacters",
+        extra_args: "",
+        input: Ty::String,
+        output: Ty::ListString,
+        has_global_val: false,
+    },
     // bool -> string
-    PipelineFn { bare_name: "boolToString", module_path: "lib.boolToString", extra_args: "", input: Ty::Bool, output: Ty::String, has_global_val: true },
+    PipelineFn {
+        bare_name: "boolToString",
+        module_path: "lib.boolToString",
+        extra_args: "",
+        input: Ty::Bool,
+        output: Ty::String,
+        has_global_val: true,
+    },
     // [string] -> string
-    PipelineFn { bare_name: "concatStrings", module_path: "lib.strings.concatStrings", extra_args: "", input: Ty::ListString, output: Ty::String, has_global_val: true },
-    PipelineFn { bare_name: "concatStringsSep", module_path: "lib.strings.concatStringsSep", extra_args: "\",\"", input: Ty::ListString, output: Ty::String, has_global_val: false },
+    PipelineFn {
+        bare_name: "concatStrings",
+        module_path: "lib.strings.concatStrings",
+        extra_args: "",
+        input: Ty::ListString,
+        output: Ty::String,
+        has_global_val: true,
+    },
+    PipelineFn {
+        bare_name: "concatStringsSep",
+        module_path: "lib.strings.concatStringsSep",
+        extra_args: "\",\"",
+        input: Ty::ListString,
+        output: Ty::String,
+        has_global_val: false,
+    },
     // [a] -> int
-    PipelineFn { bare_name: "length", module_path: "lib.lists.length", extra_args: "", input: Ty::ListAny, output: Ty::Int, has_global_val: true },
+    PipelineFn {
+        bare_name: "length",
+        module_path: "lib.lists.length",
+        extra_args: "",
+        input: Ty::ListAny,
+        output: Ty::Int,
+        has_global_val: true,
+    },
 ];
 
 /// Check if a type can be passed where `expected` is required.

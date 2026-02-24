@@ -70,11 +70,7 @@ pub fn signature_help(
     let mut active_param: u32 = (total_params - 1) as u32; // default to last
 
     for (i, (_fun, arg)) in chain.iter().enumerate() {
-        if arg
-            .syntax()
-            .text_range()
-            .contains_inclusive(cursor_offset)
-        {
+        if arg.syntax().text_range().contains_inclusive(cursor_offset) {
             active_param = i as u32;
             break;
         }
@@ -113,9 +109,7 @@ fn find_outermost_apply(node: &rnix::SyntaxNode) -> Option<rnix::ast::Apply> {
 ///
 /// Returns: `[(f, a), (Apply(f,a), b), (Apply(Apply(f,a),b), c)]`
 /// i.e. the root function `f` is at index 0, and the arguments are in call order.
-fn flatten_apply_chain(
-    outermost: &rnix::ast::Apply,
-) -> Vec<(rnix::ast::Expr, rnix::ast::Expr)> {
+fn flatten_apply_chain(outermost: &rnix::ast::Apply) -> Vec<(rnix::ast::Expr, rnix::ast::Expr)> {
     let mut stack = Vec::new();
     let mut current = outermost.clone();
 
@@ -396,11 +390,7 @@ mod tests {
         let t = TestAnalysis::new(src);
         let help = sig_help_at(&t, markers[&1]).expect("should get signature help");
 
-        assert_eq!(
-            active_param(&help),
-            1,
-            "cursor should be on second param"
-        );
+        assert_eq!(active_param(&help), 1, "cursor should be on second param");
         let params = param_labels(&help);
         assert!(
             params.len() >= 2,
@@ -420,11 +410,7 @@ mod tests {
         let t = TestAnalysis::new(src);
         let help = sig_help_at(&t, markers[&1]).expect("should get signature help");
 
-        assert_eq!(
-            active_param(&help),
-            0,
-            "cursor should be on first param"
-        );
+        assert_eq!(active_param(&help), 0, "cursor should be on first param");
     }
 
     #[test]
@@ -497,11 +483,7 @@ mod tests {
         let t = TestAnalysis::new(src);
         let help = sig_help_at(&t, markers[&1]).expect("should get signature help");
 
-        assert_eq!(
-            active_param(&help),
-            2,
-            "cursor should be on third param"
-        );
+        assert_eq!(active_param(&help), 2, "cursor should be on third param");
         let params = param_labels(&help);
         assert!(
             params.len() >= 3,

@@ -245,7 +245,10 @@ pub fn resolve_imports(
         // results rather than blocking the LSP indefinitely.
         .with_deadline(Instant::now() + std::time::Duration::from_secs(5));
 
-        log::info!("{indent}  {target_name}: inferring ({} SCC groups)...", target_grouped.len());
+        log::info!(
+            "{indent}  {target_name}: inferring ({} SCC groups)...",
+            target_grouped.len()
+        );
         let t0 = Instant::now();
         // Use infer_prog_partial so we always get a result — even when
         // inference hits the deadline or produces errors, partial results
@@ -256,12 +259,14 @@ pub fn resolve_imports(
         let (result, diagnostics, _timed_out) = check.infer_prog_partial(target_grouped);
 
         let t_infer = t0.elapsed();
-        let has_errors = diagnostics.iter().any(|d| !matches!(
-            d.kind,
-            crate::diagnostic::TixDiagnosticKind::UnresolvedName { .. }
-                | crate::diagnostic::TixDiagnosticKind::AnnotationArityMismatch { .. }
-                | crate::diagnostic::TixDiagnosticKind::AnnotationUnchecked { .. }
-        ));
+        let has_errors = diagnostics.iter().any(|d| {
+            !matches!(
+                d.kind,
+                crate::diagnostic::TixDiagnosticKind::UnresolvedName { .. }
+                    | crate::diagnostic::TixDiagnosticKind::AnnotationArityMismatch { .. }
+                    | crate::diagnostic::TixDiagnosticKind::AnnotationUnchecked { .. }
+            )
+        });
 
         let root_ty = result
             .expr_ty_map

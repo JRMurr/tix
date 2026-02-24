@@ -175,13 +175,10 @@ fn find_attrset_insert_point(
     // If the set is a Reference, resolve it to the name's binding expression.
     let attrset_expr = match &analysis.module[set_expr] {
         Expr::Reference(_) => {
-            let name_id = analysis
-                .name_res
-                .get(set_expr)
-                .and_then(|r| match r {
-                    lang_ast::nameres::ResolveResult::Definition(n) => Some(*n),
-                    _ => None,
-                })?;
+            let name_id = analysis.name_res.get(set_expr).and_then(|r| match r {
+                lang_ast::nameres::ResolveResult::Definition(n) => Some(*n),
+                _ => None,
+            })?;
             *analysis.module_indices.binding_expr.get(&name_id)?
         }
         // If it's already an AttrSet literal, use it directly.
@@ -355,10 +352,7 @@ fn has_existing_annotation(name_node: &rnix::SyntaxNode) -> bool {
                     return true;
                 }
                 // Stop at non-whitespace, non-comment tokens.
-                if !text.trim().is_empty()
-                    && !text.starts_with('#')
-                    && !text.starts_with("/*")
-                {
+                if !text.trim().is_empty() && !text.starts_with('#') && !text.starts_with("/*") {
                     break;
                 }
             }
@@ -584,7 +578,10 @@ mod tests {
         // The edit should insert text containing `bar`.
         let changes = edit.changes.unwrap();
         let all_edits: Vec<_> = changes.values().flat_map(|v| v.iter()).collect();
-        assert!(!all_edits.is_empty(), "should produce at least one text edit");
+        assert!(
+            !all_edits.is_empty(),
+            "should produce at least one text edit"
+        );
 
         let new_text = &all_edits[0].new_text;
         assert!(

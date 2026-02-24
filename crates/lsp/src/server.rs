@@ -106,7 +106,12 @@ impl TixLanguageServer {
         };
 
         if reuse_existing {
-            workers.get(&path).unwrap().tx.send((text, debounce_delay)).ok();
+            workers
+                .get(&path)
+                .unwrap()
+                .tx
+                .send((text, debounce_delay))
+                .ok();
             return;
         }
 
@@ -224,9 +229,7 @@ impl TixLanguageServer {
                 }
 
                 // Send timing to the editor's output panel.
-                client
-                    .log_message(MessageType::INFO, &timing_msg)
-                    .await;
+                client.log_message(MessageType::INFO, &timing_msg).await;
 
                 let uri = match Url::from_file_path(&path) {
                     Ok(u) => u,
@@ -437,17 +440,18 @@ impl LanguageServer for TixLanguageServer {
     }
 
     async fn initialized(&self, _: InitializedParams) {
-        let msg = {
-            let state = self.state.lock();
-            let config = self.config.lock();
-            format!(
+        let msg =
+            {
+                let state = self.state.lock();
+                let config = self.config.lock();
+                format!(
                 "tix-lsp ready — {} type aliases, {} global vals, diagnostics {}, inlay hints {}",
                 state.registry.alias_count(),
                 state.registry.global_vals().len(),
                 if config.diagnostics.enable { "on" } else { "off" },
                 if config.inlay_hints.enable { "on" } else { "off" },
             )
-        };
+            };
         log::info!("{msg}");
         self.client.log_message(MessageType::INFO, msg).await;
     }
@@ -563,10 +567,7 @@ impl LanguageServer for TixLanguageServer {
         })
     }
 
-    async fn signature_help(
-        &self,
-        params: SignatureHelpParams,
-    ) -> Result<Option<SignatureHelp>> {
+    async fn signature_help(&self, params: SignatureHelpParams) -> Result<Option<SignatureHelp>> {
         let uri = &params.text_document_position_params.text_document.uri;
         let pos = params.text_document_position_params.position;
         self.with_analysis(uri, |_, analysis| {
@@ -733,9 +734,7 @@ impl LanguageServer for TixLanguageServer {
 
         // Surface the cross-file rename warning in the editor's output panel.
         if let Some(msg) = warning {
-            self.client
-                .show_message(MessageType::WARNING, &msg)
-                .await;
+            self.client.show_message(MessageType::WARNING, &msg).await;
         }
 
         Ok(edit)
@@ -769,10 +768,7 @@ impl LanguageServer for TixLanguageServer {
         })
     }
 
-    async fn code_action(
-        &self,
-        params: CodeActionParams,
-    ) -> Result<Option<CodeActionResponse>> {
+    async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
         self.with_analysis(&params.text_document.uri, |_, analysis| {
             let root = analysis.parsed.tree();
             let actions = crate::code_actions::code_actions(analysis, &params, &root);

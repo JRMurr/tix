@@ -137,16 +137,12 @@ pub fn rename(
 ///   let helper = ...; in { ... }  # LetIn whose body is AttrSet
 fn is_top_level_export(analysis: &FileAnalysis, target: NameId) -> bool {
     let entry = analysis.module.entry_expr;
-    fields_of_root_attrset(&analysis.module, entry)
-        .is_some_and(|fields| fields.contains(&target))
+    fields_of_root_attrset(&analysis.module, entry).is_some_and(|fields| fields.contains(&target))
 }
 
 /// Collect NameIds of fields in the root-level attrset, chasing through
 /// LetIn bodies (Nix files commonly have `let ... in { fields }` at the top).
-fn fields_of_root_attrset(
-    module: &lang_ast::Module,
-    expr_id: ExprId,
-) -> Option<Vec<NameId>> {
+fn fields_of_root_attrset(module: &lang_ast::Module, expr_id: ExprId) -> Option<Vec<NameId>> {
     match &module[expr_id] {
         Expr::AttrSet { bindings, .. } => {
             Some(bindings.statics.iter().map(|(name, _)| *name).collect())
@@ -211,8 +207,7 @@ fn collect_cross_file_edits(
                                     other_analysis.source_map.node_for_expr(first_attr_expr)
                                 {
                                     let node = ptr.to_node(other_root.syntax());
-                                    let range =
-                                        other_analysis.line_index.range(node.text_range());
+                                    let range = other_analysis.line_index.range(node.text_range());
                                     file_edits.push(TextEdit {
                                         range,
                                         new_text: new_name.to_string(),
@@ -238,8 +233,7 @@ fn collect_cross_file_edits(
                                     other_analysis.source_map.node_for_expr(first_attr_expr)
                                 {
                                     let node = ptr.to_node(other_root.syntax());
-                                    let range =
-                                        other_analysis.line_index.range(node.text_range());
+                                    let range = other_analysis.line_index.range(node.text_range());
                                     file_edits.push(TextEdit {
                                         range,
                                         new_text: new_name.to_string(),
@@ -443,7 +437,10 @@ mod tests {
                         # ^1
                     "},
                 ),
-                ("main.nix", "let lib = import ./lib.nix; in lib.foo + lib.bar"),
+                (
+                    "main.nix",
+                    "let lib = import ./lib.nix; in lib.foo + lib.bar",
+                ),
             ],
             "lib.nix",
             1,
@@ -528,10 +525,7 @@ mod tests {
         let result = result.expect("should produce rename result");
         let total = edit_count(&result.edit);
         // Only local edits: definition of `helper` + reference in `{ foo = helper; }`
-        assert_eq!(
-            total, 2,
-            "should only rename locally, got {total}"
-        );
+        assert_eq!(total, 2, "should only rename locally, got {total}");
         assert!(
             result.warning.is_none(),
             "should not warn for non-export rename"
@@ -562,10 +556,7 @@ mod tests {
         let total = edit_count(&result.edit);
         // lib.nix: definition of `foo` + reference to `foo` (there's no local ref, just def)
         // main.nix: `foo` in `lib.foo`
-        assert_eq!(
-            total, 2,
-            "1 def + 1 cross-file = 2 edits, got {total}"
-        );
+        assert_eq!(total, 2, "1 def + 1 cross-file = 2 edits, got {total}");
     }
 
     #[test]
@@ -580,10 +571,7 @@ mod tests {
                         # ^1
                     "},
                 ),
-                (
-                    "main.nix",
-                    "let lib = import ./lib.nix; in lib.bar",
-                ),
+                ("main.nix", "let lib = import ./lib.nix; in lib.bar"),
             ],
             "lib.nix",
             1,
@@ -593,10 +581,7 @@ mod tests {
         let result = result.expect("should produce rename result");
         let total = edit_count(&result.edit);
         // Only the definition of `foo` in lib.nix — no cross-file edits.
-        assert_eq!(
-            total, 1,
-            "should only rename definition, got {total}"
-        );
+        assert_eq!(total, 1, "should only rename definition, got {total}");
     }
 
     #[test]

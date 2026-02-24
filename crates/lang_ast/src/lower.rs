@@ -7,8 +7,8 @@ use smol_str::SmolStr;
 
 use super::{
     ast_utils::{get_str_literal, name_kind_of_set, name_of_ident, AttrKind},
-    AstPtr, Attrpath, BindingValue, Bindings, Expr, ExprId, InterpolPart, Literal,
-    LowerDiagnostic, Module, ModuleSourceMap, Name, NameId, NameKind,
+    AstPtr, Attrpath, BindingValue, Bindings, Expr, ExprId, InterpolPart, Literal, LowerDiagnostic,
+    Module, ModuleSourceMap, Name, NameId, NameKind,
 };
 use crate::{comment::DocCommentCtx, DocComments, ModuleTypeDecMap, Pat};
 
@@ -40,7 +40,10 @@ pub fn lower(root: rnix::Root, doc_comments: DocCommentCtx) -> (Module, ModuleSo
     let is_type_alias = |doc: &str| -> bool {
         let trimmed = doc.trim();
         trimmed.starts_with("type ")
-            && trimmed.as_bytes().get(5).is_some_and(|b| b.is_ascii_uppercase())
+            && trimmed
+                .as_bytes()
+                .get(5)
+                .is_some_and(|b| b.is_ascii_uppercase())
     };
 
     let mut inline_type_aliases: Vec<String> = Vec::new();
@@ -528,7 +531,9 @@ impl MergingSet {
             Entry::Occupied(mut ent) => {
                 // The same key appears twice in this attrset/let-block. Nix allows
                 // this (second value wins), but it is almost always a mistake.
-                let first_ptr = ctx.source_map.name_map_rev
+                let first_ptr = ctx
+                    .source_map
+                    .name_map_rev
                     .get(ent.get().name)
                     .copied()
                     .unwrap_or(attr_ptr);

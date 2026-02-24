@@ -309,7 +309,8 @@ fn run_check(
         })
         .collect();
 
-    let mut result = check_file_collecting(&db, file, &registry, import_resolution.types, context_args);
+    let mut result =
+        check_file_collecting(&db, file, &registry, import_resolution.types, context_args);
 
     // Merge import diagnostics into the check result.
     result.diagnostics.extend(import_diagnostics);
@@ -347,10 +348,7 @@ fn run_check(
 
         // DuplicateKey carries its own AstPtr spans; other diagnostics
         // resolve ExprId → source span via the ModuleSourceMap.
-        let labels = if let TixDiagnosticKind::DuplicateKey {
-            first, second, ..
-        } = &diag.kind
-        {
+        let labels = if let TixDiagnosticKind::DuplicateKey { first, second, .. } = &diag.kind {
             let to_span = |ptr: &lang_ast::AstPtr| {
                 let node = ptr.to_node(root.syntax());
                 let range = node.text_range();

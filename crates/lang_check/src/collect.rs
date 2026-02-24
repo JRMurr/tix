@@ -761,7 +761,10 @@ fn remove_redundant_negations(members: Vec<OutputTy>) -> Vec<OutputTy> {
     let has_concrete = members.iter().any(|m| {
         matches!(
             m,
-            OutputTy::Primitive(_) | OutputTy::AttrSet(_) | OutputTy::List(_) | OutputTy::Lambda { .. }
+            OutputTy::Primitive(_)
+                | OutputTy::AttrSet(_)
+                | OutputTy::List(_)
+                | OutputTy::Lambda { .. }
         )
     });
 

@@ -22,7 +22,10 @@ fn doc_text(comment: &rnix::ast::Comment) -> Option<DocComment> {
         // Line comment with inline type alias: # type Foo = ...;
         if trimmed.starts_with("type:")
             || (trimmed.starts_with("type ")
-                && trimmed.as_bytes().get(5).is_some_and(|b| b.is_ascii_uppercase()))
+                && trimmed
+                    .as_bytes()
+                    .get(5)
+                    .is_some_and(|b| b.is_ascii_uppercase()))
         {
             Some(comment.text().into())
         } else {
