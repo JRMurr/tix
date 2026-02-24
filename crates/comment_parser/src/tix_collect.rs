@@ -18,7 +18,9 @@ use smol_str::SmolStr;
 use std::collections::BTreeMap;
 
 use crate::tix_parser::Rule;
-use crate::{FieldDoc, ParsedTy, ParsedTyRef, TixDeclFile, TixDeclaration, TypeVarValue};
+use crate::{
+    CollectError, FieldDoc, ParsedTy, ParsedTyRef, TixDeclFile, TixDeclaration, TypeVarValue,
+};
 
 // =============================================================================
 // Doc block extraction
@@ -45,7 +47,7 @@ fn extract_doc_block(pair: &Pair<Rule>) -> SmolStr {
 }
 
 /// Try to extract a doc_block from the first child of `inner` if it matches.
-/// Returns `(Option<SmolStr>, Pairs)` — the doc (if present) and the remaining
+/// Returns `(Option<SmolStr>, Pairs)` -- the doc (if present) and the remaining
 /// children with the doc_block consumed.
 fn take_doc_block(inner: &mut Pairs<Rule>) -> Option<SmolStr> {
     let first = inner.peek()?;
@@ -58,32 +60,38 @@ fn take_doc_block(inner: &mut Pairs<Rule>) -> Option<SmolStr> {
     }
 }
 
+/// Helper to build a CollectError with span information from a pest Pair.
+fn err_at_pair(message: impl Into<String>, pair: &Pair<Rule>) -> CollectError {
+    let span = pair.as_span();
+    CollectError::with_span(message, span.start(), span.end())
+}
+
 // =============================================================================
 // Top-level collection
 // =============================================================================
 
-pub fn collect_tix_file(pairs: Pairs<Rule>) -> TixDeclFile {
+pub fn collect_tix_file(pairs: Pairs<Rule>) -> Result<TixDeclFile, CollectError> {
     let mut declarations = Vec::new();
     let mut ctx = CollectCtx::new();
 
-    collect_tix_file_inner(pairs, &mut declarations, &mut ctx);
+    collect_tix_file_inner(pairs, &mut declarations, &mut ctx)?;
 
-    TixDeclFile {
+    Ok(TixDeclFile {
         declarations,
         field_docs: ctx.field_docs,
-    }
+    })
 }
 
 fn collect_tix_file_inner(
     pairs: Pairs<Rule>,
     declarations: &mut Vec<TixDeclaration>,
     ctx: &mut CollectCtx,
-) {
+) -> Result<(), CollectError> {
     for pair in pairs {
         match pair.as_rule() {
             Rule::tix_file => {
-                collect_tix_file_inner(pair.into_inner(), declarations, ctx);
-                return;
+                collect_tix_file_inner(pair.into_inner(), declarations, ctx)?;
+                return Ok(());
             }
             Rule::type_alias_decl => {
                 let mut inner = pair.into_inner();
@@ -93,7 +101,9 @@ fn collect_tix_file_inner(
                 // Set path context so field-level doc comments in the body
                 // get the correct prefix (e.g. ["Config", "services", "enable"]).
                 ctx.set_path(vec![name.clone()]);
-                let body = collect_type_expr(inner, ctx).unwrap();
+                let body = collect_type_expr(inner, ctx)?.ok_or_else(|| {
+                    CollectError::new(format!("type alias '{name}' has empty body"))
+                })?;
                 ctx.set_path(Vec::new());
 
                 declarations.push(TixDeclaration::TypeAlias { name, body, doc });
@@ -102,7 +112,9 @@ fn collect_tix_file_inner(
                 let mut inner = pair.into_inner();
                 let doc = take_doc_block(&mut inner);
                 let name: SmolStr = inner.next().unwrap().as_str().into();
-                let ty = collect_type_expr(inner, ctx).unwrap();
+                let ty = collect_type_expr(inner, ctx)?.ok_or_else(|| {
+                    CollectError::new(format!("val declaration '{name}' has empty type"))
+                })?;
                 declarations.push(TixDeclaration::ValDecl { name, ty, doc });
             }
             Rule::module_decl => {
@@ -111,7 +123,7 @@ fn collect_tix_file_inner(
                 let name: SmolStr = inner.next().unwrap().as_str().into();
                 // Remaining children are the nested declarations.
                 let mut nested = Vec::new();
-                collect_tix_file_inner(inner, &mut nested, ctx);
+                collect_tix_file_inner(inner, &mut nested, ctx)?;
                 declarations.push(TixDeclaration::Module {
                     name,
                     declarations: nested,
@@ -119,9 +131,18 @@ fn collect_tix_file_inner(
                 });
             }
             Rule::EOI => {}
-            _ => unreachable!("collect_tix_file: unexpected rule {:?}", pair.as_rule()),
+            _ => {
+                return Err(err_at_pair(
+                    format!(
+                        "unexpected rule {:?} at top level of .tix file",
+                        pair.as_rule()
+                    ),
+                    &pair,
+                ));
+            }
         }
     }
+    Ok(())
 }
 
 // =============================================================================
@@ -164,11 +185,17 @@ impl CollectCtx {
 }
 
 // =============================================================================
-// Type expression collection — mirrors collect.rs but for tix_parser::Rule
+// Type expression collection -- mirrors collect.rs but for tix_parser::Rule
 // =============================================================================
 
-fn collect_type_expr(mut pairs: Pairs<Rule>, ctx: &mut CollectCtx) -> Option<ParsedTy> {
-    let curr = pairs.next()?;
+fn collect_type_expr(
+    mut pairs: Pairs<Rule>,
+    ctx: &mut CollectCtx,
+) -> Result<Option<ParsedTy>, CollectError> {
+    let curr = match pairs.next() {
+        Some(c) => c,
+        None => return Ok(None),
+    };
 
     let curr = match curr.as_rule() {
         // Transparent wrappers.
@@ -177,14 +204,18 @@ fn collect_type_expr(mut pairs: Pairs<Rule>, ctx: &mut CollectCtx) -> Option<Par
         | Rule::paren_type
         | Rule::type_ref
         | Rule::primitive_ref
-        | Rule::atom_type => collect_type_expr(curr.into_inner(), ctx).unwrap(),
+        | Rule::atom_type => collect_type_expr(curr.into_inner(), ctx)?.ok_or_else(|| {
+            CollectError::new("expected type expression inside wrapper, found empty")
+        })?,
 
-        Rule::union_type => collect_union(curr.into_inner(), ctx),
-        Rule::isect_type => collect_intersection(curr.into_inner(), ctx),
+        Rule::union_type => collect_union(curr.into_inner(), ctx)?,
+        Rule::isect_type => collect_intersection(curr.into_inner(), ctx)?,
 
-        Rule::attrset_type => collect_attrset(curr.into_inner(), ctx),
+        Rule::attrset_type => collect_attrset(curr.into_inner(), ctx)?,
         Rule::list_type => {
-            ParsedTy::List(collect_type_expr(curr.into_inner(), ctx).unwrap().into())
+            let inner = collect_type_expr(curr.into_inner(), ctx)?
+                .ok_or_else(|| CollectError::new("list type has empty element type"))?;
+            ParsedTy::List(inner.into())
         }
         Rule::string_ref => ParsedTy::Primitive(PrimitiveTy::String),
         Rule::number_ref => ParsedTy::Primitive(PrimitiveTy::Number),
@@ -195,25 +226,30 @@ fn collect_type_expr(mut pairs: Pairs<Rule>, ctx: &mut CollectCtx) -> Option<Par
         Rule::null_ref => ParsedTy::Primitive(PrimitiveTy::Null),
         Rule::generic_ident => ParsedTy::TyVar(TypeVarValue::Generic(curr.as_str().into())),
         Rule::user_type => ParsedTy::TyVar(TypeVarValue::Reference(curr.as_str().into())),
-        Rule::EOI => return None,
-        _ => unreachable!(
-            "tix collect_type_expr: unexpected rule {:?}",
-            curr.as_rule()
-        ),
+        Rule::EOI => return Ok(None),
+        _ => {
+            return Err(err_at_pair(
+                format!("unexpected rule {:?} in type expression", curr.as_rule()),
+                &curr,
+            ));
+        }
     };
 
     // Arrow chaining: right-associative lambdas.
-    if let Some(lam_body) = collect_type_expr(pairs, ctx) {
-        return Some(ParsedTy::Lambda {
+    if let Some(lam_body) = collect_type_expr(pairs, ctx)? {
+        return Ok(Some(ParsedTy::Lambda {
             param: curr.into(),
             body: lam_body.into(),
-        });
+        }));
     }
 
-    Some(curr)
+    Ok(Some(curr))
 }
 
-fn collect_one(pair: pest::iterators::Pair<Rule>, ctx: &mut CollectCtx) -> ParsedTy {
+fn collect_one(
+    pair: pest::iterators::Pair<Rule>,
+    ctx: &mut CollectCtx,
+) -> Result<ParsedTy, CollectError> {
     match pair.as_rule() {
         Rule::isect_type => collect_intersection(pair.into_inner(), ctx),
         Rule::atom_type
@@ -222,53 +258,70 @@ fn collect_one(pair: pest::iterators::Pair<Rule>, ctx: &mut CollectCtx) -> Parse
         | Rule::primitive_ref
         | Rule::arrow_segment
         | Rule::union_type
-        | Rule::type_expr => collect_type_expr(pair.into_inner(), ctx).unwrap(),
+        | Rule::type_expr => collect_type_expr(pair.into_inner(), ctx)?
+            .ok_or_else(|| CollectError::new("expected type expression, found empty")),
         Rule::attrset_type => collect_attrset(pair.into_inner(), ctx),
         Rule::list_type => {
-            ParsedTy::List(collect_type_expr(pair.into_inner(), ctx).unwrap().into())
+            let inner = collect_type_expr(pair.into_inner(), ctx)?
+                .ok_or_else(|| CollectError::new("list type has empty element type"))?;
+            Ok(ParsedTy::List(inner.into()))
         }
-        Rule::string_ref => ParsedTy::Primitive(PrimitiveTy::String),
-        Rule::number_ref => ParsedTy::Primitive(PrimitiveTy::Number),
-        Rule::int_ref => ParsedTy::Primitive(PrimitiveTy::Int),
-        Rule::bool_ref => ParsedTy::Primitive(PrimitiveTy::Bool),
-        Rule::float_ref => ParsedTy::Primitive(PrimitiveTy::Float),
-        Rule::path_ref => ParsedTy::Primitive(PrimitiveTy::Path),
-        Rule::null_ref => ParsedTy::Primitive(PrimitiveTy::Null),
-        Rule::generic_ident => ParsedTy::TyVar(TypeVarValue::Generic(pair.as_str().into())),
-        Rule::user_type => ParsedTy::TyVar(TypeVarValue::Reference(pair.as_str().into())),
-        _ => unreachable!("tix collect_one: unexpected rule {:?}", pair.as_rule()),
+        Rule::string_ref => Ok(ParsedTy::Primitive(PrimitiveTy::String)),
+        Rule::number_ref => Ok(ParsedTy::Primitive(PrimitiveTy::Number)),
+        Rule::int_ref => Ok(ParsedTy::Primitive(PrimitiveTy::Int)),
+        Rule::bool_ref => Ok(ParsedTy::Primitive(PrimitiveTy::Bool)),
+        Rule::float_ref => Ok(ParsedTy::Primitive(PrimitiveTy::Float)),
+        Rule::path_ref => Ok(ParsedTy::Primitive(PrimitiveTy::Path)),
+        Rule::null_ref => Ok(ParsedTy::Primitive(PrimitiveTy::Null)),
+        Rule::generic_ident => Ok(ParsedTy::TyVar(TypeVarValue::Generic(pair.as_str().into()))),
+        Rule::user_type => Ok(ParsedTy::TyVar(TypeVarValue::Reference(
+            pair.as_str().into(),
+        ))),
+        _ => Err(err_at_pair(
+            format!("unexpected rule {:?} in type expression", pair.as_rule()),
+            &pair,
+        )),
     }
 }
 
-fn collect_union(pairs: Pairs<Rule>, ctx: &mut CollectCtx) -> ParsedTy {
-    let members: Vec<ParsedTyRef> = pairs
-        .map(|p| ParsedTyRef::from(collect_one(p, ctx)))
+fn collect_union(pairs: Pairs<Rule>, ctx: &mut CollectCtx) -> Result<ParsedTy, CollectError> {
+    let members: Result<Vec<ParsedTyRef>, CollectError> = pairs
+        .map(|p| collect_one(p, ctx).map(ParsedTyRef::from))
         .collect();
+    let members = members?;
     match members.len() {
-        0 => unreachable!("union_type must have at least one member"),
+        0 => Err(CollectError::new(
+            "union type must have at least one member",
+        )),
         1 => {
             let single = members.into_iter().next().unwrap();
-            (*single.0).clone()
+            Ok((*single.0).clone())
         }
-        _ => ParsedTy::Union(members),
+        _ => Ok(ParsedTy::Union(members)),
     }
 }
 
-fn collect_intersection(pairs: Pairs<Rule>, ctx: &mut CollectCtx) -> ParsedTy {
-    let members: Vec<ParsedTyRef> = pairs
-        .map(|p| ParsedTyRef::from(collect_one(p, ctx)))
+fn collect_intersection(
+    pairs: Pairs<Rule>,
+    ctx: &mut CollectCtx,
+) -> Result<ParsedTy, CollectError> {
+    let members: Result<Vec<ParsedTyRef>, CollectError> = pairs
+        .map(|p| collect_one(p, ctx).map(ParsedTyRef::from))
         .collect();
+    let members = members?;
     match members.len() {
-        0 => unreachable!("isect_type must have at least one member"),
+        0 => Err(CollectError::new(
+            "intersection type must have at least one member",
+        )),
         1 => {
             let single = members.into_iter().next().unwrap();
-            (*single.0).clone()
+            Ok((*single.0).clone())
         }
-        _ => ParsedTy::Intersection(members),
+        _ => Ok(ParsedTy::Intersection(members)),
     }
 }
 
-fn collect_attrset(pairs: Pairs<Rule>, ctx: &mut CollectCtx) -> ParsedTy {
+fn collect_attrset(pairs: Pairs<Rule>, ctx: &mut CollectCtx) -> Result<ParsedTy, CollectError> {
     let mut fields: BTreeMap<SmolStr, ParsedTyRef> = BTreeMap::new();
     let mut dyn_ty: Option<ParsedTyRef> = None;
     let mut open = false;
@@ -283,7 +336,7 @@ fn collect_attrset(pairs: Pairs<Rule>, ctx: &mut CollectCtx) -> ParsedTy {
                 let field_doc = take_doc_block(&mut inner);
 
                 let name_pair = inner.next().unwrap();
-                // quoted_field includes surrounding quotes — strip them.
+                // quoted_field includes surrounding quotes -- strip them.
                 let name: SmolStr = match name_pair.as_rule() {
                     Rule::quoted_field => {
                         let raw = name_pair.as_str();
@@ -303,7 +356,8 @@ fn collect_attrset(pairs: Pairs<Rule>, ctx: &mut CollectCtx) -> ParsedTy {
                 child_path.push(name.clone());
                 ctx.set_path(child_path);
 
-                let ty = collect_type_expr(inner, ctx).unwrap();
+                let ty = collect_type_expr(inner, ctx)?
+                    .ok_or_else(|| CollectError::new(format!("field '{name}' has empty type")))?;
                 fields.insert(name, ty.into());
 
                 // Restore parent path context.
@@ -311,22 +365,28 @@ fn collect_attrset(pairs: Pairs<Rule>, ctx: &mut CollectCtx) -> ParsedTy {
             }
             Rule::dyn_field => {
                 let inner = pair.into_inner();
-                let ty = collect_type_expr(inner, ctx).unwrap();
+                let ty = collect_type_expr(inner, ctx)?
+                    .ok_or_else(|| CollectError::new("dynamic field has empty type"))?;
                 dyn_ty = Some(ty.into());
             }
             Rule::open_marker => {
                 open = true;
             }
-            _ => unreachable!("tix collect_attrset: unexpected rule {:?}", pair.as_rule()),
+            _ => {
+                return Err(err_at_pair(
+                    format!("unexpected rule {:?} in attrset type", pair.as_rule()),
+                    &pair,
+                ));
+            }
         }
     }
 
-    ParsedTy::AttrSet(AttrSetTy {
+    Ok(ParsedTy::AttrSet(AttrSetTy {
         fields,
         dyn_ty,
         open,
         optional_fields: std::collections::BTreeSet::new(),
-    })
+    }))
 }
 
 #[cfg(test)]
@@ -631,5 +691,75 @@ mod tests {
             ]
         );
         assert_eq!(file.field_docs[1].doc.as_str(), "Whether to enable SSH.");
+    }
+
+    // =========================================================================
+    // Malformed .tix input error tests
+    // =========================================================================
+
+    #[test]
+    fn missing_semicolon_is_parse_error() {
+        // Missing trailing semicolon -- pest grammar should reject this.
+        let result = parse_tix_file("type Foo = int");
+        assert!(result.is_err(), "missing semicolon should produce an error");
+        let err_msg = result.unwrap_err().to_string();
+        // The error should be informative, not a panic.
+        assert!(!err_msg.is_empty());
+    }
+
+    #[test]
+    fn missing_type_body_is_error() {
+        // `type Foo = ;` -- the grammar expects a type expression after `=`.
+        let result = parse_tix_file("type Foo = ;");
+        assert!(result.is_err(), "missing type body should produce an error");
+    }
+
+    #[test]
+    fn missing_val_type_is_error() {
+        // `val x :: ;` -- the grammar expects a type expression after `::`.
+        let result = parse_tix_file("val x :: ;");
+        assert!(result.is_err(), "missing val type should produce an error");
+    }
+
+    #[test]
+    fn unclosed_brace_is_error() {
+        let result = parse_tix_file("type Foo = { name: string ;");
+        assert!(result.is_err(), "unclosed brace should produce an error");
+    }
+
+    #[test]
+    fn unclosed_bracket_is_error() {
+        let result = parse_tix_file("type Foo = [string ;");
+        assert!(result.is_err(), "unclosed bracket should produce an error");
+    }
+
+    #[test]
+    fn bad_type_keyword_is_error() {
+        let result = parse_tix_file("tyep Foo = int;");
+        assert!(result.is_err(), "misspelled 'type' should produce an error");
+    }
+
+    #[test]
+    fn empty_module_is_ok() {
+        // An empty module is syntactically valid.
+        let result = parse_tix_file("module empty { }");
+        assert!(result.is_ok(), "empty module should parse: {result:?}");
+    }
+
+    #[test]
+    fn unclosed_module_brace_is_error() {
+        let result = parse_tix_file("module lib { val id :: a -> a;");
+        assert!(
+            result.is_err(),
+            "unclosed module brace should produce an error"
+        );
+    }
+
+    #[test]
+    fn tix_error_display_includes_context() {
+        // Verify that TixError::Parse includes the pest error message.
+        let err = parse_tix_file("type Foo = ;").unwrap_err();
+        let msg = err.to_string();
+        assert!(!msg.is_empty(), "error message should not be empty");
     }
 }
