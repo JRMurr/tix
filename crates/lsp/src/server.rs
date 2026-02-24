@@ -282,6 +282,7 @@ impl LanguageServer for TixLanguageServer {
                         },
                     ),
                 ),
+                workspace_symbol_provider: Some(OneOf::Left(true)),
                 inlay_hint_provider: Some(OneOf::Left(true)),
                 signature_help_provider: Some(SignatureHelpOptions {
                     trigger_characters: Some(vec![" ".to_string()]),
@@ -579,6 +580,17 @@ impl LanguageServer for TixLanguageServer {
                 &root,
             ))
         })
+    }
+
+    async fn symbol(
+        &self,
+        params: WorkspaceSymbolParams,
+    ) -> Result<Option<Vec<SymbolInformation>>> {
+        let state = self.state.lock();
+        Ok(crate::workspace_symbols::handle_workspace_symbols(
+            &state,
+            &params.query,
+        ))
     }
 }
 

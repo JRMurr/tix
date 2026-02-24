@@ -22,6 +22,7 @@ Communicates over stdin/stdout. Same stub flags as `tix-cli`.
 | **Rename** | Refactor bindings and their references |
 | **Inlay Hints** | Inline type annotations after binding names |
 | **Document Symbols** | Outline of let bindings and lambda params |
+| **Workspace Symbols** | Search for symbols across all open files |
 | **Document Links** | Clickable `import` paths |
 | **Semantic Tokens** | Syntax highlighting based on name kind |
 | **Selection Range** | Smart expand/shrink selection |

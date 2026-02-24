@@ -22,6 +22,7 @@ mod state;
 #[cfg(test)]
 mod test_util;
 mod ty_nav;
+mod workspace_symbols;
 
 use std::path::PathBuf;
 
