@@ -1,5 +1,7 @@
 # Tix
 
+[![Docs](https://img.shields.io/badge/docs-jrmurr.github.io%2Ftix-blue)](https://jrmurr.github.io/tix/)
+
 A type checker for Nix, built on [MLsub/SimpleSub](https://lptk.github.io/programming/2020/03/26/demystifying-mlsub.html) — Hindley-Milner extended with subtyping, union types, and intersection types.
 
 The goal is to have inference do as much of the work as possible but when it gets really nasty allow manually specified types through doc comments.
@@ -141,7 +143,9 @@ Union types fall out naturally — `if-then-else` with different branch types, h
 
 ## Documentation
 
-Full docs (type system, stubs, configuration, internals): `docs/` directory, built with mdbook.
+Full docs (type system, stubs, configuration, internals): **[jrmurr.github.io/tix](https://jrmurr.github.io/tix/)**
+
+To build locally:
 
 ```bash
 cd docs && mdbook serve
