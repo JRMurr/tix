@@ -17,6 +17,7 @@ mod rename;
 mod selection_range;
 mod semantic_tokens;
 mod server;
+mod signature_help;
 mod state;
 #[cfg(test)]
 mod test_util;

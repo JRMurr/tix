@@ -22,6 +22,7 @@ use crate::references::find_references;
 use crate::rename::prepare_rename;
 use crate::selection_range::selection_ranges;
 use crate::semantic_tokens::semantic_tokens;
+use crate::signature_help::signature_help;
 use crate::test_util::{interesting_positions, TestAnalysis};
 use lang_check::aliases::DocIndex;
 
@@ -265,6 +266,17 @@ proptest! {
         for ip in &positions {
             let pos = analysis.line_index.position(ip.byte_offset());
             let _ = prepare_rename(analysis, pos, &t.root);
+        }
+    }
+
+    #[test]
+    fn pbt_signature_help_no_crash(src in arb_nix_source()) {
+        let t = TestAnalysis::new(&src);
+        let analysis = t.analysis();
+        let positions = interesting_positions(analysis, &t.root);
+        for ip in &positions {
+            let pos = analysis.line_index.position(ip.byte_offset());
+            let _ = signature_help(analysis, pos, &t.root);
         }
     }
 
