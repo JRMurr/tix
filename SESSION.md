@@ -271,13 +271,13 @@ Nix code sizes (hundreds of bindings per file, not millions):
 
 ### LSP Blocks on Large Repos (Serial didOpen Processing)
 
-- The LSP processes `didOpen` events serially while holding the `Mutex<AnalysisState>`
-  lock. When the editor opens many files at once (large workspace), each file runs the
-  full pipeline (parse → lower → name res → import resolution → type inference) before
-  the next can start. No debouncing, no background processing, no cancellation.
-  Potential fixes: (a) debounce `didOpen`/`didChange` to skip stale requests,
-  (b) move analysis to a background task and cancel on new edits,
-  (c) lazy analysis (only analyze on first hover/completion, not on open).
+- RESOLVED: didOpen/didChange notifications are now debounced per-file (300ms for
+  edits, 50ms for opens) and in-flight analysis is cancelled via a cooperative
+  `Arc<AtomicBool>` flag when a newer edit arrives. The cancel flag is checked at
+  the same points as the deadline (between SCC groups and every 1024 constraint
+  operations). Remaining limitation: analysis still holds the `Mutex<AnalysisState>`
+  lock, so files are analyzed serially. Moving to a read-write lock or per-file
+  state would allow concurrent analysis of different files.
 
 ### `contains_union()` Doesn't See Through Alias References
 

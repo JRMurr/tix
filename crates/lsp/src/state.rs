@@ -10,6 +10,8 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use lang_ast::{
@@ -117,6 +119,28 @@ impl AnalysisState {
     /// Update file contents and re-run analysis. Returns the cached analysis
     /// and a timing breakdown of each pipeline phase.
     pub fn update_file(&mut self, path: PathBuf, contents: String) -> (&FileAnalysis, AnalysisTiming) {
+        self.update_file_inner(path, contents, None)
+    }
+
+    /// Like `update_file` but with an external cancellation flag. When the
+    /// flag is set to `true` (e.g. because a newer edit arrived for the same
+    /// file), type inference bails out early with partial results.
+    pub fn update_file_with_cancel(
+        &mut self,
+        path: PathBuf,
+        contents: String,
+        cancel_flag: Arc<AtomicBool>,
+    ) -> (&FileAnalysis, AnalysisTiming) {
+        self.update_file_inner(path, contents, Some(cancel_flag))
+    }
+
+    /// Shared implementation for `update_file` and `update_file_with_cancel`.
+    fn update_file_inner(
+        &mut self,
+        path: PathBuf,
+        contents: String,
+        cancel_flag: Option<Arc<AtomicBool>>,
+    ) -> (&FileAnalysis, AnalysisTiming) {
         let t_total = Instant::now();
 
         // -- Phase 1: Parse --
@@ -241,15 +265,18 @@ impl AnalysisState {
         // 10-second deadline for the top-level file. If inference hangs (e.g.
         // due to pathological constraint propagation on complex files), bail
         // out with partial results rather than blocking the LSP indefinitely.
+        // The cancel flag provides an additional early-exit path when a newer
+        // edit supersedes this analysis.
         let t0 = Instant::now();
         let deadline = Some(Instant::now() + Duration::from_secs(10));
-        let mut check_result = lang_check::check_file_collecting_with_deadline(
+        let mut check_result = lang_check::check_file_collecting_with_cancel(
             &self.db,
             nix_file,
             &self.registry,
             import_resolution.types,
             context_args,
             deadline,
+            cancel_flag,
         );
         let t_check = t0.elapsed();
 
@@ -528,6 +555,55 @@ mod tests {
             !cycle_diags.is_empty(),
             "expected an ImportCyclic diagnostic, got: {:?}",
             analysis.check_result.diagnostics.iter().map(|d| &d.kind).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn update_file_with_cancel_completes_normally_when_not_cancelled() {
+        // When the cancel flag is never set, analysis should complete and
+        // produce valid results — identical to `update_file`.
+        let src = "let x = 1; in x + x";
+        let path = crate::test_util::temp_path("cancel_normal.nix");
+        let cancel = Arc::new(AtomicBool::new(false));
+
+        let mut state = AnalysisState::new(TypeAliasRegistry::default());
+        let (analysis, timing) =
+            state.update_file_with_cancel(path.clone(), src.to_string(), cancel);
+
+        // Should have valid inference results.
+        assert!(
+            analysis.inference().is_some(),
+            "inference should succeed when cancel flag is not set"
+        );
+        // Timing should be non-zero.
+        assert!(
+            timing.total > Duration::ZERO,
+            "timing should be non-zero for completed analysis"
+        );
+        // Should not be marked as timed out.
+        assert!(
+            !analysis.check_result.timed_out,
+            "should not be marked as timed out"
+        );
+    }
+
+    #[test]
+    fn update_file_with_cancel_aborts_when_pre_cancelled() {
+        // When the cancel flag is already set before analysis begins,
+        // inference should bail out immediately with partial results.
+        let src = "let x = 1; in x + x";
+        let path = crate::test_util::temp_path("cancel_pre.nix");
+        let cancel = Arc::new(AtomicBool::new(true));
+
+        let mut state = AnalysisState::new(TypeAliasRegistry::default());
+        let (analysis, _timing) =
+            state.update_file_with_cancel(path.clone(), src.to_string(), cancel);
+
+        // When cancelled before inference starts, the inference engine
+        // treats it like a deadline exceeded — timed_out is set to true.
+        assert!(
+            analysis.check_result.timed_out,
+            "should be marked as timed out when cancel flag is pre-set"
         );
     }
 }

@@ -26,6 +26,8 @@ use la_arena::ArenaMap;
 use lang_ast::{AstDb, Expr, ExprId, Module, NameId, NameResolution, NixFile, OverloadBinOp};
 use lang_ty::{OutputTy, PrimitiveTy, Ty};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 use thiserror::Error;
 use type_table::TypeTable;
@@ -270,6 +272,30 @@ pub fn check_file_collecting_with_deadline(
     context_args: HashMap<smol_str::SmolStr, ParsedTy>,
     deadline: Option<Instant>,
 ) -> CheckResult {
+    check_file_collecting_with_cancel(
+        db,
+        file,
+        aliases,
+        import_types,
+        context_args,
+        deadline,
+        None,
+    )
+}
+
+/// Like `check_file_collecting_with_deadline` but with an additional external
+/// cancellation flag. When the flag is set to `true` (e.g. because the LSP
+/// received a newer edit for the same file), inference bails out with partial
+/// results just like a deadline expiry.
+pub fn check_file_collecting_with_cancel(
+    db: &dyn AstDb,
+    file: NixFile,
+    aliases: &TypeAliasRegistry,
+    import_types: HashMap<ExprId, OutputTy>,
+    context_args: HashMap<smol_str::SmolStr, ParsedTy>,
+    deadline: Option<Instant>,
+    cancel_flag: Option<Arc<AtomicBool>>,
+) -> CheckResult {
     let module = lang_ast::module(db, file);
     let name_res = lang_ast::name_resolution(db, file);
     let indices = lang_ast::module_indices(db, file);
@@ -293,6 +319,9 @@ pub fn check_file_collecting_with_deadline(
     );
     if let Some(d) = deadline {
         check = check.with_deadline(d);
+    }
+    if let Some(flag) = cancel_flag {
+        check = check.with_cancel_flag(flag);
     }
     let (inference, mut diagnostics, timed_out) = check.infer_prog_partial(grouped_defs);
 
@@ -418,6 +447,11 @@ pub struct CheckCtx<'db> {
     /// returns Ok(()) immediately, infer_expr short-circuits to a fresh
     /// variable, and extrude returns the original type as-is.
     deadline_exceeded: bool,
+
+    /// External cancellation flag. Set by the LSP server when a newer edit
+    /// arrives for the same file, allowing in-flight inference to abort early.
+    /// Checked alongside `deadline_exceeded` in the same hot paths.
+    cancel_flag: Option<Arc<AtomicBool>>,
 }
 
 /// Count the function arity (number of arrows along the spine) of a ParsedTy.
@@ -475,6 +509,7 @@ impl<'db> CheckCtx<'db> {
             deadline: None,
             op_counter: 0,
             deadline_exceeded: false,
+            cancel_flag: None,
         }
     }
 
@@ -484,9 +519,26 @@ impl<'db> CheckCtx<'db> {
         self
     }
 
-    /// Check whether the inference deadline has been exceeded.
+    /// Attach an external cancellation flag. When the flag is set to `true`,
+    /// inference bails out with partial results — the same behavior as
+    /// deadline expiry.
+    pub fn with_cancel_flag(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.cancel_flag = Some(flag);
+        self
+    }
+
+    /// Check whether the inference deadline has been exceeded or cancellation
+    /// was requested externally.
     fn past_deadline(&self) -> bool {
-        self.deadline.is_some_and(|d| Instant::now() > d)
+        if self.deadline.is_some_and(|d| Instant::now() > d) {
+            return true;
+        }
+        if let Some(ref flag) = self.cancel_flag {
+            if flag.load(Ordering::Relaxed) {
+                return true;
+            }
+        }
+        false
     }
 
     /// Allocate a fresh type variable at the current level.
