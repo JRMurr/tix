@@ -17,7 +17,8 @@ use lang_ast::{
     ModuleSourceMap, NameId, NameResolution, NixFile, RootDatabase,
 };
 use lang_check::aliases::TypeAliasRegistry;
-use lang_check::imports::resolve_imports;
+use lang_check::diagnostic::{TixDiagnostic, TixDiagnosticKind};
+use lang_check::imports::{resolve_imports, ImportErrorKind};
 use lang_check::{CheckResult, InferenceResult};
 use lang_ty::OutputTy;
 use smol_str::SmolStr;
@@ -151,7 +152,33 @@ impl AnalysisState {
             &mut in_progress,
             &mut self.import_cache,
         );
-        // TODO: surface import_resolution.errors as LSP diagnostics.
+
+        // Convert import resolution errors into TixDiagnostics so they
+        // surface in the editor alongside type-checking diagnostics.
+        let import_diagnostics: Vec<TixDiagnostic> = import_resolution
+            .errors
+            .iter()
+            .map(|err| {
+                let kind = match &err.kind {
+                    ImportErrorKind::FileNotFound(path) => TixDiagnosticKind::ImportNotFound {
+                        path: path.display().to_string(),
+                    },
+                    ImportErrorKind::CyclicImport(path) => TixDiagnosticKind::ImportCyclic {
+                        path: path.display().to_string(),
+                    },
+                    ImportErrorKind::InferenceError(path, diag) => {
+                        TixDiagnosticKind::ImportInferenceError {
+                            path: path.display().to_string(),
+                            message: diag.kind.to_string(),
+                        }
+                    }
+                };
+                TixDiagnostic {
+                    at_expr: err.at_expr,
+                    kind,
+                }
+            })
+            .collect();
 
         let import_targets = import_resolution.targets;
 
@@ -216,7 +243,7 @@ impl AnalysisState {
         // out with partial results rather than blocking the LSP indefinitely.
         let t0 = Instant::now();
         let deadline = Some(Instant::now() + Duration::from_secs(10));
-        let check_result = lang_check::check_file_collecting_with_deadline(
+        let mut check_result = lang_check::check_file_collecting_with_deadline(
             &self.db,
             nix_file,
             &self.registry,
@@ -225,6 +252,19 @@ impl AnalysisState {
             deadline,
         );
         let t_check = t0.elapsed();
+
+        // Merge import resolution diagnostics into the check result so they
+        // appear in the editor alongside type-checking diagnostics.
+        check_result.diagnostics.extend(import_diagnostics);
+
+        // If inference timed out, emit a diagnostic on the module's entry
+        // expression so the user knows why types may be missing.
+        if check_result.timed_out {
+            check_result.diagnostics.push(TixDiagnostic {
+                at_expr: module.entry_expr,
+                kind: TixDiagnosticKind::InferenceTimeout,
+            });
+        }
 
         let t_total = t_total.elapsed();
 
@@ -392,6 +432,102 @@ mod tests {
             root.syntax().text().to_string(),
             src,
             "cached parse should reproduce the original source"
+        );
+    }
+
+    #[test]
+    fn missing_import_surfaces_as_diagnostic() {
+        // Create a project with a Nix file that imports a non-existent file.
+        let project = crate::test_util::TempProject::new(&[(
+            "main.nix",
+            "import ./missing.nix",
+        )]);
+        let nix_path = project.path("main.nix");
+
+        let mut state = AnalysisState::new(TypeAliasRegistry::default());
+        let (analysis, _timing) = state.update_file(nix_path.clone(), "import ./missing.nix".to_string());
+
+        // There should be at least one diagnostic about the missing import.
+        let import_diags: Vec<_> = analysis
+            .check_result
+            .diagnostics
+            .iter()
+            .filter(|d| matches!(d.kind, TixDiagnosticKind::ImportNotFound { .. }))
+            .collect();
+        assert!(
+            !import_diags.is_empty(),
+            "expected an ImportNotFound diagnostic, got: {:?}",
+            analysis.check_result.diagnostics.iter().map(|d| &d.kind).collect::<Vec<_>>()
+        );
+
+        // Verify the diagnostic message includes the file name.
+        let msg = import_diags[0].kind.to_string();
+        assert!(
+            msg.contains("missing.nix"),
+            "diagnostic message should mention the missing file: {msg}"
+        );
+    }
+
+    #[test]
+    fn missing_import_converts_to_lsp_diagnostic() {
+        // Verify the full LSP pipeline: import error -> TixDiagnostic -> LSP Diagnostic.
+        let project = crate::test_util::TempProject::new(&[(
+            "main.nix",
+            "import ./nonexistent.nix",
+        )]);
+        let nix_path = project.path("main.nix");
+        let src = "import ./nonexistent.nix".to_string();
+
+        let mut state = AnalysisState::new(TypeAliasRegistry::default());
+        let (analysis, _timing) = state.update_file(nix_path.clone(), src);
+
+        let root = analysis.parsed.tree();
+        let lsp_diags = crate::diagnostics::to_lsp_diagnostics(
+            &analysis.check_result.diagnostics,
+            &analysis.source_map,
+            &analysis.line_index,
+            &root,
+        );
+
+        // Should have at least one warning-level diagnostic about the import.
+        let import_diags: Vec<_> = lsp_diags
+            .iter()
+            .filter(|d| d.message.contains("import target not found"))
+            .collect();
+        assert!(
+            !import_diags.is_empty(),
+            "expected an import-not-found LSP diagnostic, got: {:?}",
+            lsp_diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            import_diags[0].severity,
+            Some(tower_lsp::lsp_types::DiagnosticSeverity::WARNING),
+            "import diagnostics should be warnings"
+        );
+    }
+
+    #[test]
+    fn cyclic_import_surfaces_as_diagnostic() {
+        // Create two files that import each other.
+        let project = crate::test_util::TempProject::new(&[
+            ("a.nix", "import ./b.nix"),
+            ("b.nix", "import ./a.nix"),
+        ]);
+        let a_path = project.path("a.nix");
+
+        let mut state = AnalysisState::new(TypeAliasRegistry::default());
+        let (analysis, _timing) = state.update_file(a_path.clone(), "import ./b.nix".to_string());
+
+        let cycle_diags: Vec<_> = analysis
+            .check_result
+            .diagnostics
+            .iter()
+            .filter(|d| matches!(d.kind, TixDiagnosticKind::ImportCyclic { .. }))
+            .collect();
+        assert!(
+            !cycle_diags.is_empty(),
+            "expected an ImportCyclic diagnostic, got: {:?}",
+            analysis.check_result.diagnostics.iter().map(|d| &d.kind).collect::<Vec<_>>()
         );
     }
 }

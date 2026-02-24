@@ -26,6 +26,19 @@ Communicates over stdin/stdout. Same stub flags as `tix-cli`.
 | **Selection Range** | Smart expand/shrink selection |
 | **Document Highlight** | Highlight all uses of the name under cursor |
 | **Formatting** | Runs `nixfmt` |
+| **Diagnostics** | Type errors, missing fields, import resolution errors, inference timeouts |
+
+## Diagnostics
+
+When diagnostics are enabled (`"diagnostics": { "enable": true }`), tix reports:
+
+- **Type errors** (ERROR): type mismatches, invalid operators, invalid attrset merges
+- **Missing fields** (ERROR): accessing a field that doesn't exist on a closed attrset
+- **Unresolved names** (WARNING): references to names that can't be resolved
+- **Import errors** (WARNING): `import ./missing.nix` where the target file doesn't exist, cyclic imports, or errors in the imported file
+- **Inference timeout** (WARNING): when type inference exceeds the 10-second deadline, partial results are still available for bindings inferred before the timeout
+
+Import errors appear at the `import` expression so you can see which import failed and why. The CLI (`tix-cli`) shows the same diagnostics with source context.
 
 ## Editor setup
 

@@ -33,7 +33,7 @@ enum OverloadProgress {
 
 impl CheckCtx<'_> {
     pub fn infer_prog(self, groups: GroupedDefs) -> Result<InferenceResult, Box<TixDiagnostic>> {
-        let (result, diagnostics) = self.infer_prog_partial(groups);
+        let (result, diagnostics, _timed_out) = self.infer_prog_partial(groups);
         // Return the first error diagnostic (skip warnings like UnresolvedName).
         for diag in diagnostics {
             if !matches!(
@@ -52,10 +52,13 @@ impl CheckCtx<'_> {
     /// errors occur. Errors are collected rather than short-circuiting — SCC
     /// groups after a failed one still get inferred, so the LSP can show types
     /// for successfully-inferred bindings alongside error diagnostics.
+    ///
+    /// Returns `(result, diagnostics, timed_out)` where `timed_out` is true
+    /// when inference was aborted because the deadline was exceeded.
     pub fn infer_prog_partial(
         mut self,
         groups: GroupedDefs,
-    ) -> (InferenceResult, Vec<TixDiagnostic>) {
+    ) -> (InferenceResult, Vec<TixDiagnostic>, bool) {
         // Pre-allocate TyIds for all names and expressions so they can be
         // referenced before they are inferred (needed for recursive definitions).
         let len = self.module.names().len() + self.module.exprs().len();
@@ -117,6 +120,9 @@ impl CheckCtx<'_> {
             diagnostic::errors_to_diagnostics(&errors, &self.types.storage, &self.alias_provenance);
         diagnostics.extend(diagnostic::warnings_to_diagnostics(&warnings));
 
+        // Capture before self is moved into Collector.
+        let timed_out = self.deadline_exceeded || self.past_deadline();
+
         let t_canon = Instant::now();
         let mut collector = Collector::new(self);
         let result = collector.finalize_inference();
@@ -124,7 +130,7 @@ impl CheckCtx<'_> {
         if canon_elapsed.as_millis() > 50 {
             log::info!("canonicalization took {:.1}ms", canon_elapsed.as_secs_f64() * 1000.0);
         }
-        (result, diagnostics)
+        (result, diagnostics, timed_out)
     }
 
     fn infer_root(&mut self) -> Result<(), LocatedError> {
