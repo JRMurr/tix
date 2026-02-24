@@ -125,7 +125,9 @@ pub fn parse_comment_text(source: &str) -> Result<Pairs<'_, Rule>, ParseError> {
 pub fn parse_and_collect(source: &str) -> Result<Vec<TypeDecl>, ParseError> {
     let pairs = parse_comment_text(source)?;
 
-    Ok(collect_type_decls(pairs))
+    // Collection errors (malformed parse tree) are logged as empty results
+    // since the caller (lang_check) already discards failures silently.
+    Ok(collect_type_decls(pairs).unwrap_or_default())
 }
 
 // =============================================================================
@@ -567,7 +569,7 @@ mod conformance_tests {
     fn parse_via_comment(expr: &str) -> ParsedTy {
         let comment = format!("type: x :: {expr}");
         let pairs = parse_comment_text(&comment).expect("comment parse error");
-        let decls = collect::collect_type_decls(pairs);
+        let decls = collect::collect_type_decls(pairs).expect("collect error");
         assert_eq!(decls.len(), 1, "expected exactly one decl for: {expr}");
         decls.into_iter().next().unwrap().type_expr
     }

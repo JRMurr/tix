@@ -21,28 +21,37 @@ use pest::iterators::Pairs;
 use smol_str::SmolStr;
 use std::collections::BTreeMap;
 
-use crate::{ParsedTy, ParsedTyRef, Rule, TypeDecl, TypeVarValue};
+use crate::{CollectError, ParsedTy, ParsedTyRef, Rule, TypeDecl, TypeVarValue};
 
-pub fn collect_type_decls(pairs: Pairs<Rule>) -> Vec<TypeDecl> {
+pub fn collect_type_decls(pairs: Pairs<Rule>) -> Result<Vec<TypeDecl>, CollectError> {
     let mut decls = Vec::new();
 
     for pair in pairs {
         match pair.as_rule() {
             Rule::type_block | Rule::block_content => {
                 // Descend into children to find type_line
-                decls.extend(collect_type_decls(pair.into_inner()));
+                decls.extend(collect_type_decls(pair.into_inner())?);
             }
             Rule::type_line => {
                 let mut inner = pair.into_inner();
-                let ident_rule = inner.next().unwrap(); // identifier
+                let ident_rule = inner.next().ok_or_else(|| {
+                    CollectError::new("type_line missing identifier")
+                })?;
+
+                let type_expr = collect_type_expr(inner)?.ok_or_else(|| {
+                    CollectError::new(format!(
+                        "type_line for '{}' missing type expression",
+                        ident_rule.as_str()
+                    ))
+                })?;
 
                 decls.push(TypeDecl {
                     identifier: ident_rule.as_str().into(),
-                    type_expr: collect_type_expr(inner).unwrap(),
+                    type_expr,
                 });
             }
             Rule::comment_content => {
-                decls.extend(collect_type_decls(pair.into_inner()));
+                decls.extend(collect_type_decls(pair.into_inner())?);
             }
             Rule::other_text
             | Rule::EOI
@@ -50,22 +59,28 @@ pub fn collect_type_decls(pairs: Pairs<Rule>) -> Vec<TypeDecl> {
             | Rule::NEWLINE
             | Rule::ANY_WHITESPACE => {}
             _ => {
-                unreachable!("Should be handle by type line: {:?}", pair.as_rule())
+                return Err(CollectError::new(format!(
+                    "unexpected rule {:?} in type_block (should be handled by type_line)",
+                    pair.as_rule()
+                )));
             }
         }
     }
 
-    decls
+    Ok(decls)
 }
 
-pub fn collect_type_expr(mut pairs: Pairs<Rule>) -> Option<ParsedTy> {
-    let curr = pairs.next()?;
+pub fn collect_type_expr(mut pairs: Pairs<Rule>) -> Result<Option<ParsedTy>, CollectError> {
+    let curr = match pairs.next() {
+        Some(c) => c,
+        None => return Ok(None),
+    };
 
     let curr = match curr.as_rule() {
         // EOI can appear as a child of type_line when the doc comment text
         // ends without a trailing newline (the grammar's `(NEWLINE | EOI)`
         // terminator). It's not a type expression — return None.
-        Rule::EOI => return None,
+        Rule::EOI => return Ok(None),
 
         // Transparent wrappers — descend into their single child.
         Rule::type_expr
@@ -73,17 +88,24 @@ pub fn collect_type_expr(mut pairs: Pairs<Rule>) -> Option<ParsedTy> {
         | Rule::paren_type
         | Rule::type_ref
         | Rule::primitive_ref
-        | Rule::atom_type => collect_type_expr(curr.into_inner()).unwrap(),
+        | Rule::atom_type => collect_type_expr(curr.into_inner())?.ok_or_else(|| {
+            CollectError::new("expected type expression inside wrapper, found empty")
+        })?,
 
         // Union type: `isect_type ("|" isect_type)*`
         // If only one member, unwrap to avoid a spurious Union wrapper.
-        Rule::union_type => collect_union(curr.into_inner()),
+        Rule::union_type => collect_union(curr.into_inner())?,
 
         // Intersection type: `atom_type ("&" atom_type)*`
-        Rule::isect_type => collect_intersection(curr.into_inner()),
+        Rule::isect_type => collect_intersection(curr.into_inner())?,
 
-        Rule::attrset_type => collect_attrset(curr.into_inner()),
-        Rule::list_type => ParsedTy::List(collect_type_expr(curr.into_inner()).unwrap().into()),
+        Rule::attrset_type => collect_attrset(curr.into_inner())?,
+        Rule::list_type => {
+            let inner = collect_type_expr(curr.into_inner())?.ok_or_else(|| {
+                CollectError::new("list type has empty element type")
+            })?;
+            ParsedTy::List(inner.into())
+        }
         Rule::string_ref => ParsedTy::Primitive(PrimitiveTy::String),
         Rule::number_ref => ParsedTy::Primitive(PrimitiveTy::Number),
         Rule::int_ref => ParsedTy::Primitive(PrimitiveTy::Int),
@@ -94,27 +116,35 @@ pub fn collect_type_expr(mut pairs: Pairs<Rule>) -> Option<ParsedTy> {
         Rule::generic_ident => ParsedTy::TyVar(TypeVarValue::Generic(curr.as_str().into())),
         Rule::user_type => ParsedTy::TyVar(TypeVarValue::Reference(curr.as_str().into())),
         Rule::other_text | Rule::WHITESPACE | Rule::NEWLINE | Rule::ANY_WHITESPACE => {
-            unreachable!("should not be seen whitespace...")
+            return Err(CollectError::new(format!(
+                "unexpected whitespace/text rule {:?} in type expression",
+                curr.as_rule()
+            )));
         }
-        _ => unreachable!("collect_type_expr should not be seen: {:?}", curr.as_rule()),
+        _ => {
+            return Err(CollectError::new(format!(
+                "unexpected rule {:?} in type expression",
+                curr.as_rule()
+            )));
+        }
     };
 
     // If there are more segments, this expression is the argument to a lambda.
     // `arrow_segment -> arrow_segment -> ...` builds right-associative Lambdas.
-    if let Some(lam_body) = collect_type_expr(pairs) {
-        return Some(ParsedTy::Lambda {
+    if let Some(lam_body) = collect_type_expr(pairs)? {
+        return Ok(Some(ParsedTy::Lambda {
             param: curr.into(),
             body: lam_body.into(),
-        });
+        }));
     }
 
-    Some(curr)
+    Ok(Some(curr))
 }
 
 /// Collect a single type from a Pair. Dispatches on the pair's rule and
 /// processes its children. Unlike `collect_type_expr`, this does NOT treat
 /// remaining items as lambda body — it processes exactly one rule node.
-fn collect_one(pair: pest::iterators::Pair<Rule>) -> ParsedTy {
+fn collect_one(pair: pest::iterators::Pair<Rule>) -> Result<ParsedTy, CollectError> {
     match pair.as_rule() {
         Rule::isect_type => collect_intersection(pair.into_inner()),
         Rule::atom_type
@@ -123,55 +153,76 @@ fn collect_one(pair: pest::iterators::Pair<Rule>) -> ParsedTy {
         | Rule::primitive_ref
         | Rule::arrow_segment
         | Rule::union_type
-        | Rule::type_expr => collect_type_expr(pair.into_inner()).unwrap(),
+        | Rule::type_expr => collect_type_expr(pair.into_inner())?
+            .ok_or_else(|| CollectError::new("expected type expression, found empty")),
         Rule::attrset_type => collect_attrset(pair.into_inner()),
-        Rule::list_type => ParsedTy::List(collect_type_expr(pair.into_inner()).unwrap().into()),
-        Rule::string_ref => ParsedTy::Primitive(PrimitiveTy::String),
-        Rule::number_ref => ParsedTy::Primitive(PrimitiveTy::Number),
-        Rule::int_ref => ParsedTy::Primitive(PrimitiveTy::Int),
-        Rule::bool_ref => ParsedTy::Primitive(PrimitiveTy::Bool),
-        Rule::float_ref => ParsedTy::Primitive(PrimitiveTy::Float),
-        Rule::path_ref => ParsedTy::Primitive(PrimitiveTy::Path),
-        Rule::null_ref => ParsedTy::Primitive(PrimitiveTy::Null),
-        Rule::generic_ident => ParsedTy::TyVar(TypeVarValue::Generic(pair.as_str().into())),
-        Rule::user_type => ParsedTy::TyVar(TypeVarValue::Reference(pair.as_str().into())),
-        _ => unreachable!("collect_one: unexpected rule {:?}", pair.as_rule()),
+        Rule::list_type => {
+            let inner = collect_type_expr(pair.into_inner())?.ok_or_else(|| {
+                CollectError::new("list type has empty element type")
+            })?;
+            Ok(ParsedTy::List(inner.into()))
+        }
+        Rule::string_ref => Ok(ParsedTy::Primitive(PrimitiveTy::String)),
+        Rule::number_ref => Ok(ParsedTy::Primitive(PrimitiveTy::Number)),
+        Rule::int_ref => Ok(ParsedTy::Primitive(PrimitiveTy::Int)),
+        Rule::bool_ref => Ok(ParsedTy::Primitive(PrimitiveTy::Bool)),
+        Rule::float_ref => Ok(ParsedTy::Primitive(PrimitiveTy::Float)),
+        Rule::path_ref => Ok(ParsedTy::Primitive(PrimitiveTy::Path)),
+        Rule::null_ref => Ok(ParsedTy::Primitive(PrimitiveTy::Null)),
+        Rule::generic_ident => Ok(ParsedTy::TyVar(TypeVarValue::Generic(pair.as_str().into()))),
+        Rule::user_type => Ok(ParsedTy::TyVar(TypeVarValue::Reference(
+            pair.as_str().into(),
+        ))),
+        _ => Err(CollectError::new(format!(
+            "unexpected rule {:?} in type expression",
+            pair.as_rule()
+        ))),
     }
 }
 
 /// Collect a union type from its children: `isect_type ("|" isect_type)*`.
 /// If only one member, returns it directly (no spurious Union wrapper).
-fn collect_union(pairs: Pairs<Rule>) -> ParsedTy {
-    let members: Vec<ParsedTyRef> = pairs.map(|p| ParsedTyRef::from(collect_one(p))).collect();
+fn collect_union(pairs: Pairs<Rule>) -> Result<ParsedTy, CollectError> {
+    let members: Result<Vec<ParsedTyRef>, CollectError> = pairs
+        .map(|p| collect_one(p).map(ParsedTyRef::from))
+        .collect();
+    let mut members = members?;
 
     match members.len() {
-        0 => unreachable!("union_type must have at least one member"),
+        0 => Err(CollectError::new(
+            "union type must have at least one member",
+        )),
         1 => {
-            let single = members.into_iter().next().unwrap();
-            (*single.0).clone()
+            let single = members.pop().expect("len checked above");
+            Ok((*single.0).clone())
         }
-        _ => ParsedTy::Union(members),
+        _ => Ok(ParsedTy::Union(members)),
     }
 }
 
 /// Collect an intersection type from its children: `atom_type ("&" atom_type)*`.
 /// If only one member, returns it directly.
-fn collect_intersection(pairs: Pairs<Rule>) -> ParsedTy {
-    let members: Vec<ParsedTyRef> = pairs.map(|p| ParsedTyRef::from(collect_one(p))).collect();
+fn collect_intersection(pairs: Pairs<Rule>) -> Result<ParsedTy, CollectError> {
+    let members: Result<Vec<ParsedTyRef>, CollectError> = pairs
+        .map(|p| collect_one(p).map(ParsedTyRef::from))
+        .collect();
+    let mut members = members?;
 
     match members.len() {
-        0 => unreachable!("isect_type must have at least one member"),
+        0 => Err(CollectError::new(
+            "intersection type must have at least one member",
+        )),
         1 => {
-            let single = members.into_iter().next().unwrap();
-            (*single.0).clone()
+            let single = members.pop().expect("len checked above");
+            Ok((*single.0).clone())
         }
-        _ => ParsedTy::Intersection(members),
+        _ => Ok(ParsedTy::Intersection(members)),
     }
 }
 
 /// Collect an attrset type from its children: `named_field*`, optional `dyn_field`,
 /// optional `open_marker`.
-fn collect_attrset(pairs: Pairs<Rule>) -> ParsedTy {
+fn collect_attrset(pairs: Pairs<Rule>) -> Result<ParsedTy, CollectError> {
     let mut fields: BTreeMap<SmolStr, ParsedTyRef> = BTreeMap::new();
     let mut dyn_ty: Option<ParsedTyRef> = None;
     let mut open = false;
@@ -180,30 +231,43 @@ fn collect_attrset(pairs: Pairs<Rule>) -> ParsedTy {
         match pair.as_rule() {
             Rule::named_field => {
                 let mut inner = pair.into_inner();
-                let name: SmolStr = inner.next().unwrap().as_str().into();
-                let ty = collect_type_expr(inner).unwrap();
+                let name: SmolStr = inner
+                    .next()
+                    .ok_or_else(|| CollectError::new("named_field missing field name"))?
+                    .as_str()
+                    .into();
+                let ty = collect_type_expr(inner)?.ok_or_else(|| {
+                    CollectError::new(format!("field '{name}' has empty type"))
+                })?;
                 fields.insert(name, ty.into());
             }
             Rule::dyn_field => {
                 let inner = pair.into_inner();
                 // The "_" token is consumed by the grammar rule; the inner
                 // pairs contain only the type_expr.
-                let ty = collect_type_expr(inner).unwrap();
+                let ty = collect_type_expr(inner)?.ok_or_else(|| {
+                    CollectError::new("dynamic field has empty type")
+                })?;
                 dyn_ty = Some(ty.into());
             }
             Rule::open_marker => {
                 open = true;
             }
-            _ => unreachable!("collect_attrset: unexpected rule {:?}", pair.as_rule()),
+            _ => {
+                return Err(CollectError::new(format!(
+                    "unexpected rule {:?} in attrset type",
+                    pair.as_rule()
+                )));
+            }
         }
     }
 
-    ParsedTy::AttrSet(AttrSetTy {
+    Ok(ParsedTy::AttrSet(AttrSetTy {
         fields,
         dyn_ty,
         open,
         optional_fields: std::collections::BTreeSet::new(),
-    })
+    }))
 }
 
 #[cfg(test)]
@@ -217,7 +281,7 @@ mod tests {
             #[test]
             fn $name() {
                 let pairs = parse_comment_text($comment).expect("No parse error");
-                let decs = collect_type_decls(pairs);
+                let decs = collect_type_decls(pairs).expect("No collect error");
                 let expected = vec![TypeDecl {
                     identifier: $ident.into(),
                     type_expr: known_ty! $ty,
@@ -242,7 +306,7 @@ mod tests {
         Some more doc lines
     "#;
         let pairs = parse_comment_text(example_comment).expect("No parse error");
-        let decs = collect_type_decls(pairs);
+        let decs = collect_type_decls(pairs).expect("No collect error");
 
         let expected = vec![
             TypeDecl {
@@ -370,7 +434,7 @@ mod tests {
             : The first number
         "};
         let pairs = parse_comment_text(example_comment).expect("No parse error");
-        let decs = collect_type_decls(pairs);
+        let decs = collect_type_decls(pairs).expect("No collect error");
 
         let expected = vec![TypeDecl {
             identifier: "add".into(),
@@ -390,7 +454,7 @@ mod tests {
             ```
         "};
         let pairs = parse_comment_text(example_comment).expect("No parse error");
-        let decs = collect_type_decls(pairs);
+        let decs = collect_type_decls(pairs).expect("No collect error");
 
         assert_eq!(decs.len(), 2);
         assert_eq!(decs[0].identifier.as_str(), "foo");

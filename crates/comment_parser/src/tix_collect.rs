@@ -96,7 +96,11 @@ fn collect_tix_file_inner(
             Rule::type_alias_decl => {
                 let mut inner = pair.into_inner();
                 let doc = take_doc_block(&mut inner);
-                let name: SmolStr = inner.next().unwrap().as_str().into();
+                let name: SmolStr = inner
+                    .next()
+                    .ok_or_else(|| CollectError::new("type_alias_decl missing identifier"))?
+                    .as_str()
+                    .into();
 
                 // Set path context so field-level doc comments in the body
                 // get the correct prefix (e.g. ["Config", "services", "enable"]).
@@ -111,7 +115,11 @@ fn collect_tix_file_inner(
             Rule::val_decl => {
                 let mut inner = pair.into_inner();
                 let doc = take_doc_block(&mut inner);
-                let name: SmolStr = inner.next().unwrap().as_str().into();
+                let name: SmolStr = inner
+                    .next()
+                    .ok_or_else(|| CollectError::new("val_decl missing identifier"))?
+                    .as_str()
+                    .into();
                 let ty = collect_type_expr(inner, ctx)?.ok_or_else(|| {
                     CollectError::new(format!("val declaration '{name}' has empty type"))
                 })?;
@@ -120,7 +128,11 @@ fn collect_tix_file_inner(
             Rule::module_decl => {
                 let mut inner = pair.into_inner();
                 let doc = take_doc_block(&mut inner);
-                let name: SmolStr = inner.next().unwrap().as_str().into();
+                let name: SmolStr = inner
+                    .next()
+                    .ok_or_else(|| CollectError::new("module_decl missing identifier"))?
+                    .as_str()
+                    .into();
                 // Remaining children are the nested declarations.
                 let mut nested = Vec::new();
                 collect_tix_file_inner(inner, &mut nested, ctx)?;
@@ -288,13 +300,13 @@ fn collect_union(pairs: Pairs<Rule>, ctx: &mut CollectCtx) -> Result<ParsedTy, C
     let members: Result<Vec<ParsedTyRef>, CollectError> = pairs
         .map(|p| collect_one(p, ctx).map(ParsedTyRef::from))
         .collect();
-    let members = members?;
+    let mut members = members?;
     match members.len() {
         0 => Err(CollectError::new(
             "union type must have at least one member",
         )),
         1 => {
-            let single = members.into_iter().next().unwrap();
+            let single = members.pop().expect("len checked above");
             Ok((*single.0).clone())
         }
         _ => Ok(ParsedTy::Union(members)),
@@ -308,13 +320,13 @@ fn collect_intersection(
     let members: Result<Vec<ParsedTyRef>, CollectError> = pairs
         .map(|p| collect_one(p, ctx).map(ParsedTyRef::from))
         .collect();
-    let members = members?;
+    let mut members = members?;
     match members.len() {
         0 => Err(CollectError::new(
             "intersection type must have at least one member",
         )),
         1 => {
-            let single = members.into_iter().next().unwrap();
+            let single = members.pop().expect("len checked above");
             Ok((*single.0).clone())
         }
         _ => Ok(ParsedTy::Intersection(members)),
@@ -335,7 +347,9 @@ fn collect_attrset(pairs: Pairs<Rule>, ctx: &mut CollectCtx) -> Result<ParsedTy,
                 // Check for a doc_block on the field.
                 let field_doc = take_doc_block(&mut inner);
 
-                let name_pair = inner.next().unwrap();
+                let name_pair = inner
+                    .next()
+                    .ok_or_else(|| CollectError::new("named_field missing field name"))?;
                 // quoted_field includes surrounding quotes -- strip them.
                 let name: SmolStr = match name_pair.as_rule() {
                     Rule::quoted_field => {
