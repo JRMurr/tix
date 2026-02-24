@@ -316,12 +316,30 @@ fn run_check(
     // Merge import diagnostics into the check result.
     result.diagnostics.extend(import_diagnostics);
 
-    // If inference timed out, emit a diagnostic on the module's entry
-    // expression so the user knows why types may be missing.
+    // If inference timed out, identify which bindings are incomplete
+    // and include them in the diagnostic for actionable feedback.
     if result.timed_out {
+        let missing_bindings: Vec<smol_str::SmolStr> = module
+            .names()
+            .filter(|(_, name)| {
+                matches!(
+                    name.kind,
+                    lang_ast::NameKind::LetIn
+                        | lang_ast::NameKind::RecAttrset
+                        | lang_ast::NameKind::PlainAttrset
+                )
+            })
+            .filter(|(id, _)| {
+                result
+                    .inference
+                    .as_ref()
+                    .map_or(true, |inf| inf.name_ty_map.get(*id).is_none())
+            })
+            .map(|(_, name)| name.text.clone())
+            .collect();
         result.diagnostics.push(TixDiagnostic {
             at_expr: module.entry_expr,
-            kind: TixDiagnosticKind::InferenceTimeout,
+            kind: TixDiagnosticKind::InferenceTimeout { missing_bindings },
         });
     }
 
@@ -341,7 +359,7 @@ fn run_check(
                 | TixDiagnosticKind::ImportNotFound { .. }
                 | TixDiagnosticKind::ImportCyclic { .. }
                 | TixDiagnosticKind::ImportInferenceError { .. }
-                | TixDiagnosticKind::InferenceTimeout
+                | TixDiagnosticKind::InferenceTimeout { .. }
         );
         if !is_warning {
             has_errors = true;

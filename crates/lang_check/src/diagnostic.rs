@@ -83,7 +83,12 @@ pub enum TixDiagnosticKind {
     /// Inference was aborted because the deadline was exceeded.
     /// Bindings inferred before the timeout still have types; only
     /// the remaining ones are missing.
-    InferenceTimeout,
+    InferenceTimeout {
+        /// Names of bindings that were not inferred before the deadline.
+        /// Empty if all bindings were inferred but expression-level types
+        /// were skipped.
+        missing_bindings: Vec<SmolStr>,
+    },
 }
 
 impl fmt::Display for TixDiagnosticKind {
@@ -153,11 +158,34 @@ impl fmt::Display for TixDiagnosticKind {
             TixDiagnosticKind::ImportInferenceError { path, message } => {
                 write!(f, "error in imported file {path}: {message}")
             }
-            TixDiagnosticKind::InferenceTimeout => {
-                write!(
-                    f,
-                    "type inference timed out — partial results are available for bindings inferred before the deadline"
-                )
+            TixDiagnosticKind::InferenceTimeout { missing_bindings } => {
+                if missing_bindings.is_empty() {
+                    write!(
+                        f,
+                        "type inference timed out — partial results are available for bindings inferred before the deadline"
+                    )
+                } else if missing_bindings.len() <= 5 {
+                    let names = missing_bindings
+                        .iter()
+                        .map(|n| format!("`{n}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    write!(
+                        f,
+                        "type inference timed out — missing types for: {names}"
+                    )
+                } else {
+                    let shown = missing_bindings[..5]
+                        .iter()
+                        .map(|n| format!("`{n}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    write!(
+                        f,
+                        "type inference timed out — missing types for: {shown}, and {} more",
+                        missing_bindings.len() - 5
+                    )
+                }
             }
         }
     }
@@ -589,10 +617,44 @@ mod tests {
     }
 
     #[test]
-    fn inference_timeout_display() {
-        let kind = TixDiagnosticKind::InferenceTimeout;
+    fn inference_timeout_display_no_missing() {
+        let kind = TixDiagnosticKind::InferenceTimeout {
+            missing_bindings: vec![],
+        };
         let msg = kind.to_string();
         assert!(msg.contains("timed out"));
         assert!(msg.contains("partial results"));
+    }
+
+    #[test]
+    fn inference_timeout_display_with_missing() {
+        let kind = TixDiagnosticKind::InferenceTimeout {
+            missing_bindings: vec!["x".into(), "y".into()],
+        };
+        let msg = kind.to_string();
+        assert!(msg.contains("timed out"));
+        assert!(msg.contains("`x`"));
+        assert!(msg.contains("`y`"));
+        assert!(!msg.contains("and"), "should not truncate for <=5 items");
+    }
+
+    #[test]
+    fn inference_timeout_display_truncated() {
+        let kind = TixDiagnosticKind::InferenceTimeout {
+            missing_bindings: vec![
+                "a".into(),
+                "b".into(),
+                "c".into(),
+                "d".into(),
+                "e".into(),
+                "f".into(),
+                "g".into(),
+            ],
+        };
+        let msg = kind.to_string();
+        assert!(msg.contains("timed out"));
+        assert!(msg.contains("`a`"));
+        assert!(msg.contains("`e`"));
+        assert!(msg.contains("and 2 more"));
     }
 }

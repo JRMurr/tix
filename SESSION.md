@@ -307,12 +307,20 @@ Nix code sizes (hundreds of bindings per file, not millions):
   for the narrowing case, but the underlying issue could cause other subtle
   problems if poly_type_env entries are expected to represent the full type.
 
-### Doc Comment Collection Panics (collect.rs)
+### Doc Comment Collection Panics (collect.rs) — RESOLVED
 
-- `comment_parser/src/collect.rs` still has 7 `unreachable!()` calls in its doc
-  comment type collection functions. These are defensive assertions against
-  grammar-level bugs (the pest grammar validates structure before collection
-  runs), so they're less likely to fire from user input than the `.tix` file
-  collection panics that were converted in this session. Converting them to
-  `Result`-based errors for consistency is low priority but would improve
-  robustness.
+- Converted all `unreachable!()`/`unwrap()` calls in both `collect.rs` and
+  `tix_collect.rs` to proper `Result<_, CollectError>` returns. Both doc comment
+  and `.tix` file collection now surface clean error messages instead of panics.
+
+### LSP Duplicate Key Diagnostic — RESOLVED
+
+- Added `DiagnosticRelatedInformation` pointing to the first definition when
+  reporting duplicate keys. Users can now navigate to the first definition
+  directly from the diagnostic.
+
+### Timeout Diagnostic Per-Binding Detail — RESOLVED
+
+- `InferenceTimeout` now carries `missing_bindings: Vec<SmolStr>` identifying
+  which bindings were not inferred before the deadline. The diagnostic message
+  lists them (truncated to 5 with "and N more" for large counts).

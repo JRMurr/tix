@@ -299,12 +299,30 @@ impl AnalysisState {
         // appear in the editor alongside type-checking diagnostics.
         check_result.diagnostics.extend(import_diagnostics);
 
-        // If inference timed out, emit a diagnostic on the module's entry
-        // expression so the user knows why types may be missing.
+        // If inference timed out, identify which bindings are incomplete
+        // and include them in the diagnostic for actionable feedback.
         if check_result.timed_out {
+            let missing_bindings: Vec<SmolStr> = module
+                .names()
+                .filter(|(_, name)| {
+                    matches!(
+                        name.kind,
+                        lang_ast::NameKind::LetIn
+                            | lang_ast::NameKind::RecAttrset
+                            | lang_ast::NameKind::PlainAttrset
+                    )
+                })
+                .filter(|(id, _)| {
+                    check_result
+                        .inference
+                        .as_ref()
+                        .map_or(true, |inf| inf.name_ty_map.get(*id).is_none())
+                })
+                .map(|(_, name)| name.text.clone())
+                .collect();
             check_result.diagnostics.push(TixDiagnostic {
                 at_expr: module.entry_expr,
-                kind: TixDiagnosticKind::InferenceTimeout,
+                kind: TixDiagnosticKind::InferenceTimeout { missing_bindings },
             });
         }
 
