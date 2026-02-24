@@ -100,6 +100,10 @@ pub struct AnalysisState {
     /// Inference deadline in seconds (per top-level file). Configurable via
     /// `deadline` in `tix.toml`, defaults to 10.
     pub deadline_secs: u64,
+    /// Inference deadline in seconds per imported file. Configurable via
+    /// `import_deadline` in `tix.toml`, defaults to 5. Passed as `None`
+    /// means use the hardcoded 5s default inside `resolve_imports`.
+    pub import_deadline_secs: Option<u64>,
     /// Cross-file import type cache. Persists across `update_file()` calls so
     /// files like `bwrap.nix` that are imported by many open files don't get
     /// re-inferred each time. Invalidated per-path when that path is edited,
@@ -116,6 +120,7 @@ impl AnalysisState {
             project_config: None,
             config_dir: None,
             deadline_secs: 10,
+            import_deadline_secs: None,
             import_cache: HashMap::new(),
         }
     }
@@ -183,6 +188,7 @@ impl AnalysisState {
             &self.registry,
             &mut in_progress,
             &mut self.import_cache,
+            self.import_deadline_secs,
         );
 
         // Convert import resolution errors into TixDiagnostics so they

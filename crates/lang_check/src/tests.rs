@@ -1371,6 +1371,7 @@ mod import_tests {
             &aliases,
             &mut in_progress,
             &mut cache,
+            None,
         );
 
         let errors = resolution.errors;
@@ -1597,6 +1598,7 @@ mod import_tests {
             &aliases,
             &mut in_progress,
             &mut cache,
+            None,
         );
 
         // There should be exactly 3 target entries: Apply, fun (Reference), arg (Literal).
@@ -1656,6 +1658,7 @@ mod import_tests {
             aliases,
             &mut in_progress,
             &mut cache,
+            None,
         );
 
         let errors = resolution.errors;

@@ -413,6 +413,10 @@ impl LanguageServer for TixLanguageServer {
                                 log::info!("Inference deadline: {secs}s (from tix.toml)");
                                 state.deadline_secs = secs;
                             }
+                            if let Some(secs) = project_cfg.import_deadline {
+                                log::info!("Import deadline: {secs}s (from tix.toml)");
+                                state.import_deadline_secs = Some(secs);
+                            }
 
                             state.project_config = Some(project_cfg);
                             state.config_dir = Some(config_dir);

@@ -281,6 +281,7 @@ fn run_check(
         &registry,
         &mut in_progress,
         &mut cache,
+        None,
     );
     // Convert import resolution errors into TixDiagnostics so they render
     // with the same miette source-context as type-checking diagnostics.

@@ -15,7 +15,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use lang_ast::nameres::ResolveResult;
 use lang_ast::{AstDb, Expr, ExprId, Literal, Module, NameResolution, NixFile};
@@ -130,6 +130,7 @@ pub fn resolve_imports(
     aliases: &TypeAliasRegistry,
     in_progress: &mut HashSet<PathBuf>,
     cache: &mut HashMap<PathBuf, OutputTy>,
+    import_deadline_secs: Option<u64>,
 ) -> ImportResolution {
     // Determine the base directory for resolving relative import paths.
     let file_path = file.path(db);
@@ -220,6 +221,7 @@ pub fn resolve_imports(
             aliases,
             in_progress,
             cache,
+            import_deadline_secs,
         );
         let t_sub_imports = t0.elapsed();
 
@@ -240,10 +242,11 @@ pub fn resolve_imports(
             target_imports.types,
             std::collections::HashMap::new(),
         )
-        // 5-second deadline per imported file. If inference hangs (e.g. due
-        // to pathological constraint propagation), bail out with partial
-        // results rather than blocking the LSP indefinitely.
-        .with_deadline(Instant::now() + std::time::Duration::from_secs(5));
+        // Per-import deadline (default 5s, configurable via tix.toml
+        // `import_deadline`). If inference hangs (e.g. due to pathological
+        // constraint propagation), bail out with partial results rather
+        // than blocking the LSP indefinitely.
+        .with_deadline(Instant::now() + Duration::from_secs(import_deadline_secs.unwrap_or(5)));
 
         log::info!(
             "{indent}  {target_name}: inferring ({} SCC groups)...",

@@ -1592,6 +1592,7 @@ mod tests {
             stubs: vec![],
             context: context_map,
             deadline: None,
+            import_deadline: None,
         });
         state.config_dir = Some(temp_dir.clone());
 
@@ -1639,6 +1640,7 @@ mod tests {
             stubs: vec![],
             context: context_map,
             deadline: None,
+            import_deadline: None,
         });
         state.config_dir = Some(temp_dir.clone());
 
@@ -2072,6 +2074,7 @@ mod tests {
             stubs: vec![],
             context: context_map,
             deadline: None,
+            import_deadline: None,
         });
         state.config_dir = Some(temp_dir.clone());
 

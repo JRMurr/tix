@@ -28,6 +28,11 @@ pub struct ProjectConfig {
     /// out with partial results. Defaults to 10 when omitted.
     #[serde(default)]
     pub deadline: Option<u64>,
+
+    /// Maximum seconds for type inference per imported file. Defaults to 5
+    /// when omitted.
+    #[serde(default)]
+    pub import_deadline: Option<u64>,
 }
 
 /// A single context definition within `tix.toml`.

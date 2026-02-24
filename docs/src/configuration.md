@@ -50,10 +50,11 @@ You can also set context per-file with a doc comment at the top:
 
 ### Inference deadline
 
-By default the LSP aborts type inference after 10 seconds per file (5 seconds per imported file) and returns partial results. If you work with large files that need more time, increase the deadline:
+By default the LSP aborts type inference after 10 seconds per file (5 seconds per imported file) and returns partial results. If you work with large files that need more time, increase the deadlines:
 
 ```toml
-deadline = 30   # seconds
+deadline = 30          # seconds per top-level file (default: 10)
+import_deadline = 15   # seconds per imported file (default: 5)
 ```
 
 ### No-module escape hatch
