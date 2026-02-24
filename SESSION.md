@@ -294,3 +294,13 @@ Nix code sizes (hundreds of bindings per file, not millions):
   `ty_for_name_direct` instead of `name_slot_or_override`) works around this
   for the narrowing case, but the underlying issue could cause other subtle
   problems if poly_type_env entries are expected to represent the full type.
+
+### Doc Comment Collection Panics (collect.rs)
+
+- `comment_parser/src/collect.rs` still has 7 `unreachable!()` calls in its doc
+  comment type collection functions. These are defensive assertions against
+  grammar-level bugs (the pest grammar validates structure before collection
+  runs), so they're less likely to fire from user input than the `.tix` file
+  collection panics that were converted in this session. Converting them to
+  `Result`-based errors for consistency is low priority but would improve
+  robustness.

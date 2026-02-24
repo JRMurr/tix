@@ -2,6 +2,7 @@ mod collect;
 pub mod tix_collect;
 pub mod tix_parser;
 
+use std::fmt;
 use std::sync::Arc;
 
 use collect::collect_type_decls;
@@ -17,6 +18,104 @@ pub struct CommentParser;
 
 // Box the error since the raw pest error type is large (clippy::result_large_err).
 type ParseError = Box<pest::error::Error<Rule>>;
+
+// =============================================================================
+// Stub collection error type
+// =============================================================================
+//
+// Errors that occur during collection (walking the pest parse tree to produce
+// structured types). These are distinct from *parse* errors -- the grammar
+// accepted the input, but the collector encountered an unexpected rule or
+// structural invariant violation. In practice this means a bug in the grammar
+// or a new rule that the collector doesn't handle yet.
+
+/// An error encountered while collecting types from a parsed `.tix` file or
+/// doc comment. Carries a human-readable message and, where available, the
+/// byte span in the source that triggered the error.
+#[derive(Clone, PartialEq, Eq)]
+pub struct CollectError {
+    pub message: String,
+    /// Byte offset range in the original source, if available.
+    pub span: Option<(usize, usize)>,
+}
+
+impl CollectError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            span: None,
+        }
+    }
+
+    pub fn with_span(message: impl Into<String>, start: usize, end: usize) -> Self {
+        Self {
+            message: message.into(),
+            span: Some((start, end)),
+        }
+    }
+}
+
+impl fmt::Debug for CollectError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some((start, end)) = self.span {
+            write!(f, "CollectError({}, {}..{})", self.message, start, end)
+        } else {
+            write!(f, "CollectError({})", self.message)
+        }
+    }
+}
+
+impl fmt::Display for CollectError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some((start, end)) = self.span {
+            write!(f, "{} (at bytes {}..{})", self.message, start, end)
+        } else {
+            write!(f, "{}", self.message)
+        }
+    }
+}
+
+impl std::error::Error for CollectError {}
+
+/// Combined error type for `.tix` file processing, covering both the pest
+/// parsing phase and the collection phase.
+#[derive(Debug)]
+pub enum TixError {
+    /// The pest grammar rejected the input.
+    Parse(Box<pest::error::Error<tix_parser::Rule>>),
+    /// The parse tree was structurally invalid during collection.
+    Collect(CollectError),
+}
+
+impl fmt::Display for TixError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TixError::Parse(e) => write!(f, "{e}"),
+            TixError::Collect(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for TixError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            TixError::Parse(e) => Some(e.as_ref()),
+            TixError::Collect(e) => Some(e),
+        }
+    }
+}
+
+impl From<CollectError> for TixError {
+    fn from(e: CollectError) -> Self {
+        TixError::Collect(e)
+    }
+}
+
+impl From<Box<pest::error::Error<tix_parser::Rule>>> for TixError {
+    fn from(e: Box<pest::error::Error<tix_parser::Rule>>) -> Self {
+        TixError::Parse(e)
+    }
+}
 
 pub fn parse_comment_text(source: &str) -> Result<Pairs<'_, Rule>, ParseError> {
     Ok(CommentParser::parse(Rule::comment_content, source)?)
@@ -96,7 +195,10 @@ pub enum TixDeclaration {
 pub fn parse_inline_type_alias(source: &str) -> Option<(SmolStr, ParsedTy)> {
     let trimmed = source.trim();
     if !trimmed.starts_with("type ")
-        || !trimmed.as_bytes().get(5).is_some_and(|b| b.is_ascii_uppercase())
+        || !trimmed
+            .as_bytes()
+            .get(5)
+            .is_some_and(|b| b.is_ascii_uppercase())
     {
         return None;
     }
@@ -107,10 +209,11 @@ pub fn parse_inline_type_alias(source: &str) -> Option<(SmolStr, ParsedTy)> {
     })
 }
 
-pub fn parse_tix_file(source: &str) -> Result<TixDeclFile, Box<dyn std::error::Error>> {
+pub fn parse_tix_file(source: &str) -> Result<TixDeclFile, TixError> {
     use pest::Parser;
-    let pairs = tix_parser::TixDeclParser::parse(tix_parser::Rule::tix_file, source)?;
-    Ok(tix_collect::collect_tix_file(pairs))
+    let pairs = tix_parser::TixDeclParser::parse(tix_parser::Rule::tix_file, source)
+        .map_err(|e| TixError::Parse(Box::new(e)))?;
+    tix_collect::collect_tix_file(pairs).map_err(TixError::Collect)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -207,9 +310,9 @@ impl ParsedTy {
     /// into a single module attrset.
     pub fn rename_generics(&self, suffix: &str) -> ParsedTy {
         match self {
-            ParsedTy::TyVar(TypeVarValue::Generic(name)) => {
-                ParsedTy::TyVar(TypeVarValue::Generic(SmolStr::from(format!("{name}${suffix}"))))
-            }
+            ParsedTy::TyVar(TypeVarValue::Generic(name)) => ParsedTy::TyVar(TypeVarValue::Generic(
+                SmolStr::from(format!("{name}${suffix}")),
+            )),
             ParsedTy::TyVar(_) | ParsedTy::Primitive(_) => self.clone(),
             ParsedTy::List(inner) => {
                 ParsedTy::List(ParsedTyRef::from(inner.0.rename_generics(suffix)))

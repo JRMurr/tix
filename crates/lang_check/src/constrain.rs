@@ -70,7 +70,11 @@ impl CheckCtx<'_> {
         // constrain() cascade (e.g. structural subtyping on large attrsets).
         if self.deadline.is_some() {
             self.op_counter = self.op_counter.wrapping_add(1);
-            if self.op_counter % Self::DEADLINE_CHECK_INTERVAL == 0 && self.past_deadline() {
+            if self
+                .op_counter
+                .is_multiple_of(Self::DEADLINE_CHECK_INTERVAL)
+                && self.past_deadline()
+            {
                 log::warn!(
                     "inference deadline exceeded during constrain (after {} operations, {} cache entries, {} type slots)",
                     self.op_counter,

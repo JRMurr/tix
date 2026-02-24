@@ -386,12 +386,13 @@ fn run_check(
         }
 
         // Print the root expression type.
-        let root_ty = inference
-            .expr_ty_map
-            .get(module.entry_expr)
-            .expect("No type for root module entry");
-
-        println!("\nRoot type:\n  {root_ty}");
+        match inference.expr_ty_map.get(module.entry_expr) {
+            Some(root_ty) => println!("\nRoot type:\n  {root_ty}"),
+            None => {
+                eprintln!("error: could not infer type for root expression");
+                std::process::exit(1);
+            }
+        }
     }
 
     Ok(())
