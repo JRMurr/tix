@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use lang_ast::{ExprId, OverloadBinOp};
+use lang_ast::{AstPtr, ExprId, OverloadBinOp};
 use lang_ty::OutputTy;
 use smol_str::SmolStr;
 
@@ -56,6 +56,16 @@ pub enum TixDiagnosticKind {
     AnnotationUnchecked {
         name: SmolStr,
         reason: SmolStr,
+    },
+    /// Two bindings in the same attrset or let-block define the same key.
+    /// Nix allows this (the second silently overwrites the first), but it
+    /// is almost always a mistake.
+    DuplicateKey {
+        key: SmolStr,
+        /// Syntax span of the first definition.
+        first: AstPtr,
+        /// Syntax span of the duplicate definition.
+        second: AstPtr,
     },
 }
 
@@ -113,6 +123,9 @@ impl fmt::Display for TixDiagnosticKind {
                     f,
                     "annotation for `{name}` accepted but not verified: {reason}"
                 )
+            }
+            TixDiagnosticKind::DuplicateKey { key, .. } => {
+                write!(f, "duplicate key `{key}` in binding set")
             }
         }
     }
@@ -355,6 +368,35 @@ pub fn warnings_to_diagnostics(warnings: &[Located<Warning>]) -> Vec<TixDiagnost
     warnings.iter().map(warning_to_diagnostic).collect()
 }
 
+/// Convert lowering-phase diagnostics into `TixDiagnostic`s.
+///
+/// Lowering diagnostics carry their own `AstPtr` spans (they don't have an
+/// `ExprId` location). We use `fallback_expr` (typically `module.entry_expr`)
+/// for the `at_expr` field; the rendering code in CLI and LSP uses the
+/// embedded spans directly for `DuplicateKey`.
+pub fn lower_diagnostics_to_tix(
+    lower_diags: &[lang_ast::LowerDiagnostic],
+    fallback_expr: ExprId,
+) -> Vec<TixDiagnostic> {
+    lower_diags
+        .iter()
+        .map(|ld| match ld {
+            lang_ast::LowerDiagnostic::DuplicateKey {
+                key,
+                first,
+                second,
+            } => TixDiagnostic {
+                at_expr: fallback_expr,
+                kind: TixDiagnosticKind::DuplicateKey {
+                    key: key.clone(),
+                    first: *first,
+                    second: *second,
+                },
+            },
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -485,4 +527,5 @@ mod tests {
         assert!(msg.contains("dispatch"));
         assert!(msg.contains("not verified"));
     }
+
 }

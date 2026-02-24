@@ -5349,3 +5349,140 @@ fn inline_alias_references_another() {
         other => panic!("expected AttrSet or Named, got: {other:?}"),
     }
 }
+
+// ==============================================================================
+// Duplicate Key Diagnostics
+// ==============================================================================
+
+/// Helper: type-check with check_file_collecting (which includes lowering
+/// diagnostics) and return just the diagnostics.
+fn collect_diagnostics(src: &str) -> Vec<TixDiagnostic> {
+    let (db, file) = TestDatabase::single_file(src).unwrap();
+    let result = crate::check_file_collecting(
+        &db,
+        file,
+        &TypeAliasRegistry::default(),
+        HashMap::new(),
+        HashMap::new(),
+    );
+    result.diagnostics
+}
+
+#[test]
+fn duplicate_key_in_attrset() {
+    let diags = collect_diagnostics("{ a = 1; a = 2; }");
+    let dup_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| matches!(&d.kind, TixDiagnosticKind::DuplicateKey { .. }))
+        .collect();
+    assert_eq!(dup_diags.len(), 1, "expected exactly one DuplicateKey diagnostic");
+    match &dup_diags[0].kind {
+        TixDiagnosticKind::DuplicateKey { key, .. } => {
+            assert_eq!(key.as_str(), "a");
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn duplicate_key_in_let_in() {
+    let diags = collect_diagnostics(indoc! {"
+        let
+          x = 1;
+          x = 2;
+        in x
+    "});
+    let dup_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| matches!(&d.kind, TixDiagnosticKind::DuplicateKey { .. }))
+        .collect();
+    assert_eq!(dup_diags.len(), 1);
+    match &dup_diags[0].kind {
+        TixDiagnosticKind::DuplicateKey { key, .. } => {
+            assert_eq!(key.as_str(), "x");
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn duplicate_key_inherit_overrides_binding() {
+    let diags = collect_diagnostics(indoc! {"
+        let x = 1; in { x = 2; inherit x; }
+    "});
+    let dup_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| matches!(&d.kind, TixDiagnosticKind::DuplicateKey { .. }))
+        .collect();
+    assert_eq!(dup_diags.len(), 1);
+    match &dup_diags[0].kind {
+        TixDiagnosticKind::DuplicateKey { key, .. } => {
+            assert_eq!(key.as_str(), "x");
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn no_duplicate_key_for_nested_merge() {
+    // `a.b = 1; a.c = 2;` is a legitimate nested merge, not a duplicate.
+    let diags = collect_diagnostics("{ a.b = 1; a.c = 2; }");
+    let dup_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| matches!(&d.kind, TixDiagnosticKind::DuplicateKey { .. }))
+        .collect();
+    assert_eq!(dup_diags.len(), 0, "nested attr merge should not warn");
+}
+
+#[test]
+fn no_duplicate_key_for_distinct_keys() {
+    let diags = collect_diagnostics("{ a = 1; b = 2; }");
+    let dup_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| matches!(&d.kind, TixDiagnosticKind::DuplicateKey { .. }))
+        .collect();
+    assert_eq!(dup_diags.len(), 0);
+}
+
+#[test]
+fn duplicate_key_multiple_duplicates() {
+    let diags = collect_diagnostics("{ a = 1; b = 2; a = 3; b = 4; }");
+    let dup_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| matches!(&d.kind, TixDiagnosticKind::DuplicateKey { .. }))
+        .collect();
+    assert_eq!(dup_diags.len(), 2, "both `a` and `b` should have duplicates");
+}
+
+#[test]
+fn duplicate_key_is_warning_not_error() {
+    // Duplicate keys should produce a warning but still infer successfully.
+    let (db, file) = TestDatabase::single_file("{ a = 1; a = 2; }").unwrap();
+    let result = crate::check_file_collecting(
+        &db,
+        file,
+        &TypeAliasRegistry::default(),
+        HashMap::new(),
+        HashMap::new(),
+    );
+    // Inference should succeed despite the warning.
+    assert!(result.inference.is_some());
+    // The duplicate key diagnostic should be present.
+    assert!(
+        result.diagnostics.iter().any(|d| matches!(
+            &d.kind,
+            TixDiagnosticKind::DuplicateKey { key, .. } if key == "a"
+        )),
+        "expected DuplicateKey warning in diagnostics"
+    );
+}
+
+#[test]
+fn duplicate_key_display_message() {
+    let diags = collect_diagnostics("{ foo = 1; foo = 2; }");
+    let dup = diags
+        .iter()
+        .find(|d| matches!(&d.kind, TixDiagnosticKind::DuplicateKey { .. }))
+        .expect("expected a DuplicateKey diagnostic");
+    assert_eq!(dup.kind.to_string(), "duplicate key `foo` in binding set");
+}

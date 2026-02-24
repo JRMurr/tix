@@ -300,19 +300,42 @@ fn run_check(
             TixDiagnosticKind::UnresolvedName { .. }
                 | TixDiagnosticKind::AnnotationArityMismatch { .. }
                 | TixDiagnosticKind::AnnotationUnchecked { .. }
+                | TixDiagnosticKind::DuplicateKey { .. }
         );
         if !is_warning {
             has_errors = true;
         }
 
-        // Resolve ExprId → source span via the ModuleSourceMap.
-        let span = source_map.node_for_expr(diag.at_expr).map(|ptr| {
-            let node = ptr.to_node(root.syntax());
-            let range = node.text_range();
-            let start: usize = range.start().into();
-            let len: usize = range.len().into();
-            (start, len)
-        });
+        // DuplicateKey carries its own AstPtr spans; other diagnostics
+        // resolve ExprId → source span via the ModuleSourceMap.
+        let labels = if let TixDiagnosticKind::DuplicateKey {
+            first, second, ..
+        } = &diag.kind
+        {
+            let to_span = |ptr: &lang_ast::AstPtr| {
+                let node = ptr.to_node(root.syntax());
+                let range = node.text_range();
+                let start: usize = range.start().into();
+                let len: usize = range.len().into();
+                (start, len)
+            };
+            let (s1, l1) = to_span(first);
+            let (s2, l2) = to_span(second);
+            vec![
+                LabeledSpan::at(s1..s1 + l1, "first defined here"),
+                LabeledSpan::at(s2..s2 + l2, "duplicate defined here"),
+            ]
+        } else {
+            let span = source_map.node_for_expr(diag.at_expr).map(|ptr| {
+                let node = ptr.to_node(root.syntax());
+                let range = node.text_range();
+                let start: usize = range.start().into();
+                let len: usize = range.len().into();
+                (start, len)
+            });
+            span.map(|(offset, len)| vec![LabeledSpan::at(offset..offset + len, "here")])
+                .unwrap_or_default()
+        };
 
         // Build help text for MissingField suggestions.
         let help = match &diag.kind {
@@ -322,10 +345,6 @@ fn run_check(
             } => Some(format!("did you mean `{s}`?")),
             _ => None,
         };
-
-        let labels = span
-            .map(|(offset, len)| vec![LabeledSpan::at(offset..offset + len, "here")])
-            .unwrap_or_default();
 
         let mut builder = miette::MietteDiagnostic::new(diag.kind.to_string());
         if !labels.is_empty() {

@@ -285,6 +285,13 @@ Nix code sizes (hundreds of bindings per file, not millions):
   Fix: expand alias references before checking `contains_union()`, or check
   after interning.
 
+### Docs: No Dedicated Diagnostics Reference Page
+
+- The LSP and CLI produce several diagnostic kinds (TypeMismatch, MissingField,
+  DuplicateKey, etc.) but there's no docs page listing all diagnostics, their
+  severity, and what triggers them. Low priority since the messages are self-
+  explanatory, but a reference page would be useful.
+
 ### `resolve_to_concrete_id` Picks Arbitrary Lower Bound
 
 - `resolve_to_concrete_id` follows the first reachable lower bound to find a
