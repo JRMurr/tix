@@ -8,23 +8,91 @@ TLDR: try to be typescript for nix
 
 ## Quick Start
 
-### Install via Nix Flake
+### Installation
+
+<details>
+  <summary>nix run (try without installing)</summary>
 
 ```bash
-# Run directly
 nix run github:JRMurr/tix -- my-file.nix
 
-# Or add to your flake inputs
+# With pre-generated NixOS and Home Manager type stubs:
+nix run github:JRMurr/tix#with-stubs -- my-file.nix
+```
+
+</details>
+
+<details>
+  <summary>Flake (NixOS / Home Manager / nix profile)</summary>
+
+Add tix to your flake inputs:
+
+```nix
 {
   inputs.tix.url = "github:JRMurr/tix";
 }
 ```
 
-The `with-stubs` package includes pre-generated NixOS and Home Manager type stubs:
+Then add the package to your config, e.g. in NixOS:
+
+```nix
+# configuration.nix
+{ inputs, pkgs, ... }:
+{
+  environment.systemPackages = [
+    inputs.tix.packages.${pkgs.system}.default
+    # Or for the variant with pre-generated stubs:
+    # inputs.tix.packages.${pkgs.system}.with-stubs
+  ];
+}
+```
+
+Or install imperatively with `nix profile`:
 
 ```bash
-nix run github:JRMurr/tix#with-stubs -- my-file.nix
+nix profile install github:JRMurr/tix
 ```
+
+</details>
+
+<details>
+  <summary>Without flakes (traditional NixOS / nix-env)</summary>
+
+Add to a traditional NixOS configuration via `fetchTarball`:
+
+```nix
+# configuration.nix
+let
+  tix = import (builtins.fetchTarball "https://github.com/JRMurr/tix/archive/main.tar.gz") {};
+in
+{
+  environment.systemPackages = [
+    tix.packages.${builtins.currentSystem}.default
+    # Or for the variant with pre-generated stubs:
+    # tix.packages.${builtins.currentSystem}.with-stubs
+  ];
+}
+```
+
+Pin to a specific revision for reproducibility:
+
+```nix
+let
+  tix = import (builtins.fetchTarball {
+    url = "https://github.com/JRMurr/tix/archive/<rev>.tar.gz";
+    sha256 = "<hash>";  # nix-prefetch-url --unpack <url>
+  }) {};
+in
+  tix.packages.${builtins.currentSystem}.default
+```
+
+Or install imperatively with `nix-env`:
+
+```bash
+nix-env -f https://github.com/JRMurr/tix/archive/main.tar.gz -iA packages.x86_64-linux.default
+```
+
+</details>
 
 ### Type-check a file
 
