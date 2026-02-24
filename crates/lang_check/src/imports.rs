@@ -253,7 +253,7 @@ pub fn resolve_imports(
         // are still useful. This also ensures the result is always cached,
         // preventing expensive re-inference when the same file is imported
         // from multiple paths.
-        let (result, diagnostics) = check.infer_prog_partial(target_grouped);
+        let (result, diagnostics, _timed_out) = check.infer_prog_partial(target_grouped);
 
         let t_infer = t0.elapsed();
         let has_errors = diagnostics.iter().any(|d| !matches!(

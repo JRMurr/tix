@@ -40,7 +40,11 @@ pub fn to_lsp_diagnostics(
                 TixDiagnosticKind::UnresolvedName { .. }
                 | TixDiagnosticKind::AnnotationArityMismatch { .. }
                 | TixDiagnosticKind::AnnotationUnchecked { .. }
-                | TixDiagnosticKind::DuplicateKey { .. } => DiagnosticSeverity::WARNING,
+                | TixDiagnosticKind::DuplicateKey { .. }
+                | TixDiagnosticKind::ImportNotFound { .. }
+                | TixDiagnosticKind::ImportCyclic { .. }
+                | TixDiagnosticKind::ImportInferenceError { .. }
+                | TixDiagnosticKind::InferenceTimeout => DiagnosticSeverity::WARNING,
                 _ => DiagnosticSeverity::ERROR,
             };
 

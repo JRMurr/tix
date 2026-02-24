@@ -16,3 +16,4 @@ docs/book/
 /target
 
 /tmp
+.claude/worktrees/

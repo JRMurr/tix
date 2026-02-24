@@ -240,6 +240,9 @@ pub struct CheckResult {
     /// Display-ready diagnostics (errors + warnings) with human-readable type
     /// names via OutputTy.
     pub diagnostics: Vec<TixDiagnostic>,
+    /// Whether inference was aborted because the deadline was exceeded.
+    /// Consumers can use this to emit a user-visible timeout diagnostic.
+    pub timed_out: bool,
 }
 
 /// Type-check a file, collecting errors instead of aborting on the first one.
@@ -291,7 +294,7 @@ pub fn check_file_collecting_with_deadline(
     if let Some(d) = deadline {
         check = check.with_deadline(d);
     }
-    let (inference, mut diagnostics) = check.infer_prog_partial(grouped_defs);
+    let (inference, mut diagnostics, timed_out) = check.infer_prog_partial(grouped_defs);
 
     // Include diagnostics from the lowering phase (e.g. duplicate keys).
     let lower_diags = diagnostic::lower_diagnostics_to_tix(
@@ -303,6 +306,7 @@ pub fn check_file_collecting_with_deadline(
     CheckResult {
         inference: Some(inference),
         diagnostics,
+        timed_out,
     }
 }
 

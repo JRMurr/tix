@@ -67,6 +67,23 @@ pub enum TixDiagnosticKind {
         /// Syntax span of the duplicate definition.
         second: AstPtr,
     },
+    /// An imported file could not be found on disk.
+    ImportNotFound {
+        path: String,
+    },
+    /// An import created a dependency cycle (A imports B imports A).
+    ImportCyclic {
+        path: String,
+    },
+    /// Type inference in an imported file produced errors.
+    ImportInferenceError {
+        path: String,
+        message: String,
+    },
+    /// Inference was aborted because the deadline was exceeded.
+    /// Bindings inferred before the timeout still have types; only
+    /// the remaining ones are missing.
+    InferenceTimeout,
 }
 
 impl fmt::Display for TixDiagnosticKind {
@@ -126,6 +143,21 @@ impl fmt::Display for TixDiagnosticKind {
             }
             TixDiagnosticKind::DuplicateKey { key, .. } => {
                 write!(f, "duplicate key `{key}` in binding set")
+            }
+            TixDiagnosticKind::ImportNotFound { path } => {
+                write!(f, "import target not found: {path}")
+            }
+            TixDiagnosticKind::ImportCyclic { path } => {
+                write!(f, "cyclic import detected: {path}")
+            }
+            TixDiagnosticKind::ImportInferenceError { path, message } => {
+                write!(f, "error in imported file {path}: {message}")
+            }
+            TixDiagnosticKind::InferenceTimeout => {
+                write!(
+                    f,
+                    "type inference timed out — partial results are available for bindings inferred before the deadline"
+                )
             }
         }
     }
@@ -528,4 +560,43 @@ mod tests {
         assert!(msg.contains("not verified"));
     }
 
+    #[test]
+    fn import_not_found_display() {
+        let kind = TixDiagnosticKind::ImportNotFound {
+            path: "/tmp/missing.nix".to_string(),
+        };
+        let msg = kind.to_string();
+        assert!(msg.contains("import target not found"));
+        assert!(msg.contains("/tmp/missing.nix"));
+    }
+
+    #[test]
+    fn import_cyclic_display() {
+        let kind = TixDiagnosticKind::ImportCyclic {
+            path: "/tmp/cycle.nix".to_string(),
+        };
+        let msg = kind.to_string();
+        assert!(msg.contains("cyclic import"));
+        assert!(msg.contains("/tmp/cycle.nix"));
+    }
+
+    #[test]
+    fn import_inference_error_display() {
+        let kind = TixDiagnosticKind::ImportInferenceError {
+            path: "/tmp/bad.nix".to_string(),
+            message: "type mismatch".to_string(),
+        };
+        let msg = kind.to_string();
+        assert!(msg.contains("error in imported file"));
+        assert!(msg.contains("/tmp/bad.nix"));
+        assert!(msg.contains("type mismatch"));
+    }
+
+    #[test]
+    fn inference_timeout_display() {
+        let kind = TixDiagnosticKind::InferenceTimeout;
+        let msg = kind.to_string();
+        assert!(msg.contains("timed out"));
+        assert!(msg.contains("partial results"));
+    }
 }
