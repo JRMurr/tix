@@ -283,6 +283,11 @@ impl LanguageServer for TixLanguageServer {
                     ),
                 ),
                 inlay_hint_provider: Some(OneOf::Left(true)),
+                signature_help_provider: Some(SignatureHelpOptions {
+                    trigger_characters: Some(vec![" ".to_string()]),
+                    retrigger_characters: None,
+                    work_done_progress_options: Default::default(),
+                }),
                 ..Default::default()
             },
             ..Default::default()
@@ -393,6 +398,18 @@ impl LanguageServer for TixLanguageServer {
         self.with_analysis(uri, |state, analysis| {
             let root = analysis.parsed.tree();
             crate::hover::hover(analysis, pos, &root, &state.registry.docs)
+        })
+    }
+
+    async fn signature_help(
+        &self,
+        params: SignatureHelpParams,
+    ) -> Result<Option<SignatureHelp>> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let pos = params.text_document_position_params.position;
+        self.with_analysis(uri, |_, analysis| {
+            let root = analysis.parsed.tree();
+            crate::signature_help::signature_help(analysis, pos, &root)
         })
     }
 

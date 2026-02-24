@@ -16,6 +16,7 @@ Communicates over stdin/stdout. Same stub flags as `tix-cli`.
 |---------|-------------|
 | **Hover** | Shows inferred type and doc comments |
 | **Completion** | Attrset field access (`.`), function args, identifiers, inherit targets |
+| **Signature Help** | Parameter names and types when calling functions; highlights the active parameter for curried calls |
 | **Go to Definition** | Jump to let bindings, lambda params, imports, and cross-file field definitions (including `callPackage`-style patterns) |
 | **Find References** | All uses of a name in the file |
 | **Rename** | Refactor bindings and their references |
