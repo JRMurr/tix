@@ -274,6 +274,17 @@ Nix code sizes (hundreds of bindings per file, not millions):
   (b) move analysis to a background task and cancel on new edits,
   (c) lazy analysis (only analyze on first hover/completion, not on open).
 
+### `contains_union()` Doesn't See Through Alias References
+
+- When a type annotation references a type alias that contains a union
+  (e.g. `type: x :: Nullable` where `Nullable = int | null`), the
+  `contains_union()` safety check operates on the top-level `ParsedTy` which
+  is `TyVar(Reference("Nullable"))` — not the expanded alias body. So the
+  union check doesn't trigger, and the annotation is applied with bidirectional
+  constraints, which can produce false type errors (e.g. `null` vs `int`).
+  Fix: expand alias references before checking `contains_union()`, or check
+  after interning.
+
 ### `resolve_to_concrete_id` Picks Arbitrary Lower Bound
 
 - `resolve_to_concrete_id` follows the first reachable lower bound to find a

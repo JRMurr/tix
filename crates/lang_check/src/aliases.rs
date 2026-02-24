@@ -265,6 +265,12 @@ impl TypeAliasRegistry {
         }
     }
 
+    /// Register a single inline type alias (from a doc comment in a .nix file).
+    /// Inline aliases shadow any existing alias with the same name.
+    pub fn load_inline_alias(&mut self, name: SmolStr, body: ParsedTy) {
+        self.aliases.insert(name, body);
+    }
+
     /// Look up a type alias by name.
     pub fn get(&self, name: &str) -> Option<&ParsedTy> {
         self.aliases.get(name)

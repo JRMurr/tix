@@ -31,11 +31,39 @@ pub fn lower(root: rnix::Root, doc_comments: DocCommentCtx) -> (Module, ModuleSo
     };
 
     let entry = ctx.lower_expr_opt(root.expr());
+
+    // Collect inline type alias declarations from all doc comments.
+    // These are comments matching `type <Uppercase>...` which declare file-scoped
+    // type aliases (as opposed to `type: name :: Type` binding annotations).
+    let is_type_alias = |doc: &str| -> bool {
+        let trimmed = doc.trim();
+        trimmed.starts_with("type ")
+            && trimmed.as_bytes().get(5).is_some_and(|b| b.is_ascii_uppercase())
+    };
+
+    let mut inline_type_aliases: Vec<String> = Vec::new();
+
+    // From orphan docs (free-floating comments not attached to any node)
+    for doc in &ctx.doc_comments.orphan_docs {
+        if is_type_alias(doc) {
+            inline_type_aliases.push(doc.trim().to_string());
+        }
+    }
+
+    // From docs attached to expressions and names (e.g. a type alias comment
+    // above a let-block or next to a binding)
+    for doc in ctx.type_dec_map.all_doc_strings() {
+        if is_type_alias(doc) {
+            inline_type_aliases.push(doc.trim().to_string());
+        }
+    }
+
     let module = Module {
         exprs: ctx.exprs,
         names: ctx.names,
         entry_expr: entry,
         type_dec_map: ctx.type_dec_map,
+        inline_type_aliases,
     };
     (module, ctx.source_map)
 }

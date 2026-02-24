@@ -5193,3 +5193,159 @@ fn stub_polymorphic_rec_with_annotations() {
     let (_module, result) = check_str_with_aliases(nix_src, &registry);
     result.expect("annotated rec block functions with stub warnIf should not produce type errors");
 }
+
+// ==========================================================================
+// Inline type alias tests
+// ==========================================================================
+
+/// Orphan block comment defines a type alias, binding annotation references it.
+#[test]
+fn inline_alias_orphan_block_comment() {
+    let ty = get_inferred_root(indoc! {r#"
+        /** type Pair = { fst: a, snd: b }; */
+        let
+          /** type: mkPair :: a -> b -> Pair */
+          mkPair = fst: snd: { inherit fst snd; };
+        in mkPair 1 "hello"
+    "#});
+    // Result should be an attrset with fst: int, snd: string
+    match &ty {
+        OutputTy::AttrSet(attr) => {
+            assert!(attr.fields.contains_key("fst"));
+            assert!(attr.fields.contains_key("snd"));
+        }
+        other => panic!("expected AttrSet, got: {other:?}"),
+    }
+}
+
+/// Type alias attached to the same binding as the annotation.
+#[test]
+fn inline_alias_attached_to_binding() {
+    let ty = get_inferred_root(indoc! {r#"
+        let
+          /** type Result = { ok: bool, value: a }; */
+          /** type: wrap :: a -> Result */
+          wrap = value: { ok = true; inherit value; };
+        in wrap 42
+    "#});
+    match &ty {
+        OutputTy::AttrSet(attr) => {
+            assert!(attr.fields.contains_key("ok"));
+            assert!(attr.fields.contains_key("value"));
+        }
+        other => panic!("expected AttrSet, got: {other:?}"),
+    }
+}
+
+/// Line comment syntax for inline type alias: `# type Foo = ...;`
+#[test]
+fn inline_alias_line_comment() {
+    let ty = get_inferred_root(indoc! {r#"
+        # type Wrapper = { inner: a };
+        let
+          /** type: wrap :: a -> Wrapper */
+          wrap = inner: { inherit inner; };
+        in wrap 42
+    "#});
+    match &ty {
+        OutputTy::AttrSet(attr) => {
+            assert!(attr.fields.contains_key("inner"));
+        }
+        other => panic!("expected AttrSet, got: {other:?}"),
+    }
+}
+
+/// Multiple inline aliases in the same file.
+#[test]
+fn inline_alias_multiple() {
+    let ty = get_inferred_root(indoc! {r#"
+        /** type Pair = { fst: a, snd: b }; */
+        /** type Triple = { fst: a, snd: b, thd: c }; */
+        let
+          /** type: mkTriple :: a -> b -> c -> Triple */
+          mkTriple = fst: snd: thd: { inherit fst snd thd; };
+        in mkTriple 1 "two" 3.0
+    "#});
+    match &ty {
+        OutputTy::AttrSet(attr) => {
+            assert!(attr.fields.contains_key("fst"));
+            assert!(attr.fields.contains_key("snd"));
+            assert!(attr.fields.contains_key("thd"));
+        }
+        other => panic!("expected AttrSet, got: {other:?}"),
+    }
+}
+
+/// Inline alias shadows a stub alias with the same name.
+#[test]
+fn inline_alias_shadows_stub() {
+    let tix_src = "type Thing = { old: int };";
+    let registry = registry_from_tix(tix_src);
+    // Inline alias redefines Thing with a different shape
+    let nix_src = indoc! {r#"
+        /** type Thing = { new: string }; */
+        let
+          /** type: x :: Thing */
+          x = { new = "hello"; };
+        in x
+    "#};
+    let ty = get_inferred_root_with_aliases(nix_src, &registry);
+    // The result may be wrapped in Named("Thing", ...) due to alias provenance
+    let inner = match &ty {
+        OutputTy::Named(name, inner) => {
+            assert_eq!(name.as_str(), "Thing");
+            inner.0.as_ref()
+        }
+        other => other,
+    };
+    match inner {
+        OutputTy::AttrSet(attr) => {
+            assert!(
+                attr.fields.contains_key("new"),
+                "inline alias should shadow stub: expected 'new' field"
+            );
+            assert!(
+                !attr.fields.contains_key("old"),
+                "inline alias should shadow stub: 'old' field should not be present"
+            );
+        }
+        other => panic!("expected AttrSet (possibly Named-wrapped), got: {other:?}"),
+    }
+}
+
+/// Regular comments that look nothing like type aliases are not collected.
+#[test]
+fn inline_alias_ignores_normal_comments() {
+    // The `# type` without uppercase should not be recognized as an alias
+    let ty = get_inferred_root(indoc! {"
+        # type of x is int
+        let x = 1; in x
+    "});
+    assert_eq!(ty, arc_ty!(Int));
+}
+
+/// Inline alias referenced by another inline alias.
+#[test]
+fn inline_alias_references_another() {
+    let ty = get_inferred_root(indoc! {r#"
+        /** type Inner = { value: a }; */
+        /** type Outer = { wrapped: Inner }; */
+        let
+          /** type: mk :: a -> Outer */
+          mk = v: { wrapped = { value = v; }; };
+        in mk 42
+    "#});
+    // Outer references Inner — both should be resolved
+    match &ty {
+        OutputTy::AttrSet(attr) => {
+            assert!(attr.fields.contains_key("wrapped"));
+        }
+        OutputTy::Named(_, inner) => match inner.0.as_ref() {
+            OutputTy::AttrSet(attr) => {
+                assert!(attr.fields.contains_key("wrapped"));
+            }
+            other => panic!("expected AttrSet inside Named, got: {other:?}"),
+        },
+        other => panic!("expected AttrSet or Named, got: {other:?}"),
+    }
+}

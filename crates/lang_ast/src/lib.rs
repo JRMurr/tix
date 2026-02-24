@@ -126,6 +126,10 @@ pub struct Module {
     names: Arena<Name>,
     pub entry_expr: ExprId,
     pub type_dec_map: ModuleTypeDecMap,
+    /// Inline type alias declarations extracted from doc comments
+    /// (e.g. `/** type Pair = { fst: a, snd: b }; */` or `# type Nullable = a | null;`).
+    /// File-scoped — loaded into the TypeAliasRegistry before inference begins.
+    pub inline_type_aliases: Vec<String>,
 }
 
 impl Module {
@@ -179,6 +183,16 @@ impl ModuleTypeDecMap {
 
     pub fn insert_name(&mut self, name_id: NameId, comments: DocComments) {
         self.name_map.insert(name_id, comments);
+    }
+
+    /// Iterate over all doc comment strings stored in this map (from both
+    /// expressions and names).
+    pub fn all_doc_strings(&self) -> impl Iterator<Item = &str> {
+        self.expr_map
+            .values()
+            .chain(self.name_map.values())
+            .flat_map(|docs| docs.iter())
+            .map(|s| s.as_str())
     }
 }
 

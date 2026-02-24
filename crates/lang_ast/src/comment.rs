@@ -16,16 +16,27 @@ fn doc_text(comment: &rnix::ast::Comment) -> Option<DocComment> {
     // Line comment with type annotation: # type: name :: Type
     // rnix's Comment::text() strips the `#` prefix, so for `# type: pkgs :: Pkgs`
     // it returns ` type: pkgs :: Pkgs` — exactly what the pest grammar expects.
-    } else if text.starts_with('#') && comment.text().trim_start().starts_with("type:") {
-        Some(comment.text().into())
+    } else if text.starts_with('#') {
+        let trimmed = comment.text().trim_start();
+        // Line comment with type annotation: # type: name :: Type
+        // Line comment with inline type alias: # type Foo = ...;
+        if trimmed.starts_with("type:")
+            || (trimmed.starts_with("type ")
+                && trimmed.as_bytes().get(5).is_some_and(|b| b.is_ascii_uppercase()))
+        {
+            Some(comment.text().into())
+        } else {
+            None
+        }
     } else {
         None
     }
 }
 
-// TODO: need a good way to handle doc comments that are just type aliases
-// they don't need to be associated to a node and can just "hang" out.
-// Parsing the doc comments could figure out if its just type aliases and handle it there?
+// Type alias doc comments (e.g. `/** type Foo = int; */` or `# type Foo = int;`)
+// are recognized by doc_text() and collected during lowering into
+// Module.inline_type_aliases. They may be orphan comments or attached to a
+// nearby node — both cases are handled.
 #[derive(Default, Debug)]
 pub struct DocCommentCtx {
     /// For each node's pointer, store *all* doc comments that were associated with it.
@@ -34,7 +45,7 @@ pub struct DocCommentCtx {
 
     /// Comments that you couldn't attach to any particular node (e.g. file-level
     /// doc or trailing comments).
-    orphan_docs: Vec<String>,
+    pub(crate) orphan_docs: Vec<String>,
 }
 
 impl DocCommentCtx {

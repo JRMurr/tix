@@ -97,6 +97,26 @@ Precedence (low to high): `->` then `|` then `&` then atoms. Use parens to overr
 
 Nixpkgs doc comments conventionally use uppercase names like `String`, `Bool`, and `Int`. Tix recognizes these as aliases for the lowercase primitives, so both `string` and `String` work in annotations.
 
+## Inline Type Aliases
+
+You can define type aliases directly in a `.nix` file using doc comments, without needing a separate `.tix` stub file:
+
+```nix
+/** type Derivation = { name: string, src: path, ... }; */
+# type Nullable = a | null;
+
+let
+  /** type: mkDrv :: { name: string, ... } -> Derivation */
+  mkDrv = { name, src, ... }: { inherit name; system = "x86_64-linux"; };
+in ...
+```
+
+Both block (`/** ... */`) and line (`# type Foo = ...;`) comments work. The syntax is exactly the same as in `.tix` stub files — `type Name = TypeExpr;`.
+
+Inline aliases are file-scoped (visible everywhere in the file regardless of placement) and shadow any aliases with the same name from loaded stubs.
+
+**Disambiguation:** `type:` (with a colon) triggers a binding annotation (`type: name :: Type`). `type ` (with a space followed by an uppercase letter) triggers an alias declaration (`type Name = ...;`).
+
 ## Annotation safety
 
 Tix applies annotations as bidirectional constraints — the inferred type must be compatible with the annotation and vice versa. Two situations cause annotations to be skipped with a warning instead of producing false errors:

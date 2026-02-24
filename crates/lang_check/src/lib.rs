@@ -56,11 +56,21 @@ pub fn check_file_with_imports(
     let name_res = lang_ast::name_resolution(db, file);
     let indices = lang_ast::module_indices(db, file);
     let grouped_defs = lang_ast::group_def(db, file);
+
+    // Load inline type aliases from doc comments before inference so they're
+    // available for annotation resolution. Inline aliases shadow stub aliases.
+    let mut aliases = aliases.clone();
+    for alias_source in &module.inline_type_aliases {
+        if let Some((name, body)) = comment_parser::parse_inline_type_alias(alias_source) {
+            aliases.load_inline_alias(name, body);
+        }
+    }
+
     let check = CheckCtx::new(
         &module,
         &name_res,
         &indices.binding_expr,
-        aliases.clone(),
+        aliases,
         import_types,
         HashMap::new(),
     );
@@ -261,11 +271,20 @@ pub fn check_file_collecting_with_deadline(
     let name_res = lang_ast::name_resolution(db, file);
     let indices = lang_ast::module_indices(db, file);
     let grouped_defs = lang_ast::group_def(db, file);
+
+    // Load inline type aliases from doc comments before inference.
+    let mut aliases = aliases.clone();
+    for alias_source in &module.inline_type_aliases {
+        if let Some((name, body)) = comment_parser::parse_inline_type_alias(alias_source) {
+            aliases.load_inline_alias(name, body);
+        }
+    }
+
     let mut check = CheckCtx::new(
         &module,
         &name_res,
         &indices.binding_expr,
-        aliases.clone(),
+        aliases,
         import_types,
         context_args,
     );

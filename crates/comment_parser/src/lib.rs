@@ -88,6 +88,25 @@ pub enum TixDeclaration {
     },
 }
 
+/// Try to parse a doc comment string as an inline type alias declaration.
+/// Returns `Some((name, body))` if the string matches `type Name = ...;`.
+/// Returns `None` if it doesn't look like a type alias.
+///
+/// Reuses the existing `.tix` parser — no new grammar needed.
+pub fn parse_inline_type_alias(source: &str) -> Option<(SmolStr, ParsedTy)> {
+    let trimmed = source.trim();
+    if !trimmed.starts_with("type ")
+        || !trimmed.as_bytes().get(5).is_some_and(|b| b.is_ascii_uppercase())
+    {
+        return None;
+    }
+    let file = parse_tix_file(trimmed).ok()?;
+    file.declarations.into_iter().find_map(|decl| match decl {
+        TixDeclaration::TypeAlias { name, body, .. } => Some((name, body)),
+        _ => None,
+    })
+}
+
 pub fn parse_tix_file(source: &str) -> Result<TixDeclFile, Box<dyn std::error::Error>> {
     use pest::Parser;
     let pairs = tix_parser::TixDeclParser::parse(tix_parser::Rule::tix_file, source)?;
@@ -389,6 +408,41 @@ mod tests {
     #[test]
     fn context_annotation_bare_prefix() {
         assert_eq!(parse_context_annotation("context:"), None);
+    }
+
+    #[test]
+    fn inline_alias_basic() {
+        let result = parse_inline_type_alias("type Pair = { fst: a, snd: b };");
+        assert!(result.is_some());
+        let (name, body) = result.unwrap();
+        assert_eq!(name.as_str(), "Pair");
+        assert!(matches!(body, ParsedTy::AttrSet(_)));
+    }
+
+    #[test]
+    fn inline_alias_with_whitespace() {
+        let result = parse_inline_type_alias("  type Nullable = a | null;  ");
+        assert!(result.is_some());
+        let (name, _) = result.unwrap();
+        assert_eq!(name.as_str(), "Nullable");
+    }
+
+    #[test]
+    fn inline_alias_not_a_binding_annotation() {
+        // "type:" (colon) is a binding annotation, not an alias
+        assert!(parse_inline_type_alias("type: x :: int").is_none());
+    }
+
+    #[test]
+    fn inline_alias_lowercase_rejected() {
+        // Lowercase after "type " is a generic var, not an alias name
+        assert!(parse_inline_type_alias("type foo = int;").is_none());
+    }
+
+    #[test]
+    fn inline_alias_not_a_comment() {
+        // Regular text that doesn't start with "type "
+        assert!(parse_inline_type_alias("hello world").is_none());
     }
 }
 
