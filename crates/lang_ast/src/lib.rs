@@ -130,6 +130,8 @@ pub struct Module {
     /// (e.g. `/** type Pair = { fst: a, snd: b }; */` or `# type Nullable = a | null;`).
     /// File-scoped — loaded into the TypeAliasRegistry before inference begins.
     pub inline_type_aliases: Vec<String>,
+    /// Diagnostics emitted during AST lowering (e.g. duplicate keys).
+    pub lower_diagnostics: Vec<LowerDiagnostic>,
 }
 
 impl Module {
@@ -157,6 +159,20 @@ impl ops::Index<NameId> for Module {
 }
 
 pub type AstPtr = rowan::ast::SyntaxNodePtr<NixLanguage>;
+
+/// A diagnostic emitted during AST lowering (before type inference).
+/// Uses raw `AstPtr` spans since `ExprId`s may not be available yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LowerDiagnostic {
+    /// Two bindings in the same attrset/let-block use the same key.
+    /// Nix allows this (the second silently overwrites the first),
+    /// but it is almost always a mistake.
+    DuplicateKey {
+        key: SmolStr,
+        first: AstPtr,
+        second: AstPtr,
+    },
+}
 
 pub type DocComment = String; // TODO: real type
 

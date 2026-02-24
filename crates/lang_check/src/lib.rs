@@ -291,7 +291,15 @@ pub fn check_file_collecting_with_deadline(
     if let Some(d) = deadline {
         check = check.with_deadline(d);
     }
-    let (inference, diagnostics) = check.infer_prog_partial(grouped_defs);
+    let (inference, mut diagnostics) = check.infer_prog_partial(grouped_defs);
+
+    // Include diagnostics from the lowering phase (e.g. duplicate keys).
+    let lower_diags = diagnostic::lower_diagnostics_to_tix(
+        &module.lower_diagnostics,
+        module.entry_expr,
+    );
+    diagnostics.extend(lower_diags);
+
     CheckResult {
         inference: Some(inference),
         diagnostics,

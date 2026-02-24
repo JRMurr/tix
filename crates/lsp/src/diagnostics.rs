@@ -21,18 +21,26 @@ pub fn to_lsp_diagnostics(
     diagnostics
         .iter()
         .map(|diag| {
-            let range = source_map
-                .node_for_expr(diag.at_expr)
-                .map(|ptr| {
-                    let node = ptr.to_node(root.syntax());
-                    line_index.range(node.text_range())
-                })
-                .unwrap_or_else(|| Range::new(Default::default(), Default::default()));
+            // DuplicateKey carries its own AstPtr spans; point the diagnostic
+            // at the duplicate (second) definition for maximum visibility.
+            let range = if let TixDiagnosticKind::DuplicateKey { second, .. } = &diag.kind {
+                let node = second.to_node(root.syntax());
+                line_index.range(node.text_range())
+            } else {
+                source_map
+                    .node_for_expr(diag.at_expr)
+                    .map(|ptr| {
+                        let node = ptr.to_node(root.syntax());
+                        line_index.range(node.text_range())
+                    })
+                    .unwrap_or_else(|| Range::new(Default::default(), Default::default()))
+            };
 
             let severity = match &diag.kind {
                 TixDiagnosticKind::UnresolvedName { .. }
                 | TixDiagnosticKind::AnnotationArityMismatch { .. }
-                | TixDiagnosticKind::AnnotationUnchecked { .. } => DiagnosticSeverity::WARNING,
+                | TixDiagnosticKind::AnnotationUnchecked { .. }
+                | TixDiagnosticKind::DuplicateKey { .. } => DiagnosticSeverity::WARNING,
                 _ => DiagnosticSeverity::ERROR,
             };
 

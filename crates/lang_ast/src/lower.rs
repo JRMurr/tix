@@ -7,8 +7,8 @@ use smol_str::SmolStr;
 
 use super::{
     ast_utils::{get_str_literal, name_kind_of_set, name_of_ident, AttrKind},
-    AstPtr, Attrpath, BindingValue, Bindings, Expr, ExprId, InterpolPart, Literal, Module,
-    ModuleSourceMap, Name, NameId, NameKind,
+    AstPtr, Attrpath, BindingValue, Bindings, Expr, ExprId, InterpolPart, Literal,
+    LowerDiagnostic, Module, ModuleSourceMap, Name, NameId, NameKind,
 };
 use crate::{comment::DocCommentCtx, DocComments, ModuleTypeDecMap, Pat};
 
@@ -18,6 +18,7 @@ struct LowerCtx {
     source_map: ModuleSourceMap,
     doc_comments: DocCommentCtx,
     type_dec_map: ModuleTypeDecMap, // should this just be a part of the source map?
+    diagnostics: Vec<LowerDiagnostic>,
 }
 
 #[allow(dead_code)]
@@ -28,6 +29,7 @@ pub fn lower(root: rnix::Root, doc_comments: DocCommentCtx) -> (Module, ModuleSo
         source_map: ModuleSourceMap::default(),
         type_dec_map: ModuleTypeDecMap::default(),
         doc_comments,
+        diagnostics: Vec::new(),
     };
 
     let entry = ctx.lower_expr_opt(root.expr());
@@ -64,6 +66,7 @@ pub fn lower(root: rnix::Root, doc_comments: DocCommentCtx) -> (Module, ModuleSo
         entry_expr: entry,
         type_dec_map: ctx.type_dec_map,
         inline_type_aliases,
+        lower_diagnostics: ctx.diagnostics,
     };
     (module, ctx.source_map)
 }
@@ -523,7 +526,17 @@ impl MergingSet {
         use std::collections::hash_map::Entry;
         match self.statics.entry(key.clone()) {
             Entry::Occupied(mut ent) => {
-                // TODO: emit a proper duplicate-key diagnostic instead of silently overwriting
+                // The same key appears twice in this attrset/let-block. Nix allows
+                // this (second value wins), but it is almost always a mistake.
+                let first_ptr = ctx.source_map.name_map_rev
+                    .get(ent.get().name)
+                    .copied()
+                    .unwrap_or(attr_ptr);
+                ctx.diagnostics.push(LowerDiagnostic::DuplicateKey {
+                    key: key.clone(),
+                    first: first_ptr,
+                    second: attr_ptr,
+                });
                 ent.get_mut().value = Some((attr_ptr, value));
             }
             Entry::Vacant(ent) => {
