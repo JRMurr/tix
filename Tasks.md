@@ -3,6 +3,33 @@
 Tasks to address before wider adoption. Ordered by recommended priority —
 earlier tasks protect against the worst user experiences or unblock later work.
 
+
+1 - 11 and 16 should be done but need a good code review pass / testing
+
+some manual notes
+
+- arg auto complete seems to work for thing like bubble wrap helper but does not seem to work nested
+
+ie 
+```
+foo = bubblewrap_helper {   }
+#                         ^ i get all the attrs to the call as autocomplete
+
+
+
+bar = bubblewrap_helper { args = [ ]  }
+#                                 ^ i just get top level attr keys not autocomplete for elements of args
+```
+
+- dot autocomplete does not show at all automatically
+
+in `foo = lib.` i need to hit control + space to see autocomplete. 
+I assume its the debounce somehow not triggering the auto complete event? Maybe we should just lower the debounce?
+We should we just do w/e rust analyzer does cuz it feels good for it. Maybe we can pre-compute autocomplete as you are typing lib or something?
+
+EDIT: actually it worked automatically now?? seems sus need some better testing maybe
+
+
 ---
 
 ## 1. Add CI pipeline for tests/clippy/fmt

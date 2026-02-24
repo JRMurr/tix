@@ -1,6 +1,6 @@
-{ 
+{
   # type: pkgs :: Pkgs
-  pkgs
+  pkgs,
 }:
 let
   lib = pkgs.lib;
