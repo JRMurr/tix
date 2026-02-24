@@ -31,12 +31,28 @@ Communicates over stdin/stdout. Same stub flags as `tix-cli`.
 
 ### VS Code
 
-Install the [Nix IDE](https://marketplace.visualstudio.com/items?itemName=jnoortheen.nix-ide) extension, then point it at `tix-lsp` in your workspace or user settings:
+Install the [Nix IDE](https://marketplace.visualstudio.com/items?itemName=jnoortheen.nix-ide) extension, then configure it to use `tix-lsp`.
+
+**Minimal setup** — add to your `.vscode/settings.json` (workspace) or user settings:
 
 ```json
 {
   "nix.enableLanguageServer": true,
   "nix.serverPath": "tix-lsp"
+}
+```
+
+**With extra stubs and initialization options:**
+
+```json
+{
+  "nix.enableLanguageServer": true,
+  "nix.serverPath": "tix-lsp",
+  "nix.serverSettings": {
+    "stubs": ["./my-stubs"],
+    "inlayHints": { "enable": true },
+    "diagnostics": { "enable": true }
+  }
 }
 ```
 
@@ -56,7 +72,7 @@ vim.api.nvim_create_autocmd("FileType", {
 
 ### Initialization options
 
-The LSP accepts configuration via `initializationOptions`:
+The LSP accepts configuration via `initializationOptions`. How you pass these depends on your editor — in VS Code they go under `nix.serverSettings`, in Neovim they go in the `init_options` field of `vim.lsp.start()`:
 
 ```json
 {

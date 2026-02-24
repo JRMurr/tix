@@ -2,17 +2,42 @@
 
 ## Install
 
-### Nix Flake (recommended)
+### Try without installing
+
+The fastest way to try tix — no installation required:
 
 ```bash
-# Run directly
 nix run github:JRMurr/tix -- my-file.nix
 
-# With pre-generated NixOS + Home Manager stubs
+# With pre-generated NixOS + Home Manager type stubs:
 nix run github:JRMurr/tix#with-stubs -- my-file.nix
 ```
 
-To add tix to your project's dev shell:
+### Nix Flake (recommended)
+
+Add tix to your flake inputs:
+
+```nix
+{
+  inputs.tix.url = "github:JRMurr/tix";
+}
+```
+
+Then add the package to your system configuration:
+
+```nix
+# configuration.nix (NixOS)
+{ inputs, pkgs, ... }:
+{
+  environment.systemPackages = [
+    inputs.tix.packages.${pkgs.system}.default
+    # Or for the variant with pre-generated stubs:
+    # inputs.tix.packages.${pkgs.system}.with-stubs
+  ];
+}
+```
+
+Or add it to a dev shell:
 
 ```nix
 {
@@ -29,6 +54,48 @@ To add tix to your project's dev shell:
       };
     };
 }
+```
+
+Or install imperatively with `nix profile`:
+
+```bash
+nix profile install github:JRMurr/tix
+```
+
+### Without flakes
+
+Add to a traditional NixOS configuration via `fetchTarball`:
+
+```nix
+# configuration.nix
+let
+  tix = import (builtins.fetchTarball "https://github.com/JRMurr/tix/archive/main.tar.gz") {};
+in
+{
+  environment.systemPackages = [
+    tix.packages.${builtins.currentSystem}.default
+    # Or for the variant with pre-generated stubs:
+    # tix.packages.${builtins.currentSystem}.with-stubs
+  ];
+}
+```
+
+Pin to a specific revision for reproducibility:
+
+```nix
+let
+  tix = import (builtins.fetchTarball {
+    url = "https://github.com/JRMurr/tix/archive/<rev>.tar.gz";
+    sha256 = "<hash>";  # nix-prefetch-url --unpack <url>
+  }) {};
+in
+  tix.packages.${builtins.currentSystem}.default
+```
+
+Or install imperatively with `nix-env`:
+
+```bash
+nix-env -f https://github.com/JRMurr/tix/archive/main.tar.gz -iA packages.x86_64-linux.default
 ```
 
 ### Build from source
