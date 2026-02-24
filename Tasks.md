@@ -331,36 +331,3 @@ No `textDocument/codeAction` support. High-value quick fixes for a type checker:
 
 **Files touched**: new `lsp/src/code_actions.rs`, `lsp/src/server.rs`
 
----
-
-## 17. Add `OutputTy::Top` variant
-
-**Effort**: Medium | **Impact**: Low-Medium
-
-Tautologies like `null | ~null` are currently removed silently. If the tautology
-is the only member, the result becomes an empty union which falls through to
-`TyVar`. An explicit `Top` would be more honest in type output.
-
-See old Tasks.md item A3 for details.
-
-**Files touched**: `lang_ty/src/arc_ty.rs`, `lang_check/src/collect.rs`,
-`lang_ty/src/simplify.rs`
-
----
-
-## 18. Cross-file import inference tests
-
-**Effort**: Medium | **Impact**: Medium
-
-Limited test coverage for `import_types` — pre-resolved types from imported
-files.
-
-**What to do**:
-
-1. Add tests in `lang_check/src/tests.rs` using `check_file_with_imports`.
-2. Verify imported polymorphic types are properly isolated (constraints don't
-   leak back).
-3. Verify imported union/intersection types are interned correctly.
-4. Verify named/aliased imports preserve provenance.
-
-**Files touched**: `lang_check/src/tests.rs`
