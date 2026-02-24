@@ -65,14 +65,15 @@ impl CheckCtx<'_> {
             return Ok(());
         }
 
-        // Periodic deadline check inside the constraint propagation hotpath.
-        // This catches cases where a single infer_expr call triggers a huge
-        // constrain() cascade (e.g. structural subtyping on large attrsets).
-        if self.deadline.is_some() {
+        // Periodic deadline/cancellation check inside the constraint propagation
+        // hotpath. This catches cases where a single infer_expr call triggers a
+        // huge constrain() cascade (e.g. structural subtyping on large attrsets),
+        // or when the LSP cancels analysis because a newer edit arrived.
+        if self.deadline.is_some() || self.cancel_flag.is_some() {
             self.op_counter = self.op_counter.wrapping_add(1);
             if self.op_counter.is_multiple_of(Self::DEADLINE_CHECK_INTERVAL) && self.past_deadline() {
                 log::warn!(
-                    "inference deadline exceeded during constrain (after {} operations, {} cache entries, {} type slots)",
+                    "inference aborted during constrain (after {} operations, {} cache entries, {} type slots)",
                     self.op_counter,
                     self.types.constrain_cache.len(),
                     self.types.storage.len(),

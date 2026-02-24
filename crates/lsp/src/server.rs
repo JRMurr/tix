@@ -5,10 +5,25 @@
 // Lifecycle (initialize/shutdown) and request dispatch. Analysis runs inside
 // spawn_blocking because rnix::Root is !Send + !Sync. The AnalysisState is
 // behind a parking_lot::Mutex and all access happens within the blocking task.
+//
+// Debouncing: didChange/didOpen notifications are debounced per-file (300ms
+// default). Rapid edits restart the timer so analysis only runs after the user
+// pauses typing.
+//
+// Cancellation: when a new edit arrives for a file that's currently being
+// analyzed, the in-flight analysis is cancelled via an Arc<AtomicBool> flag
+// that's checked periodically by the inference engine (alongside the existing
+// deadline mechanism). This avoids blocking the editor while waiting for a
+// 10-second timeout on a stale version of the file.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
 use parking_lot::Mutex;
+use tokio::sync::mpsc;
 
 use lang_check::aliases::TypeAliasRegistry;
 use tower_lsp::jsonrpc::Result;
@@ -18,15 +33,38 @@ use tower_lsp::{Client, LanguageServer};
 use crate::config::TixConfig;
 use crate::state::{AnalysisState, FileAnalysis};
 
+/// Default debounce delay for `didChange` notifications. `didOpen` uses a
+/// shorter delay (see `DEBOUNCE_DELAY_DID_OPEN`) because the user expects
+/// immediate feedback when first opening a file.
+const DEBOUNCE_DELAY_MS: u64 = 300;
+
+/// Debounce delay for `didOpen` — shorter than `didChange` because the user
+/// just opened the file and expects to see types quickly. Still non-zero to
+/// coalesce rapid multi-file opens (e.g. editor restoring a session).
+const DEBOUNCE_DELAY_DID_OPEN_MS: u64 = 50;
+
+/// Per-file debounce/cancellation state. Each open file gets a background
+/// tokio task that receives edit notifications, debounces them, and then
+/// runs analysis with a cancellation flag.
+struct DebounceWorker {
+    /// Send new file contents (and debounce delay) to the background worker.
+    tx: mpsc::UnboundedSender<(String, Duration)>,
+    /// Cancellation flag for the currently running analysis (if any).
+    /// Set to `true` when a newer edit supersedes the in-flight analysis.
+    cancel_flag: Arc<AtomicBool>,
+}
+
 pub struct TixLanguageServer {
     client: Client,
-    state: Mutex<AnalysisState>,
+    state: Arc<Mutex<AnalysisState>>,
     config: Mutex<TixConfig>,
     /// CLI-provided stub paths, kept so they can be re-loaded when
     /// the config changes at runtime.
     cli_stub_paths: Vec<PathBuf>,
     /// When true, skip loading built-in nixpkgs stubs.
     no_default_stubs: bool,
+    /// Per-file debounce workers. Keyed by canonical file path.
+    debounce_workers: Mutex<HashMap<PathBuf, DebounceWorker>>,
 }
 
 impl TixLanguageServer {
@@ -38,63 +76,165 @@ impl TixLanguageServer {
     ) -> Self {
         Self {
             client,
-            state: Mutex::new(AnalysisState::new(registry)),
+            state: Arc::new(Mutex::new(AnalysisState::new(registry))),
             config: Mutex::new(TixConfig::default()),
             cli_stub_paths,
             no_default_stubs,
+            debounce_workers: Mutex::new(HashMap::new()),
         }
     }
 
-    /// Run analysis for a file and publish diagnostics.
-    /// Called from didOpen and didChange.
-    async fn on_change(&self, uri: Url, text: String) {
+    /// Schedule analysis for a file. The actual analysis is debounced: rapid
+    /// calls within the debounce window only trigger a single analysis run
+    /// using the latest content.
+    fn schedule_analysis(&self, uri: Url, text: String, debounce_delay: Duration) {
         let path = match uri_to_path(&uri) {
             Some(p) => p,
             None => return,
         };
 
-        let diagnostics_enabled = self.config.lock().diagnostics.enable;
+        let mut workers = self.debounce_workers.lock();
 
-        // All analysis runs in spawn_blocking because rnix::Root is !Send.
-        // We gather the LSP-safe results (diagnostics) inside the blocking
-        // closure and publish them afterwards. We always run analysis (needed
-        // for hover, completion, etc.) but only collect diagnostics if enabled.
-        let file_name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.display().to_string());
-
-        let (diagnostics, timing_msg) = {
-            let mut state = self.state.lock();
-            let (analysis, timing) = state.update_file(path, text);
-
-            let timing_msg = format!("{file_name}: {timing}");
-            log::info!("{timing_msg}");
-
-            let diags = if diagnostics_enabled {
-                let root = analysis.parsed.tree();
-
-                crate::diagnostics::to_lsp_diagnostics(
-                    &analysis.check_result.diagnostics,
-                    &analysis.source_map,
-                    &analysis.line_index,
-                    &root,
-                )
-            } else {
-                vec![]
-            };
-
-            (diags, timing_msg)
+        // Check if an existing debounce worker can accept this edit.
+        let reuse_existing = if let Some(worker) = workers.get(&path) {
+            // Signal cancellation of any in-flight analysis for this file.
+            worker.cancel_flag.store(true, Ordering::Relaxed);
+            // Check if the worker channel is still open.
+            !worker.tx.is_closed()
+        } else {
+            false
         };
 
-        // Send timing to the editor's output panel via the LSP protocol.
-        self.client
-            .log_message(MessageType::INFO, &timing_msg)
-            .await;
+        if reuse_existing {
+            workers.get(&path).unwrap().tx.send((text, debounce_delay)).ok();
+            return;
+        }
 
-        self.client
-            .publish_diagnostics(uri, diagnostics, None)
-            .await;
+        // Create a new debounce worker for this file.
+        let (tx, rx) = mpsc::unbounded_channel();
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+
+        tx.send((text, debounce_delay)).ok();
+
+        let worker = DebounceWorker {
+            tx,
+            cancel_flag: cancel_flag.clone(),
+        };
+        workers.insert(path.clone(), worker);
+        drop(workers);
+
+        // Spawn the debounce worker task.
+        let client = self.client.clone();
+        let state = self.state.clone();
+        let diagnostics_enabled = self.config.lock().diagnostics.enable;
+
+        self.spawn_debounce_worker(path, rx, cancel_flag, client, state, diagnostics_enabled);
+    }
+
+    /// Spawn a background task that debounces edits for a single file and
+    /// runs analysis after the debounce delay.
+    fn spawn_debounce_worker(
+        &self,
+        path: PathBuf,
+        mut rx: mpsc::UnboundedReceiver<(String, Duration)>,
+        initial_cancel_flag: Arc<AtomicBool>,
+        client: Client,
+        state: Arc<Mutex<AnalysisState>>,
+        diagnostics_enabled: bool,
+    ) {
+        tokio::spawn(async move {
+            // The cancel flag for the current analysis run. Updated each time
+            // we start a new analysis.
+            let mut current_cancel = initial_cancel_flag;
+
+            while let Some((mut text, mut delay)) = rx.recv().await {
+                // Debounce loop: keep consuming new edits until the channel is
+                // quiet for the debounce delay.
+                loop {
+                    tokio::select! {
+                        // Wait for the debounce delay to expire.
+                        () = tokio::time::sleep(delay) => {
+                            break;
+                        }
+                        // A newer edit arrived — restart the timer.
+                        newer = rx.recv() => {
+                            match newer {
+                                Some((new_text, new_delay)) => {
+                                    text = new_text;
+                                    delay = new_delay;
+                                    // Continue the debounce loop with the new text.
+                                }
+                                None => {
+                                    // Channel closed (file was closed or server
+                                    // shutting down). Exit the worker.
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Cancel any previous in-flight analysis for this file.
+                current_cancel.store(true, Ordering::Relaxed);
+
+                // Create a fresh cancel flag for this analysis run.
+                let cancel_flag = Arc::new(AtomicBool::new(false));
+                current_cancel = cancel_flag.clone();
+
+                let file_name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.display().to_string());
+
+                // Run analysis. This acquires the AnalysisState lock, which
+                // serializes analysis across all files. The cancel flag allows
+                // the analysis to be aborted early if a newer edit arrives.
+                let (diagnostics, timing_msg, was_cancelled) = {
+                    let mut st = state.lock();
+                    let (analysis, timing) =
+                        st.update_file_with_cancel(path.clone(), text.clone(), cancel_flag.clone());
+
+                    let was_cancelled = cancel_flag.load(Ordering::Relaxed);
+                    let timing_msg = format!("{file_name}: {timing}");
+                    if was_cancelled {
+                        log::info!("{timing_msg} (cancelled)");
+                    } else {
+                        log::info!("{timing_msg}");
+                    }
+
+                    let diags = if diagnostics_enabled && !was_cancelled {
+                        let root = analysis.parsed.tree();
+                        crate::diagnostics::to_lsp_diagnostics(
+                            &analysis.check_result.diagnostics,
+                            &analysis.source_map,
+                            &analysis.line_index,
+                            &root,
+                        )
+                    } else {
+                        vec![]
+                    };
+
+                    (diags, timing_msg, was_cancelled)
+                };
+
+                // Don't publish results from cancelled analysis — a newer
+                // version is already queued.
+                if was_cancelled {
+                    continue;
+                }
+
+                // Send timing to the editor's output panel.
+                client
+                    .log_message(MessageType::INFO, &timing_msg)
+                    .await;
+
+                let uri = match Url::from_file_path(&path) {
+                    Ok(u) => u,
+                    Err(_) => continue,
+                };
+                client.publish_diagnostics(uri, diagnostics, None).await;
+            }
+        });
     }
 
     /// Lock the state, look up the file analysis for `uri`, and call `f`.
@@ -315,14 +455,24 @@ impl LanguageServer for TixLanguageServer {
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
-        self.on_change(params.text_document.uri, params.text_document.text)
-            .await;
+        // Use a short debounce for didOpen — the user expects quick feedback
+        // when opening a file, but we still coalesce rapid multi-file opens
+        // (e.g. editor restoring a session with many tabs).
+        self.schedule_analysis(
+            params.text_document.uri,
+            params.text_document.text,
+            Duration::from_millis(DEBOUNCE_DELAY_DID_OPEN_MS),
+        );
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         // With FULL sync, there's exactly one content change containing the full text.
         if let Some(change) = params.content_changes.into_iter().next() {
-            self.on_change(params.text_document.uri, change.text).await;
+            self.schedule_analysis(
+                params.text_document.uri,
+                change.text,
+                Duration::from_millis(DEBOUNCE_DELAY_MS),
+            );
         }
     }
 
@@ -332,8 +482,18 @@ impl LanguageServer for TixLanguageServer {
             .publish_diagnostics(params.text_document.uri.clone(), vec![], None)
             .await;
 
-        // Remove cached analysis.
+        // Remove the debounce worker and cached analysis.
         if let Some(path) = uri_to_path(&params.text_document.uri) {
+            // Cancel any in-flight analysis and remove the worker.
+            {
+                let mut workers = self.debounce_workers.lock();
+                if let Some(worker) = workers.remove(&path) {
+                    worker.cancel_flag.store(true, Ordering::Relaxed);
+                    // Dropping the sender closes the channel, which will cause
+                    // the worker task to exit.
+                }
+            }
+
             let mut state = self.state.lock();
             state.files.remove(&path);
         }
