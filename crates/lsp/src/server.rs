@@ -104,9 +104,7 @@ impl TixLanguageServer {
         };
 
         // Store the latest text immediately so completion can use it.
-        self.pending_text
-            .lock()
-            .insert(path.clone(), text.clone());
+        self.pending_text.lock().insert(path.clone(), text.clone());
 
         let mut workers = self.debounce_workers.lock();
 
@@ -162,6 +160,7 @@ impl TixLanguageServer {
 
     /// Spawn a background task that debounces edits for a single file and
     /// runs analysis after the debounce delay.
+    #[allow(clippy::too_many_arguments)]
     fn spawn_debounce_worker(
         &self,
         path: PathBuf,
@@ -260,7 +259,7 @@ impl TixLanguageServer {
                 // only if the text hasn't been superseded by an even newer edit.
                 {
                     let mut pt = pending_text.lock();
-                    if pt.get(&path).map_or(false, |t| *t == text) {
+                    if pt.get(&path).is_some_and(|t| *t == text) {
                         pt.remove(&path);
                     }
                 }

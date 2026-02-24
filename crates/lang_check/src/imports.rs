@@ -122,6 +122,7 @@ pub struct ImportResolution {
 ///
 /// The `cache` prevents re-inferring files in diamond import patterns (A imports
 /// B and C, both of which import D — D is inferred only once).
+#[allow(clippy::too_many_arguments)]
 pub fn resolve_imports(
     db: &dyn AstDb,
     file: NixFile,

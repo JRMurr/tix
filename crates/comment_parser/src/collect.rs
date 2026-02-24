@@ -34,9 +34,9 @@ pub fn collect_type_decls(pairs: Pairs<Rule>) -> Result<Vec<TypeDecl>, CollectEr
             }
             Rule::type_line => {
                 let mut inner = pair.into_inner();
-                let ident_rule = inner.next().ok_or_else(|| {
-                    CollectError::new("type_line missing identifier")
-                })?;
+                let ident_rule = inner
+                    .next()
+                    .ok_or_else(|| CollectError::new("type_line missing identifier"))?;
 
                 let type_expr = collect_type_expr(inner)?.ok_or_else(|| {
                     CollectError::new(format!(
@@ -101,9 +101,8 @@ pub fn collect_type_expr(mut pairs: Pairs<Rule>) -> Result<Option<ParsedTy>, Col
 
         Rule::attrset_type => collect_attrset(curr.into_inner())?,
         Rule::list_type => {
-            let inner = collect_type_expr(curr.into_inner())?.ok_or_else(|| {
-                CollectError::new("list type has empty element type")
-            })?;
+            let inner = collect_type_expr(curr.into_inner())?
+                .ok_or_else(|| CollectError::new("list type has empty element type"))?;
             ParsedTy::List(inner.into())
         }
         Rule::string_ref => ParsedTy::Primitive(PrimitiveTy::String),
@@ -157,9 +156,8 @@ fn collect_one(pair: pest::iterators::Pair<Rule>) -> Result<ParsedTy, CollectErr
             .ok_or_else(|| CollectError::new("expected type expression, found empty")),
         Rule::attrset_type => collect_attrset(pair.into_inner()),
         Rule::list_type => {
-            let inner = collect_type_expr(pair.into_inner())?.ok_or_else(|| {
-                CollectError::new("list type has empty element type")
-            })?;
+            let inner = collect_type_expr(pair.into_inner())?
+                .ok_or_else(|| CollectError::new("list type has empty element type"))?;
             Ok(ParsedTy::List(inner.into()))
         }
         Rule::string_ref => Ok(ParsedTy::Primitive(PrimitiveTy::String)),
@@ -236,18 +234,16 @@ fn collect_attrset(pairs: Pairs<Rule>) -> Result<ParsedTy, CollectError> {
                     .ok_or_else(|| CollectError::new("named_field missing field name"))?
                     .as_str()
                     .into();
-                let ty = collect_type_expr(inner)?.ok_or_else(|| {
-                    CollectError::new(format!("field '{name}' has empty type"))
-                })?;
+                let ty = collect_type_expr(inner)?
+                    .ok_or_else(|| CollectError::new(format!("field '{name}' has empty type")))?;
                 fields.insert(name, ty.into());
             }
             Rule::dyn_field => {
                 let inner = pair.into_inner();
                 // The "_" token is consumed by the grammar rule; the inner
                 // pairs contain only the type_expr.
-                let ty = collect_type_expr(inner)?.ok_or_else(|| {
-                    CollectError::new("dynamic field has empty type")
-                })?;
+                let ty = collect_type_expr(inner)?
+                    .ok_or_else(|| CollectError::new("dynamic field has empty type"))?;
                 dyn_ty = Some(ty.into());
             }
             Rule::open_marker => {

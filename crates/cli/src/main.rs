@@ -333,7 +333,7 @@ fn run_check(
                 result
                     .inference
                     .as_ref()
-                    .map_or(true, |inf| inf.name_ty_map.get(*id).is_none())
+                    .is_none_or(|inf| inf.name_ty_map.get(*id).is_none())
             })
             .map(|(_, name)| name.text.clone())
             .collect();

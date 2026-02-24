@@ -170,10 +170,7 @@ impl fmt::Display for TixDiagnosticKind {
                         .map(|n| format!("`{n}`"))
                         .collect::<Vec<_>>()
                         .join(", ");
-                    write!(
-                        f,
-                        "type inference timed out — missing types for: {names}"
-                    )
+                    write!(f, "type inference timed out — missing types for: {names}")
                 } else {
                     let shown = missing_bindings[..5]
                         .iter()
