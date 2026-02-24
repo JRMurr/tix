@@ -6,13 +6,15 @@ Things tix doesn't support yet, or handles imperfectly.
 
 ### `with` blocks
 
-Only the innermost `with` environment is constrained for unresolved names. Nested `with` blocks don't fully fall through:
+Nested `with` blocks resolve names inner-to-outer, matching Nix runtime semantics:
 
 ```nix
 with a; with b;
-  # names resolve against b, then a — but tix only constrains against b
+  # names resolve against b first, then a if b doesn't have the field
   x
 ```
+
+The innermost `with` scope that contains the field wins, so shadowing works correctly. If no `with` scope has the field, a `MissingField` error is reported.
 
 ### Literal / singleton types
 

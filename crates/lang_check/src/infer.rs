@@ -13,7 +13,9 @@ use super::{CheckCtx, InferenceError, InferenceResult, LocatedError, Polarity, T
 use crate::collect::{canonicalize_standalone, Collector};
 use crate::diagnostic;
 use crate::diagnostic::TixDiagnostic;
-use crate::infer_expr::{BinConstraint, PendingHasField, PendingMerge, PendingOverload};
+use crate::infer_expr::{
+    BinConstraint, PendingHasField, PendingMerge, PendingOverload, PendingWithFallback,
+};
 use crate::storage::TypeEntry;
 use lang_ast::nameres::{DependentGroup, GroupedDefs};
 use lang_ast::Expr;
@@ -659,6 +661,18 @@ impl CheckCtx<'_> {
                             false => remaining.push(super::PendingConstraint::HasField(hf)),
                         }
                     }
+                    super::PendingConstraint::WithFallback(wf) => {
+                        self.current_expr = wf.at_expr;
+                        match self
+                            .try_resolve_with_fallback(&wf)
+                            .map_err(|err| self.locate_err(err))?
+                        {
+                            true => made_progress = true,
+                            false => {
+                                remaining.push(super::PendingConstraint::WithFallback(wf))
+                            }
+                        }
+                    }
                 }
             }
 
@@ -802,6 +816,80 @@ impl CheckCtx<'_> {
             // resolved to avoid double-reporting.
             _ => Ok(true),
         }
+    }
+
+    /// Try to resolve a deferred multi-`with` fallback constraint.
+    ///
+    /// Nix tries `with` environments inner-to-outer at runtime. We walk the
+    /// env list (inner first) and pick the first env that definitely has the
+    /// field. That env's value_ty is connected to the result variable. If an
+    /// env is not yet concrete, we must wait (can't determine field presence).
+    /// If all envs are concrete/closed and none has the field, it's an error.
+    fn try_resolve_with_fallback(
+        &mut self,
+        wf: &PendingWithFallback,
+    ) -> Result<bool, InferenceError> {
+        let mut all_concrete_or_closed = true;
+
+        for &(env_ty, value_ty) in &wf.envs {
+            let Some(concrete) = self.types.find_concrete_through_inter(env_ty) else {
+                // Not yet concrete — can't determine field presence. We must
+                // stop here and wait, because an inner env that's still unknown
+                // might have the field, and we must respect shadowing order.
+                all_concrete_or_closed = false;
+                break;
+            };
+
+            match concrete {
+                Ty::AttrSet(ref attr) => {
+                    if attr.fields.contains_key(&wf.field) {
+                        // This env has the field — it's the winner. Connect
+                        // its value variable to the result and stop.
+                        self.constrain(value_ty, wf.result)?;
+                        self.constrain(wf.result, value_ty)?;
+                        return Ok(true);
+                    } else if attr.dyn_ty.is_some() {
+                        // Dynamic field type — field might be present.
+                        all_concrete_or_closed = false;
+                        break;
+                    } else if attr.open {
+                        // Open attrset — field might appear via future constraints.
+                        all_concrete_or_closed = false;
+                        break;
+                    }
+                    // Closed without the field: this env definitely doesn't
+                    // have it, continue checking the next outer env.
+                }
+                _ => {
+                    // Non-attrset: TypeMismatch is already caught by the
+                    // constrain() in infer_reference. Treat as "no field here"
+                    // and continue to the next env.
+                }
+            }
+        }
+
+        if all_concrete_or_closed {
+            // Every env is known-concrete and none has the field.
+            // Collect available fields from all envs for the error message.
+            let mut available: Vec<smol_str::SmolStr> = Vec::new();
+            for &(env_ty, _) in &wf.envs {
+                if let Some(Ty::AttrSet(attr)) = self.types.find_concrete_through_inter(env_ty) {
+                    for key in attr.fields.keys() {
+                        if !available.contains(key) {
+                            available.push(key.clone());
+                        }
+                    }
+                }
+            }
+            return Err(InferenceError::MissingField {
+                field: wf.field.clone(),
+                available,
+            });
+        }
+
+        // Still pending: at least one env is not concrete/closed, and no inner
+        // env with the field has been found yet.
+        Ok(false)
     }
 
     fn try_resolve_merge(&mut self, mg: &PendingMerge) -> Result<bool, InferenceError> {

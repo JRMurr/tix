@@ -21,7 +21,7 @@ use aliases::TypeAliasRegistry;
 use comment_parser::{parse_and_collect, parse_context_annotation, ParsedTy, TypeVarValue};
 use derive_more::Debug;
 use diagnostic::TixDiagnostic;
-use infer_expr::{PendingHasField, PendingMerge, PendingOverload};
+use infer_expr::{PendingHasField, PendingMerge, PendingOverload, PendingWithFallback};
 use la_arena::ArenaMap;
 use lang_ast::{AstDb, Expr, ExprId, Module, NameId, NameResolution, NixFile, OverloadBinOp};
 use lang_ty::{OutputTy, PrimitiveTy, Ty};
@@ -305,6 +305,10 @@ pub enum PendingConstraint {
     Overload(PendingOverload),
     Merge(PendingMerge),
     HasField(PendingHasField),
+    /// Multi-`with` fallback: at least one of the `with` environments must
+    /// contain the requested field. Emitted when a name resolves through
+    /// multiple nested `with` scopes.
+    WithFallback(PendingWithFallback),
 }
 
 /// Constraints whose resolution is deferred until operand types are known.
