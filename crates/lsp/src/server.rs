@@ -422,6 +422,7 @@ impl LanguageServer for TixLanguageServer {
                         },
                     ),
                 ),
+                code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
                 workspace_symbol_provider: Some(OneOf::Left(true)),
                 inlay_hint_provider: Some(OneOf::Left(true)),
                 signature_help_provider: Some(SignatureHelpOptions {
@@ -765,6 +766,21 @@ impl LanguageServer for TixLanguageServer {
                 params.range,
                 &root,
             ))
+        })
+    }
+
+    async fn code_action(
+        &self,
+        params: CodeActionParams,
+    ) -> Result<Option<CodeActionResponse>> {
+        self.with_analysis(&params.text_document.uri, |_, analysis| {
+            let root = analysis.parsed.tree();
+            let actions = crate::code_actions::code_actions(analysis, &params, &root);
+            if actions.is_empty() {
+                None
+            } else {
+                Some(actions)
+            }
         })
     }
 

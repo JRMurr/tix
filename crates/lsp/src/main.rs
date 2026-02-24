@@ -1,3 +1,4 @@
+mod code_actions;
 mod completion;
 mod config;
 mod convert;

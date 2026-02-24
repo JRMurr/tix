@@ -11,6 +11,7 @@ use proptest::prelude::*;
 use rowan::ast::AstNode;
 use tower_lsp::lsp_types::{Position, Range};
 
+use crate::code_actions::code_actions;
 use crate::completion::completion;
 use crate::document_highlight::document_highlight;
 use crate::document_link::document_links;
@@ -327,5 +328,28 @@ proptest! {
         let t = TestAnalysis::new(&src);
         let analysis = t.analysis();
         let _ = document_links(analysis, &t.root);
+    }
+
+    #[test]
+    fn pbt_code_actions_no_crash(src in arb_nix_source()) {
+        let t = TestAnalysis::new(&src);
+        let analysis = t.analysis();
+        let positions = interesting_positions(analysis, &t.root);
+        for ip in &positions {
+            let pos = analysis.line_index.position(ip.byte_offset());
+            let range = Range::new(pos, pos);
+            let params = tower_lsp::lsp_types::CodeActionParams {
+                text_document: tower_lsp::lsp_types::TextDocumentIdentifier { uri: t.uri() },
+                range,
+                context: tower_lsp::lsp_types::CodeActionContext {
+                    diagnostics: vec![],
+                    only: None,
+                    trigger_kind: None,
+                },
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+            };
+            let _ = code_actions(analysis, &params, &t.root);
+        }
     }
 }

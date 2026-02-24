@@ -27,6 +27,7 @@ Communicates over stdin/stdout. Same stub flags as `tix-cli`.
 | **Semantic Tokens** | Syntax highlighting based on name kind |
 | **Selection Range** | Smart expand/shrink selection |
 | **Document Highlight** | Highlight all uses of the name under cursor |
+| **Code Actions** | Quick fixes: add missing field, add type annotation, remove unused binding |
 | **Formatting** | Runs `nixfmt` |
 | **Diagnostics** | Type errors, missing fields, import resolution errors, inference timeouts |
 
@@ -41,6 +42,16 @@ When diagnostics are enabled (`"diagnostics": { "enable": true }`), tix reports:
 - **Inference timeout** (WARNING): when type inference exceeds the 10-second deadline, partial results are still available for bindings inferred before the timeout
 
 Import errors appear at the `import` expression so you can see which import failed and why. The CLI (`tix-cli`) shows the same diagnostics with source context.
+
+## Code Actions
+
+Code actions (quick fixes / refactorings) are offered based on diagnostics and cursor position:
+
+- **Add missing field** (quick fix): when you access a field that doesn't exist on a closed attrset (e.g. `x.bar` where `x = { foo = 1; }`), offers to insert `bar = throw "TODO";` into the attrset definition. Only works when the attrset definition is visible in the same file.
+
+- **Add type annotation** (refactor): when the cursor is on a let-binding or rec-attrset field that has an inferred type, offers to insert a `/** type: name :: <type> */` doc comment above the binding. Skipped if an annotation already exists.
+
+- **Remove unused binding** (quick fix): when a let-binding has no references in the file, offers to remove the entire `name = value;` line. Names starting with `_` are excluded (conventional "unused" prefix in Nix).
 
 ## Performance
 
