@@ -21,9 +21,13 @@ pub fn to_lsp_diagnostics(
     diagnostics
         .iter()
         .map(|diag| {
-            // DuplicateKey carries its own AstPtr spans; point the diagnostic
-            // at the duplicate (second) definition for maximum visibility.
-            let range = if let TixDiagnosticKind::DuplicateKey { second, .. } = &diag.kind {
+            // File-level diagnostics (like InferenceTimeout) should only
+            // highlight the first line, not the entire file.
+            let range = if matches!(diag.kind, TixDiagnosticKind::InferenceTimeout) {
+                Range::new(Default::default(), Default::default())
+            } else if let TixDiagnosticKind::DuplicateKey { second, .. } = &diag.kind {
+                // DuplicateKey carries its own AstPtr spans; point the diagnostic
+                // at the duplicate (second) definition for maximum visibility.
                 let node = second.to_node(root.syntax());
                 line_index.range(node.text_range())
             } else {

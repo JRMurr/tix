@@ -23,6 +23,11 @@ pub struct ProjectConfig {
     /// Named contexts mapping file globs to module arg types.
     #[serde(default)]
     pub context: HashMap<String, ContextConfig>,
+
+    /// Maximum seconds for type inference on a single file before bailing
+    /// out with partial results. Defaults to 10 when omitted.
+    #[serde(default)]
+    pub deadline: Option<u64>,
 }
 
 /// A single context definition within `tix.toml`.

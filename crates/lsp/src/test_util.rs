@@ -174,6 +174,7 @@ impl ContextTestSetup {
         state.project_config = Some(ProjectConfig {
             stubs: vec![],
             context,
+            deadline: None,
         });
         state.config_dir = Some(temp_dir.clone());
 

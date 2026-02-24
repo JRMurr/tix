@@ -1591,6 +1591,7 @@ mod tests {
         state.project_config = Some(ProjectConfig {
             stubs: vec![],
             context: context_map,
+            deadline: None,
         });
         state.config_dir = Some(temp_dir.clone());
 
@@ -1637,6 +1638,7 @@ mod tests {
         state.project_config = Some(ProjectConfig {
             stubs: vec![],
             context: context_map,
+            deadline: None,
         });
         state.config_dir = Some(temp_dir.clone());
 
@@ -2069,6 +2071,7 @@ mod tests {
         state.project_config = Some(ProjectConfig {
             stubs: vec![],
             context: context_map,
+            deadline: None,
         });
         state.config_dir = Some(temp_dir.clone());
 

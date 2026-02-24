@@ -97,6 +97,9 @@ pub struct AnalysisState {
     pub project_config: Option<ProjectConfig>,
     /// Directory containing the tix.toml file (for resolving relative paths).
     pub config_dir: Option<PathBuf>,
+    /// Inference deadline in seconds (per top-level file). Configurable via
+    /// `deadline` in `tix.toml`, defaults to 10.
+    pub deadline_secs: u64,
     /// Cross-file import type cache. Persists across `update_file()` calls so
     /// files like `bwrap.nix` that are imported by many open files don't get
     /// re-inferred each time. Invalidated per-path when that path is edited,
@@ -112,6 +115,7 @@ impl AnalysisState {
             files: HashMap::new(),
             project_config: None,
             config_dir: None,
+            deadline_secs: 10,
             import_cache: HashMap::new(),
         }
     }
@@ -266,13 +270,14 @@ impl AnalysisState {
         let t_imports = t0.elapsed();
 
         // -- Phase 4: Type inference --
-        // 10-second deadline for the top-level file. If inference hangs (e.g.
-        // due to pathological constraint propagation on complex files), bail
-        // out with partial results rather than blocking the LSP indefinitely.
-        // The cancel flag provides an additional early-exit path when a newer
-        // edit supersedes this analysis.
+        // Deadline for the top-level file (configurable via `deadline` in
+        // tix.toml, default 10s). If inference hangs (e.g. due to pathological
+        // constraint propagation on complex files), bail out with partial
+        // results rather than blocking the LSP indefinitely. The cancel flag
+        // provides an additional early-exit path when a newer edit supersedes
+        // this analysis.
         let t0 = Instant::now();
-        let deadline = Some(Instant::now() + Duration::from_secs(10));
+        let deadline = Some(Instant::now() + Duration::from_secs(self.deadline_secs));
         let mut check_result = lang_check::check_file_collecting_with_cancel(
             &self.db,
             nix_file,

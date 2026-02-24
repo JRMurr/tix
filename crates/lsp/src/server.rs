@@ -409,6 +409,11 @@ impl LanguageServer for TixLanguageServer {
                                 }
                             }
 
+                            if let Some(secs) = project_cfg.deadline {
+                                log::info!("Inference deadline: {secs}s (from tix.toml)");
+                                state.deadline_secs = secs;
+                            }
+
                             state.project_config = Some(project_cfg);
                             state.config_dir = Some(config_dir);
                         }

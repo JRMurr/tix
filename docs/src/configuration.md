@@ -48,6 +48,14 @@ You can also set context per-file with a doc comment at the top:
 }
 ```
 
+### Inference deadline
+
+By default the LSP aborts type inference after 10 seconds per file (5 seconds per imported file) and returns partial results. If you work with large files that need more time, increase the deadline:
+
+```toml
+deadline = 30   # seconds
+```
+
 ### No-module escape hatch
 
 If tix incorrectly treats a file as a module, add this comment to disable module-aware features:
