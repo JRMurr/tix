@@ -22,9 +22,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt
-      # The .rustfmt.toml uses nightly-only options (imports_granularity,
-      # group_imports), so we run rustfmt via the nightly toolchain.
-      - run: cargo +nightly fmt --check
+      - run: cargo y fmt --check
 
   clippy:
     name: Clippy
