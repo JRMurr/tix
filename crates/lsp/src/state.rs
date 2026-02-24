@@ -460,6 +460,7 @@ mod tests {
     use super::*;
     use lang_check::aliases::TypeAliasRegistry;
     use rowan::ast::AstNode;
+    use tower_lsp::lsp_types::Url;
 
     #[test]
     fn cached_parse_roundtrips_source_text() {
@@ -525,11 +526,13 @@ mod tests {
         let (analysis, _timing) = state.update_file(nix_path.clone(), src);
 
         let root = analysis.parsed.tree();
+        let test_uri = Url::from_file_path(&nix_path).unwrap();
         let lsp_diags = crate::diagnostics::to_lsp_diagnostics(
             &analysis.check_result.diagnostics,
             &analysis.source_map,
             &analysis.line_index,
             &root,
+            &test_uri,
         );
 
         // Should have at least one warning-level diagnostic about the import.
@@ -547,6 +550,47 @@ mod tests {
             Some(tower_lsp::lsp_types::DiagnosticSeverity::WARNING),
             "import diagnostics should be warnings"
         );
+    }
+
+    #[test]
+    fn duplicate_key_diagnostic_has_related_information() {
+        // A let block with duplicate key `x` should produce a diagnostic
+        // with related_information pointing to the first definition.
+        let src = "let x = 1; x = 2; in x";
+        let path = crate::test_util::temp_path("dup_key.nix");
+
+        let mut state = AnalysisState::new(TypeAliasRegistry::default());
+        let (analysis, _timing) = state.update_file(path.clone(), src.to_string());
+
+        let root = analysis.parsed.tree();
+        let test_uri = Url::from_file_path(&path).unwrap();
+        let lsp_diags = crate::diagnostics::to_lsp_diagnostics(
+            &analysis.check_result.diagnostics,
+            &analysis.source_map,
+            &analysis.line_index,
+            &root,
+            &test_uri,
+        );
+
+        let dup_diags: Vec<_> = lsp_diags
+            .iter()
+            .filter(|d| d.message.contains("duplicate key"))
+            .collect();
+        assert!(
+            !dup_diags.is_empty(),
+            "expected a duplicate key diagnostic, got: {:?}",
+            lsp_diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+
+        let related = dup_diags[0].related_information.as_ref();
+        assert!(
+            related.is_some(),
+            "duplicate key diagnostic should have related_information"
+        );
+        let related = related.unwrap();
+        assert_eq!(related.len(), 1);
+        assert_eq!(related[0].message, "first defined here");
+        assert_eq!(related[0].location.uri, test_uri);
     }
 
     #[test]

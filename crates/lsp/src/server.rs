@@ -234,11 +234,14 @@ impl TixLanguageServer {
 
                     let diags = if diagnostics_enabled && !was_cancelled {
                         let root = analysis.parsed.tree();
+                        let file_uri = Url::from_file_path(&path)
+                            .unwrap_or_else(|_| Url::parse("file:///unknown").unwrap());
                         crate::diagnostics::to_lsp_diagnostics(
                             &analysis.check_result.diagnostics,
                             &analysis.source_map,
                             &analysis.line_index,
                             &root,
+                            &file_uri,
                         )
                     } else {
                         vec![]
@@ -585,6 +588,7 @@ impl LanguageServer for TixLanguageServer {
                             &analysis.source_map,
                             &analysis.line_index,
                             &root,
+                            &uri,
                         )
                     } else {
                         vec![]
