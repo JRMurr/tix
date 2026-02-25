@@ -6,9 +6,13 @@
 // spawn_blocking because rnix::Root is !Send + !Sync. The AnalysisState is
 // behind a parking_lot::Mutex and all access happens within the blocking task.
 //
-// Debouncing: didChange/didOpen notifications are debounced per-file (300ms
-// default). Rapid edits restart the timer so analysis only runs after the user
-// pauses typing.
+// Event coalescing (inspired by rust-analyzer): didChange/didOpen notifications
+// are cheap — they just send an event to a single analysis loop. The loop
+// drains all pending events via try_recv() before starting analysis, naturally
+// coalescing rapid edits without a per-file timer. Diagnostic publication is
+// deferred until quiescence (no new edits for DIAGNOSTIC_QUIESCENCE_MS),
+// preventing flicker during rapid typing. Analysis results are available to
+// interactive requests (hover, completion) immediately.
 //
 // Cancellation: when a new edit arrives for a file that's currently being
 // analyzed, the in-flight analysis is cancelled via an Arc<AtomicBool> flag
@@ -18,6 +22,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,25 +38,20 @@ use tower_lsp::{Client, LanguageServer};
 use crate::config::TixConfig;
 use crate::state::{AnalysisState, FileAnalysis};
 
-/// Default debounce delay for `didChange` notifications. `didOpen` uses a
-/// shorter delay (see `DEBOUNCE_DELAY_DID_OPEN`) because the user expects
-/// immediate feedback when first opening a file.
-const DEBOUNCE_DELAY_MS: u64 = 300;
+/// Quiescence delay for diagnostic publication. Diagnostics are held back
+/// until no new edits arrive for this duration, preventing flickering during
+/// rapid typing. Analysis results are available to interactive requests
+/// (hover, completion) immediately — only diagnostic *publication* is deferred.
+const DIAGNOSTIC_QUIESCENCE_MS: u64 = 200;
 
-/// Debounce delay for `didOpen` — shorter than `didChange` because the user
-/// just opened the file and expects to see types quickly. Still non-zero to
-/// coalesce rapid multi-file opens (e.g. editor restoring a session).
-const DEBOUNCE_DELAY_DID_OPEN_MS: u64 = 50;
-
-/// Per-file debounce/cancellation state. Each open file gets a background
-/// tokio task that receives edit notifications, debounces them, and then
-/// runs analysis with a cancellation flag.
-struct DebounceWorker {
-    /// Send new file contents (and debounce delay) to the background worker.
-    tx: mpsc::UnboundedSender<(String, Duration)>,
-    /// Cancellation flag for the currently running analysis (if any).
-    /// Set to `true` when a newer edit supersedes the in-flight analysis.
-    cancel_flag: Arc<AtomicBool>,
+/// Events sent to the single analysis loop. Mirrors rust-analyzer's closed
+/// Event enum pattern — all inputs to the loop are a single enum over one
+/// channel.
+enum AnalysisEvent {
+    /// File contents changed (didChange or didOpen).
+    FileChanged { path: PathBuf, text: String },
+    /// File closed (didClose). Clears pending diagnostics for this file.
+    FileClosed { path: PathBuf },
 }
 
 pub struct TixLanguageServer {
@@ -63,12 +63,15 @@ pub struct TixLanguageServer {
     cli_stub_paths: Vec<PathBuf>,
     /// When true, skip loading built-in nixpkgs stubs.
     no_default_stubs: bool,
-    /// Per-file debounce workers. Keyed by canonical file path.
-    debounce_workers: Mutex<HashMap<PathBuf, DebounceWorker>>,
+    /// Channel to the single analysis loop (like RA's VFS channel).
+    event_tx: mpsc::UnboundedSender<AnalysisEvent>,
+    /// Cancel flag for the currently running analysis. schedule_analysis()
+    /// sets this to true; the analysis loop swaps in a fresh flag before
+    /// starting each batch.
+    current_cancel: Arc<Mutex<Arc<AtomicBool>>>,
     /// Latest document text received via didChange/didOpen, stored immediately
-    /// before debouncing. Completion handlers check this to get a fresh parse
-    /// tree when the debounced analysis hasn't completed yet. Cleared once
-    /// analysis catches up.
+    /// so completion can re-parse on the fly while analysis catches up.
+    /// Cleared once analysis catches up.
     pending_text: Arc<Mutex<HashMap<PathBuf, String>>>,
 }
 
@@ -79,201 +82,55 @@ impl TixLanguageServer {
         cli_stub_paths: Vec<PathBuf>,
         no_default_stubs: bool,
     ) -> Self {
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let state = Arc::new(Mutex::new(AnalysisState::new(registry)));
+        let pending_text = Arc::new(Mutex::new(HashMap::new()));
+        let current_cancel = Arc::new(Mutex::new(Arc::new(AtomicBool::new(false))));
+
+        // Spawn the analysis loop eagerly. diagnostics_enabled defaults to
+        // true; if the editor sends a different config via initializationOptions
+        // before opening files, it takes effect before any analysis runs.
+        spawn_analysis_loop(
+            event_rx,
+            state.clone(),
+            client.clone(),
+            pending_text.clone(),
+            current_cancel.clone(),
+            true, // diagnostics default on
+        );
+
         Self {
             client,
-            state: Arc::new(Mutex::new(AnalysisState::new(registry))),
+            state,
             config: Mutex::new(TixConfig::default()),
             cli_stub_paths,
             no_default_stubs,
-            debounce_workers: Mutex::new(HashMap::new()),
-            pending_text: Arc::new(Mutex::new(HashMap::new())),
+            event_tx,
+            current_cancel,
+            pending_text,
         }
     }
 
-    /// Schedule analysis for a file. The actual analysis is debounced: rapid
-    /// calls within the debounce window only trigger a single analysis run
-    /// using the latest content.
-    ///
-    /// The text is stored immediately in `pending_text` so that request
-    /// handlers (e.g. completion) can re-parse it on the fly while the
-    /// debounce timer is still running.
-    fn schedule_analysis(&self, uri: Url, text: String, debounce_delay: Duration) {
+    /// Schedule analysis for a file. The text is stored immediately in
+    /// `pending_text` so that request handlers (e.g. completion) can re-parse
+    /// it on the fly, then an event is sent to the analysis loop which will
+    /// coalesce it with any other pending edits.
+    fn schedule_analysis(&self, uri: Url, text: String) {
         let path = match uri_to_path(&uri) {
             Some(p) => p,
             None => return,
         };
 
-        // Store the latest text immediately so completion can use it.
+        // Store latest text immediately (completion can use it right away).
         self.pending_text.lock().insert(path.clone(), text.clone());
 
-        let mut workers = self.debounce_workers.lock();
+        // Cancel any in-flight analysis (like RA's trigger_cancellation()).
+        self.current_cancel.lock().store(true, Ordering::Relaxed);
 
-        // Check if an existing debounce worker can accept this edit.
-        let reuse_existing = if let Some(worker) = workers.get(&path) {
-            // Signal cancellation of any in-flight analysis for this file.
-            worker.cancel_flag.store(true, Ordering::Relaxed);
-            // Check if the worker channel is still open.
-            !worker.tx.is_closed()
-        } else {
-            false
-        };
-
-        if reuse_existing {
-            workers
-                .get(&path)
-                .unwrap()
-                .tx
-                .send((text, debounce_delay))
-                .ok();
-            return;
-        }
-
-        // Create a new debounce worker for this file.
-        let (tx, rx) = mpsc::unbounded_channel();
-        let cancel_flag = Arc::new(AtomicBool::new(false));
-
-        tx.send((text, debounce_delay)).ok();
-
-        let worker = DebounceWorker {
-            tx,
-            cancel_flag: cancel_flag.clone(),
-        };
-        workers.insert(path.clone(), worker);
-        drop(workers);
-
-        // Spawn the debounce worker task.
-        let client = self.client.clone();
-        let state = self.state.clone();
-        let diagnostics_enabled = self.config.lock().diagnostics.enable;
-
-        let pending_text = self.pending_text.clone();
-        self.spawn_debounce_worker(
-            path,
-            rx,
-            cancel_flag,
-            client,
-            state,
-            diagnostics_enabled,
-            pending_text,
-        );
-    }
-
-    /// Spawn a background task that debounces edits for a single file and
-    /// runs analysis after the debounce delay.
-    #[allow(clippy::too_many_arguments)]
-    fn spawn_debounce_worker(
-        &self,
-        path: PathBuf,
-        mut rx: mpsc::UnboundedReceiver<(String, Duration)>,
-        initial_cancel_flag: Arc<AtomicBool>,
-        client: Client,
-        state: Arc<Mutex<AnalysisState>>,
-        diagnostics_enabled: bool,
-        pending_text: Arc<Mutex<HashMap<PathBuf, String>>>,
-    ) {
-        tokio::spawn(async move {
-            // The cancel flag for the current analysis run. Updated each time
-            // we start a new analysis.
-            let mut current_cancel = initial_cancel_flag;
-
-            while let Some((mut text, mut delay)) = rx.recv().await {
-                // Debounce loop: keep consuming new edits until the channel is
-                // quiet for the debounce delay.
-                loop {
-                    tokio::select! {
-                        // Wait for the debounce delay to expire.
-                        () = tokio::time::sleep(delay) => {
-                            break;
-                        }
-                        // A newer edit arrived — restart the timer.
-                        newer = rx.recv() => {
-                            match newer {
-                                Some((new_text, new_delay)) => {
-                                    text = new_text;
-                                    delay = new_delay;
-                                    // Continue the debounce loop with the new text.
-                                }
-                                None => {
-                                    // Channel closed (file was closed or server
-                                    // shutting down). Exit the worker.
-                                    return;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Cancel any previous in-flight analysis for this file.
-                current_cancel.store(true, Ordering::Relaxed);
-
-                // Create a fresh cancel flag for this analysis run.
-                let cancel_flag = Arc::new(AtomicBool::new(false));
-                current_cancel = cancel_flag.clone();
-
-                let file_name = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| path.display().to_string());
-
-                // Run analysis. This acquires the AnalysisState lock, which
-                // serializes analysis across all files. The cancel flag allows
-                // the analysis to be aborted early if a newer edit arrives.
-                let (diagnostics, timing_msg, was_cancelled) = {
-                    let mut st = state.lock();
-                    let (analysis, timing) =
-                        st.update_file_with_cancel(path.clone(), text.clone(), cancel_flag.clone());
-
-                    let was_cancelled = cancel_flag.load(Ordering::Relaxed);
-                    let timing_msg = format!("{file_name}: {timing}");
-                    if was_cancelled {
-                        log::info!("{timing_msg} (cancelled)");
-                    } else {
-                        log::info!("{timing_msg}");
-                    }
-
-                    let diags = if diagnostics_enabled && !was_cancelled {
-                        let root = analysis.parsed.tree();
-                        let file_uri = Url::from_file_path(&path)
-                            .unwrap_or_else(|_| Url::parse("file:///unknown").unwrap());
-                        crate::diagnostics::to_lsp_diagnostics(
-                            &analysis.check_result.diagnostics,
-                            &analysis.source_map,
-                            &analysis.line_index,
-                            &root,
-                            &file_uri,
-                        )
-                    } else {
-                        vec![]
-                    };
-
-                    (diags, timing_msg, was_cancelled)
-                };
-
-                // Don't publish results from cancelled analysis — a newer
-                // version is already queued.
-                if was_cancelled {
-                    continue;
-                }
-
-                // Analysis completed successfully — clear pending_text, but
-                // only if the text hasn't been superseded by an even newer edit.
-                {
-                    let mut pt = pending_text.lock();
-                    if pt.get(&path).is_some_and(|t| *t == text) {
-                        pt.remove(&path);
-                    }
-                }
-
-                // Send timing to the editor's output panel.
-                client.log_message(MessageType::INFO, &timing_msg).await;
-
-                let uri = match Url::from_file_path(&path) {
-                    Ok(u) => u,
-                    Err(_) => continue,
-                };
-                client.publish_diagnostics(uri, diagnostics, None).await;
-            }
-        });
+        // Send to analysis loop — it will drain and coalesce.
+        self.event_tx
+            .send(AnalysisEvent::FileChanged { path, text })
+            .ok();
     }
 
     /// Lock the state, look up the file analysis for `uri`, and call `f`.
@@ -335,6 +192,208 @@ impl TixLanguageServer {
 
         registry
     }
+}
+
+/// Single analysis loop task (like rust-analyzer's `GlobalState::run()`).
+///
+/// Receives `AnalysisEvent`s from `schedule_analysis` / `did_close` and
+/// processes them in batches. Key design properties:
+///
+/// - **Event coalescing**: after receiving the first event, drains all pending
+///   events via `try_recv()`. With FULL document sync, only the latest text
+///   per file matters, so rapid edits naturally collapse into a single analysis.
+///
+/// - **Diagnostic quiescence**: diagnostics are not published immediately after
+///   analysis. Instead they're buffered behind a timer. If new edits arrive
+///   before the timer fires, the stale diagnostics are discarded and the timer
+///   resets. This prevents flickering during rapid typing.
+///
+/// - **Inter-file cancellation**: between analyzing files in a batch, the loop
+///   checks whether new events have arrived. If so, it cancels the current
+///   batch and re-enters the drain phase to coalesce the new edits.
+#[allow(clippy::too_many_arguments)]
+fn spawn_analysis_loop(
+    mut rx: mpsc::UnboundedReceiver<AnalysisEvent>,
+    state: Arc<Mutex<AnalysisState>>,
+    client: Client,
+    pending_text: Arc<Mutex<HashMap<PathBuf, String>>>,
+    current_cancel: Arc<Mutex<Arc<AtomicBool>>>,
+    diagnostics_enabled: bool,
+) {
+    tokio::spawn(async move {
+        // Pending diagnostics waiting for quiescence, keyed by path.
+        let mut pending_diags: HashMap<PathBuf, Vec<Diagnostic>> = HashMap::new();
+        let mut diag_timer: Option<Pin<Box<tokio::time::Sleep>>> = None;
+
+        loop {
+            // ── Phase 1: Wait for event or diagnostic timer ──
+            //
+            // Like RA's select! in next_event(): block until something happens.
+            // If we have pending diagnostics, race the quiescence timer against
+            // new events. New events reset the timer (like RA discards stale
+            // diagnostics when state changes).
+            let first_event = if let Some(ref mut timer) = diag_timer {
+                tokio::select! {
+                    _ = &mut *timer => {
+                        // Quiescence reached — publish all pending diagnostics.
+                        for (path, diags) in pending_diags.drain() {
+                            if let Ok(uri) = Url::from_file_path(&path) {
+                                client.publish_diagnostics(uri, diags, None).await;
+                            }
+                        }
+                        diag_timer = None;
+                        // Now block until next event.
+                        match rx.recv().await {
+                            Some(ev) => ev,
+                            None => return,
+                        }
+                    }
+                    result = rx.recv() => match result {
+                        Some(ev) => {
+                            // New event arrived — stale diagnostics discarded,
+                            // timer reset after next analysis completes.
+                            pending_diags.clear();
+                            diag_timer = None;
+                            ev
+                        }
+                        None => return,
+                    }
+                }
+            } else {
+                match rx.recv().await {
+                    Some(ev) => ev,
+                    None => return,
+                }
+            };
+
+            // ── Phase 2: Drain all pending events (RA-style coalescing) ──
+            //
+            // Like RA's `while let Ok(msg) = receiver.try_recv()` pattern after
+            // handling the first event. With FULL document sync, only the latest
+            // text per file matters.
+            let mut changes: HashMap<PathBuf, String> = HashMap::new();
+            let mut closed: Vec<PathBuf> = Vec::new();
+
+            // Process the first event.
+            match first_event {
+                AnalysisEvent::FileChanged { path, text } => {
+                    changes.insert(path, text);
+                }
+                AnalysisEvent::FileClosed { path } => {
+                    closed.push(path);
+                }
+            }
+
+            // Drain remaining (like RA's coalesce loop).
+            while let Ok(event) = rx.try_recv() {
+                match event {
+                    AnalysisEvent::FileChanged { path, text } => {
+                        changes.insert(path, text);
+                    }
+                    AnalysisEvent::FileClosed { path } => {
+                        changes.remove(&path);
+                        closed.push(path);
+                    }
+                }
+            }
+
+            // Handle closed files: remove from pending diagnostics.
+            for path in &closed {
+                pending_diags.remove(path);
+            }
+
+            if changes.is_empty() {
+                continue;
+            }
+
+            // ── Phase 3: Analyze each changed file ──
+            //
+            // Like RA's process_changes() → apply_change(), but we do
+            // per-file analysis since tix doesn't batch via Salsa.
+            // Create a fresh cancel flag (like RA's trigger_cancellation()).
+            let cancel_flag = Arc::new(AtomicBool::new(false));
+            *current_cancel.lock() = cancel_flag.clone();
+
+            let mut any_completed = false;
+
+            for (path, text) in &changes {
+                // Check for new events between files. If the user typed more,
+                // bail out and let the next loop iteration coalesce them.
+                // This mirrors RA's cancellation-on-new-revision pattern.
+                if !rx.is_empty() {
+                    cancel_flag.store(true, Ordering::Relaxed);
+                    break;
+                }
+
+                let file_name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.display().to_string());
+
+                let (diags, timing_msg, was_cancelled) = {
+                    let mut st = state.lock();
+                    let (analysis, timing) = st.update_file_with_cancel(
+                        path.clone(),
+                        text.clone(),
+                        cancel_flag.clone(),
+                    );
+
+                    let was_cancelled = cancel_flag.load(Ordering::Relaxed);
+                    let timing_msg = format!("{file_name}: {timing}");
+                    if was_cancelled {
+                        log::info!("{timing_msg} (cancelled)");
+                    } else {
+                        log::info!("{timing_msg}");
+                    }
+
+                    let diags = if diagnostics_enabled && !was_cancelled {
+                        let root = analysis.parsed.tree();
+                        let file_uri = Url::from_file_path(path)
+                            .unwrap_or_else(|_| Url::parse("file:///unknown").unwrap());
+                        crate::diagnostics::to_lsp_diagnostics(
+                            &analysis.check_result.diagnostics,
+                            &analysis.source_map,
+                            &analysis.line_index,
+                            &root,
+                            &file_uri,
+                        )
+                    } else {
+                        vec![]
+                    };
+
+                    (diags, timing_msg, was_cancelled)
+                };
+
+                if was_cancelled {
+                    break;
+                }
+
+                // Clear pending_text for this file (analysis caught up).
+                {
+                    let mut pt = pending_text.lock();
+                    if pt.get(path).is_some_and(|t| t == text) {
+                        pt.remove(path);
+                    }
+                }
+
+                client.log_message(MessageType::INFO, &timing_msg).await;
+
+                // ── Phase 4: Defer diagnostic publication (quiescence) ──
+                //
+                // Like RA's `is_quiescent()` gate. Store diagnostics but
+                // don't publish yet. The timer at the top of the loop will
+                // publish them if no new edits arrive.
+                pending_diags.insert(path.clone(), diags);
+                any_completed = true;
+            }
+
+            if any_completed {
+                diag_timer = Some(Box::pin(tokio::time::sleep(Duration::from_millis(
+                    DIAGNOSTIC_QUIESCENCE_MS,
+                ))));
+            }
+        }
+    });
 }
 
 #[tower_lsp::async_trait]
@@ -508,49 +567,29 @@ impl LanguageServer for TixLanguageServer {
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
-        // Use a short debounce for didOpen — the user expects quick feedback
-        // when opening a file, but we still coalesce rapid multi-file opens
-        // (e.g. editor restoring a session with many tabs).
-        self.schedule_analysis(
-            params.text_document.uri,
-            params.text_document.text,
-            Duration::from_millis(DEBOUNCE_DELAY_DID_OPEN_MS),
-        );
+        self.schedule_analysis(params.text_document.uri, params.text_document.text);
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         // With FULL sync, there's exactly one content change containing the full text.
         if let Some(change) = params.content_changes.into_iter().next() {
-            self.schedule_analysis(
-                params.text_document.uri,
-                change.text,
-                Duration::from_millis(DEBOUNCE_DELAY_MS),
-            );
+            self.schedule_analysis(params.text_document.uri, change.text);
         }
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
-        // Clear diagnostics when a file is closed.
+        // Clear diagnostics immediately when a file is closed.
         self.client
             .publish_diagnostics(params.text_document.uri.clone(), vec![], None)
             .await;
 
-        // Remove the debounce worker and cached analysis.
         if let Some(path) = uri_to_path(&params.text_document.uri) {
-            // Cancel any in-flight analysis and remove the worker.
-            {
-                let mut workers = self.debounce_workers.lock();
-                if let Some(worker) = workers.remove(&path) {
-                    worker.cancel_flag.store(true, Ordering::Relaxed);
-                    // Dropping the sender closes the channel, which will cause
-                    // the worker task to exit.
-                }
-            }
-
+            self.current_cancel.lock().store(true, Ordering::Relaxed);
             self.pending_text.lock().remove(&path);
-
-            let mut state = self.state.lock();
-            state.files.remove(&path);
+            self.state.lock().files.remove(&path);
+            self.event_tx
+                .send(AnalysisEvent::FileClosed { path })
+                .ok();
         }
     }
 

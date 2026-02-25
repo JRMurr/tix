@@ -55,11 +55,11 @@ Code actions (quick fixes / refactorings) are offered based on diagnostics and c
 
 ## Performance
 
-### Debouncing
+### Event Coalescing
 
-`didChange` notifications are debounced with a 300ms delay. Rapid keystrokes only trigger a single analysis run using the latest file contents, rather than one analysis per keystroke. `didOpen` uses a shorter 50ms delay for faster initial feedback while still coalescing rapid multi-file opens (e.g. when an editor restores a session).
+Instead of per-file timer debouncing, the LSP uses an event-coalescing architecture inspired by rust-analyzer. `didChange` and `didOpen` notifications are cheap — they just send an event to a single analysis loop. The loop drains all pending events before starting analysis, naturally batching rapid edits without artificial delays. Diagnostic publication is deferred behind a 200ms quiescence timer to prevent flickering during rapid typing, but analysis results are available to interactive requests (hover, completion) immediately.
 
-Completion works responsively despite the debounce. When a completion request arrives before the latest analysis finishes, the server provides **identifier completion** (variable names from the scope chain) using the stale analysis's structural information. Type-dependent completions (dot completion, callsite completion) are deferred until analysis catches up, avoiding mismatched results from pairing a fresh parse tree with stale type inference. If the analysis lock is held (inference is running), completion returns a `ContentModified` error that tells the editor to retry shortly, preventing timeout-related empty results.
+Completion works responsively during editing. When a completion request arrives before the latest analysis finishes, the server provides **identifier completion** (variable names from the scope chain) using the stale analysis's structural information. Type-dependent completions (dot completion, callsite completion) are deferred until analysis catches up, avoiding mismatched results from pairing a fresh parse tree with stale type inference. If the analysis lock is held (inference is running), completion returns a `ContentModified` error that tells the editor to retry shortly, preventing timeout-related empty results.
 
 ### Cancellation
 

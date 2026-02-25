@@ -271,17 +271,16 @@ Nix code sizes (hundreds of bindings per file, not millions):
 
 ### LSP Blocks on Large Repos (Serial didOpen Processing)
 
-- RESOLVED: didOpen/didChange notifications are now debounced per-file (300ms for
-  edits, 50ms for opens) and in-flight analysis is cancelled via a cooperative
-  `Arc<AtomicBool>` flag when a newer edit arrives. The cancel flag is checked at
-  the same points as the deadline (between SCC groups and every 1024 constraint
-  operations). Completion uses `try_lock()` to avoid blocking when inference holds
-  the lock, returning `ContentModified` so the editor retries. When pending edits
-  exist, completion falls back to syntax-only (identifier) completions from scope
-  info. Remaining limitation: `AnalysisState` is `!Sync` (Salsa `RootDatabase`
-  contains `RefCell`), so `RwLock` is not possible — analysis is still serial.
-  Moving to per-file state or making the database `Sync` would allow concurrent
-  analysis of different files.
+- RESOLVED: The LSP now uses RA-inspired event coalescing instead of per-file
+  timer debounce. A single analysis loop drains all pending events via `try_recv()`
+  before starting analysis, and diagnostic publication is deferred behind a 200ms
+  quiescence timer to prevent flicker. In-flight analysis is cancelled via a
+  cooperative `Arc<AtomicBool>` flag when new edits arrive. Completion uses
+  `try_lock()` to avoid blocking, falling back to syntax-only completions when
+  pending edits exist. Remaining limitation: `AnalysisState` is `!Sync` (Salsa
+  `RootDatabase` contains `RefCell`), so `RwLock` is not possible — analysis is
+  still serial. Moving to per-file state or making the database `Sync` would
+  allow concurrent analysis of different files.
 
 ### `contains_union()` Doesn't See Through Alias References
 
