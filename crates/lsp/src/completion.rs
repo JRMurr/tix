@@ -111,9 +111,10 @@ pub fn completion(
 }
 
 /// Degraded completion path used when analysis hasn't caught up to the latest
-/// edit (pending_text exists). Tries dot completion via name-text lookup first
-/// (safe because the definition hasn't changed, only ranges shifted), then
-/// falls back to identifier completion from scope info.
+/// edit (pending_text exists). Tries dot completion and callsite attrset
+/// completion via name-text lookup first (safe because the definition hasn't
+/// changed, only ranges shifted), then falls back to identifier completion
+/// from scope info.
 ///
 /// `root` and `line_index` come from a fresh parse of the latest text, while
 /// `analysis` is from the previous (stale) analysis. Scope structure is
@@ -135,6 +136,14 @@ pub fn syntax_only_completion(
     // no source_map needed. Safe because the definition's type hasn't changed,
     // only the cursor position / ranges have shifted.
     if let Some(items) = try_syntax_only_dot_completion(analysis, &token) {
+        if !items.is_empty() {
+            return Some(CompletionResponse::Array(items));
+        }
+    }
+
+    // Try callsite attrset completion — same name-text lookup strategy.
+    // Handles `f { | }` when analysis is stale.
+    if let Some(items) = try_syntax_only_callsite_completion(analysis, &token) {
         if !items.is_empty() {
             return Some(CompletionResponse::Array(items));
         }
@@ -215,6 +224,98 @@ fn try_syntax_only_dot_completion(
     // No doc context in the degraded path — acceptable tradeoff.
     let fields = collect_attrset_fields(&resolved_ty);
     Some(fields_to_completion_items(&fields, None))
+}
+
+/// Callsite attrset completion for the degraded (syntax-only) path.
+///
+/// When analysis is stale but the user is typing inside `f { | }`, the fresh
+/// tree has the Apply+AttrSet structure but the source_map can't resolve the
+/// function's ExprId (ranges have shifted). Instead, we extract the function's
+/// name text from the fresh tree and look it up by name in the stale analysis
+/// — the same strategy as `try_syntax_only_dot_completion`.
+///
+/// Existing fields are collected directly from the fresh rnix AttrSet node
+/// (no source_map needed) so filtering works even when the attrset is new.
+fn try_syntax_only_callsite_completion(
+    analysis: &FileAnalysis,
+    token: &rowan::SyntaxToken<rnix::NixLanguage>,
+) -> Option<Vec<CompletionItem>> {
+    let inference = analysis.inference()?;
+
+    let node = token.parent()?;
+
+    // Find the enclosing AttrSet syntax node.
+    let attrset_node = node.ancestors().find_map(rnix::ast::AttrSet::cast)?;
+
+    // The AttrSet's parent must be an Apply node (i.e. it's a function argument).
+    let apply_node = attrset_node
+        .syntax()
+        .parent()
+        .and_then(rnix::ast::Apply::cast)?;
+
+    // Extract the function's identifier text from the fresh tree.
+    let fun_expr = apply_node.lambda()?;
+    let fun_name_text = extract_ident_text(&fun_expr)?;
+
+    // Look up the function's type by name text against the stale analysis.
+    let fun_ty = find_name_type_by_text(analysis, inference, &fun_name_text)?;
+
+    log::debug!("syntax_only_callsite_completion: fun={fun_name_text}, fun_ty={fun_ty}");
+
+    // Extract the parameter type from the function type.
+    let param_ty = extract_lambda_param(&fun_ty)?;
+
+    // Get expected fields from the parameter type.
+    let expected_fields = collect_attrset_fields(&param_ty);
+    if expected_fields.is_empty() {
+        return None;
+    }
+
+    // Collect fields already present in the attrset literal directly from the
+    // fresh rnix tree — no source_map needed.
+    let existing = collect_existing_fields_from_tree(&attrset_node);
+
+    log::debug!(
+        "syntax_only_callsite_completion: expected={:?}, existing={existing:?}",
+        expected_fields.keys().collect::<Vec<_>>()
+    );
+
+    // Return only the fields that haven't been written yet.
+    let remaining: BTreeMap<SmolStr, TyRef> = expected_fields
+        .into_iter()
+        .filter(|(k, _)| !existing.contains(k))
+        .collect();
+
+    // No doc context in the degraded path — acceptable tradeoff.
+    Some(fields_to_completion_items(&remaining, None))
+}
+
+/// Collect field names already present in an attrset literal by walking the
+/// fresh rnix tree directly. Unlike `collect_existing_fields`, this does not
+/// need the source_map — it reads ident tokens from `AttrpathValue` children.
+fn collect_existing_fields_from_tree(attrset_node: &rnix::ast::AttrSet) -> Vec<SmolStr> {
+    use rnix::ast::HasEntry;
+
+    attrset_node
+        .attrpath_values()
+        .filter_map(|apv: rnix::ast::AttrpathValue| {
+            // Only consider simple single-segment attrpaths (the common case
+            // for function call arguments like `{ name = "x"; src = ./.; }`).
+            let attrpath = apv.attrpath()?;
+            let mut attrs = attrpath.attrs();
+            let first = attrs.next()?;
+            // Multi-segment paths (e.g. `a.b = ...`) are not callsite fields.
+            if attrs.next().is_some() {
+                return None;
+            }
+            match first {
+                rnix::ast::Attr::Ident(ident) => {
+                    ident.ident_token().map(|t| SmolStr::from(t.text()))
+                }
+                _ => None,
+            }
+        })
+        .collect()
 }
 
 /// Extract the identifier text from a simple expression node (Ident).
@@ -1193,6 +1294,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn callsite_completion_with_defaults() {
+        // Regression test: functions with `? null` defaults should still
+        // offer callsite completion for all pattern fields.
+        let src = indoc! {r#"
+            let
+              f = { args, name, script, pasta ? null, paths ? null }: name;
+            in f { }
+            #      ^1
+        "#};
+        let results = complete_at_markers(src);
+        let names = labels(&results[&1]);
+        assert!(
+            names.contains(&"args"),
+            "should complete args, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"name"),
+            "should complete name, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"script"),
+            "should complete script, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"pasta"),
+            "should complete pasta, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"paths"),
+            "should complete paths, got: {names:?}"
+        );
+    }
+
     // ------------------------------------------------------------------
     // Identifier completion
     // ------------------------------------------------------------------
@@ -1413,6 +1548,58 @@ mod tests {
         assert!(
             names.contains(&"sep"),
             "syntax_only should dot-complete sep, got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn syntax_only_callsite_completion() {
+        // When the user adds a call site `f { }` that doesn't exist in the
+        // stale analysis, full completion fails (source_map can't find the
+        // Apply node). The syntax-only path should still provide callsite
+        // completion by looking up the function's type by name text.
+        let stale_src = indoc! {r#"
+            let f = { name, src, ... }: name;
+            in f
+        "#};
+        let fresh_src = indoc! {r#"
+            let f = { name, src, ... }: name;
+            in f { }
+            #     ^1
+        "#};
+        let results = syntax_only_at_markers(stale_src, fresh_src);
+        let names = labels(&results[&1]);
+        assert!(
+            names.contains(&"name"),
+            "syntax_only should callsite-complete name, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"src"),
+            "syntax_only should callsite-complete src, got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn syntax_only_callsite_completion_filters_existing() {
+        // Existing fields in the fresh tree should be filtered out, even
+        // though the attrset doesn't exist in the stale analysis.
+        let stale_src = indoc! {r#"
+            let f = { name, src, ... }: name;
+            in f
+        "#};
+        let fresh_src = indoc! {r#"
+            let f = { name, src, ... }: name;
+            in f { name = "x"; }
+            #                  ^1
+        "#};
+        let results = syntax_only_at_markers(stale_src, fresh_src);
+        let names = labels(&results[&1]);
+        assert!(
+            !names.contains(&"name"),
+            "syntax_only should NOT complete already-present name, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"src"),
+            "syntax_only should complete src, got: {names:?}"
         );
     }
 
