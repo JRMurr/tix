@@ -1345,6 +1345,30 @@ mod tests {
         );
     }
 
+    /// Callsite completion when the call is in a let-binding value (not body).
+    /// This matches the real-world pattern: `foo = bubblewrap_helper { };`.
+    #[test]
+    fn callsite_completion_in_let_binding() {
+        let src = indoc! {r#"
+            let
+              f = { args, name, script, pasta ? null, paths ? null }: name;
+              foo = f { }
+              #        ^1
+            ;
+            in foo
+        "#};
+        let results = complete_at_markers(src);
+        let names = labels(&results[&1]);
+        assert!(
+            names.contains(&"args"),
+            "should complete args in let binding, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"name"),
+            "should complete name in let binding, got: {names:?}"
+        );
+    }
+
     /// Regression test: callsite completion works when using a fresh parse
     /// tree against stale analysis results. This simulates the real LSP
     /// scenario where the user adds `f { }` and the editor sends completion

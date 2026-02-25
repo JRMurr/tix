@@ -251,6 +251,17 @@ pub(crate) fn extract_lambda_param(ty: &OutputTy) -> Option<OutputTy> {
             }
             None
         }
+        // For a union of lambdas (e.g. canonicalization produced
+        // `(A→B) | (A→C)`), extract the param from the first lambda member.
+        // The param types are typically identical across union members.
+        OutputTy::Union(members) => {
+            for m in members {
+                if let Some(param) = extract_lambda_param(&m.0) {
+                    return Some(param);
+                }
+            }
+            None
+        }
         _ => None,
     }
 }
