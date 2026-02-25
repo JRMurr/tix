@@ -706,11 +706,23 @@ impl LanguageServer for TixLanguageServer {
         };
 
         if let Some(ref text) = fresh_text {
-            // Analysis hasn't caught up to the latest edit. Provide
-            // syntax-only (identifier) completion from scope info, which
-            // doesn't depend on type inference being current.
+            // Analysis hasn't caught up to the latest edit. Try full
+            // completion first — it works when the edit is in-place (e.g.
+            // `lib` → `lib.` without shifting ranges). Fall back to
+            // syntax-only completion (which handles range-shifted cases
+            // via name-text lookup) only if full completion returns None.
             let root = rnix::Root::parse(text).tree();
             let line_index = crate::convert::LineIndex::new(text);
+            let full_result = crate::completion::completion(
+                analysis,
+                pos,
+                &root,
+                &state.registry.docs,
+                &line_index,
+            );
+            if full_result.is_some() {
+                return Ok(full_result);
+            }
             Ok(crate::completion::syntax_only_completion(
                 analysis,
                 pos,

@@ -111,9 +111,9 @@ pub fn completion(
 }
 
 /// Degraded completion path used when analysis hasn't caught up to the latest
-/// edit (pending_text exists). Only provides identifier completion from scope
-/// info — skips dot completion, callsite completion, and other type-dependent
-/// strategies that would produce wrong results with mismatched tree/inference.
+/// edit (pending_text exists). Tries dot completion via name-text lookup first
+/// (safe because the definition hasn't changed, only ranges shifted), then
+/// falls back to identifier completion from scope info.
 ///
 /// `root` and `line_index` come from a fresh parse of the latest text, while
 /// `analysis` is from the previous (stale) analysis. Scope structure is
@@ -131,6 +131,16 @@ pub fn syntax_only_completion(
         .token_at_offset(rowan::TextSize::from(offset))
         .left_biased()?;
 
+    // Try dot completion first — uses name-text lookup against stale analysis,
+    // no source_map needed. Safe because the definition's type hasn't changed,
+    // only the cursor position / ranges have shifted.
+    if let Some(items) = try_syntax_only_dot_completion(analysis, &token) {
+        if !items.is_empty() {
+            return Some(CompletionResponse::Array(items));
+        }
+    }
+
+    // Fallback: identifier completion from scope chain.
     let scope_id = scope_at_token(analysis, &token)?;
     let visible = collect_visible_names_no_inference(analysis, scope_id);
 
@@ -149,6 +159,128 @@ pub fn syntax_only_completion(
     } else {
         Some(CompletionResponse::Array(items))
     }
+}
+
+/// Dot completion for the degraded (syntax-only) path.
+///
+/// When analysis is stale but the user typed `.` on a trigger, we can still
+/// provide dot completion by looking up the base identifier's type by name
+/// text rather than by source_map range. This avoids the range-mismatch
+/// problem that occurs when the fresh tree has shifted offsets (e.g. a new
+/// line was inserted before `lib.`).
+///
+/// Strategy:
+/// 1. Guard: token must be TOKEN_DOT
+/// 2. Find the Select node in the fresh tree
+/// 3. Extract the base identifier text (e.g. "lib")
+/// 4. Search stale analysis.module.names() for a NameId with matching text
+/// 5. Look up its type in inference.name_ty_map
+/// 6. Collect typed segments and resolve through them
+/// 7. Return field completion items (without doc context — acceptable degradation)
+fn try_syntax_only_dot_completion(
+    analysis: &FileAnalysis,
+    token: &rowan::SyntaxToken<rnix::NixLanguage>,
+) -> Option<Vec<CompletionItem>> {
+    use rnix::SyntaxKind;
+
+    if token.kind() != SyntaxKind::TOKEN_DOT {
+        return None;
+    }
+
+    let inference = analysis.inference()?;
+
+    // Walk ancestors from the token's parent to find a Select node in the fresh tree.
+    let node = token.parent()?;
+    let select_node = node.ancestors().find_map(rnix::ast::Select::cast)?;
+
+    // Extract the base expression's identifier text. We only handle simple
+    // identifier bases (e.g. `lib` in `lib.strings.`), not complex expressions.
+    let base_expr = select_node.expr()?;
+    let base_name_text = extract_ident_text(&base_expr)?;
+
+    // Search the stale module's names for one with matching text that has
+    // attrset fields in its type. This is the name-text lookup that avoids
+    // needing source_map ranges.
+    let base_ty = find_name_type_by_text(analysis, inference, &base_name_text)?;
+
+    let cursor_offset = token.text_range().end();
+    let typed_segments = collect_typed_segments(&select_node, cursor_offset);
+
+    log::debug!(
+        "syntax_only_dot_completion: base={base_name_text}, base_ty={base_ty}, segments={typed_segments:?}"
+    );
+
+    let resolved_ty = resolve_through_segments(&base_ty, &typed_segments).unwrap_or(base_ty);
+
+    // No doc context in the degraded path — acceptable tradeoff.
+    let fields = collect_attrset_fields(&resolved_ty);
+    Some(fields_to_completion_items(&fields, None))
+}
+
+/// Extract the identifier text from a simple expression node (Ident).
+/// Returns None for complex expressions like function calls or nested selects.
+fn extract_ident_text(expr: &rnix::ast::Expr) -> Option<SmolStr> {
+    match expr {
+        rnix::ast::Expr::Ident(ident) => ident.ident_token().map(|t| SmolStr::from(t.text())),
+        _ => None,
+    }
+}
+
+/// Find a name's type by searching the stale module for a NameId with matching
+/// text, then looking up its type in inference results.
+///
+/// Prefers names that have attrset fields (the common case for dot completion).
+/// Falls back to lambda param extraction for PatField/Param names.
+fn find_name_type_by_text(
+    analysis: &FileAnalysis,
+    inference: &lang_check::InferenceResult,
+    name_text: &str,
+) -> Option<OutputTy> {
+    let mut best: Option<OutputTy> = None;
+
+    for (name_id, name) in analysis.module.names() {
+        if name.text != name_text {
+            continue;
+        }
+
+        // Try direct name_ty_map lookup.
+        if let Some(ty) = inference.name_ty_map.get(name_id) {
+            if !collect_attrset_fields(ty).is_empty() {
+                return Some(ty.clone());
+            }
+            // Remember this as a fallback even if it has no attrset fields.
+            if best.is_none() {
+                best = Some(ty.clone());
+            }
+        }
+
+        // For lambda params, extract param type from the enclosing Lambda.
+        if matches!(name.kind, NameKind::Param | NameKind::PatField) {
+            if let Some(&lambda_expr_id) = analysis.module_indices.param_to_lambda.get(&name_id) {
+                if let Some(lambda_ty) = inference.expr_ty_map.get(lambda_expr_id) {
+                    if let Some(param_ty) = extract_lambda_param(lambda_ty) {
+                        let resolved = if name.kind == NameKind::PatField {
+                            // PatField: extract the specific field from the param type.
+                            let fields = collect_attrset_fields(&param_ty);
+                            fields.get(&name.text).map(|f| (*f.0).clone())
+                        } else {
+                            Some(param_ty)
+                        };
+                        if let Some(ref ty) = resolved {
+                            if !collect_attrset_fields(ty).is_empty() {
+                                return resolved;
+                            }
+                            if best.is_none() {
+                                best = resolved;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    best
 }
 
 // ==============================================================================
@@ -1206,10 +1338,11 @@ mod tests {
     }
 
     #[test]
-    fn syntax_only_skips_dot_completion() {
-        // When fresh_text has a `.`, syntax_only_completion should NOT
-        // attempt dot completion (which needs type info). It should fall
-        // back to identifier completion or return nothing useful for dot.
+    fn syntax_only_dot_completion_simple() {
+        // When fresh_text has a `.` that triggers completion, syntax_only
+        // should provide dot completion via name-text lookup against stale
+        // analysis. The definition's type hasn't changed, only the cursor
+        // position is new.
         let stale_src = indoc! {r#"
             let lib = { x = 1; y = 2; };
             in lib
@@ -1221,14 +1354,65 @@ mod tests {
         "#};
         let results = syntax_only_at_markers(stale_src, fresh_src);
         let names = labels(&results[&1]);
-        // syntax_only_completion only does identifier completion, so it
-        // should NOT return field names from the attrset type.
-        // It may return scope identifiers (lib, x, y, builtins...) or empty.
-        // The key assertion: it does NOT crash and doesn't return wrong
-        // type-dependent results.
         assert!(
-            !names.contains(&"x") || names.contains(&"lib"),
-            "should not produce dot-completion fields without type info, got: {names:?}"
+            names.contains(&"x"),
+            "syntax_only should dot-complete x, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"y"),
+            "syntax_only should dot-complete y, got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn syntax_only_dot_completion_new_line() {
+        // The key scenario: user adds a new line with `lib.`, shifting all
+        // ranges. Full completion fails (source_map mismatch), but syntax-only
+        // dot completion succeeds via name-text lookup.
+        let stale_src = indoc! {r#"
+            let lib = { x = 1; y = 2; };
+            in lib
+        "#};
+        let fresh_src = indoc! {r#"
+            let lib = { x = 1; y = 2; };
+            in
+              lib.
+            #     ^1
+        "#};
+        let results = syntax_only_at_markers(stale_src, fresh_src);
+        let names = labels(&results[&1]);
+        assert!(
+            names.contains(&"x"),
+            "syntax_only should dot-complete x on new line, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"y"),
+            "syntax_only should dot-complete y on new line, got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn syntax_only_dot_completion_nested() {
+        // Nested dot completion: `lib.strings.` on a new line.
+        let stale_src = indoc! {r#"
+            let lib = { strings = { concat = 1; sep = 2; }; };
+            in lib
+        "#};
+        let fresh_src = indoc! {r#"
+            let lib = { strings = { concat = 1; sep = 2; }; };
+            in
+              lib.strings.
+            #             ^1
+        "#};
+        let results = syntax_only_at_markers(stale_src, fresh_src);
+        let names = labels(&results[&1]);
+        assert!(
+            names.contains(&"concat"),
+            "syntax_only should dot-complete concat, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"sep"),
+            "syntax_only should dot-complete sep, got: {names:?}"
         );
     }
 
