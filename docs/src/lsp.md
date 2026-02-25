@@ -59,7 +59,7 @@ Code actions (quick fixes / refactorings) are offered based on diagnostics and c
 
 `didChange` notifications are debounced with a 300ms delay. Rapid keystrokes only trigger a single analysis run using the latest file contents, rather than one analysis per keystroke. `didOpen` uses a shorter 50ms delay for faster initial feedback while still coalescing rapid multi-file opens (e.g. when an editor restores a session).
 
-Completion on trigger characters (`.`) works immediately despite the debounce: the server stores the latest document text on every edit and re-parses it on the fly when a completion request arrives before analysis finishes. Type inference results from the previous analysis remain valid because the base expression's text range hasn't changed.
+Completion works responsively despite the debounce. When a completion request arrives before the latest analysis finishes, the server provides **identifier completion** (variable names from the scope chain) using the stale analysis's structural information. Type-dependent completions (dot completion, callsite completion) are deferred until analysis catches up, avoiding mismatched results from pairing a fresh parse tree with stale type inference. If the analysis lock is held (inference is running), completion returns a `ContentModified` error that tells the editor to retry shortly, preventing timeout-related empty results.
 
 ### Cancellation
 

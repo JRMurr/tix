@@ -275,9 +275,13 @@ Nix code sizes (hundreds of bindings per file, not millions):
   edits, 50ms for opens) and in-flight analysis is cancelled via a cooperative
   `Arc<AtomicBool>` flag when a newer edit arrives. The cancel flag is checked at
   the same points as the deadline (between SCC groups and every 1024 constraint
-  operations). Remaining limitation: analysis still holds the `Mutex<AnalysisState>`
-  lock, so files are analyzed serially. Moving to a read-write lock or per-file
-  state would allow concurrent analysis of different files.
+  operations). Completion uses `try_lock()` to avoid blocking when inference holds
+  the lock, returning `ContentModified` so the editor retries. When pending edits
+  exist, completion falls back to syntax-only (identifier) completions from scope
+  info. Remaining limitation: `AnalysisState` is `!Sync` (Salsa `RootDatabase`
+  contains `RefCell`), so `RwLock` is not possible — analysis is still serial.
+  Moving to per-file state or making the database `Sync` would allow concurrent
+  analysis of different files.
 
 ### `contains_union()` Doesn't See Through Alias References
 

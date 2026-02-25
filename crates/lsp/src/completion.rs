@@ -110,6 +110,47 @@ pub fn completion(
     None
 }
 
+/// Degraded completion path used when analysis hasn't caught up to the latest
+/// edit (pending_text exists). Only provides identifier completion from scope
+/// info — skips dot completion, callsite completion, and other type-dependent
+/// strategies that would produce wrong results with mismatched tree/inference.
+///
+/// `root` and `line_index` come from a fresh parse of the latest text, while
+/// `analysis` is from the previous (stale) analysis. Scope structure is
+/// structural and tolerates small edits, so identifier suggestions remain
+/// useful even when type info is slightly behind.
+pub fn syntax_only_completion(
+    analysis: &FileAnalysis,
+    pos: Position,
+    root: &rnix::Root,
+    line_index: &LineIndex,
+) -> Option<CompletionResponse> {
+    let offset = line_index.offset(pos);
+    let token = root
+        .syntax()
+        .token_at_offset(rowan::TextSize::from(offset))
+        .left_biased()?;
+
+    let scope_id = scope_at_token(analysis, &token)?;
+    let visible = collect_visible_names_no_inference(analysis, scope_id);
+
+    let items: Vec<CompletionItem> = visible
+        .into_iter()
+        .map(|(name, ty)| CompletionItem {
+            label: name.to_string(),
+            kind: Some(completion_kind_for_ty(ty.as_ref())),
+            detail: ty.as_ref().map(|t| format!("{t}")),
+            ..Default::default()
+        })
+        .collect();
+
+    if items.is_empty() {
+        None
+    } else {
+        Some(CompletionResponse::Array(items))
+    }
+}
+
 // ==============================================================================
 // Dot completion: `lib.` or `lib.strings.`
 // ==============================================================================
@@ -643,6 +684,51 @@ fn collect_visible_names(
     result
 }
 
+/// Like `collect_visible_names` but doesn't require inference results.
+///
+/// Uses inference types opportunistically when available (from stale analysis),
+/// but produces results even without them. Used by `syntax_only_completion`
+/// for the degraded pending_text path.
+fn collect_visible_names_no_inference(
+    analysis: &FileAnalysis,
+    scope_id: nameres::ScopeId,
+) -> BTreeMap<SmolStr, Option<OutputTy>> {
+    let mut result: BTreeMap<SmolStr, Option<OutputTy>> = BTreeMap::new();
+    let inference = analysis.inference();
+
+    for scope_data in analysis.scopes.ancestors(scope_id) {
+        if let Some(defs) = scope_data.as_definitions() {
+            for (name, name_id) in defs {
+                result.entry(name.clone()).or_insert_with(|| {
+                    inference.and_then(|inf| inf.name_ty_map.get(*name_id).cloned())
+                });
+            }
+        } else if let Some(with_expr_id) = scope_data.as_with() {
+            if let Some(inf) = inference {
+                if let Expr::With { env, .. } = &analysis.module[with_expr_id] {
+                    if let Some(env_ty) = inf.expr_ty_map.get(*env) {
+                        for (field_name, field_ty) in collect_attrset_fields(env_ty) {
+                            result
+                                .entry(field_name)
+                                .or_insert_with(|| Some((*field_ty.0).clone()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Append builtins at lowest priority.
+    for name in lang_ast::nameres::GLOBAL_BUILTIN_NAMES {
+        result.entry(SmolStr::from(*name)).or_insert(None);
+    }
+    for name in ["builtins", "true", "false", "null"] {
+        result.entry(SmolStr::from(name)).or_insert(None);
+    }
+
+    result
+}
+
 /// Map a type to the appropriate LSP CompletionItemKind.
 fn completion_kind_for_ty(ty: Option<&OutputTy>) -> CompletionItemKind {
     match ty {
@@ -1047,6 +1133,102 @@ mod tests {
             f_item.kind,
             Some(CompletionItemKind::FUNCTION),
             "lambda-typed name should get FUNCTION kind"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Syntax-only completion (degraded path for pending_text)
+    // ------------------------------------------------------------------
+
+    /// Analyze stale source, then run syntax_only_completion on fresh source.
+    /// Simulates the pending_text scenario: the analysis is from a previous
+    /// version of the file, but the fresh text has a new edit.
+    fn syntax_only_at_markers(stale_src: &str, fresh_src: &str) -> BTreeMap<u32, Vec<CompletionItem>> {
+        let markers = parse_markers(fresh_src);
+        assert!(!markers.is_empty(), "no markers found in fresh source");
+
+        let t = TestAnalysis::new(stale_src);
+        let stale_analysis = t.analysis();
+
+        let fresh_root = rnix::Root::parse(fresh_src).tree();
+        let fresh_line_index = crate::convert::LineIndex::new(fresh_src);
+
+        markers
+            .into_iter()
+            .map(|(num, offset)| {
+                let pos = fresh_line_index.position(offset);
+                let items = match syntax_only_completion(stale_analysis, pos, &fresh_root, &fresh_line_index) {
+                    Some(CompletionResponse::Array(items)) => items,
+                    _ => Vec::new(),
+                };
+                (num, items)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn syntax_only_returns_identifiers() {
+        // Stale source doesn't have the trailing expression; fresh source does.
+        // syntax_only_completion should still find scope names from the stale
+        // analysis's scope chain.
+        let stale_src = indoc! {r#"
+            let x = 1; y = "hello";
+            in x
+        "#};
+        let fresh_src = indoc! {r#"
+            let x = 1; y = "hello";
+            in x + y
+            #  ^1
+        "#};
+        let results = syntax_only_at_markers(stale_src, fresh_src);
+        let names = labels(&results[&1]);
+        assert!(names.contains(&"x"), "should suggest x, got: {names:?}");
+        assert!(names.contains(&"y"), "should suggest y, got: {names:?}");
+    }
+
+    #[test]
+    fn syntax_only_includes_builtins() {
+        let stale_src = "let x = 1; in x";
+        let fresh_src = indoc! {r#"
+            let x = 1; in x
+            #              ^1
+        "#};
+        let results = syntax_only_at_markers(stale_src, fresh_src);
+        let names = labels(&results[&1]);
+        assert!(
+            names.contains(&"import"),
+            "should include builtins, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"true"),
+            "should include true, got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn syntax_only_skips_dot_completion() {
+        // When fresh_text has a `.`, syntax_only_completion should NOT
+        // attempt dot completion (which needs type info). It should fall
+        // back to identifier completion or return nothing useful for dot.
+        let stale_src = indoc! {r#"
+            let lib = { x = 1; y = 2; };
+            in lib
+        "#};
+        let fresh_src = indoc! {r#"
+            let lib = { x = 1; y = 2; };
+            in lib.
+            #      ^1
+        "#};
+        let results = syntax_only_at_markers(stale_src, fresh_src);
+        let names = labels(&results[&1]);
+        // syntax_only_completion only does identifier completion, so it
+        // should NOT return field names from the attrset type.
+        // It may return scope identifiers (lib, x, y, builtins...) or empty.
+        // The key assertion: it does NOT crash and doesn't return wrong
+        // type-dependent results.
+        assert!(
+            !names.contains(&"x") || names.contains(&"lib"),
+            "should not produce dot-completion fields without type info, got: {names:?}"
         );
     }
 

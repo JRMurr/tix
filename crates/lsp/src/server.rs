@@ -277,8 +277,10 @@ impl TixLanguageServer {
     }
 
     /// Lock the state, look up the file analysis for `uri`, and call `f`.
-    /// Returns `Ok(None)` if the URI isn't a file path or the file hasn't been
-    /// analyzed yet.
+    ///
+    /// Returns `ContentModified` if the file hasn't been analyzed yet — this
+    /// tells the editor "data isn't ready, retry shortly" rather than "there
+    /// are no results." Returns `Ok(None)` only for non-file URIs.
     fn with_analysis<T>(
         &self,
         uri: &Url,
@@ -291,7 +293,7 @@ impl TixLanguageServer {
         let state = self.state.lock();
         let analysis = match state.get_file(&path) {
             Some(a) => a,
-            None => return Ok(None),
+            None => return Err(content_modified_error()),
         };
         Ok(f(&state, analysis))
     }
@@ -641,34 +643,51 @@ impl LanguageServer for TixLanguageServer {
         let uri = &params.text_document_position.text_document.uri;
         let pos = params.text_document_position.position;
 
+        let path = match uri_to_path(uri) {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+
         // Check if we have fresher text than the last completed analysis.
         // This happens when `.` triggers completion before the debounce timer
-        // fires — the stale analysis doesn't contain the `.` token, so we
-        // re-parse the latest text to get a fresh syntax tree and LineIndex.
-        let fresh_text = uri_to_path(uri).and_then(|p| self.pending_text.lock().get(&p).cloned());
+        // fires — the stale analysis doesn't contain the `.` token.
+        let fresh_text = self.pending_text.lock().get(&path).cloned();
 
-        self.with_analysis(uri, |state, analysis| {
-            if let Some(ref text) = fresh_text {
-                let root = rnix::Root::parse(text).tree();
-                let line_index = crate::convert::LineIndex::new(text);
-                crate::completion::completion(
-                    analysis,
-                    pos,
-                    &root,
-                    &state.registry.docs,
-                    &line_index,
-                )
-            } else {
-                let root = analysis.parsed.tree();
-                crate::completion::completion(
-                    analysis,
-                    pos,
-                    &root,
-                    &state.registry.docs,
-                    &analysis.line_index,
-                )
-            }
-        })
+        // Use try_lock() so completion never blocks waiting for an in-flight
+        // analysis to finish. If the lock is held (inference running), return
+        // ContentModified to tell the editor to retry shortly.
+        let state = match self.state.try_lock() {
+            Some(guard) => guard,
+            None => return Err(content_modified_error()),
+        };
+
+        let analysis = match state.get_file(&path) {
+            Some(a) => a,
+            None => return Err(content_modified_error()),
+        };
+
+        if let Some(ref text) = fresh_text {
+            // Analysis hasn't caught up to the latest edit. Provide
+            // syntax-only (identifier) completion from scope info, which
+            // doesn't depend on type inference being current.
+            let root = rnix::Root::parse(text).tree();
+            let line_index = crate::convert::LineIndex::new(text);
+            Ok(crate::completion::syntax_only_completion(
+                analysis,
+                pos,
+                &root,
+                &line_index,
+            ))
+        } else {
+            let root = analysis.parsed.tree();
+            Ok(crate::completion::completion(
+                analysis,
+                pos,
+                &root,
+                &state.registry.docs,
+                &analysis.line_index,
+            ))
+        }
     }
 
     async fn completion_resolve(&self, mut item: CompletionItem) -> Result<CompletionItem> {
@@ -862,6 +881,17 @@ impl LanguageServer for TixLanguageServer {
             &state,
             &params.query,
         ))
+    }
+}
+
+/// LSP error indicating the document has been modified and the request should
+/// be retried. Editors like VS Code and Neovim handle this gracefully by
+/// automatically retrying after a short delay.
+fn content_modified_error() -> tower_lsp::jsonrpc::Error {
+    tower_lsp::jsonrpc::Error {
+        code: tower_lsp::jsonrpc::ErrorCode::ContentModified,
+        message: "content modified".into(),
+        data: None,
     }
 }
 
