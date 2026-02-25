@@ -669,16 +669,25 @@ fn try_callsite_completion(
 
     // Get the function expression from the Apply.
     let fun_expr = apply_node.lambda()?;
-    let fun_ptr = AstPtr::new(fun_expr.syntax());
-    let fun_expr_id = analysis.source_map.expr_for_node(fun_ptr)?;
 
-    // Look up the function's type.
-    let fun_ty = inference.expr_ty_map.get(fun_expr_id)?;
+    // Try source_map lookup first (precise, works when analysis is current).
+    // Fall back to name-text lookup when analysis is stale (source_map can't
+    // find the Apply node from the fresh tree).
+    let fun_ty = match analysis
+        .source_map
+        .expr_for_node(AstPtr::new(fun_expr.syntax()))
+    {
+        Some(fun_expr_id) => inference.expr_ty_map.get(fun_expr_id)?.clone(),
+        None => {
+            let fun_name_text = extract_ident_text(&fun_expr)?;
+            find_name_type_by_text(analysis, inference, &fun_name_text)?
+        }
+    };
 
     log::debug!("callsite_completion: fun_ty={fun_ty}");
 
     // Extract the parameter type from the function type.
-    let param_ty = extract_lambda_param(fun_ty)?;
+    let param_ty = extract_lambda_param(&fun_ty)?;
 
     // Get expected fields from the parameter type.
     let expected_fields = collect_attrset_fields(&param_ty);
@@ -687,7 +696,15 @@ fn try_callsite_completion(
     }
 
     // Collect fields already present in the attrset literal to filter them out.
-    let existing = collect_existing_fields(analysis, &attrset_node);
+    // Try source_map first; fall back to tree walk when analysis is stale.
+    let existing = {
+        let from_map = collect_existing_fields(analysis, &attrset_node);
+        if from_map.is_empty() {
+            collect_existing_fields_from_tree(&attrset_node)
+        } else {
+            from_map
+        }
+    };
 
     log::debug!(
         "callsite_completion: expected={:?}, existing={existing:?}",
@@ -1325,6 +1342,89 @@ mod tests {
         assert!(
             names.contains(&"paths"),
             "should complete paths, got: {names:?}"
+        );
+    }
+
+    /// Regression test: callsite completion works when using a fresh parse
+    /// tree against stale analysis results. This simulates the real LSP
+    /// scenario where the user adds `f { }` and the editor sends completion
+    /// before the debounced analysis finishes.
+    #[test]
+    fn callsite_completion_with_stale_analysis() {
+        use crate::convert::LineIndex;
+
+        // Step 1: Analyze the file WITHOUT the callsite.
+        let stale_src = indoc! {r#"
+            let f = { name, src, ... }: name;
+            in f
+        "#};
+        let t = TestAnalysis::new(stale_src);
+        let stale_analysis = t.analysis();
+
+        // Step 2: The user types ` { }` — fresh text has the callsite but
+        // analysis is still from the pre-callsite version.
+        let fresh_src = indoc! {r#"
+            let f = { name, src, ... }: name;
+            in f { }
+            #     ^1
+        "#};
+        let fresh_root = rnix::Root::parse(fresh_src).tree();
+        let fresh_line_index = LineIndex::new(fresh_src);
+        let markers = parse_markers(fresh_src);
+        let docs = DocIndex::new();
+
+        let pos = fresh_line_index.position(markers[&1]);
+        let items = match completion(stale_analysis, pos, &fresh_root, &docs, &fresh_line_index) {
+            Some(CompletionResponse::Array(items)) => items,
+            _ => Vec::new(),
+        };
+        let names = labels(&items);
+        assert!(
+            names.contains(&"name"),
+            "stale analysis + fresh callsite should complete name, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"src"),
+            "stale analysis + fresh callsite should complete src, got: {names:?}"
+        );
+    }
+
+    /// Regression test: callsite completion with stale analysis correctly
+    /// filters out fields already present in the fresh attrset literal.
+    #[test]
+    fn callsite_completion_with_stale_analysis_filters_existing() {
+        use crate::convert::LineIndex;
+
+        let stale_src = indoc! {r#"
+            let f = { name, src, ... }: name;
+            in f
+        "#};
+        let t = TestAnalysis::new(stale_src);
+        let stale_analysis = t.analysis();
+
+        let fresh_src = indoc! {r#"
+            let f = { name, src, ... }: name;
+            in f { name = "x"; }
+            #                  ^1
+        "#};
+        let fresh_root = rnix::Root::parse(fresh_src).tree();
+        let fresh_line_index = LineIndex::new(fresh_src);
+        let markers = parse_markers(fresh_src);
+        let docs = DocIndex::new();
+
+        let pos = fresh_line_index.position(markers[&1]);
+        let items = match completion(stale_analysis, pos, &fresh_root, &docs, &fresh_line_index) {
+            Some(CompletionResponse::Array(items)) => items,
+            _ => Vec::new(),
+        };
+        let names = labels(&items);
+        assert!(
+            !names.contains(&"name"),
+            "should NOT complete already-present name, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"src"),
+            "stale analysis + fresh callsite should complete src, got: {names:?}"
         );
     }
 
