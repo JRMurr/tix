@@ -1452,6 +1452,124 @@ mod tests {
         );
     }
 
+    /// Regression test: callsite completion for a complex function whose body
+    /// contains many let-bindings, if-else chains, and nested lambdas. This
+    /// mirrors the real-world `bubblewrap_helper` from `test/null_default.nix`
+    /// where the simple `callsite_completion_in_let_binding` test passes but
+    /// the full file fails.
+    #[test]
+    fn callsite_completion_complex_function() {
+        // Simplified version of the real file — uses the same structure
+        // (top-level pattern lambda, lib bindings, complex function body)
+        // but without external nixpkgs dependencies.
+        let src = indoc! {r#"
+            {
+              pkgs,
+            }:
+            let
+              lib = pkgs.lib;
+
+              bubblewrap_helper =
+                {
+                  args,
+                  name,
+                  script,
+                  pasta ? null,
+                  paths ? null,
+                }:
+                let
+                  inner_script = pkgs.writeShellScript name script;
+
+                  bindTypes = {
+                    ro = "--ro-bind";
+                    ro_maybe = "--ro-bind-try";
+                    rw = "--bind";
+                    rw_maybe = "--bind-try";
+                    dev_maybe = "--dev-bind-try";
+                  };
+
+                  renderArg =
+                    arg':
+                    let
+                      arg = if builtins.isString arg' then { escaped = arg'; } else arg';
+                    in
+                    if !(arg.cond or true) then
+                      ""
+                    else if arg ? escaped then
+                      lib.escapeShellArg arg.escaped
+                    else if arg ? unescaped then
+                      arg.unescaped
+                    else if arg ? tmpfs then
+                      "--tmpfs ${arg.tmpfs}"
+                    else if arg ? setenv then
+                      "--setenv ${lib.escapeShellArg arg.setenv} ${lib.escapeShellArg arg.value}"
+                    else
+                      let
+                        kind = lib.findFirst (k: arg ? ${k}) null (builtins.attrNames bindTypes);
+                      in
+                      if kind == null then
+                        builtins.throw "Unsupported bwrap argument: ${builtins.toJSON arg}"
+                      else
+                        "${bindTypes.${kind}} ${arg.src or arg.${kind}} ${arg.${kind}}";
+                  bwrap_args = lib.concatMapStringsSep " " renderArg args;
+
+                  pastaFlags = lib.optionalString (pasta != null) (
+                    let
+                      hasTcp = pasta.tcpForward or [ ] != [ ];
+                      hasUdp = pasta.udpForward or [ ] != [ ];
+                      tcpFlags =
+                        if hasTcp then "-t none -T ${lib.concatMapStringsSep "," builtins.toString pasta.tcpForward}" else "-t none";
+                      udpFlags =
+                        if hasUdp then "-u none -U ${lib.concatMapStringsSep "," builtins.toString pasta.udpForward}" else "-u none";
+                      extraFlags = lib.concatStringsSep " " (pasta.extraFlags or [ ]);
+                    in
+                    lib.concatStringsSep " " (
+                      lib.filter (s: s != "") [
+                        tcpFlags
+                        udpFlags
+                        extraFlags
+                      ]
+                    )
+                  );
+                  bwrap_cmd = ''${pkgs.bubblewrap}/bin/bwrap ${bwrap_args} ${inner_script} "$@"'';
+
+                  main_cmd =
+                    if pasta == null then
+                      bwrap_cmd
+                    else
+                      "${pkgs.passt}/bin/pasta --config-net ${pastaFlags} -- ${bwrap_cmd}";
+
+                in
+                "${main_cmd}";
+
+              foo = bubblewrap_helper { }
+              #                        ^1
+            ;
+            in
+            {
+              inherit bubblewrap_helper;
+            }
+        "#};
+        let results = complete_at_markers(src);
+        let names = labels(&results[&1]);
+        assert!(
+            names.contains(&"args"),
+            "should complete args for complex function, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"name"),
+            "should complete name for complex function, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"script"),
+            "should complete script for complex function, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"pasta"),
+            "should complete pasta for complex function, got: {names:?}"
+        );
+    }
+
     // ------------------------------------------------------------------
     // Identifier completion
     // ------------------------------------------------------------------
