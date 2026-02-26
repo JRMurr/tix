@@ -12,17 +12,17 @@ use lang_check::aliases::DocIndex;
 use rowan::ast::AstNode;
 use tower_lsp::lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind, Position, Range};
 
-use crate::state::FileAnalysis;
+use crate::state::FileSnapshot;
 
 /// Try to produce hover information for the given cursor position.
 pub fn hover(
-    analysis: &FileAnalysis,
+    analysis: &FileSnapshot,
     pos: Position,
     root: &rnix::Root,
     docs: &DocIndex,
 ) -> Option<Hover> {
-    let inference = analysis.inference()?;
-    let offset = analysis.line_index.offset(pos);
+    let inference = analysis.inference_result()?;
+    let offset = analysis.syntax.line_index.offset(pos);
     let token = root
         .syntax()
         .token_at_offset(rowan::TextSize::from(offset))
@@ -34,10 +34,10 @@ pub fn hover(
         let ptr = AstPtr::new(&node);
 
         // Check for a name at this node first (shows the binding's type).
-        if let Some(name_id) = analysis.source_map.name_for_node(ptr) {
+        if let Some(name_id) = analysis.syntax.source_map.name_for_node(ptr) {
             if let Some(ty) = inference.name_ty_map.get(name_id) {
-                let name_text = &analysis.module[name_id].text;
-                let range = analysis.line_index.range(node.text_range());
+                let name_text = &analysis.syntax.module[name_id].text;
+                let range = analysis.syntax.line_index.range(node.text_range());
 
                 // Look up doc comment for this name from stubs.
                 // First try decl-level docs (global vals, type aliases).
@@ -58,7 +58,7 @@ pub fn hover(
         }
 
         // Then check for an expression.
-        if let Some(expr_id) = analysis.source_map.expr_for_node(ptr) {
+        if let Some(expr_id) = analysis.syntax.source_map.expr_for_node(ptr) {
             // Attrpath idents are lowered to Literal(String) with their own
             // source_map entries, so the walk-up finds them before the parent
             // Select. Skip these so we land on the Select node instead, which
@@ -69,12 +69,12 @@ pub fn hover(
             }
 
             if let Some(ty) = inference.expr_ty_map.get(expr_id) {
-                let range = analysis.line_index.range(node.text_range());
+                let range = analysis.syntax.line_index.range(node.text_range());
 
                 // For Reference expressions (variable uses), look up decl_doc
                 // by the referenced name. This surfaces docs for global vals
                 // from stubs (e.g. hovering on `mkDerivation` shows its doc).
-                if let Expr::Reference(ref_name) = &analysis.module[expr_id] {
+                if let Expr::Reference(ref_name) = &analysis.syntax.module[expr_id] {
                     let doc = docs.decl_doc(ref_name.as_str());
                     return Some(make_hover(format!("{ty}"), doc.map(|d| d.as_str()), range));
                 }
@@ -105,7 +105,7 @@ pub fn hover(
 /// `steam` should show the type of `config.programs.steam` and any field-level
 /// docs from the stubs.
 fn try_attrpath_key_hover(
-    analysis: &FileAnalysis,
+    analysis: &FileSnapshot,
     token: &rowan::SyntaxToken<rnix::NixLanguage>,
     docs: &DocIndex,
 ) -> Option<Hover> {
@@ -114,7 +114,7 @@ fn try_attrpath_key_hover(
         get_module_config_type, resolve_through_segments,
     };
 
-    let inference = analysis.inference()?;
+    let inference = analysis.inference_result()?;
     let node = token.parent()?;
 
     // The token must be inside an Attrpath → AttrpathValue (not a Select).
@@ -150,7 +150,7 @@ fn try_attrpath_key_hover(
         analysis,
         inference,
         first_segment,
-        &analysis.context_arg_types,
+        &analysis.syntax.context_arg_types,
     )?;
 
     let alias = extract_alias_name(&config_ty).cloned();
@@ -166,7 +166,7 @@ fn try_attrpath_key_hover(
 
     // Show the last segment name and its type, plus any docs.
     let last_segment = full_path.last()?;
-    let range = analysis.line_index.range(token.text_range());
+    let range = analysis.syntax.line_index.range(token.text_range());
 
     let type_display = format!("{last_segment} :: {resolved_ty}");
 
@@ -179,7 +179,7 @@ fn try_attrpath_key_hover(
 /// Builds the full path from parent context + attrpath segments, finds the
 /// module config type, and queries the DocIndex for field docs at that path.
 fn try_attrpath_key_field_doc(
-    analysis: &FileAnalysis,
+    analysis: &FileSnapshot,
     token: &rowan::SyntaxToken<rnix::NixLanguage>,
     docs: &DocIndex,
 ) -> Option<String> {
@@ -188,7 +188,7 @@ fn try_attrpath_key_field_doc(
         get_module_config_type,
     };
 
-    let inference = analysis.inference()?;
+    let inference = analysis.inference_result()?;
     let node = token.parent()?;
 
     // The token must be inside an Attrpath → AttrpathValue (not a Select).
@@ -213,7 +213,7 @@ fn try_attrpath_key_field_doc(
         analysis,
         inference,
         first_segment,
-        &analysis.context_arg_types,
+        &analysis.syntax.context_arg_types,
     )?;
     let alias = extract_alias_name(&config_ty)?;
 
@@ -243,13 +243,13 @@ fn is_select_attrpath(node: &rnix::SyntaxNode) -> bool {
 /// type alias associated with it (e.g. NixosConfig), and query the
 /// DocIndex with the field path (services.openssh.enable).
 fn try_select_field_doc(
-    analysis: &FileAnalysis,
+    analysis: &FileSnapshot,
     expr_id: lang_ast::ExprId,
     docs: &DocIndex,
 ) -> Option<String> {
     use lang_ast::Literal;
 
-    let module = &analysis.module;
+    let module = &analysis.syntax.module;
 
     // Build the field path by walking Select chains outward.
     // The current expr_id is the outermost Select.
@@ -275,7 +275,7 @@ fn try_select_field_doc(
                 // Try to find the inferred type for the expression to extract
                 // the alias name. If the expression type display starts with an
                 // uppercase letter, it's likely a Named alias.
-                let inference = analysis.inference()?;
+                let inference = analysis.inference_result()?;
                 if let Some(ty) = inference.expr_ty_map.get(current) {
                     let ty_str = ty.to_string();
                     if ty_str
@@ -333,9 +333,9 @@ mod tests {
 
     /// Helper: hover at a byte offset and return the hover contents.
     fn hover_at(t: &TestAnalysis, offset: u32) -> Option<Hover> {
-        let analysis = t.analysis();
-        let pos = analysis.line_index.position(offset);
-        hover(analysis, pos, &t.root, &t.state.registry.docs)
+        let analysis = t.snapshot();
+        let pos = analysis.syntax.line_index.position(offset);
+        hover(&analysis, pos, &t.root, &t.state.registry.docs)
     }
 
     /// Extract the type string and optional doc string from hover contents.
@@ -679,15 +679,15 @@ mod tests {
         assert!(!markers.is_empty(), "no markers found in source");
 
         let ctx = ContextTestSetup::new(src, context_stubs);
-        let analysis = ctx.analysis();
+        let analysis = ctx.snapshot();
         let root = ctx.root();
         let docs = ctx.docs();
 
         markers
             .into_iter()
             .map(|(num, offset)| {
-                let pos = analysis.line_index.position(offset);
-                (num, hover(analysis, pos, &root, docs))
+                let pos = analysis.syntax.line_index.position(offset);
+                (num, hover(&analysis, pos, &root, docs))
             })
             .collect()
     }

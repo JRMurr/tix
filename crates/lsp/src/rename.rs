@@ -16,21 +16,21 @@ use lang_ast::{Expr, ExprId, Literal, NameId};
 use rowan::ast::AstNode;
 use tower_lsp::lsp_types::*;
 
-use crate::state::{AnalysisState, FileAnalysis};
+use crate::state::{AnalysisState, FileSnapshot};
 
 /// Verify that the cursor is on a renameable name and return its range.
 pub fn prepare_rename(
-    analysis: &FileAnalysis,
+    analysis: &FileSnapshot,
     pos: Position,
     root: &rnix::Root,
 ) -> Option<PrepareRenameResponse> {
     let target = crate::references::name_at_position(analysis, pos, root)?;
 
     // Get the name's source range.
-    let ptr = analysis.source_map.nodes_for_name(target).next()?;
+    let ptr = analysis.syntax.source_map.nodes_for_name(target).next()?;
     let node = ptr.to_node(root.syntax());
-    let range = analysis.line_index.range(node.text_range());
-    let name_text = analysis.module[target].text.to_string();
+    let range = analysis.syntax.line_index.range(node.text_range());
+    let name_text = analysis.syntax.module[target].text.to_string();
 
     Some(PrepareRenameResponse::RangeWithPlaceholder {
         range,
@@ -52,7 +52,7 @@ pub struct RenameResult {
 /// includes cross-file edits. If some importers aren't open, a warning is
 /// returned so the LSP can show it to the user.
 pub fn rename(
-    analysis: &FileAnalysis,
+    analysis: &FileSnapshot,
     pos: Position,
     new_name: &str,
     uri: &Url,
@@ -65,9 +65,9 @@ pub fn rename(
     let mut edits = Vec::new();
 
     // Definition site.
-    if let Some(ptr) = analysis.source_map.nodes_for_name(target).next() {
+    if let Some(ptr) = analysis.syntax.source_map.nodes_for_name(target).next() {
         let node = ptr.to_node(root.syntax());
-        let range = analysis.line_index.range(node.text_range());
+        let range = analysis.syntax.line_index.range(node.text_range());
         edits.push(TextEdit {
             range,
             new_text: new_name.to_string(),
@@ -75,10 +75,10 @@ pub fn rename(
     }
 
     // Reference sites.
-    for &expr_id in analysis.name_res.refs_to(target) {
-        if let Some(ptr) = analysis.source_map.node_for_expr(expr_id) {
+    for &expr_id in analysis.syntax.name_res.refs_to(target) {
+        if let Some(ptr) = analysis.syntax.source_map.node_for_expr(expr_id) {
             let node = ptr.to_node(root.syntax());
-            let range = analysis.line_index.range(node.text_range());
+            let range = analysis.syntax.line_index.range(node.text_range());
             edits.push(TextEdit {
                 range,
                 new_text: new_name.to_string(),
@@ -102,7 +102,7 @@ pub fn rename(
     // references in those files. We also warn when importers exist but aren't
     // open for editing.
 
-    let old_name = analysis.module[target].text.as_str();
+    let old_name = analysis.syntax.module[target].text.as_str();
     let warning = if let (Some(state), Some(current_path)) = (state, current_path) {
         let is_top_level = is_top_level_export(analysis, target);
         if is_top_level {
@@ -135,9 +135,9 @@ pub fn rename(
 ///
 ///   { foo = 1; bar = 2; }         # AttrSet at root
 ///   let helper = ...; in { ... }  # LetIn whose body is AttrSet
-fn is_top_level_export(analysis: &FileAnalysis, target: NameId) -> bool {
-    let entry = analysis.module.entry_expr;
-    fields_of_root_attrset(&analysis.module, entry).is_some_and(|fields| fields.contains(&target))
+fn is_top_level_export(analysis: &FileSnapshot, target: NameId) -> bool {
+    let entry = analysis.syntax.module.entry_expr;
+    fields_of_root_attrset(&analysis.syntax.module, entry).is_some_and(|fields| fields.contains(&target))
 }
 
 /// Collect NameIds of fields in the root-level attrset, chasing through
@@ -195,7 +195,9 @@ fn collect_cross_file_edits(
         for (_expr_id, expr) in other_analysis.module.exprs() {
             if let Expr::Select { set, attrpath, .. } = expr {
                 // Resolve the Select's base to a NameId.
-                if let Some(base_name) = resolve_to_name(other_analysis, *set) {
+                if let Some(base_name) =
+                    resolve_to_name(&other_analysis.module, &other_analysis.name_res, *set)
+                {
                     if importing_names.contains(&base_name) {
                         // Check the first attrpath segment.
                         if let Some(&first_attr_expr) = attrpath.first() {
@@ -222,7 +224,9 @@ fn collect_cross_file_edits(
             // Also check HasAttr expressions (`x ? oldName`), which reference
             // field names the same way Select does.
             if let Expr::HasAttr { set, attrpath } = expr {
-                if let Some(base_name) = resolve_to_name(other_analysis, *set) {
+                if let Some(base_name) =
+                    resolve_to_name(&other_analysis.module, &other_analysis.name_res, *set)
+                {
                     if importing_names.contains(&base_name) {
                         if let Some(&first_attr_expr) = attrpath.first() {
                             if matches!(
@@ -272,10 +276,16 @@ fn collect_cross_file_edits(
 /// Handles the common patterns:
 ///   - `lib.field`  where `lib` is a Reference -> resolves to lib's NameId
 ///   - `(import ./foo.nix).field` -> no NameId (returns None)
-fn resolve_to_name(analysis: &FileAnalysis, expr_id: ExprId) -> Option<NameId> {
-    if let Expr::Reference(_) = &analysis.module[expr_id] {
-        if let Some(lang_ast::nameres::ResolveResult::Definition(name_id)) =
-            analysis.name_res.get(expr_id)
+///
+/// Takes `Module` and `NameResolution` directly so it works with both
+/// `FileSnapshot` (same-file) and `FileAnalysis` (cross-file) contexts.
+fn resolve_to_name(
+    module: &lang_ast::Module,
+    name_res: &lang_ast::NameResolution,
+    expr_id: ExprId,
+) -> Option<NameId> {
+    if let Expr::Reference(_) = &module[expr_id] {
+        if let Some(lang_ast::nameres::ResolveResult::Definition(name_id)) = name_res.get(expr_id)
         {
             return Some(*name_id);
         }
@@ -295,10 +305,10 @@ mod tests {
         let markers = parse_markers(src);
         let offset = markers[&marker];
         let t = TestAnalysis::new(src);
-        let analysis = t.analysis();
+        let analysis = t.snapshot();
         let uri = t.uri();
-        let pos = analysis.line_index.position(offset);
-        rename(analysis, pos, new_name, &uri, &t.root, None, None).map(|r| r.edit)
+        let pos = analysis.syntax.line_index.position(offset);
+        rename(&analysis, pos, new_name, &uri, &t.root, None, None).map(|r| r.edit)
     }
 
     fn edit_count(edit: &WorkspaceEdit) -> usize {
@@ -339,10 +349,10 @@ mod tests {
         let markers = parse_markers(src);
         let offset = markers[&1];
         let t = TestAnalysis::new(src);
-        let analysis = t.analysis();
-        let pos = analysis.line_index.position(offset);
+        let analysis = t.snapshot();
+        let pos = analysis.syntax.line_index.position(offset);
 
-        assert!(prepare_rename(analysis, pos, &t.root).is_none());
+        assert!(prepare_rename(&analysis, pos, &t.root).is_none());
     }
 
     #[test]
@@ -399,8 +409,8 @@ mod tests {
         }
 
         let rename_path = project.path(rename_file);
-        let analysis = state.get_file(&rename_path).unwrap();
-        let root = analysis.parsed.tree();
+        let analysis = state.get_file(&rename_path).unwrap().to_snapshot(0);
+        let root = analysis.syntax.parsed.tree();
 
         // Parse markers from the rename file's source.
         let rename_src = files
@@ -410,11 +420,11 @@ mod tests {
             .1;
         let markers = parse_markers(rename_src);
         let offset = markers[&marker];
-        let pos = analysis.line_index.position(offset);
+        let pos = analysis.syntax.line_index.position(offset);
         let uri = Url::from_file_path(&rename_path).unwrap();
 
         rename(
-            analysis,
+            &analysis,
             pos,
             new_name,
             &uri,
@@ -619,12 +629,12 @@ mod tests {
     fn is_top_level_export_basic_attrset() {
         let src = "{ foo = 1; bar = 2; }";
         let t = TestAnalysis::new(src);
-        let analysis = t.analysis();
+        let analysis = t.snapshot();
 
         // All fields of a top-level attrset should be top-level exports.
-        for (name_id, name) in analysis.module.names() {
+        for (name_id, name) in analysis.syntax.module.names() {
             assert!(
-                is_top_level_export(analysis, name_id),
+                is_top_level_export(&analysis, name_id),
                 "{} should be a top-level export",
                 name.text
             );
@@ -635,12 +645,12 @@ mod tests {
     fn is_top_level_export_let_in_attrset() {
         let src = "let helper = 1; in { foo = helper; }";
         let t = TestAnalysis::new(src);
-        let analysis = t.analysis();
+        let analysis = t.snapshot();
 
-        for (name_id, name) in analysis.module.names() {
+        for (name_id, name) in analysis.syntax.module.names() {
             let expected = name.text == "foo";
             assert_eq!(
-                is_top_level_export(analysis, name_id),
+                is_top_level_export(&analysis, name_id),
                 expected,
                 "{} export status should be {expected}",
                 name.text
@@ -654,11 +664,11 @@ mod tests {
         // an "export" in the attrset sense.
         let src = "x: x + 1";
         let t = TestAnalysis::new(src);
-        let analysis = t.analysis();
+        let analysis = t.snapshot();
 
-        for (name_id, name) in analysis.module.names() {
+        for (name_id, name) in analysis.syntax.module.names() {
             assert!(
-                !is_top_level_export(analysis, name_id),
+                !is_top_level_export(&analysis, name_id),
                 "{} should NOT be a top-level export",
                 name.text
             );

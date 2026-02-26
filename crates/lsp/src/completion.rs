@@ -37,7 +37,7 @@ use tower_lsp::lsp_types::{
 };
 
 use crate::convert::LineIndex;
-use crate::state::FileAnalysis;
+use crate::state::FileSnapshot;
 
 /// Entry point: try to produce completions for the given cursor position.
 ///
@@ -48,13 +48,13 @@ use crate::state::FileAnalysis;
 /// `analysis` for type inference results (which remain valid because the base
 /// expression's text range hasn't changed).
 pub fn completion(
-    analysis: &FileAnalysis,
+    analysis: &FileSnapshot,
     pos: Position,
     root: &rnix::Root,
     docs: &DocIndex,
     line_index: &LineIndex,
 ) -> Option<CompletionResponse> {
-    let inference = analysis.inference()?;
+    let inference = analysis.inference_result()?;
     let offset = line_index.offset(pos);
     let token = root
         .syntax()
@@ -121,7 +121,7 @@ pub fn completion(
 /// structural and tolerates small edits, so identifier suggestions remain
 /// useful even when type info is slightly behind.
 pub fn syntax_only_completion(
-    analysis: &FileAnalysis,
+    analysis: &FileSnapshot,
     pos: Position,
     root: &rnix::Root,
     line_index: &LineIndex,
@@ -182,12 +182,12 @@ pub fn syntax_only_completion(
 /// 1. Guard: token must be TOKEN_DOT
 /// 2. Find the Select node in the fresh tree
 /// 3. Extract the base identifier text (e.g. "lib")
-/// 4. Search stale analysis.module.names() for a NameId with matching text
+/// 4. Search stale analysis.syntax.module.names() for a NameId with matching text
 /// 5. Look up its type in inference.name_ty_map
 /// 6. Collect typed segments and resolve through them
 /// 7. Return field completion items (without doc context — acceptable degradation)
 fn try_syntax_only_dot_completion(
-    analysis: &FileAnalysis,
+    analysis: &FileSnapshot,
     token: &rowan::SyntaxToken<rnix::NixLanguage>,
 ) -> Option<Vec<CompletionItem>> {
     use rnix::SyntaxKind;
@@ -196,7 +196,7 @@ fn try_syntax_only_dot_completion(
         return None;
     }
 
-    let inference = analysis.inference()?;
+    let inference = analysis.inference_result()?;
 
     // Walk ancestors from the token's parent to find a Select node in the fresh tree.
     let node = token.parent()?;
@@ -237,10 +237,10 @@ fn try_syntax_only_dot_completion(
 /// Existing fields are collected directly from the fresh rnix AttrSet node
 /// (no source_map needed) so filtering works even when the attrset is new.
 fn try_syntax_only_callsite_completion(
-    analysis: &FileAnalysis,
+    analysis: &FileSnapshot,
     token: &rowan::SyntaxToken<rnix::NixLanguage>,
 ) -> Option<Vec<CompletionItem>> {
-    let inference = analysis.inference()?;
+    let inference = analysis.inference_result()?;
 
     let node = token.parent()?;
 
@@ -333,13 +333,13 @@ fn extract_ident_text(expr: &rnix::ast::Expr) -> Option<SmolStr> {
 /// Prefers names that have attrset fields (the common case for dot completion).
 /// Falls back to lambda param extraction for PatField/Param names.
 fn find_name_type_by_text(
-    analysis: &FileAnalysis,
+    analysis: &FileSnapshot,
     inference: &lang_check::InferenceResult,
     name_text: &str,
 ) -> Option<OutputTy> {
     let mut best: Option<OutputTy> = None;
 
-    for (name_id, name) in analysis.module.names() {
+    for (name_id, name) in analysis.syntax.module.names() {
         if name.text != name_text {
             continue;
         }
@@ -357,7 +357,7 @@ fn find_name_type_by_text(
 
         // For lambda params, extract param type from the enclosing Lambda.
         if matches!(name.kind, NameKind::Param | NameKind::PatField) {
-            if let Some(&lambda_expr_id) = analysis.module_indices.param_to_lambda.get(&name_id) {
+            if let Some(&lambda_expr_id) = analysis.syntax.module_indices.param_to_lambda.get(&name_id) {
                 if let Some(lambda_ty) = inference.expr_ty_map.get(lambda_expr_id) {
                     if let Some(param_ty) = extract_lambda_param(lambda_ty) {
                         let resolved = if name.kind == NameKind::PatField {
@@ -389,7 +389,7 @@ fn find_name_type_by_text(
 // ==============================================================================
 
 fn try_dot_completion(
-    analysis: &FileAnalysis,
+    analysis: &FileSnapshot,
     inference: &lang_check::InferenceResult,
     token: &rowan::SyntaxToken<rnix::NixLanguage>,
     docs: &DocIndex,
@@ -401,7 +401,7 @@ fn try_dot_completion(
     // Get the base expression of the Select (e.g. `lib` in `lib.strings.x`).
     let base_expr = select_node.expr()?;
     let base_ptr = AstPtr::new(base_expr.syntax());
-    let base_expr_id = analysis.source_map.expr_for_node(base_ptr)?;
+    let base_expr_id = analysis.syntax.source_map.expr_for_node(base_ptr)?;
 
     // Collect the already-typed path segments (everything before the cursor).
     // For `lib.strings.`, the attrpath has segments ["strings", <missing>].
@@ -449,7 +449,7 @@ fn try_dot_completion(
 ///    The Lambda type captures constraints from within the body AND from call
 ///    sites when the function and its call are in the same analysis unit.
 fn resolve_base_type(
-    analysis: &FileAnalysis,
+    analysis: &FileSnapshot,
     inference: &lang_check::InferenceResult,
     base_expr_id: ExprId,
 ) -> Option<OutputTy> {
@@ -461,7 +461,7 @@ fn resolve_base_type(
     }
 
     // Fallback: resolve through name resolution.
-    let resolve_result = analysis.name_res.get(base_expr_id)?;
+    let resolve_result = analysis.syntax.name_res.get(base_expr_id)?;
     let name_id = match resolve_result {
         ResolveResult::Definition(name_id) => *name_id,
         _ => {
@@ -480,9 +480,9 @@ fn resolve_base_type(
 
     // For lambda parameters, extract the param type from the enclosing
     // Lambda's canonicalized type.
-    let name = &analysis.module[name_id];
+    let name = &analysis.syntax.module[name_id];
     if matches!(name.kind, NameKind::Param | NameKind::PatField) {
-        if let Some(&lambda_expr_id) = analysis.module_indices.param_to_lambda.get(&name_id) {
+        if let Some(&lambda_expr_id) = analysis.syntax.module_indices.param_to_lambda.get(&name_id) {
             if let Some(lambda_ty) = inference.expr_ty_map.get(lambda_expr_id) {
                 log::debug!(
                     "dot_completion fallback: lambda ty={lambda_ty} for param {:?}",
@@ -569,7 +569,7 @@ use crate::ty_nav::{
 // root lambda's pattern fields, and suggests the next level of option keys.
 
 fn try_attrpath_key_completion(
-    analysis: &FileAnalysis,
+    analysis: &FileSnapshot,
     inference: &lang_check::InferenceResult,
     token: &rowan::SyntaxToken<rnix::NixLanguage>,
     docs: &DocIndex,
@@ -622,7 +622,7 @@ fn try_attrpath_key_completion(
         analysis,
         inference,
         first_segment,
-        &analysis.context_arg_types,
+        &analysis.syntax.context_arg_types,
     )?;
 
     // Extract the alias name before unwrap_or moves config_ty.
@@ -651,7 +651,7 @@ fn try_attrpath_key_completion(
 // ==============================================================================
 
 fn try_callsite_completion(
-    analysis: &FileAnalysis,
+    analysis: &FileSnapshot,
     inference: &lang_check::InferenceResult,
     token: &rowan::SyntaxToken<rnix::NixLanguage>,
     docs: &DocIndex,
@@ -674,6 +674,7 @@ fn try_callsite_completion(
     // Fall back to name-text lookup when analysis is stale (source_map can't
     // find the Apply node from the fresh tree).
     let fun_ty = match analysis
+        .syntax
         .source_map
         .expr_for_node(AstPtr::new(fun_expr.syntax()))
     {
@@ -728,19 +729,19 @@ fn try_callsite_completion(
 /// AST (Bindings) rather than re-parsing rnix. We look up the AttrSet's ExprId
 /// in the source map and read its static binding names from the Module.
 fn collect_existing_fields(
-    analysis: &FileAnalysis,
+    analysis: &FileSnapshot,
     attrset_node: &rnix::ast::AttrSet,
 ) -> Vec<SmolStr> {
     let ptr = AstPtr::new(attrset_node.syntax());
-    let Some(expr_id) = analysis.source_map.expr_for_node(ptr) else {
+    let Some(expr_id) = analysis.syntax.source_map.expr_for_node(ptr) else {
         return Vec::new();
     };
 
-    match &analysis.module[expr_id] {
+    match &analysis.syntax.module[expr_id] {
         Expr::AttrSet { bindings, .. } => bindings
             .statics
             .iter()
-            .map(|(name_id, _)| analysis.module[*name_id].text.clone())
+            .map(|(name_id, _)| analysis.syntax.module[*name_id].text.clone())
             .collect(),
         _ => Vec::new(),
     }
@@ -751,7 +752,7 @@ fn collect_existing_fields(
 // ==============================================================================
 
 fn try_inherit_completion(
-    analysis: &FileAnalysis,
+    analysis: &FileSnapshot,
     inference: &lang_check::InferenceResult,
     token: &rowan::SyntaxToken<rnix::NixLanguage>,
 ) -> Option<Vec<CompletionItem>> {
@@ -774,7 +775,7 @@ fn try_inherit_completion(
         // `inherit (expr) ▊;` — suggest fields from the expression's type.
         let expr_node = from.expr()?;
         let expr_ptr = AstPtr::new(expr_node.syntax());
-        let expr_id = analysis.source_map.expr_for_node(expr_ptr)?;
+        let expr_id = analysis.syntax.source_map.expr_for_node(expr_ptr)?;
         let ty = inference.expr_ty_map.get(expr_id)?;
         let fields = collect_attrset_fields(ty);
 
@@ -802,13 +803,13 @@ fn try_inherit_completion(
             // Try LetIn first, then AttrSet.
             if rnix::ast::LetIn::can_cast(n.kind()) || rnix::ast::AttrSet::can_cast(n.kind()) {
                 let ptr = AstPtr::new(&n);
-                analysis.source_map.expr_for_node(ptr)
+                analysis.syntax.source_map.expr_for_node(ptr)
             } else {
                 None
             }
         })?;
 
-        let scope_id = analysis.scopes.scope_for_expr(enclosing_expr_id)?;
+        let scope_id = analysis.syntax.scopes.scope_for_expr(enclosing_expr_id)?;
         let visible = collect_visible_names(analysis, inference, scope_id);
 
         let items = visible
@@ -831,7 +832,7 @@ fn try_inherit_completion(
 // ==============================================================================
 
 fn try_identifier_completion(
-    analysis: &FileAnalysis,
+    analysis: &FileSnapshot,
     inference: &lang_check::InferenceResult,
     token: &rowan::SyntaxToken<rnix::NixLanguage>,
 ) -> Option<Vec<CompletionItem>> {
@@ -863,7 +864,7 @@ fn try_identifier_completion(
 /// scope is the OUTER scope. In that case we try the next non-trivia token,
 /// which is typically inside the inner expression with the correct scope.
 fn scope_at_token(
-    analysis: &FileAnalysis,
+    analysis: &FileSnapshot,
     token: &rowan::SyntaxToken<rnix::NixLanguage>,
 ) -> Option<nameres::ScopeId> {
     let effective_token = if matches!(
@@ -878,8 +879,8 @@ fn scope_at_token(
     let node = effective_token.parent()?;
     for ancestor in node.ancestors() {
         let ptr = AstPtr::new(&ancestor);
-        if let Some(expr_id) = analysis.source_map.expr_for_node(ptr) {
-            if let Some(scope_id) = analysis.scopes.scope_for_expr(expr_id) {
+        if let Some(expr_id) = analysis.syntax.source_map.expr_for_node(ptr) {
+            if let Some(scope_id) = analysis.syntax.scopes.scope_for_expr(expr_id) {
                 return Some(scope_id);
             }
         }
@@ -895,13 +896,13 @@ fn scope_at_token(
 ///
 /// Appends global builtins at lowest priority.
 fn collect_visible_names(
-    analysis: &FileAnalysis,
+    analysis: &FileSnapshot,
     inference: &lang_check::InferenceResult,
     scope_id: nameres::ScopeId,
 ) -> BTreeMap<SmolStr, Option<OutputTy>> {
     let mut result: BTreeMap<SmolStr, Option<OutputTy>> = BTreeMap::new();
 
-    for scope_data in analysis.scopes.ancestors(scope_id) {
+    for scope_data in analysis.syntax.scopes.ancestors(scope_id) {
         if let Some(defs) = scope_data.as_definitions() {
             for (name, name_id) in defs {
                 result
@@ -910,7 +911,7 @@ fn collect_visible_names(
             }
         } else if let Some(with_expr_id) = scope_data.as_with() {
             // The With expression's env is the first child.
-            if let Expr::With { env, .. } = &analysis.module[with_expr_id] {
+            if let Expr::With { env, .. } = &analysis.syntax.module[with_expr_id] {
                 if let Some(env_ty) = inference.expr_ty_map.get(*env) {
                     for (field_name, field_ty) in collect_attrset_fields(env_ty) {
                         result
@@ -940,13 +941,13 @@ fn collect_visible_names(
 /// but produces results even without them. Used by `syntax_only_completion`
 /// for the degraded pending_text path.
 fn collect_visible_names_no_inference(
-    analysis: &FileAnalysis,
+    analysis: &FileSnapshot,
     scope_id: nameres::ScopeId,
 ) -> BTreeMap<SmolStr, Option<OutputTy>> {
     let mut result: BTreeMap<SmolStr, Option<OutputTy>> = BTreeMap::new();
-    let inference = analysis.inference();
+    let inference = analysis.inference_result();
 
-    for scope_data in analysis.scopes.ancestors(scope_id) {
+    for scope_data in analysis.syntax.scopes.ancestors(scope_id) {
         if let Some(defs) = scope_data.as_definitions() {
             for (name, name_id) in defs {
                 result.entry(name.clone()).or_insert_with(|| {
@@ -955,7 +956,7 @@ fn collect_visible_names_no_inference(
             }
         } else if let Some(with_expr_id) = scope_data.as_with() {
             if let Some(inf) = inference {
-                if let Expr::With { env, .. } = &analysis.module[with_expr_id] {
+                if let Expr::With { env, .. } = &analysis.syntax.module[with_expr_id] {
                     if let Some(env_ty) = inf.expr_ty_map.get(*env) {
                         for (field_name, field_ty) in collect_attrset_fields(env_ty) {
                             result
@@ -1074,11 +1075,11 @@ mod tests {
     /// Analyze source and get completions at a given byte offset.
     fn complete_at(src: &str, offset: u32) -> Vec<CompletionItem> {
         let t = TestAnalysis::new(src);
-        let analysis = t.analysis();
-        let pos = analysis.line_index.position(offset);
+        let analysis = t.snapshot();
+        let pos = analysis.syntax.line_index.position(offset);
         let docs = DocIndex::new();
 
-        match completion(analysis, pos, &t.root, &docs, &analysis.line_index) {
+        match completion(&analysis, pos, &t.root, &docs, &analysis.syntax.line_index) {
             Some(CompletionResponse::Array(items)) => items,
             _ => Vec::new(),
         }
@@ -1094,14 +1095,14 @@ mod tests {
         assert!(!markers.is_empty(), "no markers found in source");
 
         let t = TestAnalysis::new(src);
-        let analysis = t.analysis();
+        let analysis = t.snapshot();
         let docs = DocIndex::new();
 
         markers
             .into_iter()
             .map(|(num, offset)| {
-                let pos = analysis.line_index.position(offset);
-                let items = match completion(analysis, pos, &t.root, &docs, &analysis.line_index) {
+                let pos = analysis.syntax.line_index.position(offset);
+                let items = match completion(&analysis, pos, &t.root, &docs, &analysis.syntax.line_index) {
                     Some(CompletionResponse::Array(items)) => items,
                     _ => Vec::new(),
                 };
@@ -1261,7 +1262,7 @@ mod tests {
             in lib
         "#};
         let t = TestAnalysis::new(stale_src);
-        let stale_analysis = t.analysis();
+        let stale_analysis = t.snapshot();
 
         // Step 2: The user types `.` — fresh text has `lib.` but analysis
         // is still from the pre-dot version.
@@ -1277,7 +1278,7 @@ mod tests {
         let pos = fresh_line_index.position(dot_offset);
         let docs = DocIndex::new();
 
-        let items = match completion(stale_analysis, pos, &fresh_root, &docs, &fresh_line_index) {
+        let items = match completion(&stale_analysis, pos, &fresh_root, &docs, &fresh_line_index) {
             Some(CompletionResponse::Array(items)) => items,
             _ => Vec::new(),
         };
@@ -1383,7 +1384,7 @@ mod tests {
             in f
         "#};
         let t = TestAnalysis::new(stale_src);
-        let stale_analysis = t.analysis();
+        let stale_analysis = t.snapshot();
 
         // Step 2: The user types ` { }` — fresh text has the callsite but
         // analysis is still from the pre-callsite version.
@@ -1398,7 +1399,7 @@ mod tests {
         let docs = DocIndex::new();
 
         let pos = fresh_line_index.position(markers[&1]);
-        let items = match completion(stale_analysis, pos, &fresh_root, &docs, &fresh_line_index) {
+        let items = match completion(&stale_analysis, pos, &fresh_root, &docs, &fresh_line_index) {
             Some(CompletionResponse::Array(items)) => items,
             _ => Vec::new(),
         };
@@ -1424,7 +1425,7 @@ mod tests {
             in f
         "#};
         let t = TestAnalysis::new(stale_src);
-        let stale_analysis = t.analysis();
+        let stale_analysis = t.snapshot();
 
         let fresh_src = indoc! {r#"
             let f = { name, src, ... }: name;
@@ -1437,7 +1438,7 @@ mod tests {
         let docs = DocIndex::new();
 
         let pos = fresh_line_index.position(markers[&1]);
-        let items = match completion(stale_analysis, pos, &fresh_root, &docs, &fresh_line_index) {
+        let items = match completion(&stale_analysis, pos, &fresh_root, &docs, &fresh_line_index) {
             Some(CompletionResponse::Array(items)) => items,
             _ => Vec::new(),
         };
@@ -1657,7 +1658,7 @@ mod tests {
         assert!(!markers.is_empty(), "no markers found in fresh source");
 
         let t = TestAnalysis::new(stale_src);
-        let stale_analysis = t.analysis();
+        let stale_analysis = t.snapshot();
 
         let fresh_root = rnix::Root::parse(fresh_src).tree();
         let fresh_line_index = crate::convert::LineIndex::new(fresh_src);
@@ -1666,7 +1667,7 @@ mod tests {
             .into_iter()
             .map(|(num, offset)| {
                 let pos = fresh_line_index.position(offset);
-                let items = match syntax_only_completion(stale_analysis, pos, &fresh_root, &fresh_line_index) {
+                let items = match syntax_only_completion(&stale_analysis, pos, &fresh_root, &fresh_line_index) {
                     Some(CompletionResponse::Array(items)) => items,
                     _ => Vec::new(),
                 };
@@ -1970,15 +1971,15 @@ mod tests {
         assert!(!markers.is_empty(), "no markers found in source");
 
         let ctx = ContextTestSetup::new(src, context_stubs);
-        let analysis = ctx.analysis();
+        let analysis = ctx.snapshot();
         let root = ctx.root();
         let docs = ctx.docs();
 
         markers
             .into_iter()
             .map(|(num, offset)| {
-                let pos = analysis.line_index.position(offset);
-                let items = match completion(analysis, pos, &root, docs, &analysis.line_index) {
+                let pos = analysis.syntax.line_index.position(offset);
+                let items = match completion(&analysis, pos, &root, docs, &analysis.syntax.line_index) {
                     Some(CompletionResponse::Array(items)) => items,
                     _ => Vec::new(),
                 };
@@ -2458,7 +2459,7 @@ mod tests {
         fn complete_at_markers(&self, relative_path: &str) -> BTreeMap<u32, Vec<CompletionItem>> {
             let path = self.temp_dir.join(relative_path);
             let src = std::fs::read_to_string(&path).unwrap();
-            let analysis = self.state.get_file(&path).expect("file not loaded");
+            let analysis = self.state.get_file(&path).expect("file not loaded").to_snapshot(0);
             let root = rnix::Root::parse(&src).tree();
             let markers = parse_markers(&src);
             let docs = &self.state.registry.docs;
@@ -2467,8 +2468,8 @@ mod tests {
             markers
                 .into_iter()
                 .map(|(num, offset)| {
-                    let pos = analysis.line_index.position(offset);
-                    let items = match completion(analysis, pos, &root, docs, &analysis.line_index) {
+                    let pos = analysis.syntax.line_index.position(offset);
+                    let items = match completion(&analysis, pos, &root, docs, &analysis.syntax.line_index) {
                         Some(CompletionResponse::Array(items)) => items,
                         _ => Vec::new(),
                     };
@@ -2881,12 +2882,12 @@ mod tests {
         std::fs::write(&nix_path, src).unwrap();
         state.update_file(nix_path.clone(), src.to_string());
 
-        let analysis = state.get_file(&nix_path).unwrap();
+        let analysis = state.get_file(&nix_path).unwrap().to_snapshot(0);
         let root = rnix::Root::parse(src).tree();
         let docs = &state.registry.docs;
         let markers = parse_markers(src);
-        let pos = analysis.line_index.position(markers[&1]);
-        let items = match completion(analysis, pos, &root, docs, &analysis.line_index) {
+        let pos = analysis.syntax.line_index.position(markers[&1]);
+        let items = match completion(&analysis, pos, &root, docs, &analysis.syntax.line_index) {
             Some(CompletionResponse::Array(items)) => items,
             _ => Vec::new(),
         };
@@ -2955,15 +2956,15 @@ mod tests {
         assert!(!markers.is_empty(), "no markers in {rel_path}");
 
         state.update_file(file_path.clone(), src.clone());
-        let analysis = state.get_file(&file_path).unwrap();
+        let analysis = state.get_file(&file_path).unwrap().to_snapshot(0);
         let root = rnix::Root::parse(&src).tree();
         let docs = &state.registry.docs;
 
         markers
             .into_iter()
             .map(|(num, offset)| {
-                let pos = analysis.line_index.position(offset);
-                let items = match completion(analysis, pos, &root, docs, &analysis.line_index) {
+                let pos = analysis.syntax.line_index.position(offset);
+                let items = match completion(&analysis, pos, &root, docs, &analysis.syntax.line_index) {
                     Some(CompletionResponse::Array(items)) => items,
                     _ => Vec::new(),
                 };

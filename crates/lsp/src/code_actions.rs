@@ -19,7 +19,7 @@ use lang_check::diagnostic::TixDiagnosticKind;
 use rowan::ast::AstNode;
 use tower_lsp::lsp_types::*;
 
-use crate::state::FileAnalysis;
+use crate::state::FileSnapshot;
 
 /// Compute code actions for the given range in the document.
 ///
@@ -27,7 +27,7 @@ use crate::state::FileAnalysis;
 /// at that range. We match diagnostics to produce quick-fix actions and also
 /// offer refactoring actions based on the cursor position.
 pub fn code_actions(
-    analysis: &FileAnalysis,
+    analysis: &FileSnapshot,
     params: &CodeActionParams,
     root: &rnix::Root,
 ) -> Vec<CodeActionOrCommand> {
@@ -61,7 +61,7 @@ pub fn code_actions(
 //   - We can find the closing `}` of the attrset in the source
 
 fn add_missing_field_actions(
-    analysis: &FileAnalysis,
+    analysis: &FileSnapshot,
     params: &CodeActionParams,
     root: &rnix::Root,
     uri: &Url,
@@ -69,17 +69,22 @@ fn add_missing_field_actions(
 ) {
     let request_range = params.range;
 
-    for diag in &analysis.check_result.diagnostics {
+    let empty_diags = Vec::new();
+    let diagnostics = analysis
+        .any_inference()
+        .map(|inf| &inf.check_result.diagnostics)
+        .unwrap_or(&empty_diags);
+    for diag in diagnostics {
         let field_name = match &diag.kind {
             TixDiagnosticKind::MissingField { field, .. } => field.clone(),
             _ => continue,
         };
 
         // Find the source range of the diagnostic expression.
-        let diag_range = match analysis.source_map.node_for_expr(diag.at_expr) {
+        let diag_range = match analysis.syntax.source_map.node_for_expr(diag.at_expr) {
             Some(ptr) => {
                 let node = ptr.to_node(root.syntax());
-                analysis.line_index.range(node.text_range())
+                analysis.syntax.line_index.range(node.text_range())
             }
             None => continue,
         };
@@ -142,10 +147,10 @@ fn add_missing_field_actions(
 /// attrset definition. This scans all expressions for a Select whose
 /// attrpath includes `attr_expr`.
 fn find_enclosing_select_set(
-    analysis: &FileAnalysis,
+    analysis: &FileSnapshot,
     attr_expr: lang_ast::ExprId,
 ) -> Option<lang_ast::ExprId> {
-    for (expr_id, expr) in analysis.module.exprs() {
+    for (expr_id, expr) in analysis.syntax.module.exprs() {
         if let Expr::Select { set, attrpath, .. } = expr {
             if attrpath.contains(&attr_expr) {
                 return Some(*set);
@@ -168,18 +173,18 @@ fn find_enclosing_select_set(
 /// the source. Returns the position just before `}` and the indentation string
 /// for the new field.
 fn find_attrset_insert_point(
-    analysis: &FileAnalysis,
+    analysis: &FileSnapshot,
     set_expr: lang_ast::ExprId,
     root: &rnix::Root,
 ) -> Option<(Position, String)> {
     // If the set is a Reference, resolve it to the name's binding expression.
-    let attrset_expr = match &analysis.module[set_expr] {
+    let attrset_expr = match &analysis.syntax.module[set_expr] {
         Expr::Reference(_) => {
-            let name_id = analysis.name_res.get(set_expr).and_then(|r| match r {
+            let name_id = analysis.syntax.name_res.get(set_expr).and_then(|r| match r {
                 lang_ast::nameres::ResolveResult::Definition(n) => Some(*n),
                 _ => None,
             })?;
-            *analysis.module_indices.binding_expr.get(&name_id)?
+            *analysis.syntax.module_indices.binding_expr.get(&name_id)?
         }
         // If it's already an AttrSet literal, use it directly.
         Expr::AttrSet { .. } => set_expr,
@@ -187,12 +192,12 @@ fn find_attrset_insert_point(
     };
 
     // Verify this is an AttrSet expression.
-    if !matches!(&analysis.module[attrset_expr], Expr::AttrSet { .. }) {
+    if !matches!(&analysis.syntax.module[attrset_expr], Expr::AttrSet { .. }) {
         return None;
     }
 
     // Find the syntax node for the attrset expression.
-    let ptr = analysis.source_map.node_for_expr(attrset_expr)?;
+    let ptr = analysis.syntax.source_map.node_for_expr(attrset_expr)?;
     let node = ptr.to_node(root.syntax());
 
     // Find the closing `}` token in the attrset node.
@@ -202,6 +207,7 @@ fn find_attrset_insert_point(
         .find(|t| t.text() == "}")?;
 
     let close_pos = analysis
+        .syntax
         .line_index
         .position(close_brace.text_range().start().into());
 
@@ -214,7 +220,7 @@ fn find_attrset_insert_point(
                 || rnix::ast::Inherit::can_cast(child.kind())
             {
                 let start = child.text_range().start();
-                let start_pos = analysis.line_index.position(start.into());
+                let start_pos = analysis.syntax.line_index.position(start.into());
                 Some(" ".repeat(start_pos.character as usize))
             } else {
                 None
@@ -223,6 +229,7 @@ fn find_attrset_insert_point(
         // Fallback: use 2-space indent relative to the open brace.
         .unwrap_or_else(|| {
             let open_pos = analysis
+                .syntax
                 .line_index
                 .position(node.text_range().start().into());
             " ".repeat(open_pos.character as usize + 2)
@@ -239,32 +246,32 @@ fn find_attrset_insert_point(
 // insert a `/** type: name :: <type> */` doc comment above the binding.
 
 fn add_type_annotation_actions(
-    analysis: &FileAnalysis,
+    analysis: &FileSnapshot,
     params: &CodeActionParams,
     root: &rnix::Root,
     uri: &Url,
     actions: &mut Vec<CodeActionOrCommand>,
 ) {
-    let inference = match analysis.inference() {
+    let inference = match analysis.inference_result() {
         Some(inf) => inf,
         None => return,
     };
 
     let request_range = params.range;
 
-    for (name_id, name) in analysis.module.names() {
+    for (name_id, name) in analysis.syntax.module.names() {
         // Only offer annotations for let-bindings and rec-attrset fields.
         if !matches!(name.kind, NameKind::LetIn | NameKind::RecAttrset) {
             continue;
         }
 
         // Get the name's source position.
-        let ptr = match analysis.source_map.nodes_for_name(name_id).next() {
+        let ptr = match analysis.syntax.source_map.nodes_for_name(name_id).next() {
             Some(p) => p,
             None => continue,
         };
         let node = ptr.to_node(root.syntax());
-        let name_range = analysis.line_index.range(node.text_range());
+        let name_range = analysis.syntax.line_index.range(node.text_range());
 
         // Only offer when the cursor overlaps the name.
         if !ranges_overlap(name_range, request_range) {
@@ -372,7 +379,7 @@ fn has_existing_annotation(name_node: &rnix::SyntaxNode) -> bool {
 // index), offers to remove the entire `name = value;` text from the source.
 
 fn remove_unused_binding_actions(
-    analysis: &FileAnalysis,
+    analysis: &FileSnapshot,
     params: &CodeActionParams,
     root: &rnix::Root,
     uri: &Url,
@@ -380,7 +387,7 @@ fn remove_unused_binding_actions(
 ) {
     let request_range = params.range;
 
-    for (name_id, name) in analysis.module.names() {
+    for (name_id, name) in analysis.syntax.module.names() {
         // Only consider let-bindings for removal. Attrset fields and params
         // are structural and removing them would change semantics.
         if name.kind != NameKind::LetIn {
@@ -388,7 +395,7 @@ fn remove_unused_binding_actions(
         }
 
         // Skip the name if it has any references.
-        let refs = analysis.name_res.refs_to(name_id);
+        let refs = analysis.syntax.name_res.refs_to(name_id);
         if !refs.is_empty() {
             continue;
         }
@@ -399,12 +406,12 @@ fn remove_unused_binding_actions(
         }
 
         // Get the name's source position.
-        let ptr = match analysis.source_map.nodes_for_name(name_id).next() {
+        let ptr = match analysis.syntax.source_map.nodes_for_name(name_id).next() {
             Some(p) => p,
             None => continue,
         };
         let name_node = ptr.to_node(root.syntax());
-        let name_range = analysis.line_index.range(name_node.text_range());
+        let name_range = analysis.syntax.line_index.range(name_node.text_range());
 
         // Only offer when the cursor overlaps the name.
         if !ranges_overlap(name_range, request_range) {
@@ -454,8 +461,8 @@ fn remove_unused_binding_actions(
         }
 
         let delete_range = Range::new(
-            analysis.line_index.position(delete_start.into()),
-            analysis.line_index.position(delete_end.into()),
+            analysis.syntax.line_index.position(delete_start.into()),
+            analysis.syntax.line_index.position(delete_end.into()),
         );
 
         let edit = TextEdit {
@@ -500,9 +507,9 @@ mod tests {
         let markers = parse_markers(src);
         let offset = markers[&marker];
         let t = TestAnalysis::new(src);
-        let analysis = t.analysis();
+        let analysis = t.snapshot();
         let root = &t.root;
-        let pos = analysis.line_index.position(offset);
+        let pos = analysis.syntax.line_index.position(offset);
         let range = Range::new(pos, pos);
 
         let params = CodeActionParams {
@@ -517,7 +524,7 @@ mod tests {
             partial_result_params: Default::default(),
         };
 
-        code_actions(analysis, &params, root)
+        code_actions(&analysis, &params, root)
     }
 
     /// Extract titles from code actions.
