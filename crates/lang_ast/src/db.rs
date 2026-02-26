@@ -15,8 +15,9 @@ pub trait AstDb: salsa::Database {
     /// Parse a Nix file, returning the `Parse<Root>` which stores the green
     /// tree (Send+Sync). Callers get a Root via `.tree()` locally.
     ///
-    /// RootDatabase caches the parse result so repeated calls for the same
-    /// file don't re-parse. The cache is cleared when file contents change.
+    /// Implementations must always read `file.contents(self)` so that Salsa
+    /// records the dependency when this is called from tracked functions
+    /// like `module_and_source_maps`.
     fn parse_file(&self, file: NixFile) -> rnix::Parse<rnix::Root>;
 
     /// Load a file from disk by path. Returns None if the file doesn't exist
@@ -29,10 +30,6 @@ pub trait AstDb: salsa::Database {
 pub struct RootDatabase {
     storage: salsa::Storage<Self>,
     files: DashMap<PathBuf, NixFile>,
-    /// Cache parse results to avoid re-parsing when `parse_file` is called
-    /// multiple times for the same file (e.g. once from `module_and_source_maps`
-    /// and once to store in `SyntaxData`). Cleared by `set_file_contents`.
-    parse_cache: DashMap<NixFile, rnix::Parse<rnix::Root>>,
 }
 
 #[salsa::db]
@@ -41,13 +38,12 @@ impl salsa::Database for RootDatabase {}
 #[salsa::db]
 impl AstDb for RootDatabase {
     fn parse_file(&self, file: NixFile) -> rnix::Parse<rnix::Root> {
-        if let Some(cached) = self.parse_cache.get(&file) {
-            return cached.clone();
-        }
+        // Must always read file.contents(self) so Salsa records the dependency
+        // when called from inside #[salsa::tracked] functions like
+        // module_and_source_maps. A manual cache here would bypass the read
+        // and break Salsa's invalidation tracking.
         let src = file.contents(self);
-        let parsed = rnix::Root::parse(src);
-        self.parse_cache.insert(file, parsed.clone());
-        parsed
+        rnix::Root::parse(src)
     }
 
     fn load_file(&self, path: &std::path::Path) -> Option<NixFile> {
@@ -81,8 +77,6 @@ impl RootDatabase {
         let existing = self.files.get(&path).map(|entry| *entry.value());
 
         if let Some(file) = existing {
-            // Invalidate cached parse — contents are changing.
-            self.parse_cache.remove(&file);
             file.set_contents(self).to(contents);
             file
         } else {

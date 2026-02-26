@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use lang_ast::{
-    module_and_source_maps, AstDb, Expr, ExprId, GroupedDefs, Literal, Module, ModuleIndices,
+    module_and_source_maps, Expr, ExprId, GroupedDefs, Literal, Module, ModuleIndices,
     ModuleScopes, ModuleSourceMap, NameId, NameResolution, NixFile, RootDatabase,
 };
 use lang_check::aliases::TypeAliasRegistry;
@@ -351,8 +351,8 @@ impl AnalysisState {
         // -- Phase 1: Parse --
         let t0 = Instant::now();
         let line_index = LineIndex::new(&contents);
+        let parsed = rnix::Root::parse(&contents);
         let nix_file = self.db.set_file_contents(path.clone(), contents);
-        let parsed = self.db.parse_file(nix_file);
         let t_parse = t0.elapsed();
 
         // -- Phase 2: Lower to Tix AST + name resolution --
@@ -568,8 +568,8 @@ impl AnalysisState {
 
         // -- Parse --
         let line_index = LineIndex::new(&contents);
+        let parsed = rnix::Root::parse(&contents);
         let nix_file = self.db.set_file_contents(path.clone(), contents);
-        let parsed = self.db.parse_file(nix_file);
 
         // -- Lower to Tix AST + name resolution --
         let (module, source_map) = module_and_source_maps(&self.db, nix_file);
