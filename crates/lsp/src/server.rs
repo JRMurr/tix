@@ -757,46 +757,24 @@ impl LanguageServer for TixLanguageServer {
             None => return Err(content_modified_error()),
         };
 
-        // Check if we have fresher text than the last completed analysis.
-        // This happens when `.` triggers completion before the debounce timer
-        // fires — the stale analysis doesn't contain the `.` token.
-        let fresh_text = self.pending_text.lock().get(&path).cloned();
-
         // Lock state briefly for docs only.
         let docs = self.state.lock().registry.docs.clone();
 
+        // Use the freshest available tree: pending_text if the analysis loop
+        // hasn't caught up yet (e.g. `.` trigger before debounce), otherwise
+        // the snapshot's own parsed tree. The unified completion() handles
+        // stale source_map via name-text fallbacks internally.
+        let fresh_text = self.pending_text.lock().get(&path).cloned();
         if let Some(ref text) = fresh_text {
-            // Analysis hasn't caught up to the latest edit. Try full
-            // completion first — it works when the edit is in-place (e.g.
-            // `lib` → `lib.` without shifting ranges). Fall back to
-            // syntax-only completion (which handles range-shifted cases
-            // via name-text lookup) only if full completion returns None.
             let root = rnix::Root::parse(text).tree();
             let line_index = crate::convert::LineIndex::new(text);
-            let full_result = crate::completion::completion(
-                &snap_ref,
-                pos,
-                &root,
-                &docs,
-                &line_index,
-            );
-            if full_result.is_some() {
-                return Ok(full_result);
-            }
-            Ok(crate::completion::syntax_only_completion(
-                &snap_ref,
-                pos,
-                &root,
-                &line_index,
+            Ok(crate::completion::completion(
+                &snap_ref, pos, &root, &docs, &line_index,
             ))
         } else {
             let root = snap_ref.syntax.parsed.tree();
             Ok(crate::completion::completion(
-                &snap_ref,
-                pos,
-                &root,
-                &docs,
-                &snap_ref.syntax.line_index,
+                &snap_ref, pos, &root, &docs, &snap_ref.syntax.line_index,
             ))
         }
     }

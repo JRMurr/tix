@@ -47,6 +47,13 @@ use crate::state::FileSnapshot;
 /// the latest text to get a fresh tree+LineIndex while still using the stale
 /// `analysis` for type inference results (which remain valid because the base
 /// expression's text range hasn't changed).
+///
+/// Handles missing or stale inference gracefully:
+/// - Type-dependent strategies (dot, attrpath-key, callsite, inherit) require
+///   inference results. Each one has a name-text fallback for when the source_map
+///   can't find a node (stale analysis with shifted ranges).
+/// - When no inference exists at all (cold start, file just opened), only
+///   scope-based identifier completion is available.
 pub fn completion(
     analysis: &FileSnapshot,
     pos: Position,
@@ -54,7 +61,7 @@ pub fn completion(
     docs: &DocIndex,
     line_index: &LineIndex,
 ) -> Option<CompletionResponse> {
-    let inference = analysis.inference_result()?;
+    let inference = analysis.inference_result();
     let offset = line_index.offset(pos);
     let token = root
         .syntax()
@@ -64,44 +71,69 @@ pub fn completion(
         .left_biased()?;
 
     log::debug!(
-        "completion: pos={pos:?}, token={:?} {:?}, doc_field_docs={}, doc_decl_docs={}",
+        "completion: pos={pos:?}, token={:?} {:?}, inference={}, doc_field_docs={}, doc_decl_docs={}",
         token.kind(),
         token.text(),
+        inference.is_some(),
         docs.field_docs_count(),
         docs.decl_docs_count(),
     );
 
-    // Try dot completion first (cursor right after `.` in a Select).
-    if let Some(items) = try_dot_completion(analysis, inference, &token, docs) {
-        if !items.is_empty() {
-            return Some(CompletionResponse::Array(items));
+    // Type-dependent strategies: only available when inference results exist.
+    if let Some(inf) = inference {
+        // Try dot completion first (cursor right after `.` in a Select).
+        // Includes name-text fallback for stale analysis.
+        if let Some(items) = try_dot_completion(analysis, inf, &token, docs) {
+            if !items.is_empty() {
+                return Some(CompletionResponse::Array(items));
+            }
         }
-    }
 
-    // Try attrpath key completion (cursor after `.` in an attrset key like
-    // `programs.` inside a NixOS module return body).
-    if let Some(items) = try_attrpath_key_completion(analysis, inference, &token, docs) {
-        if !items.is_empty() {
-            return Some(CompletionResponse::Array(items));
+        // Try attrpath key completion (cursor after `.` in an attrset key like
+        // `programs.` inside a NixOS module return body).
+        if let Some(items) = try_attrpath_key_completion(analysis, inf, &token, docs) {
+            if !items.is_empty() {
+                return Some(CompletionResponse::Array(items));
+            }
         }
-    }
 
-    // Try callsite attrset completion (cursor inside `{ }` argument).
-    if let Some(items) = try_callsite_completion(analysis, inference, &token, docs) {
-        if !items.is_empty() {
-            return Some(CompletionResponse::Array(items));
+        // Try callsite attrset completion (cursor inside `{ }` argument).
+        // Includes name-text fallback for stale analysis.
+        if let Some(items) = try_callsite_completion(analysis, inf, &token, docs) {
+            if !items.is_empty() {
+                return Some(CompletionResponse::Array(items));
+            }
         }
-    }
 
-    // Try inherit completion (cursor inside `inherit ...;`).
-    if let Some(items) = try_inherit_completion(analysis, inference, &token) {
-        if !items.is_empty() {
-            return Some(CompletionResponse::Array(items));
+        // Try inherit completion (cursor inside `inherit ...;`).
+        if let Some(items) = try_inherit_completion(analysis, inf, &token) {
+            if !items.is_empty() {
+                return Some(CompletionResponse::Array(items));
+            }
         }
-    }
 
-    // Catch-all: suggest all visible identifiers at the cursor position.
-    if let Some(items) = try_identifier_completion(analysis, inference, &token) {
+        // Catch-all: suggest all visible identifiers at the cursor position.
+        if let Some(items) = try_identifier_completion(analysis, inf, &token) {
+            if !items.is_empty() {
+                return Some(CompletionResponse::Array(items));
+            }
+        }
+    } else {
+        // No inference available (cold start) — offer scope-based identifier
+        // completion without type details.
+        let scope_id = scope_at_token(analysis, &token)?;
+        let visible = collect_visible_names_no_inference(analysis, scope_id);
+
+        let items: Vec<CompletionItem> = visible
+            .into_iter()
+            .map(|(name, ty)| CompletionItem {
+                label: name.to_string(),
+                kind: Some(completion_kind_for_ty(ty.as_ref())),
+                detail: ty.as_ref().map(|t| format!("{t}")),
+                ..Default::default()
+            })
+            .collect();
+
         if !items.is_empty() {
             return Some(CompletionResponse::Array(items));
         }
@@ -110,185 +142,6 @@ pub fn completion(
     None
 }
 
-/// Degraded completion path used when analysis hasn't caught up to the latest
-/// edit (pending_text exists). Tries dot completion and callsite attrset
-/// completion via name-text lookup first (safe because the definition hasn't
-/// changed, only ranges shifted), then falls back to identifier completion
-/// from scope info.
-///
-/// `root` and `line_index` come from a fresh parse of the latest text, while
-/// `analysis` is from the previous (stale) analysis. Scope structure is
-/// structural and tolerates small edits, so identifier suggestions remain
-/// useful even when type info is slightly behind.
-pub fn syntax_only_completion(
-    analysis: &FileSnapshot,
-    pos: Position,
-    root: &rnix::Root,
-    line_index: &LineIndex,
-) -> Option<CompletionResponse> {
-    let offset = line_index.offset(pos);
-    let token = root
-        .syntax()
-        .token_at_offset(rowan::TextSize::from(offset))
-        .left_biased()?;
-
-    // Try dot completion first — uses name-text lookup against stale analysis,
-    // no source_map needed. Safe because the definition's type hasn't changed,
-    // only the cursor position / ranges have shifted.
-    if let Some(items) = try_syntax_only_dot_completion(analysis, &token) {
-        if !items.is_empty() {
-            return Some(CompletionResponse::Array(items));
-        }
-    }
-
-    // Try callsite attrset completion — same name-text lookup strategy.
-    // Handles `f { | }` when analysis is stale.
-    if let Some(items) = try_syntax_only_callsite_completion(analysis, &token) {
-        if !items.is_empty() {
-            return Some(CompletionResponse::Array(items));
-        }
-    }
-
-    // Fallback: identifier completion from scope chain.
-    let scope_id = scope_at_token(analysis, &token)?;
-    let visible = collect_visible_names_no_inference(analysis, scope_id);
-
-    let items: Vec<CompletionItem> = visible
-        .into_iter()
-        .map(|(name, ty)| CompletionItem {
-            label: name.to_string(),
-            kind: Some(completion_kind_for_ty(ty.as_ref())),
-            detail: ty.as_ref().map(|t| format!("{t}")),
-            ..Default::default()
-        })
-        .collect();
-
-    if items.is_empty() {
-        None
-    } else {
-        Some(CompletionResponse::Array(items))
-    }
-}
-
-/// Dot completion for the degraded (syntax-only) path.
-///
-/// When analysis is stale but the user typed `.` on a trigger, we can still
-/// provide dot completion by looking up the base identifier's type by name
-/// text rather than by source_map range. This avoids the range-mismatch
-/// problem that occurs when the fresh tree has shifted offsets (e.g. a new
-/// line was inserted before `lib.`).
-///
-/// Strategy:
-/// 1. Guard: token must be TOKEN_DOT
-/// 2. Find the Select node in the fresh tree
-/// 3. Extract the base identifier text (e.g. "lib")
-/// 4. Search stale analysis.syntax.module.names() for a NameId with matching text
-/// 5. Look up its type in inference.name_ty_map
-/// 6. Collect typed segments and resolve through them
-/// 7. Return field completion items (without doc context — acceptable degradation)
-fn try_syntax_only_dot_completion(
-    analysis: &FileSnapshot,
-    token: &rowan::SyntaxToken<rnix::NixLanguage>,
-) -> Option<Vec<CompletionItem>> {
-    use rnix::SyntaxKind;
-
-    if token.kind() != SyntaxKind::TOKEN_DOT {
-        return None;
-    }
-
-    let inference = analysis.inference_result()?;
-
-    // Walk ancestors from the token's parent to find a Select node in the fresh tree.
-    let node = token.parent()?;
-    let select_node = node.ancestors().find_map(rnix::ast::Select::cast)?;
-
-    // Extract the base expression's identifier text. We only handle simple
-    // identifier bases (e.g. `lib` in `lib.strings.`), not complex expressions.
-    let base_expr = select_node.expr()?;
-    let base_name_text = extract_ident_text(&base_expr)?;
-
-    // Search the stale module's names for one with matching text that has
-    // attrset fields in its type. This is the name-text lookup that avoids
-    // needing source_map ranges.
-    let base_ty = find_name_type_by_text(analysis, inference, &base_name_text)?;
-
-    let cursor_offset = token.text_range().end();
-    let typed_segments = collect_typed_segments(&select_node, cursor_offset);
-
-    log::debug!(
-        "syntax_only_dot_completion: base={base_name_text}, base_ty={base_ty}, segments={typed_segments:?}"
-    );
-
-    let resolved_ty = resolve_through_segments(&base_ty, &typed_segments).unwrap_or(base_ty);
-
-    // No doc context in the degraded path — acceptable tradeoff.
-    let fields = collect_attrset_fields(&resolved_ty);
-    Some(fields_to_completion_items(&fields, None))
-}
-
-/// Callsite attrset completion for the degraded (syntax-only) path.
-///
-/// When analysis is stale but the user is typing inside `f { | }`, the fresh
-/// tree has the Apply+AttrSet structure but the source_map can't resolve the
-/// function's ExprId (ranges have shifted). Instead, we extract the function's
-/// name text from the fresh tree and look it up by name in the stale analysis
-/// — the same strategy as `try_syntax_only_dot_completion`.
-///
-/// Existing fields are collected directly from the fresh rnix AttrSet node
-/// (no source_map needed) so filtering works even when the attrset is new.
-fn try_syntax_only_callsite_completion(
-    analysis: &FileSnapshot,
-    token: &rowan::SyntaxToken<rnix::NixLanguage>,
-) -> Option<Vec<CompletionItem>> {
-    let inference = analysis.inference_result()?;
-
-    let node = token.parent()?;
-
-    // Find the enclosing AttrSet syntax node.
-    let attrset_node = node.ancestors().find_map(rnix::ast::AttrSet::cast)?;
-
-    // The AttrSet's parent must be an Apply node (i.e. it's a function argument).
-    let apply_node = attrset_node
-        .syntax()
-        .parent()
-        .and_then(rnix::ast::Apply::cast)?;
-
-    // Extract the function's identifier text from the fresh tree.
-    let fun_expr = apply_node.lambda()?;
-    let fun_name_text = extract_ident_text(&fun_expr)?;
-
-    // Look up the function's type by name text against the stale analysis.
-    let fun_ty = find_name_type_by_text(analysis, inference, &fun_name_text)?;
-
-    log::debug!("syntax_only_callsite_completion: fun={fun_name_text}, fun_ty={fun_ty}");
-
-    // Extract the parameter type from the function type.
-    let param_ty = extract_lambda_param(&fun_ty)?;
-
-    // Get expected fields from the parameter type.
-    let expected_fields = collect_attrset_fields(&param_ty);
-    if expected_fields.is_empty() {
-        return None;
-    }
-
-    // Collect fields already present in the attrset literal directly from the
-    // fresh rnix tree — no source_map needed.
-    let existing = collect_existing_fields_from_tree(&attrset_node);
-
-    log::debug!(
-        "syntax_only_callsite_completion: expected={:?}, existing={existing:?}",
-        expected_fields.keys().collect::<Vec<_>>()
-    );
-
-    // Return only the fields that haven't been written yet.
-    let remaining: BTreeMap<SmolStr, TyRef> = expected_fields
-        .into_iter()
-        .filter(|(k, _)| !existing.contains(k))
-        .collect();
-
-    // No doc context in the degraded path — acceptable tradeoff.
-    Some(fields_to_completion_items(&remaining, None))
-}
 
 /// Collect field names already present in an attrset literal by walking the
 /// fresh rnix tree directly. Unlike `collect_existing_fields`, this does not
@@ -400,8 +253,6 @@ fn try_dot_completion(
 
     // Get the base expression of the Select (e.g. `lib` in `lib.strings.x`).
     let base_expr = select_node.expr()?;
-    let base_ptr = AstPtr::new(base_expr.syntax());
-    let base_expr_id = analysis.syntax.source_map.expr_for_node(base_ptr)?;
 
     // Collect the already-typed path segments (everything before the cursor).
     // For `lib.strings.`, the attrpath has segments ["strings", <missing>].
@@ -412,17 +263,28 @@ fn try_dot_completion(
     let cursor_offset = token.text_range().end();
     let typed_segments = collect_typed_segments(&select_node, cursor_offset);
 
-    // Resolve the base expression's type. Try the direct expr_ty_map first;
-    // if that yields a bare type variable (common for lambda parameters),
-    // fall back to extracting the type from the enclosing lambda.
-    let base_ty = resolve_base_type(analysis, inference, base_expr_id)?;
+    // Try precise source_map path first, fall back to name-text lookup when
+    // the source_map can't find the node (stale analysis with shifted ranges).
+    let base_ptr = AstPtr::new(base_expr.syntax());
+    let precise_ty = analysis
+        .syntax
+        .source_map
+        .expr_for_node(base_ptr)
+        .and_then(|eid| resolve_base_type(analysis, inference, eid));
+
+    let (base_ty, alias) = if let Some(ty) = precise_ty {
+        let alias = extract_alias_name(&ty).cloned();
+        (ty, alias)
+    } else {
+        // Fallback: name-text lookup (works when source_map can't find the
+        // node due to stale analysis / shifted ranges).
+        let base_name_text = extract_ident_text(&base_expr)?;
+        let ty = find_name_type_by_text(analysis, inference, &base_name_text)?;
+        // No alias info in the degraded path — acceptable tradeoff.
+        (ty, None)
+    };
 
     log::debug!("dot_completion: base_ty={base_ty}, typed_segments={typed_segments:?}");
-
-    // Extract the alias name from the base type for doc lookups (e.g.
-    // "NixosConfig" from Named("NixosConfig", {...})). Must happen before
-    // the unwrap_or below moves base_ty.
-    let alias = extract_alias_name(&base_ty).cloned();
 
     // Walk through the typed segments to resolve the nested type.
     // If segment resolution fails (e.g. the type doesn't have the expected
@@ -938,8 +800,8 @@ fn collect_visible_names(
 /// Like `collect_visible_names` but doesn't require inference results.
 ///
 /// Uses inference types opportunistically when available (from stale analysis),
-/// but produces results even without them. Used by `syntax_only_completion`
-/// for the degraded pending_text path.
+/// but produces results even without them. Used as the cold-start fallback
+/// when no inference exists yet (file just opened, first analysis in progress).
 fn collect_visible_names_no_inference(
     analysis: &FileSnapshot,
     scope_id: nameres::ScopeId,
@@ -1647,13 +1509,14 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Syntax-only completion (degraded path for pending_text)
+    // Stale-analysis completion (fresh tree against stale inference)
     // ------------------------------------------------------------------
 
-    /// Analyze stale source, then run syntax_only_completion on fresh source.
-    /// Simulates the pending_text scenario: the analysis is from a previous
-    /// version of the file, but the fresh text has a new edit.
-    fn syntax_only_at_markers(stale_src: &str, fresh_src: &str) -> BTreeMap<u32, Vec<CompletionItem>> {
+    /// Analyze stale source, then run the unified completion() with a fresh
+    /// parse of different source. Simulates the pending_text scenario: the
+    /// analysis is from a previous version of the file, but the fresh text
+    /// has a new edit (e.g. appended `.` or `{ }`).
+    fn stale_completion_at_markers(stale_src: &str, fresh_src: &str) -> BTreeMap<u32, Vec<CompletionItem>> {
         let markers = parse_markers(fresh_src);
         assert!(!markers.is_empty(), "no markers found in fresh source");
 
@@ -1662,12 +1525,13 @@ mod tests {
 
         let fresh_root = rnix::Root::parse(fresh_src).tree();
         let fresh_line_index = crate::convert::LineIndex::new(fresh_src);
+        let docs = DocIndex::new();
 
         markers
             .into_iter()
             .map(|(num, offset)| {
                 let pos = fresh_line_index.position(offset);
-                let items = match syntax_only_completion(&stale_analysis, pos, &fresh_root, &fresh_line_index) {
+                let items = match completion(&stale_analysis, pos, &fresh_root, &docs, &fresh_line_index) {
                     Some(CompletionResponse::Array(items)) => items,
                     _ => Vec::new(),
                 };
@@ -1677,10 +1541,10 @@ mod tests {
     }
 
     #[test]
-    fn syntax_only_returns_identifiers() {
+    fn stale_returns_identifiers() {
         // Stale source doesn't have the trailing expression; fresh source does.
-        // syntax_only_completion should still find scope names from the stale
-        // analysis's scope chain.
+        // Completion should still find scope names from the stale analysis's
+        // scope chain.
         let stale_src = indoc! {r#"
             let x = 1; y = "hello";
             in x
@@ -1690,20 +1554,20 @@ mod tests {
             in x + y
             #  ^1
         "#};
-        let results = syntax_only_at_markers(stale_src, fresh_src);
+        let results = stale_completion_at_markers(stale_src, fresh_src);
         let names = labels(&results[&1]);
         assert!(names.contains(&"x"), "should suggest x, got: {names:?}");
         assert!(names.contains(&"y"), "should suggest y, got: {names:?}");
     }
 
     #[test]
-    fn syntax_only_includes_builtins() {
+    fn stale_includes_builtins() {
         let stale_src = "let x = 1; in x";
         let fresh_src = indoc! {r#"
             let x = 1; in x
             #              ^1
         "#};
-        let results = syntax_only_at_markers(stale_src, fresh_src);
+        let results = stale_completion_at_markers(stale_src, fresh_src);
         let names = labels(&results[&1]);
         assert!(
             names.contains(&"import"),
@@ -1716,11 +1580,11 @@ mod tests {
     }
 
     #[test]
-    fn syntax_only_dot_completion_simple() {
-        // When fresh_text has a `.` that triggers completion, syntax_only
-        // should provide dot completion via name-text lookup against stale
-        // analysis. The definition's type hasn't changed, only the cursor
-        // position is new.
+    fn stale_dot_completion_simple() {
+        // When fresh_text has a `.` that triggers completion, the unified
+        // completion should provide dot completion via name-text lookup
+        // against stale analysis. The definition's type hasn't changed,
+        // only the cursor position is new.
         let stale_src = indoc! {r#"
             let lib = { x = 1; y = 2; };
             in lib
@@ -1730,23 +1594,23 @@ mod tests {
             in lib.
             #      ^1
         "#};
-        let results = syntax_only_at_markers(stale_src, fresh_src);
+        let results = stale_completion_at_markers(stale_src, fresh_src);
         let names = labels(&results[&1]);
         assert!(
             names.contains(&"x"),
-            "syntax_only should dot-complete x, got: {names:?}"
+            "stale should dot-complete x, got: {names:?}"
         );
         assert!(
             names.contains(&"y"),
-            "syntax_only should dot-complete y, got: {names:?}"
+            "stale should dot-complete y, got: {names:?}"
         );
     }
 
     #[test]
-    fn syntax_only_dot_completion_new_line() {
+    fn stale_dot_completion_new_line() {
         // The key scenario: user adds a new line with `lib.`, shifting all
-        // ranges. Full completion fails (source_map mismatch), but syntax-only
-        // dot completion succeeds via name-text lookup.
+        // ranges. Source_map can't find the base expr, but the name-text
+        // fallback in try_dot_completion resolves the type.
         let stale_src = indoc! {r#"
             let lib = { x = 1; y = 2; };
             in lib
@@ -1757,20 +1621,20 @@ mod tests {
               lib.
             #     ^1
         "#};
-        let results = syntax_only_at_markers(stale_src, fresh_src);
+        let results = stale_completion_at_markers(stale_src, fresh_src);
         let names = labels(&results[&1]);
         assert!(
             names.contains(&"x"),
-            "syntax_only should dot-complete x on new line, got: {names:?}"
+            "stale should dot-complete x on new line, got: {names:?}"
         );
         assert!(
             names.contains(&"y"),
-            "syntax_only should dot-complete y on new line, got: {names:?}"
+            "stale should dot-complete y on new line, got: {names:?}"
         );
     }
 
     #[test]
-    fn syntax_only_dot_completion_nested() {
+    fn stale_dot_completion_nested() {
         // Nested dot completion: `lib.strings.` on a new line.
         let stale_src = indoc! {r#"
             let lib = { strings = { concat = 1; sep = 2; }; };
@@ -1782,24 +1646,24 @@ mod tests {
               lib.strings.
             #             ^1
         "#};
-        let results = syntax_only_at_markers(stale_src, fresh_src);
+        let results = stale_completion_at_markers(stale_src, fresh_src);
         let names = labels(&results[&1]);
         assert!(
             names.contains(&"concat"),
-            "syntax_only should dot-complete concat, got: {names:?}"
+            "stale should dot-complete concat, got: {names:?}"
         );
         assert!(
             names.contains(&"sep"),
-            "syntax_only should dot-complete sep, got: {names:?}"
+            "stale should dot-complete sep, got: {names:?}"
         );
     }
 
     #[test]
-    fn syntax_only_callsite_completion() {
+    fn stale_callsite_completion() {
         // When the user adds a call site `f { }` that doesn't exist in the
-        // stale analysis, full completion fails (source_map can't find the
-        // Apply node). The syntax-only path should still provide callsite
-        // completion by looking up the function's type by name text.
+        // stale analysis, the source_map can't find the Apply node. The
+        // name-text fallback in try_callsite_completion resolves the function
+        // type by identifier text.
         let stale_src = indoc! {r#"
             let f = { name, src, ... }: name;
             in f
@@ -1809,20 +1673,20 @@ mod tests {
             in f { }
             #     ^1
         "#};
-        let results = syntax_only_at_markers(stale_src, fresh_src);
+        let results = stale_completion_at_markers(stale_src, fresh_src);
         let names = labels(&results[&1]);
         assert!(
             names.contains(&"name"),
-            "syntax_only should callsite-complete name, got: {names:?}"
+            "stale should callsite-complete name, got: {names:?}"
         );
         assert!(
             names.contains(&"src"),
-            "syntax_only should callsite-complete src, got: {names:?}"
+            "stale should callsite-complete src, got: {names:?}"
         );
     }
 
     #[test]
-    fn syntax_only_callsite_completion_filters_existing() {
+    fn stale_callsite_completion_filters_existing() {
         // Existing fields in the fresh tree should be filtered out, even
         // though the attrset doesn't exist in the stale analysis.
         let stale_src = indoc! {r#"
@@ -1834,15 +1698,15 @@ mod tests {
             in f { name = "x"; }
             #                  ^1
         "#};
-        let results = syntax_only_at_markers(stale_src, fresh_src);
+        let results = stale_completion_at_markers(stale_src, fresh_src);
         let names = labels(&results[&1]);
         assert!(
             !names.contains(&"name"),
-            "syntax_only should NOT complete already-present name, got: {names:?}"
+            "stale should NOT complete already-present name, got: {names:?}"
         );
         assert!(
             names.contains(&"src"),
-            "syntax_only should complete src, got: {names:?}"
+            "stale should complete src, got: {names:?}"
         );
     }
 
