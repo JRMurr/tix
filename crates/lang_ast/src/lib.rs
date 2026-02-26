@@ -22,7 +22,7 @@ pub use db::{AstDb, NixFile, RootDatabase};
 use derive_more::From;
 use la_arena::{Arena, ArenaMap, Idx as Id};
 use lower::lower;
-pub use nameres::{group_def, name_resolution, scopes, ModuleScopes, NameResolution};
+pub use nameres::{group_def, name_resolution, scopes, GroupedDefs, ModuleScopes, NameResolution};
 use rnix::NixLanguage;
 use smol_str::SmolStr;
 

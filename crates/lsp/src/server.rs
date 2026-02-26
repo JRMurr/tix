@@ -37,7 +37,7 @@ use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 
 use crate::config::TixConfig;
-use crate::state::{AnalysisState, FileAnalysis, FileSnapshot};
+use crate::state::{AnalysisState, FileAnalysis, FileSnapshot, InferenceData};
 
 /// Quiescence delay for diagnostic publication. Diagnostics are held back
 /// until no new edits arrive for this duration, preventing flickering during
@@ -234,6 +234,9 @@ fn spawn_analysis_loop(
         // Pending diagnostics waiting for quiescence, keyed by path.
         let mut pending_diags: HashMap<PathBuf, Vec<Diagnostic>> = HashMap::new();
         let mut diag_timer: Option<Pin<Box<tokio::time::Sleep>>> = None;
+        // Monotonically increasing counter to tag SyntaxData/InferenceData
+        // with matching generations, so handlers can detect stale inference.
+        let mut generation_counter: u64 = 0;
 
         loop {
             // ── Phase 1: Wait for event or diagnostic timer ──
@@ -318,9 +321,10 @@ fn spawn_analysis_loop(
 
             // ── Phase 3: Analyze each changed file ──
             //
-            // Like RA's process_changes() → apply_change(), but we do
-            // per-file analysis since tix doesn't batch via Salsa.
-            // Create a fresh cancel flag (like RA's trigger_cancellation()).
+            // Split into syntax + inference phases. The mutex is held only for
+            // the fast syntax phase (~5-50ms). SyntaxData is written to the
+            // DashMap immediately, making handlers responsive. Inference runs
+            // without the mutex, so handlers never block on type inference.
             let cancel_flag = Arc::new(AtomicBool::new(false));
             *current_cancel.lock() = cancel_flag.clone();
 
@@ -329,7 +333,6 @@ fn spawn_analysis_loop(
             for (path, text) in &changes {
                 // Check for new events between files. If the user typed more,
                 // bail out and let the next loop iteration coalesce them.
-                // This mirrors RA's cancellation-on-new-revision pattern.
                 if !rx.is_empty() {
                     cancel_flag.store(true, Ordering::Relaxed);
                     break;
@@ -340,38 +343,82 @@ fn spawn_analysis_loop(
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_else(|| path.display().to_string());
 
-                let (diags, timing_msg, was_cancelled) = {
+                // Phase A: Syntax update (mutex held ~5-50ms).
+                let generation = generation_counter;
+                generation_counter += 1;
+                let (syntax_data, inference_inputs, syntax_duration) = {
                     let mut st = state.lock();
-                    let (analysis, timing) = st.update_file_with_cancel(
+                    st.update_syntax(path.clone(), text.clone(), generation)
+                };
+                // mutex released here
+
+                // Write SyntaxData to DashMap immediately — handlers can read
+                // fresh syntax data while inference is still running.
+                {
+                    // Preserve existing inference data when updating syntax.
+                    let prev_inference = _snapshots
+                        .get(path)
+                        .and_then(|snap| snap.inference.as_ref().cloned());
+                    _snapshots.insert(
                         path.clone(),
-                        text.clone(),
-                        cancel_flag.clone(),
+                        FileSnapshot {
+                            syntax: syntax_data,
+                            inference: prev_inference,
+                        },
                     );
+                }
 
-                    let was_cancelled = cancel_flag.load(Ordering::Relaxed);
-                    let timing_msg = format!("{file_name}: {timing}");
-                    if was_cancelled {
-                        log::info!("{timing_msg} (cancelled)");
-                    } else {
-                        log::info!("{timing_msg}");
-                    }
+                // Phase B: Type inference (NO mutex held).
+                let (check_result, infer_duration) =
+                    crate::state::run_inference(&inference_inputs, Some(cancel_flag.clone()));
 
-                    let diags = if diagnostics_enabled && !was_cancelled {
-                        let root = analysis.parsed.tree();
+                let was_cancelled = cancel_flag.load(Ordering::Relaxed);
+                let total = syntax_duration + infer_duration;
+                let timing = crate::state::AnalysisTiming {
+                    parse: syntax_duration, // folded for now
+                    lower: Duration::ZERO,
+                    name_res: Duration::ZERO,
+                    imports: Duration::ZERO,
+                    type_check: infer_duration,
+                    total,
+                };
+                let timing_msg = format!("{file_name}: {timing}");
+                if was_cancelled {
+                    log::info!("{timing_msg} (cancelled)");
+                } else {
+                    log::info!("{timing_msg}");
+                }
+
+                // Phase C: Store inference results in DashMap and legacy state.
+                if let Some(mut snap) = _snapshots.get_mut(path) {
+                    snap.inference = Some(InferenceData {
+                        check_result: check_result.clone(),
+                        syntax_generation: generation,
+                    });
+                }
+
+                // Also store in legacy state.files for backward compat.
+                let file_analysis =
+                    crate::state::build_file_analysis(inference_inputs, check_result.clone());
+                state.lock().files.insert(path.clone(), file_analysis);
+
+                let diags = if diagnostics_enabled && !was_cancelled {
+                    if let Some(snap) = _snapshots.get(path) {
+                        let root = snap.syntax.parsed.tree();
                         let file_uri = Url::from_file_path(path)
                             .unwrap_or_else(|_| Url::parse("file:///unknown").unwrap());
                         crate::diagnostics::to_lsp_diagnostics(
-                            &analysis.check_result.diagnostics,
-                            &analysis.source_map,
-                            &analysis.line_index,
+                            &check_result.diagnostics,
+                            &snap.syntax.source_map,
+                            &snap.syntax.line_index,
                             &root,
                             &file_uri,
                         )
                     } else {
                         vec![]
-                    };
-
-                    (diags, timing_msg, was_cancelled)
+                    }
+                } else {
+                    vec![]
                 };
 
                 if was_cancelled {
@@ -389,10 +436,6 @@ fn spawn_analysis_loop(
                 client.log_message(MessageType::INFO, &timing_msg).await;
 
                 // ── Phase 4: Defer diagnostic publication (quiescence) ──
-                //
-                // Like RA's `is_quiescent()` gate. Store diagnostics but
-                // don't publish yet. The timer at the top of the loop will
-                // publish them if no new edits arrive.
                 pending_diags.insert(path.clone(), diags);
                 any_completed = true;
             }

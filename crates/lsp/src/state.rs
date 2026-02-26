@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use lang_ast::{
-    module_and_source_maps, Expr, ExprId, Literal, Module, ModuleIndices, ModuleScopes,
+    module_and_source_maps, Expr, ExprId, GroupedDefs, Literal, Module, ModuleIndices, ModuleScopes,
     ModuleSourceMap, NameId, NameResolution, NixFile, RootDatabase,
 };
 use lang_check::aliases::TypeAliasRegistry;
@@ -57,6 +57,7 @@ pub struct SyntaxData {
 }
 
 /// Type inference results from a completed analysis pass.
+#[derive(Clone)]
 pub struct InferenceData {
     pub check_result: CheckResult,
     /// Generation of the SyntaxData this inference was computed against.
@@ -88,6 +89,107 @@ impl FileSnapshot {
     pub fn inference_result(&self) -> Option<&lang_check::InferenceResult> {
         self.any_inference()
             .and_then(|inf| inf.check_result.inference.as_ref())
+    }
+}
+
+/// Everything needed to run type inference after the syntax phase.
+/// Produced by `AnalysisState::update_syntax()`, consumed by `run_inference()`.
+/// This bundle is Send + Sync so inference can run outside the mutex.
+pub struct InferenceInputs {
+    pub module: Module,
+    pub module_indices: ModuleIndices,
+    pub name_res: NameResolution,
+    pub grouped_defs: GroupedDefs,
+    pub registry: TypeAliasRegistry,
+    pub import_types: HashMap<ExprId, OutputTy>,
+    pub import_diagnostics: Vec<TixDiagnostic>,
+    pub context_args: HashMap<SmolStr, comment_parser::ParsedTy>,
+    pub deadline_secs: u64,
+    // Fields duplicated from SyntaxData for building the legacy FileAnalysis.
+    pub nix_file: NixFile,
+    pub line_index: LineIndex,
+    pub parsed: rnix::Parse<rnix::Root>,
+    pub source_map: ModuleSourceMap,
+    pub scopes: ModuleScopes,
+    pub import_targets: HashMap<ExprId, PathBuf>,
+    pub name_to_import: HashMap<NameId, PathBuf>,
+    pub context_arg_types: HashMap<SmolStr, OutputTy>,
+}
+
+/// Run type inference using precomputed syntax data. Does not need the Salsa
+/// database or the analysis mutex. Returns the check result and timing.
+pub fn run_inference(
+    inputs: &InferenceInputs,
+    cancel_flag: Option<Arc<AtomicBool>>,
+) -> (CheckResult, Duration) {
+    let t0 = Instant::now();
+    let deadline = Some(Instant::now() + Duration::from_secs(inputs.deadline_secs));
+
+    let mut check_result = lang_check::check_with_precomputed(
+        &inputs.module,
+        &inputs.name_res,
+        &inputs.module_indices,
+        inputs.grouped_defs.clone(),
+        &inputs.registry,
+        inputs.import_types.clone(),
+        inputs.context_args.clone(),
+        deadline,
+        cancel_flag,
+    );
+
+    // Merge import diagnostics.
+    check_result
+        .diagnostics
+        .extend(inputs.import_diagnostics.clone());
+
+    // If inference timed out, add timeout diagnostic.
+    if check_result.timed_out {
+        let missing_bindings: Vec<SmolStr> = inputs
+            .module
+            .names()
+            .filter(|(_, name)| {
+                matches!(
+                    name.kind,
+                    lang_ast::NameKind::LetIn
+                        | lang_ast::NameKind::RecAttrset
+                        | lang_ast::NameKind::PlainAttrset
+                )
+            })
+            .filter(|(id, _)| {
+                check_result
+                    .inference
+                    .as_ref()
+                    .is_none_or(|inf| inf.name_ty_map.get(*id).is_none())
+            })
+            .map(|(_, name)| name.text.clone())
+            .collect();
+        check_result.diagnostics.push(TixDiagnostic {
+            at_expr: inputs.module.entry_expr,
+            kind: TixDiagnosticKind::InferenceTimeout { missing_bindings },
+        });
+    }
+
+    let elapsed = t0.elapsed();
+    (check_result, elapsed)
+}
+
+/// Build a `FileAnalysis` from inference inputs and check result. This is the
+/// legacy path used during the transition — handlers will eventually read from
+/// `FileSnapshot` instead.
+pub fn build_file_analysis(inputs: InferenceInputs, check_result: CheckResult) -> FileAnalysis {
+    FileAnalysis {
+        nix_file: inputs.nix_file,
+        line_index: inputs.line_index,
+        parsed: inputs.parsed,
+        module: inputs.module,
+        module_indices: inputs.module_indices,
+        source_map: inputs.source_map,
+        name_res: inputs.name_res,
+        scopes: inputs.scopes,
+        check_result,
+        import_targets: inputs.import_targets,
+        name_to_import: inputs.name_to_import,
+        context_arg_types: inputs.context_arg_types,
     }
 }
 
@@ -423,6 +525,149 @@ impl AnalysisState {
 
     pub fn get_file(&self, path: &PathBuf) -> Option<&FileAnalysis> {
         self.files.get(path)
+    }
+
+    /// Run only the syntax phases (parse, lower, nameres, imports) under
+    /// the mutex. Returns a `SyntaxData` that can be published to the DashMap
+    /// immediately, plus an `InferenceInputs` bundle for running inference
+    /// without holding the mutex.
+    pub fn update_syntax(
+        &mut self,
+        path: PathBuf,
+        contents: String,
+        generation: u64,
+    ) -> (SyntaxData, InferenceInputs, Duration) {
+        let t0 = Instant::now();
+
+        // -- Parse --
+        let line_index = LineIndex::new(&contents);
+        let parsed = rnix::Root::parse(&contents);
+        let nix_file = self.db.set_file_contents(path.clone(), contents);
+
+        // -- Lower to Tix AST + name resolution --
+        let (module, source_map) = module_and_source_maps(&self.db, nix_file);
+        let module_indices = lang_ast::module_indices(&self.db, nix_file);
+        let name_res = lang_ast::name_resolution(&self.db, nix_file);
+        let scopes = lang_ast::scopes(&self.db, nix_file);
+        let grouped = lang_ast::group_def(&self.db, nix_file);
+
+        // -- Import resolution --
+        let mut in_progress = HashSet::new();
+        self.import_cache.remove(&path);
+
+        let import_resolution = resolve_imports(
+            &self.db,
+            nix_file,
+            &module,
+            &name_res,
+            &self.registry,
+            &mut in_progress,
+            &mut self.import_cache,
+            self.import_deadline_secs,
+        );
+
+        let import_diagnostics: Vec<TixDiagnostic> = import_resolution
+            .errors
+            .iter()
+            .map(|err| {
+                let kind = match &err.kind {
+                    ImportErrorKind::FileNotFound(path) => TixDiagnosticKind::ImportNotFound {
+                        path: path.display().to_string(),
+                    },
+                    ImportErrorKind::CyclicImport(path) => TixDiagnosticKind::ImportCyclic {
+                        path: path.display().to_string(),
+                    },
+                    ImportErrorKind::InferenceError(path, diag) => {
+                        TixDiagnosticKind::ImportInferenceError {
+                            path: path.display().to_string(),
+                            message: diag.kind.to_string(),
+                        }
+                    }
+                };
+                TixDiagnostic {
+                    at_expr: err.at_expr,
+                    kind,
+                }
+            })
+            .collect();
+
+        let import_targets = import_resolution.targets;
+
+        // Build name→import mapping.
+        let file_dir = path.parent().map(|p| p.to_path_buf());
+        let mut name_to_import = HashMap::new();
+        for group in grouped.iter() {
+            for typedef in group {
+                let target = chase_import_target(&module, &import_targets, typedef.expr())
+                    .or_else(|| {
+                        let dir = file_dir.as_deref()?;
+                        find_path_literal_target(&module, typedef.expr(), dir)
+                    });
+                if let Some(path) = target {
+                    name_to_import.insert(typedef.name(), path);
+                }
+            }
+        }
+
+        // Resolve context args.
+        let context_args =
+            if let (Some(ref cfg), Some(ref dir)) = (&self.project_config, &self.config_dir) {
+                crate::project_config::resolve_context_for_file(&path, cfg, dir, &mut self.registry)
+                    .unwrap_or_else(|e| {
+                        log::warn!("Failed to resolve context for {}: {e}", path.display());
+                        HashMap::new()
+                    })
+            } else {
+                HashMap::new()
+            };
+
+        let context_arg_types: HashMap<SmolStr, OutputTy> = context_args
+            .iter()
+            .map(|(name, parsed_ty)| {
+                let output_ty = crate::ty_nav::parsed_ty_to_output_ty(parsed_ty, &self.registry, 0);
+                (name.clone(), output_ty)
+            })
+            .collect();
+
+        let syntax_duration = t0.elapsed();
+
+        let syntax_data = SyntaxData {
+            nix_file,
+            parsed,
+            line_index,
+            module: module.clone(),
+            module_indices: module_indices.clone(),
+            source_map: source_map.clone(),
+            name_res: name_res.clone(),
+            scopes: scopes.clone(),
+            import_targets: import_targets.clone(),
+            name_to_import: name_to_import.clone(),
+            context_arg_types: context_arg_types.clone(),
+            generation,
+        };
+
+        let inference_inputs = InferenceInputs {
+            module,
+            module_indices,
+            name_res,
+            grouped_defs: grouped,
+            registry: self.registry.clone(),
+            import_types: import_resolution.types,
+            import_diagnostics,
+            context_args,
+            deadline_secs: self.deadline_secs,
+            // Data also needed for FileAnalysis (the old path).
+            nix_file,
+            line_index: syntax_data.line_index.clone(),
+            parsed: syntax_data.parsed.clone(),
+            source_map,
+            scopes,
+            import_targets,
+            name_to_import,
+            context_arg_types,
+        };
+
+        (syntax_data, inference_inputs, syntax_duration)
     }
 
     /// Replace the type alias registry and re-analyze all open files.

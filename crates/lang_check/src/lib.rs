@@ -337,6 +337,58 @@ pub fn check_file_collecting_with_cancel(
     }
 }
 
+/// Like `check_file_collecting_with_cancel` but takes precomputed Salsa query
+/// results directly instead of `&dyn AstDb`. This allows the LSP to run
+/// inference without holding the Salsa database lock — the caller queries
+/// module/name_res/indices/grouped_defs under the lock, releases it, then
+/// calls this function.
+pub fn check_with_precomputed(
+    module: &Module,
+    name_res: &NameResolution,
+    indices: &lang_ast::ModuleIndices,
+    grouped_defs: lang_ast::GroupedDefs,
+    aliases: &TypeAliasRegistry,
+    import_types: HashMap<ExprId, OutputTy>,
+    context_args: HashMap<smol_str::SmolStr, ParsedTy>,
+    deadline: Option<Instant>,
+    cancel_flag: Option<Arc<AtomicBool>>,
+) -> CheckResult {
+    // Load inline type aliases from doc comments before inference.
+    let mut aliases = aliases.clone();
+    for alias_source in &module.inline_type_aliases {
+        if let Some((name, body)) = comment_parser::parse_inline_type_alias(alias_source) {
+            aliases.load_inline_alias(name, body);
+        }
+    }
+
+    let mut check = CheckCtx::new(
+        module,
+        name_res,
+        &indices.binding_expr,
+        aliases,
+        import_types,
+        context_args,
+    );
+    if let Some(d) = deadline {
+        check = check.with_deadline(d);
+    }
+    if let Some(flag) = cancel_flag {
+        check = check.with_cancel_flag(flag);
+    }
+    let (inference, mut diagnostics, timed_out) = check.infer_prog_partial(grouped_defs);
+
+    // Include diagnostics from the lowering phase (e.g. duplicate keys).
+    let lower_diags =
+        diagnostic::lower_diagnostics_to_tix(&module.lower_diagnostics, module.entry_expr);
+    diagnostics.extend(lower_diags);
+
+    CheckResult {
+        inference: Some(inference),
+        diagnostics,
+        timed_out,
+    }
+}
+
 /// A pending constraint that couldn't be resolved immediately because one or
 /// both operand types are still unknown.
 #[derive(Debug, Clone)]
