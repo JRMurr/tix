@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 
 use dashmap::DashMap;
-use rnix::Root;
 use salsa::{self, Setter};
 
 #[salsa::input]
@@ -11,16 +10,14 @@ pub struct NixFile {
     pub contents: String,
 }
 
-// // Wrapping this to add some traits salsa needs
-// #[derive(Error, Clone, Debug, PartialEq)]
-// #[error(transparent)]
-// pub struct ParseError(#[from] rnix::parser::ParseError);
-
-// impl Eq for ParseError {}
-
 #[salsa::db]
 pub trait AstDb: salsa::Database {
-    fn parse_file(&self, file: NixFile) -> Root;
+    /// Parse a Nix file, returning the `Parse<Root>` which stores the green
+    /// tree (Send+Sync). Callers get a Root via `.tree()` locally.
+    ///
+    /// RootDatabase caches the parse result so repeated calls for the same
+    /// file don't re-parse. The cache is cleared when file contents change.
+    fn parse_file(&self, file: NixFile) -> rnix::Parse<rnix::Root>;
 
     /// Load a file from disk by path. Returns None if the file doesn't exist
     /// or can't be read. Used by multi-file import resolution.
@@ -32,6 +29,10 @@ pub trait AstDb: salsa::Database {
 pub struct RootDatabase {
     storage: salsa::Storage<Self>,
     files: DashMap<PathBuf, NixFile>,
+    /// Cache parse results to avoid re-parsing when `parse_file` is called
+    /// multiple times for the same file (e.g. once from `module_and_source_maps`
+    /// and once to store in `SyntaxData`). Cleared by `set_file_contents`.
+    parse_cache: DashMap<NixFile, rnix::Parse<rnix::Root>>,
 }
 
 #[salsa::db]
@@ -39,12 +40,14 @@ impl salsa::Database for RootDatabase {}
 
 #[salsa::db]
 impl AstDb for RootDatabase {
-    // TODO: I don't think this will be tracked by salsa so will re-parse if called many times
-    // Root is !Send + !Sync so having it tracked by salsa is sad.
-    // Could store it in the db itself but would need to handle re-parsing on file change
-    fn parse_file(&self, file: NixFile) -> Root {
+    fn parse_file(&self, file: NixFile) -> rnix::Parse<rnix::Root> {
+        if let Some(cached) = self.parse_cache.get(&file) {
+            return cached.clone();
+        }
         let src = file.contents(self);
-        rnix::Root::parse(src).tree()
+        let parsed = rnix::Root::parse(src);
+        self.parse_cache.insert(file, parsed.clone());
+        parsed
     }
 
     fn load_file(&self, path: &std::path::Path) -> Option<NixFile> {
@@ -78,6 +81,8 @@ impl RootDatabase {
         let existing = self.files.get(&path).map(|entry| *entry.value());
 
         if let Some(file) = existing {
+            // Invalidate cached parse — contents are changing.
+            self.parse_cache.remove(&file);
             file.set_contents(self).to(contents);
             file
         } else {

@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::{db::NixFile, AstDb};
-use rnix::Root;
 
 const DEFAULT_IMPORT_FILE: &str = "default.nix";
 
@@ -17,9 +16,9 @@ impl salsa::Database for TestDatabase {}
 
 #[salsa::db]
 impl AstDb for TestDatabase {
-    fn parse_file(&self, file: NixFile) -> Root {
+    fn parse_file(&self, file: NixFile) -> rnix::Parse<rnix::Root> {
         let src = file.contents(self);
-        rnix::Root::parse(src).tree()
+        rnix::Root::parse(src)
     }
 
     fn load_file(&self, _path: &std::path::Path) -> Option<NixFile> {
@@ -60,9 +59,9 @@ impl salsa::Database for MultiFileTestDatabase {}
 
 #[salsa::db]
 impl AstDb for MultiFileTestDatabase {
-    fn parse_file(&self, file: NixFile) -> Root {
+    fn parse_file(&self, file: NixFile) -> rnix::Parse<rnix::Root> {
         let src = file.contents(self);
-        rnix::Root::parse(src).tree()
+        rnix::Root::parse(src)
     }
 
     fn load_file(&self, path: &std::path::Path) -> Option<NixFile> {

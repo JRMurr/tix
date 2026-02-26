@@ -28,7 +28,8 @@ use smol_str::SmolStr;
 
 #[salsa::tracked]
 pub fn module_and_source_maps(db: &dyn crate::AstDb, file: NixFile) -> (Module, ModuleSourceMap) {
-    let root = db.parse_file(file);
+    let parsed = db.parse_file(file);
+    let root = parsed.tree();
 
     let docs = gather_doc_comments(&root);
 
