@@ -2323,7 +2323,7 @@ mod tests {
         fn complete_at_markers(&self, relative_path: &str) -> BTreeMap<u32, Vec<CompletionItem>> {
             let path = self.temp_dir.join(relative_path);
             let src = std::fs::read_to_string(&path).unwrap();
-            let analysis = self.state.get_file(&path).expect("file not loaded").to_snapshot(0);
+            let analysis = self.state.get_file(&path).expect("file not loaded").to_snapshot();
             let root = rnix::Root::parse(&src).tree();
             let markers = parse_markers(&src);
             let docs = &self.state.registry.docs;
@@ -2746,7 +2746,7 @@ mod tests {
         std::fs::write(&nix_path, src).unwrap();
         state.update_file(nix_path.clone(), src.to_string());
 
-        let analysis = state.get_file(&nix_path).unwrap().to_snapshot(0);
+        let analysis = state.get_file(&nix_path).unwrap().to_snapshot();
         let root = rnix::Root::parse(src).tree();
         let docs = &state.registry.docs;
         let markers = parse_markers(src);
@@ -2820,7 +2820,7 @@ mod tests {
         assert!(!markers.is_empty(), "no markers in {rel_path}");
 
         state.update_file(file_path.clone(), src.clone());
-        let analysis = state.get_file(&file_path).unwrap().to_snapshot(0);
+        let analysis = state.get_file(&file_path).unwrap().to_snapshot();
         let root = rnix::Root::parse(&src).tree();
         let docs = &state.registry.docs;
 

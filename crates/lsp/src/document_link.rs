@@ -69,7 +69,7 @@ mod tests {
         let mut state = AnalysisState::new(TypeAliasRegistry::default());
         let contents = std::fs::read_to_string(&main_path).unwrap();
         state.update_file(main_path.clone(), contents.clone());
-        let analysis = state.get_file(&main_path).unwrap().to_snapshot(0);
+        let analysis = state.get_file(&main_path).unwrap().to_snapshot();
         let root = rnix::Root::parse(&contents).tree();
 
         let links = document_links(&analysis, &root);
@@ -92,7 +92,7 @@ mod tests {
         let mut state = AnalysisState::new(TypeAliasRegistry::default());
         let contents = std::fs::read_to_string(&main_path).unwrap();
         state.update_file(main_path.clone(), contents.clone());
-        let analysis = state.get_file(&main_path).unwrap().to_snapshot(0);
+        let analysis = state.get_file(&main_path).unwrap().to_snapshot();
         let root = rnix::Root::parse(&contents).tree();
 
         let links = document_links(&analysis, &root);
@@ -106,7 +106,7 @@ mod tests {
         let path = temp_path("test.nix");
         let mut state = AnalysisState::new(TypeAliasRegistry::default());
         state.update_file(path.clone(), "42".to_string());
-        let analysis = state.get_file(&path).unwrap().to_snapshot(0);
+        let analysis = state.get_file(&path).unwrap().to_snapshot();
         let root = rnix::Root::parse("42").tree();
 
         let links = document_links(&analysis, &root);

@@ -229,7 +229,7 @@ mod tests {
 
         let mut state = AnalysisState::new(TypeAliasRegistry::default());
         let (uri, contents) = analyze(&mut state, &path);
-        let analysis = state.get_file(&path).unwrap().to_snapshot(0);
+        let analysis = state.get_file(&path).unwrap().to_snapshot();
         let root = rnix::Root::parse(&contents).tree();
 
         // Cursor on the trailing `x` (the reference).
@@ -254,7 +254,7 @@ mod tests {
 
         let mut state = AnalysisState::new(TypeAliasRegistry::default());
         let (uri, contents) = analyze(&mut state, &main_path);
-        let analysis = state.get_file(&main_path).unwrap().to_snapshot(0);
+        let analysis = state.get_file(&main_path).unwrap().to_snapshot();
         let root = rnix::Root::parse(&contents).tree();
 
         // Cursor on `import` keyword.
@@ -281,7 +281,7 @@ mod tests {
 
         let mut state = AnalysisState::new(TypeAliasRegistry::default());
         let (uri, contents) = analyze(&mut state, &main_path);
-        let analysis = state.get_file(&main_path).unwrap().to_snapshot(0);
+        let analysis = state.get_file(&main_path).unwrap().to_snapshot();
         let root = rnix::Root::parse(&contents).tree();
 
         // Cursor on the path literal `./lib.nix`.
@@ -310,7 +310,7 @@ mod tests {
 
         let mut state = AnalysisState::new(TypeAliasRegistry::default());
         let (uri, contents) = analyze(&mut state, &main_path);
-        let analysis = state.get_file(&main_path).unwrap().to_snapshot(0);
+        let analysis = state.get_file(&main_path).unwrap().to_snapshot();
         let root = rnix::Root::parse(&contents).tree();
 
         // Cursor on `x` in `lib.x` (the field name after the dot).
@@ -350,7 +350,7 @@ mod tests {
 
         let mut state = AnalysisState::new(TypeAliasRegistry::default());
         let (uri, contents) = analyze(&mut state, &main_path);
-        let analysis = state.get_file(&main_path).unwrap().to_snapshot(0);
+        let analysis = state.get_file(&main_path).unwrap().to_snapshot();
         let root = rnix::Root::parse(&contents).tree();
 
         // Cursor on `name` in `attrs.name`.
@@ -390,7 +390,7 @@ mod tests {
 
         let mut state = AnalysisState::new(TypeAliasRegistry::default());
         let (uri, contents) = analyze(&mut state, &main_path);
-        let analysis = state.get_file(&main_path).unwrap().to_snapshot(0);
+        let analysis = state.get_file(&main_path).unwrap().to_snapshot();
         let root = rnix::Root::parse(&contents).tree();
 
         // Cursor on `name` in `x.name`.
@@ -428,7 +428,7 @@ mod tests {
 
         let mut state = AnalysisState::new(TypeAliasRegistry::default());
         let (uri, contents) = analyze(&mut state, &main_path);
-        let analysis = state.get_file(&main_path).unwrap().to_snapshot(0);
+        let analysis = state.get_file(&main_path).unwrap().to_snapshot();
         let root = rnix::Root::parse(&contents).tree();
 
         // Cursor on `name` in `x.name`.
@@ -456,7 +456,7 @@ mod tests {
 
         let mut state = AnalysisState::new(TypeAliasRegistry::default());
         let (uri, contents) = analyze(&mut state, &path);
-        let analysis = state.get_file(&path).unwrap().to_snapshot(0);
+        let analysis = state.get_file(&path).unwrap().to_snapshot();
         let root = rnix::Root::parse(&contents).tree();
 
         let pos = Position::new(0, 0);

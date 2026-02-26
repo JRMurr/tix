@@ -234,9 +234,6 @@ fn spawn_analysis_loop(
         // Pending diagnostics waiting for quiescence, keyed by path.
         let mut pending_diags: HashMap<PathBuf, Vec<Diagnostic>> = HashMap::new();
         let mut diag_timer: Option<Pin<Box<tokio::time::Sleep>>> = None;
-        // Monotonically increasing counter to tag SyntaxData/InferenceData
-        // with matching generations, so handlers can detect stale inference.
-        let mut generation_counter: u64 = 0;
 
         loop {
             // ── Phase 1: Wait for event or diagnostic timer ──
@@ -346,11 +343,9 @@ fn spawn_analysis_loop(
                     .unwrap_or_else(|| path.display().to_string());
 
                 // Phase A: Syntax update (mutex held ~5-50ms).
-                let generation = generation_counter;
-                generation_counter += 1;
                 let (syntax_data, inference_inputs, syntax_duration) = {
                     let mut st = state.lock();
-                    st.update_syntax(path.clone(), text.clone(), generation)
+                    st.update_syntax(path.clone(), text.clone())
                 };
                 // mutex released here
 
@@ -395,7 +390,6 @@ fn spawn_analysis_loop(
                 if let Some(mut snap) = _snapshots.get_mut(path) {
                     snap.inference = Some(InferenceData {
                         check_result: check_result.clone(),
-                        syntax_generation: generation,
                     });
                 }
 

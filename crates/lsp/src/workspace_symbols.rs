@@ -36,7 +36,7 @@ pub fn workspace_symbols(state: &AnalysisState, query: &str) -> Vec<SymbolInform
             Err(()) => continue,
         };
 
-        let snapshot = analysis.to_snapshot(0);
+        let snapshot = analysis.to_snapshot();
         let root = snapshot.syntax.parsed.tree();
         let doc_symbols = crate::document_symbol::document_symbols(&snapshot, &root);
 

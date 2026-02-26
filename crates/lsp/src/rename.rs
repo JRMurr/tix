@@ -409,7 +409,7 @@ mod tests {
         }
 
         let rename_path = project.path(rename_file);
-        let analysis = state.get_file(&rename_path).unwrap().to_snapshot(0);
+        let analysis = state.get_file(&rename_path).unwrap().to_snapshot();
         let root = analysis.syntax.parsed.tree();
 
         // Parse markers from the rename file's source.

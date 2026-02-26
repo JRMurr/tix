@@ -135,7 +135,7 @@ impl TestAnalysis {
     }
 
     pub fn snapshot(&self) -> FileSnapshot {
-        self.analysis().to_snapshot(0)
+        self.analysis().to_snapshot()
     }
 
     pub fn uri(&self) -> Url {
@@ -197,7 +197,7 @@ impl ContextTestSetup {
     }
 
     pub fn snapshot(&self) -> FileSnapshot {
-        self.analysis().to_snapshot(0)
+        self.analysis().to_snapshot()
     }
 
     pub fn docs(&self) -> &DocIndex {

@@ -342,6 +342,7 @@ pub fn check_file_collecting_with_cancel(
 /// inference without holding the Salsa database lock — the caller queries
 /// module/name_res/indices/grouped_defs under the lock, releases it, then
 /// calls this function.
+#[allow(clippy::too_many_arguments)]
 pub fn check_with_precomputed(
     module: &Module,
     name_res: &NameResolution,

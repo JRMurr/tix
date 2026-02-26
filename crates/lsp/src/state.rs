@@ -21,7 +21,9 @@ use lang_ast::{
 use lang_check::aliases::TypeAliasRegistry;
 use lang_check::diagnostic::{TixDiagnostic, TixDiagnosticKind};
 use lang_check::imports::{resolve_imports, ImportErrorKind};
-use lang_check::{CheckResult, InferenceResult};
+use lang_check::CheckResult;
+#[cfg(test)]
+use lang_check::InferenceResult;
 use lang_ty::OutputTy;
 use smol_str::SmolStr;
 
@@ -40,7 +42,6 @@ use crate::project_config::ProjectConfig;
 /// Syntax-level data. Always present once a file has been analyzed at least once.
 /// All fields come from the same analysis pass and are internally consistent.
 pub struct SyntaxData {
-    pub nix_file: NixFile,
     pub parsed: rnix::Parse<rnix::Root>,
     pub line_index: LineIndex,
     pub module: Module,
@@ -51,19 +52,12 @@ pub struct SyntaxData {
     pub import_targets: HashMap<ExprId, PathBuf>,
     pub name_to_import: HashMap<NameId, PathBuf>,
     pub context_arg_types: HashMap<SmolStr, OutputTy>,
-    /// Generation counter. Incremented on each syntax update.
-    /// Inference results tagged with a matching generation are consistent.
-    pub generation: u64,
 }
 
 /// Type inference results from a completed analysis pass.
 #[derive(Clone)]
 pub struct InferenceData {
     pub check_result: CheckResult,
-    /// Generation of the SyntaxData this inference was computed against.
-    /// If this doesn't match SyntaxData.generation, the ExprIds may not
-    /// correspond and handlers need name-text reconciliation.
-    pub syntax_generation: u64,
 }
 
 /// Complete snapshot for a file. Stored in DashMap for lock-free handler access.
@@ -73,13 +67,6 @@ pub struct FileSnapshot {
 }
 
 impl FileSnapshot {
-    /// Get inference if it matches the current syntax generation.
-    pub fn fresh_inference(&self) -> Option<&InferenceData> {
-        self.inference
-            .as_ref()
-            .filter(|inf| inf.syntax_generation == self.syntax.generation)
-    }
-
     /// Get inference even if stale (for graceful degradation).
     pub fn any_inference(&self) -> Option<&InferenceData> {
         self.inference.as_ref()
@@ -196,10 +183,9 @@ pub fn build_file_analysis(inputs: InferenceInputs, check_result: CheckResult) -
 impl FileAnalysis {
     /// Convert a FileAnalysis into a FileSnapshot. Used by tests and the
     /// transitional period where both representations coexist.
-    pub fn to_snapshot(&self, generation: u64) -> FileSnapshot {
+    pub fn to_snapshot(&self) -> FileSnapshot {
         FileSnapshot {
             syntax: SyntaxData {
-                nix_file: self.nix_file,
                 parsed: self.parsed.clone(),
                 line_index: self.line_index.clone(),
                 module: self.module.clone(),
@@ -210,11 +196,9 @@ impl FileAnalysis {
                 import_targets: self.import_targets.clone(),
                 name_to_import: self.name_to_import.clone(),
                 context_arg_types: self.context_arg_types.clone(),
-                generation,
             },
             inference: Some(InferenceData {
                 check_result: self.check_result.clone(),
-                syntax_generation: generation,
             }),
         }
     }
@@ -249,6 +233,7 @@ pub struct FileAnalysis {
 }
 
 impl FileAnalysis {
+    #[cfg(test)]
     pub fn inference(&self) -> Option<&InferenceResult> {
         self.check_result.inference.as_ref()
     }
@@ -330,6 +315,7 @@ impl AnalysisState {
     /// Like `update_file` but with an external cancellation flag. When the
     /// flag is set to `true` (e.g. because a newer edit arrived for the same
     /// file), type inference bails out early with partial results.
+    #[cfg(test)]
     pub fn update_file_with_cancel(
         &mut self,
         path: PathBuf,
@@ -550,6 +536,7 @@ impl AnalysisState {
         (self.files.get(&path).unwrap(), timing)
     }
 
+    #[cfg(test)]
     pub fn get_file(&self, path: &PathBuf) -> Option<&FileAnalysis> {
         self.files.get(path)
     }
@@ -562,7 +549,6 @@ impl AnalysisState {
         &mut self,
         path: PathBuf,
         contents: String,
-        generation: u64,
     ) -> (SyntaxData, InferenceInputs, Duration) {
         let t0 = Instant::now();
 
@@ -659,7 +645,6 @@ impl AnalysisState {
         let syntax_duration = t0.elapsed();
 
         let syntax_data = SyntaxData {
-            nix_file,
             parsed,
             line_index,
             module: module.clone(),
@@ -670,7 +655,6 @@ impl AnalysisState {
             import_targets: import_targets.clone(),
             name_to_import: name_to_import.clone(),
             context_arg_types: context_arg_types.clone(),
-            generation,
         };
 
         let inference_inputs = InferenceInputs {
