@@ -193,6 +193,33 @@ pub fn build_file_analysis(inputs: InferenceInputs, check_result: CheckResult) -
     }
 }
 
+impl FileAnalysis {
+    /// Convert a FileAnalysis into a FileSnapshot. Used by tests and the
+    /// transitional period where both representations coexist.
+    pub fn to_snapshot(&self, generation: u64) -> FileSnapshot {
+        FileSnapshot {
+            syntax: SyntaxData {
+                nix_file: self.nix_file,
+                parsed: self.parsed.clone(),
+                line_index: self.line_index.clone(),
+                module: self.module.clone(),
+                module_indices: self.module_indices.clone(),
+                source_map: self.source_map.clone(),
+                name_res: self.name_res.clone(),
+                scopes: self.scopes.clone(),
+                import_targets: self.import_targets.clone(),
+                name_to_import: self.name_to_import.clone(),
+                context_arg_types: self.context_arg_types.clone(),
+                generation,
+            },
+            inference: Some(InferenceData {
+                check_result: self.check_result.clone(),
+                syntax_generation: generation,
+            }),
+        }
+    }
+}
+
 /// Cached analysis output for a single open file.
 pub struct FileAnalysis {
     pub nix_file: NixFile,

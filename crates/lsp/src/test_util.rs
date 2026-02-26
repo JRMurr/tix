@@ -7,7 +7,7 @@ use rowan::ast::AstNode;
 use tower_lsp::lsp_types::Url;
 
 use crate::project_config::{ContextConfig, ProjectConfig};
-use crate::state::{AnalysisState, FileAnalysis};
+use crate::state::{AnalysisState, FileAnalysis, FileSnapshot};
 use lang_check::aliases::{DocIndex, TypeAliasRegistry};
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -134,6 +134,10 @@ impl TestAnalysis {
         self.state.get_file(&self.path).unwrap()
     }
 
+    pub fn snapshot(&self) -> FileSnapshot {
+        self.analysis().to_snapshot(0)
+    }
+
     pub fn uri(&self) -> Url {
         Url::from_file_path(&self.path).unwrap()
     }
@@ -190,6 +194,10 @@ impl ContextTestSetup {
 
     pub fn analysis(&self) -> &FileAnalysis {
         self.state.get_file(&self.nix_path).unwrap()
+    }
+
+    pub fn snapshot(&self) -> FileSnapshot {
+        self.analysis().to_snapshot(0)
     }
 
     pub fn docs(&self) -> &DocIndex {
