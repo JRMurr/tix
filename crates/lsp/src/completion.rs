@@ -520,14 +520,52 @@ fn try_callsite_completion(
 ) -> Option<Vec<CompletionItem>> {
     let node = token.parent()?;
 
-    // Find the enclosing AttrSet syntax node.
-    let attrset_node = node.ancestors().find_map(rnix::ast::AttrSet::cast)?;
-
-    // Check if the AttrSet's parent is an Apply node (i.e. it's a function argument).
-    let apply_node = attrset_node
-        .syntax()
-        .parent()
-        .and_then(rnix::ast::Apply::cast)?;
+    // Find the enclosing function call and determine existing fields.
+    //
+    // Two rnix parse tree shapes depending on what the user has typed:
+    //
+    // 1. `f { name = "x"; }` — complete attrset binding:
+    //    Apply(f, AttrSet({ name = "x"; }))
+    //    → AttrSet parent is Apply
+    //
+    // 2. `f { en }` — partial identifier without `=`:
+    //    Apply(f, Lambda(Pattern({ en })))
+    //    → rnix thinks `{ en }` is a lambda pattern, not an attrset.
+    //    Pattern → Lambda → Apply
+    let (apply_node, existing) =
+        if let Some(attrset_node) = node.ancestors().find_map(rnix::ast::AttrSet::cast) {
+            let apply = attrset_node
+                .syntax()
+                .parent()
+                .and_then(rnix::ast::Apply::cast)?;
+            // Collect fields already present in the attrset literal.
+            let from_map = collect_existing_fields(analysis, &attrset_node);
+            let existing = if from_map.is_empty() {
+                collect_existing_fields_from_tree(&attrset_node)
+            } else {
+                from_map
+            };
+            (apply, existing)
+        } else if let Some(pat_node) = node.ancestors().find_map(rnix::ast::Pattern::cast) {
+            // rnix parsed `{ en }` as a Pattern (lambda param). Walk up:
+            // Pattern → Lambda → Apply.
+            let lambda_node = pat_node
+                .syntax()
+                .parent()
+                .and_then(rnix::ast::Lambda::cast)?;
+            let apply = lambda_node
+                .syntax()
+                .parent()
+                .and_then(rnix::ast::Apply::cast)?;
+            // Treat PatEntry idents as "already typed" field names.
+            let existing: Vec<SmolStr> = pat_node
+                .pat_entries()
+                .filter_map(|e| Some(e.ident()?.to_string().into()))
+                .collect();
+            (apply, existing)
+        } else {
+            return None;
+        };
 
     // Get the function expression from the Apply.
     let fun_expr = apply_node.lambda()?;
@@ -557,17 +595,6 @@ fn try_callsite_completion(
     if expected_fields.is_empty() {
         return None;
     }
-
-    // Collect fields already present in the attrset literal to filter them out.
-    // Try source_map first; fall back to tree walk when analysis is stale.
-    let existing = {
-        let from_map = collect_existing_fields(analysis, &attrset_node);
-        if from_map.is_empty() {
-            collect_existing_fields_from_tree(&attrset_node)
-        } else {
-            from_map
-        }
-    };
 
     log::debug!(
         "callsite_completion: expected={:?}, existing={existing:?}",
@@ -1430,6 +1457,26 @@ mod tests {
         assert!(
             names.contains(&"pasta"),
             "should complete pasta for complex function, got: {names:?}"
+        );
+    }
+
+    /// Callsite completion with a partial identifier already typed.
+    /// Simulates the real-world scenario of typing `en` inside `f { en| }`.
+    /// VS Code auto-triggers completion when typing identifier characters.
+    #[test]
+    fn callsite_completion_with_partial_identifier() {
+        let src = indoc! {r#"
+            let f = { enable ? false, name, src, ... }: name;
+            in f { en }
+            #       ^1
+        "#};
+        let results = complete_at_markers(src);
+        let names = labels(&results[&1]);
+        // Should still offer callsite fields, not just identifier completion
+        eprintln!("callsite with partial ident: {names:?}");
+        assert!(
+            names.contains(&"enable"),
+            "should complete enable, got: {names:?}"
         );
     }
 
