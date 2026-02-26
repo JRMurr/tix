@@ -67,10 +67,11 @@ pub struct TixLanguageServer {
     no_default_stubs: bool,
     /// Channel to the single analysis loop (like RA's VFS channel).
     event_tx: mpsc::UnboundedSender<AnalysisEvent>,
-    /// Cancel flag for the currently running analysis. schedule_analysis()
-    /// sets this to true; the analysis loop swaps in a fresh flag before
-    /// starting each batch.
-    current_cancel: Arc<Mutex<Arc<AtomicBool>>>,
+    /// Shared cancel flag. `schedule_analysis()` / `did_close()` set this to
+    /// true; the analysis loop resets it to false at the start of each batch.
+    /// The same flag is passed to inference, which checks it periodically via
+    /// `check_limits()`.
+    cancel_flag: Arc<AtomicBool>,
     /// Latest document text received via didChange/didOpen, stored immediately
     /// so completion can re-parse on the fly while analysis catches up.
     /// Cleared once analysis catches up.
@@ -92,7 +93,7 @@ impl TixLanguageServer {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let state = Arc::new(Mutex::new(AnalysisState::new(registry)));
         let pending_text = Arc::new(Mutex::new(HashMap::new()));
-        let current_cancel = Arc::new(Mutex::new(Arc::new(AtomicBool::new(false))));
+        let cancel_flag = Arc::new(AtomicBool::new(false));
         let snapshots = Arc::new(DashMap::new());
 
         // Spawn the analysis loop eagerly. diagnostics_enabled defaults to
@@ -103,7 +104,7 @@ impl TixLanguageServer {
             state.clone(),
             client.clone(),
             pending_text.clone(),
-            current_cancel.clone(),
+            cancel_flag.clone(),
             snapshots.clone(),
             true, // diagnostics default on
         );
@@ -115,7 +116,7 @@ impl TixLanguageServer {
             cli_stub_paths,
             no_default_stubs,
             event_tx,
-            current_cancel,
+            cancel_flag,
             pending_text,
             snapshots,
         }
@@ -135,7 +136,7 @@ impl TixLanguageServer {
         self.pending_text.lock().insert(path.clone(), text.clone());
 
         // Cancel any in-flight analysis (like RA's trigger_cancellation()).
-        self.current_cancel.lock().store(true, Ordering::Relaxed);
+        self.cancel_flag.store(true, Ordering::Relaxed);
 
         // Send to analysis loop — it will drain and coalesce.
         self.event_tx
@@ -225,7 +226,7 @@ fn spawn_analysis_loop(
     state: Arc<Mutex<AnalysisState>>,
     client: Client,
     pending_text: Arc<Mutex<HashMap<PathBuf, String>>>,
-    current_cancel: Arc<Mutex<Arc<AtomicBool>>>,
+    cancel_flag: Arc<AtomicBool>,
     _snapshots: Arc<DashMap<PathBuf, FileSnapshot>>,
     diagnostics_enabled: bool,
 ) {
@@ -324,16 +325,18 @@ fn spawn_analysis_loop(
             // the fast syntax phase (~5-50ms). SyntaxData is written to the
             // DashMap immediately, making handlers responsive. Inference runs
             // without the mutex, so handlers never block on type inference.
-            let cancel_flag = Arc::new(AtomicBool::new(false));
-            *current_cancel.lock() = cancel_flag.clone();
+            //
+            // Reset the shared cancel flag for this batch. schedule_analysis()
+            // or did_close() may set it to true during inference.
+            cancel_flag.store(false, Ordering::Relaxed);
 
             let mut any_completed = false;
 
             for (path, text) in &changes {
-                // Check for new events between files. If the user typed more,
+                // Check for new events or external cancellation between files.
+                // If the user typed more (schedule_analysis sets the flag),
                 // bail out and let the next loop iteration coalesce them.
-                if !rx.is_empty() {
-                    cancel_flag.store(true, Ordering::Relaxed);
+                if !rx.is_empty() || cancel_flag.load(Ordering::Relaxed) {
                     break;
                 }
 
@@ -636,7 +639,7 @@ impl LanguageServer for TixLanguageServer {
             .await;
 
         if let Some(path) = uri_to_path(&params.text_document.uri) {
-            self.current_cancel.lock().store(true, Ordering::Relaxed);
+            self.cancel_flag.store(true, Ordering::Relaxed);
             self.pending_text.lock().remove(&path);
             self.state.lock().files.remove(&path);
             self.event_tx

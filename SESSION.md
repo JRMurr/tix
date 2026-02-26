@@ -271,14 +271,14 @@ Nix code sizes (hundreds of bindings per file, not millions):
 
 ### LSP Blocks on Large Repos (Serial didOpen Processing)
 
-- PARTIALLY RESOLVED: Phases 1-4 of the Salsa concurrency migration are complete.
+- PARTIALLY RESOLVED: Phases 1-5 of the Salsa concurrency migration are complete.
   Handlers now read from a lock-free DashMap<PathBuf, FileSnapshot> instead of
   locking the AnalysisState mutex. The analysis loop holds the mutex only during
   the fast syntax phase (~5-50ms) and writes snapshots immediately, so handlers
   are responsive even during type inference. Completion uses a single unified
   codepath with name-text fallbacks for all strategies when source_map fails
-  (stale analysis). Remaining work:
-  - Phase 5: Replace manual AtomicBool cancel with Salsa cancellation
+  (stale analysis). Cancel flag simplified from `Arc<Mutex<Arc<AtomicBool>>>`
+  to a single shared `Arc<AtomicBool>`. Remaining work:
   - Phase 6: Track parse result in Salsa for incremental memoization
   - Legacy `pending_text` / `state.files` still exist alongside DashMap snapshots
   - hover/completion still lock state briefly for DocIndex (should store separately)
