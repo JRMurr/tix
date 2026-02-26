@@ -28,6 +28,69 @@ use smol_str::SmolStr;
 use crate::convert::LineIndex;
 use crate::project_config::ProjectConfig;
 
+// ==============================================================================
+// FileSnapshot: lock-free handler-accessible data
+// ==============================================================================
+//
+// Request handlers read from FileSnapshot via DashMap — never locking the
+// analysis mutex. The analysis loop is the sole writer: it publishes SyntaxData
+// immediately after the cheap syntax phases (parse, lower, nameres), then adds
+// InferenceData after type inference completes.
+
+/// Syntax-level data. Always present once a file has been analyzed at least once.
+/// All fields come from the same analysis pass and are internally consistent.
+pub struct SyntaxData {
+    pub nix_file: NixFile,
+    pub parsed: rnix::Parse<rnix::Root>,
+    pub line_index: LineIndex,
+    pub module: Module,
+    pub module_indices: ModuleIndices,
+    pub source_map: ModuleSourceMap,
+    pub name_res: NameResolution,
+    pub scopes: ModuleScopes,
+    pub import_targets: HashMap<ExprId, PathBuf>,
+    pub name_to_import: HashMap<NameId, PathBuf>,
+    pub context_arg_types: HashMap<SmolStr, OutputTy>,
+    /// Generation counter. Incremented on each syntax update.
+    /// Inference results tagged with a matching generation are consistent.
+    pub generation: u64,
+}
+
+/// Type inference results from a completed analysis pass.
+pub struct InferenceData {
+    pub check_result: CheckResult,
+    /// Generation of the SyntaxData this inference was computed against.
+    /// If this doesn't match SyntaxData.generation, the ExprIds may not
+    /// correspond and handlers need name-text reconciliation.
+    pub syntax_generation: u64,
+}
+
+/// Complete snapshot for a file. Stored in DashMap for lock-free handler access.
+pub struct FileSnapshot {
+    pub syntax: SyntaxData,
+    pub inference: Option<InferenceData>,
+}
+
+impl FileSnapshot {
+    /// Get inference if it matches the current syntax generation.
+    pub fn fresh_inference(&self) -> Option<&InferenceData> {
+        self.inference
+            .as_ref()
+            .filter(|inf| inf.syntax_generation == self.syntax.generation)
+    }
+
+    /// Get inference even if stale (for graceful degradation).
+    pub fn any_inference(&self) -> Option<&InferenceData> {
+        self.inference.as_ref()
+    }
+
+    /// Convenience: get the InferenceResult if any inference data is available.
+    pub fn inference_result(&self) -> Option<&lang_check::InferenceResult> {
+        self.any_inference()
+            .and_then(|inf| inf.check_result.inference.as_ref())
+    }
+}
+
 /// Cached analysis output for a single open file.
 pub struct FileAnalysis {
     pub nix_file: NixFile,

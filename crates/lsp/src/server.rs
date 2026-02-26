@@ -27,6 +27,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use dashmap::DashMap;
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
 
@@ -36,7 +37,7 @@ use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 
 use crate::config::TixConfig;
-use crate::state::{AnalysisState, FileAnalysis};
+use crate::state::{AnalysisState, FileAnalysis, FileSnapshot};
 
 /// Quiescence delay for diagnostic publication. Diagnostics are held back
 /// until no new edits arrive for this duration, preventing flickering during
@@ -73,6 +74,11 @@ pub struct TixLanguageServer {
     /// so completion can re-parse on the fly while analysis catches up.
     /// Cleared once analysis catches up.
     pending_text: Arc<Mutex<HashMap<PathBuf, String>>>,
+    /// Lock-free per-file snapshots for handler access. The analysis loop
+    /// writes SyntaxData immediately after syntax analysis, then adds
+    /// InferenceData after type inference completes. Handlers read from
+    /// this without ever locking the analysis mutex.
+    snapshots: Arc<DashMap<PathBuf, FileSnapshot>>,
 }
 
 impl TixLanguageServer {
@@ -86,6 +92,7 @@ impl TixLanguageServer {
         let state = Arc::new(Mutex::new(AnalysisState::new(registry)));
         let pending_text = Arc::new(Mutex::new(HashMap::new()));
         let current_cancel = Arc::new(Mutex::new(Arc::new(AtomicBool::new(false))));
+        let snapshots = Arc::new(DashMap::new());
 
         // Spawn the analysis loop eagerly. diagnostics_enabled defaults to
         // true; if the editor sends a different config via initializationOptions
@@ -96,6 +103,7 @@ impl TixLanguageServer {
             client.clone(),
             pending_text.clone(),
             current_cancel.clone(),
+            snapshots.clone(),
             true, // diagnostics default on
         );
 
@@ -108,6 +116,7 @@ impl TixLanguageServer {
             event_tx,
             current_cancel,
             pending_text,
+            snapshots,
         }
     }
 
@@ -218,6 +227,7 @@ fn spawn_analysis_loop(
     client: Client,
     pending_text: Arc<Mutex<HashMap<PathBuf, String>>>,
     current_cancel: Arc<Mutex<Arc<AtomicBool>>>,
+    _snapshots: Arc<DashMap<PathBuf, FileSnapshot>>,
     diagnostics_enabled: bool,
 ) {
     tokio::spawn(async move {
