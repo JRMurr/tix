@@ -3,10 +3,15 @@
 // ==============================================================================
 //
 // Before inference begins for a file, we scan its AST for `import <literal-path>`
-// patterns, recursively infer each target file, and build a pre-computed
-// `ExprId -> OutputTy` map. This map is passed into CheckCtx so that Apply
-// expressions matching resolved imports use the imported file's root type
-// instead of the unconstrained `a -> b` from the builtin `import` signature.
+// and `callPackage <literal-path> <overrides>` patterns, recursively infer each
+// target file, and build a pre-computed `ExprId -> OutputTy` map. This map is
+// passed into CheckCtx so that Apply expressions matching resolved imports use
+// the imported file's root type instead of the unconstrained `a -> b` from the
+// builtin `import` signature.
+//
+// For `callPackage`, the target file's root type is a function (the package
+// derivation). Since callPackage applies the dependency-injection argument, we
+// peel one Lambda layer to get the return type.
 //
 // Type isolation: each imported file is inferred in its own CheckCtx with its
 // own TypeStorage. The result is canonicalized to immutable OutputTy values.
@@ -76,6 +81,130 @@ pub fn scan_literal_imports(
 }
 
 // ==============================================================================
+// callPackage Scanning
+// ==============================================================================
+
+/// Check whether an ExprId refers to something named `callPackage`.
+///
+/// Matches two patterns:
+/// - `callPackage` — a bare `Reference("callPackage")`
+/// - `pkgs.callPackage` — a `Select` whose last attrpath segment is the string
+///   literal `"callPackage"`
+///
+/// Only exact `"callPackage"` — NOT `callPackageWith` or `callPackagesWith`,
+/// which have a different argument structure.
+fn is_callpackage_callee(module: &Module, expr_id: ExprId) -> bool {
+    match &module[expr_id] {
+        Expr::Reference(name) => name == "callPackage",
+        Expr::Select { attrpath, .. } => {
+            if let Some(last) = attrpath.last() {
+                matches!(&module[*last], Expr::Literal(Literal::String(s)) if s == "callPackage")
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
+/// Scan a module's AST for `callPackage <literal-path> <overrides>` patterns.
+///
+/// The Nix desugaring of `callPackage ./pkg.nix {}` is:
+///   `Apply { fun: Apply { fun: callPackage, arg: ./pkg.nix }, arg: {} }`
+///
+/// Returns `(outer_apply_id, inner_apply_id, path_literal_expr_id, resolved_path)`.
+fn scan_callpackage_imports(
+    module: &Module,
+    base_dir: &Path,
+) -> Vec<(ExprId, ExprId, ExprId, PathBuf)> {
+    let mut results = Vec::new();
+
+    for (outer_id, expr) in module.exprs() {
+        // outer Apply: callPackage ./path <overrides>
+        let Expr::Apply {
+            fun: inner_apply_id,
+            arg: _,
+        } = expr
+        else {
+            continue;
+        };
+
+        // inner Apply: callPackage ./path
+        let Expr::Apply {
+            fun: callee_id,
+            arg: path_arg_id,
+        } = &module[*inner_apply_id]
+        else {
+            continue;
+        };
+
+        if !is_callpackage_callee(module, *callee_id) {
+            continue;
+        }
+
+        let Expr::Literal(Literal::Path(path_str)) = &module[*path_arg_id] else {
+            continue;
+        };
+
+        let resolved = base_dir.join(path_str);
+        results.push((outer_id, *inner_apply_id, *path_arg_id, resolved));
+    }
+
+    results
+}
+
+/// Peel one Lambda layer from a type to get the return type.
+///
+/// `callPackage` applies the dependency-injection argument (the first parameter
+/// of the package function), so we extract the body type. For non-function files
+/// (e.g. a plain attrset), the type is returned as-is.
+fn extract_return_type(ty: &OutputTy) -> OutputTy {
+    match ty {
+        OutputTy::Lambda { body, .. } => body.0.as_ref().clone(),
+        OutputTy::Named(_, inner) => extract_return_type(&inner.0),
+        other => other.clone(),
+    }
+}
+
+/// Resolve a path that may point to a directory, applying Nix's convention
+/// of loading `default.nix` from directories.
+///
+/// Returns `None` if the path is a directory with no `default.nix`.
+fn resolve_directory_path(path: PathBuf) -> Option<PathBuf> {
+    if path.is_dir() {
+        let default = path.join("default.nix");
+        if default.is_file() {
+            Some(default.canonicalize().unwrap_or(default))
+        } else {
+            None
+        }
+    } else {
+        Some(path)
+    }
+}
+
+// ==============================================================================
+// Import Kinds
+// ==============================================================================
+
+/// Distinguishes regular `import` from `callPackage` so the resolution loop
+/// can handle both uniformly but store the result type differently.
+enum ImportKind {
+    /// `import <literal-path>` — the resolved type is used directly.
+    Import { apply_expr_id: ExprId },
+    /// `callPackage <literal-path> <overrides>` — the resolved type has one
+    /// Lambda layer peeled to get the return type.
+    CallPackage {
+        outer_apply_id: ExprId,
+        /// The inner `Apply(callPackage, path)` — registered with the raw file
+        /// type so that inferring it doesn't produce spurious type errors from
+        /// applying the user's `callPackage` function to a path literal.
+        inner_apply_id: ExprId,
+        path_literal_id: ExprId,
+    },
+}
+
+// ==============================================================================
 // Import Errors
 // ==============================================================================
 
@@ -112,13 +241,16 @@ pub struct ImportResolution {
     pub targets: HashMap<ExprId, PathBuf>,
 }
 
-/// Recursively resolve all literal imports in a file.
+/// Recursively resolve all literal imports and callPackage patterns in a file.
 ///
-/// For each `import <literal-path>` found in the AST:
+/// For each `import <literal-path>` or `callPackage <literal-path> <overrides>`:
 /// - If the target is already being resolved (in `in_progress`), record a cyclic
 ///   import error.
 /// - If the target was already resolved (in `cache`), reuse the cached type.
 /// - Otherwise, load and infer the target file recursively, then cache the result.
+///
+/// For callPackage, one Lambda layer is peeled from the file's root type since
+/// callPackage applies the dependency-injection argument.
 ///
 /// The `cache` prevents re-inferring files in diamond import patterns (A imports
 /// B and C, both of which import D — D is inferred only once).
@@ -137,7 +269,44 @@ pub fn resolve_imports(
     let file_path = file.path(db);
     let base_dir = file_path.parent().unwrap_or(Path::new("/"));
 
+    // Collect both regular imports and callPackage patterns into a unified
+    // work list so they share the same cache, cycle detection, and inference
+    // pipeline. The only difference is how the result type is stored.
     let literal_imports = scan_literal_imports(module, name_res, base_dir);
+    let callpackage_imports = scan_callpackage_imports(module, base_dir);
+
+    // Track which paths are already handled by regular imports so we don't
+    // double-infer files that appear in both `import ./x` and `callPackage ./x`.
+    let import_paths: HashSet<PathBuf> = literal_imports
+        .iter()
+        .map(|(_, p)| p.canonicalize().unwrap_or_else(|_| p.clone()))
+        .collect();
+
+    let mut work: Vec<(ImportKind, PathBuf)> = Vec::new();
+
+    for (apply_expr_id, target_path) in literal_imports {
+        work.push((ImportKind::Import { apply_expr_id }, target_path));
+    }
+
+    for (outer_apply_id, inner_apply_id, path_literal_id, target_path) in callpackage_imports {
+        let canonical = target_path
+            .canonicalize()
+            .unwrap_or_else(|_| target_path.clone());
+        // Skip if a regular import already covers this file — importing the
+        // same path via both `import` and `callPackage` would be unusual, but
+        // guard against it to avoid duplicate work.
+        if import_paths.contains(&canonical) {
+            continue;
+        }
+        work.push((
+            ImportKind::CallPackage {
+                outer_apply_id,
+                inner_apply_id,
+                path_literal_id,
+            },
+            target_path,
+        ));
+    }
 
     let mut types = HashMap::new();
     let mut errors = Vec::new();
@@ -145,20 +314,36 @@ pub fn resolve_imports(
 
     let depth = in_progress.len();
     let indent = "  ".repeat(depth);
-    if !literal_imports.is_empty() {
+    if !work.is_empty() {
         log::info!(
-            "{indent}resolve_imports: {} literal import(s) from {}",
-            literal_imports.len(),
+            "{indent}resolve_imports: {} import(s) from {}",
+            work.len(),
             file_path.display(),
         );
     }
 
-    for (apply_expr_id, target_path) in literal_imports {
+    for (kind, target_path) in work {
         // Canonicalize the path so cycle detection and caching work correctly
         // even with symlinks or `..` components. Fall back to the raw path
         // when canonicalization fails (e.g. in-memory test databases where
         // the path doesn't exist on disk).
         let target_path = target_path.canonicalize().unwrap_or(target_path);
+
+        // Resolve directory paths to default.nix (Nix convention).
+        let target_path = match resolve_directory_path(target_path.clone()) {
+            Some(p) => p,
+            None => {
+                let error_expr = match &kind {
+                    ImportKind::Import { apply_expr_id } => *apply_expr_id,
+                    ImportKind::CallPackage { outer_apply_id, .. } => *outer_apply_id,
+                };
+                errors.push(ImportError {
+                    kind: ImportErrorKind::FileNotFound(target_path),
+                    at_expr: error_expr,
+                });
+                continue;
+            }
+        };
 
         let target_name = target_path
             .file_name()
@@ -167,26 +352,59 @@ pub fn resolve_imports(
 
         // Record navigation targets for the LSP before any cycle/cache/load
         // checks, so even failed imports get jump-to-definition support.
-        if let Expr::Apply { fun, arg } = &module[apply_expr_id] {
-            targets.insert(*fun, target_path.clone());
-            targets.insert(*arg, target_path.clone());
+        match &kind {
+            ImportKind::Import { apply_expr_id } => {
+                if let Expr::Apply { fun, arg } = &module[*apply_expr_id] {
+                    targets.insert(*fun, target_path.clone());
+                    targets.insert(*arg, target_path.clone());
+                }
+                targets.insert(*apply_expr_id, target_path.clone());
+            }
+            ImportKind::CallPackage {
+                outer_apply_id,
+                inner_apply_id,
+                path_literal_id,
+            } => {
+                targets.insert(*path_literal_id, target_path.clone());
+                targets.insert(*outer_apply_id, target_path.clone());
+                targets.insert(*inner_apply_id, target_path.clone());
+            }
         }
-        targets.insert(apply_expr_id, target_path.clone());
 
         // Check for cycles.
+        let error_expr = match &kind {
+            ImportKind::Import { apply_expr_id } => *apply_expr_id,
+            ImportKind::CallPackage { outer_apply_id, .. } => *outer_apply_id,
+        };
         if in_progress.contains(&target_path) {
             log::info!("{indent}  {target_name}: cycle detected, skipping");
             errors.push(ImportError {
                 kind: ImportErrorKind::CyclicImport(target_path),
-                at_expr: apply_expr_id,
+                at_expr: error_expr,
             });
             continue;
         }
 
-        // Check cache.
+        // Check cache — use the raw file type, then apply kind-specific
+        // transformation (extract_return_type for callPackage).
         if let Some(cached_ty) = cache.get(&target_path) {
             log::info!("{indent}  {target_name}: cached");
-            types.insert(apply_expr_id, cached_ty.clone());
+            match &kind {
+                ImportKind::Import { apply_expr_id } => {
+                    types.insert(*apply_expr_id, cached_ty.clone());
+                }
+                ImportKind::CallPackage {
+                    outer_apply_id,
+                    inner_apply_id,
+                    ..
+                } => {
+                    // Register the raw file type on the inner Apply so that
+                    // infer_expr short-circuits it (avoids type errors from
+                    // applying the user's callPackage function to a path literal).
+                    types.insert(*inner_apply_id, cached_ty.clone());
+                    types.insert(*outer_apply_id, extract_return_type(cached_ty));
+                }
+            }
             continue;
         }
 
@@ -198,7 +416,7 @@ pub fn resolve_imports(
             log::info!("{indent}  {target_name}: file not found");
             errors.push(ImportError {
                 kind: ImportErrorKind::FileNotFound(target_path),
-                at_expr: apply_expr_id,
+                at_expr: error_expr,
             });
             continue;
         };
@@ -278,11 +496,28 @@ pub fn resolve_imports(
             .cloned()
             .unwrap_or(OutputTy::TyVar(0));
 
-        // Always cache — even partial/errored results. Without this, a
-        // file that times out gets re-inferred (and re-times-out) every
-        // time it's imported from a different path.
+        // Always cache the raw file type — even partial/errored results.
+        // Kind-specific transformation (extract_return_type) is applied
+        // on retrieval so the cache stays reusable across import kinds.
         cache.insert(target_path.clone(), root_ty.clone());
-        types.insert(apply_expr_id, root_ty);
+
+        // Store the appropriate type for this import kind.
+        match &kind {
+            ImportKind::Import { apply_expr_id } => {
+                types.insert(*apply_expr_id, root_ty);
+            }
+            ImportKind::CallPackage {
+                outer_apply_id,
+                inner_apply_id,
+                ..
+            } => {
+                // Register the raw file type on the inner Apply so that
+                // infer_expr short-circuits it (avoids type errors from
+                // applying the user's callPackage function to a path literal).
+                types.insert(*inner_apply_id, root_ty.clone());
+                types.insert(*outer_apply_id, extract_return_type(&root_ty));
+            }
+        }
 
         if has_errors {
             let t_total = t_import.elapsed();

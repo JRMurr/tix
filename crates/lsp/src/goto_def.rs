@@ -67,6 +67,21 @@ pub fn goto_definition(
                 }
             }
 
+            // Any path literal not already handled by import_targets: resolve
+            // the path on disk (including directory→default.nix) and jump to it.
+            // This makes bare path literals like `./lib.nix` or `./pkg` clickable
+            // regardless of whether they appear in an import, callPackage, or other context.
+            if let Expr::Literal(Literal::Path(path_str)) = &analysis.syntax.module[expr_id] {
+                let base_dir = uri.to_file_path().ok()?.parent()?.to_path_buf();
+                if let Some(resolved) = crate::state::resolve_nix_path(&base_dir, path_str) {
+                    let target_uri = Url::from_file_path(&resolved).ok()?;
+                    return Some(Location::new(
+                        target_uri,
+                        Range::new(Position::new(0, 0), Position::new(0, 0)),
+                    ));
+                }
+            }
+
             // Same-file: Reference expressions resolve via name resolution.
             if matches!(&analysis.syntax.module[expr_id], Expr::Reference(_)) {
                 if let Some(res) = analysis.syntax.name_res.get(expr_id) {
@@ -462,5 +477,65 @@ mod tests {
         let pos = Position::new(0, 0);
         let loc = goto_definition(&state, &analysis, pos, &uri, &root);
         assert!(loc.is_none(), "literal should not resolve to a definition");
+    }
+
+    // ------------------------------------------------------------------
+    // Bare path literal: ./lib.nix  →  jumps to lib.nix
+    // ------------------------------------------------------------------
+    #[test]
+    fn bare_path_literal_jumps_to_file() {
+        let src = indoc! {"
+            let x = ./lib.nix; in x
+            #       ^1
+        "};
+        let markers = parse_markers(src);
+
+        let project = TempProject::new(&[("main.nix", src), ("lib.nix", "42")]);
+        let main_path = project.path("main.nix");
+        let lib_path = project.path("lib.nix");
+
+        let mut state = AnalysisState::new(TypeAliasRegistry::default());
+        let (uri, contents) = analyze(&mut state, &main_path);
+        let analysis = state.get_file(&main_path).unwrap().to_snapshot();
+        let root = rnix::Root::parse(&contents).tree();
+
+        // Cursor on the path literal `./lib.nix`.
+        let pos = analysis.syntax.line_index.position(markers[&1]);
+        let loc = goto_definition(&state, &analysis, pos, &uri, &root);
+        let loc = loc.expect("bare path literal should resolve to target file");
+
+        let lib_uri = Url::from_file_path(&lib_path).unwrap();
+        assert_eq!(loc.uri, lib_uri);
+        assert_eq!(loc.range.start, Position::new(0, 0));
+    }
+
+    // ------------------------------------------------------------------
+    // Directory path literal: ./pkg  →  jumps to pkg/default.nix
+    // ------------------------------------------------------------------
+    #[test]
+    fn bare_path_literal_directory_jumps_to_default_nix() {
+        let src = indoc! {"
+            let x = ./pkg; in x
+            #       ^1
+        "};
+        let markers = parse_markers(src);
+
+        let project = TempProject::new(&[("main.nix", src), ("pkg/default.nix", "{ name = 1; }")]);
+        let main_path = project.path("main.nix");
+        let pkg_default = project.path("pkg/default.nix");
+
+        let mut state = AnalysisState::new(TypeAliasRegistry::default());
+        let (uri, contents) = analyze(&mut state, &main_path);
+        let analysis = state.get_file(&main_path).unwrap().to_snapshot();
+        let root = rnix::Root::parse(&contents).tree();
+
+        // Cursor on the path literal `./pkg`.
+        let pos = analysis.syntax.line_index.position(markers[&1]);
+        let loc = goto_definition(&state, &analysis, pos, &uri, &root);
+        let loc = loc.expect("directory path literal should resolve to default.nix");
+
+        let pkg_uri = Url::from_file_path(&pkg_default).unwrap();
+        assert_eq!(loc.uri, pkg_uri, "should jump to pkg/default.nix");
+        assert_eq!(loc.range.start, Position::new(0, 0));
     }
 }

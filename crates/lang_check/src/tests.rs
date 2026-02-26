@@ -1946,6 +1946,141 @@ mod import_tests {
             "selecting .x from Named(Foo, {{ x: int }}) should produce int"
         );
     }
+
+    // ======================================================================
+    // callPackage type-aware import resolution
+    // ======================================================================
+
+    // callPackage peels one Lambda layer from the target file's type,
+    // returning the function body type (the package's output).
+    #[test]
+    fn callpackage_returns_function_body_type() {
+        let ty = get_multifile_root(&[
+            (
+                "/main.nix",
+                r#"
+                let callPackage = x: x {};
+                in callPackage /pkg.nix {}
+                "#,
+            ),
+            ("/pkg.nix", "{ }: { name = \"hello\"; }"),
+        ]);
+        match &ty {
+            OutputTy::AttrSet(attr) => {
+                let name = attr.fields.get("name").expect("field name");
+                assert_eq!(
+                    *name.0,
+                    arc_ty!(String),
+                    "callPackage should produce the function's return type"
+                );
+            }
+            _ => panic!("expected attrset from callPackage, got: {ty}"),
+        }
+    }
+
+    // callPackage via Select: `pkgs.callPackage ./pkg.nix {}`
+    #[test]
+    fn callpackage_select_variant() {
+        let ty = get_multifile_root(&[
+            (
+                "/main.nix",
+                r#"
+                let
+                    pkgs = { callPackage = x: x {}; };
+                in pkgs.callPackage /pkg.nix {}
+                "#,
+            ),
+            ("/pkg.nix", "{ }: { version = 1; }"),
+        ]);
+        match &ty {
+            OutputTy::AttrSet(attr) => {
+                let version = attr.fields.get("version").expect("field version");
+                assert_eq!(
+                    *version.0,
+                    arc_ty!(Int),
+                    "callPackage via Select should produce the function's return type"
+                );
+            }
+            _ => panic!("expected attrset from callPackage via Select, got: {ty}"),
+        }
+    }
+
+    // callPackage on a non-function file: uses the file type as-is.
+    #[test]
+    fn callpackage_non_function_file() {
+        let ty = get_multifile_root(&[
+            (
+                "/main.nix",
+                r#"
+                let callPackage = x: x {};
+                in callPackage /pkg.nix {}
+                "#,
+            ),
+            ("/pkg.nix", "42"),
+        ]);
+        // The file exports an int, not a function. extract_return_type
+        // returns it as-is since there's no Lambda to peel.
+        assert_eq!(
+            ty,
+            arc_ty!(Int),
+            "callPackage on non-function file should use file type as-is"
+        );
+    }
+
+    // Verify that callPackage patterns populate import_targets for the
+    // path literal and outer Apply expression.
+    #[test]
+    fn callpackage_targets_populated() {
+        use lang_ast::{Expr, Literal};
+        use std::path::PathBuf;
+
+        let (db, entry_file) = MultiFileTestDatabase::new(&[
+            (
+                "/main.nix",
+                r#"let callPackage = x: x {}; in callPackage /pkg.nix {}"#,
+            ),
+            ("/pkg.nix", "{ }: { name = 1; }"),
+        ]);
+
+        let module = lang_ast::module(&db, entry_file);
+        let name_res = lang_ast::name_resolution(&db, entry_file);
+        let aliases = TypeAliasRegistry::default();
+
+        let mut in_progress = HashSet::new();
+        let mut cache = HashMap::new();
+        let resolution = resolve_imports(
+            &db,
+            entry_file,
+            &module,
+            &name_res,
+            &aliases,
+            &mut in_progress,
+            &mut cache,
+            None,
+        );
+
+        // The callPackage pattern should produce target entries for the path
+        // literal and the outer Apply.
+        let target = PathBuf::from("/pkg.nix");
+        let mut has_path_literal = false;
+        let mut has_apply = false;
+        for (expr_id, path) in &resolution.targets {
+            assert_eq!(*path, target, "all targets should resolve to /pkg.nix");
+            match &module[*expr_id] {
+                Expr::Literal(Literal::Path(_)) => has_path_literal = true,
+                Expr::Apply { .. } => has_apply = true,
+                _ => {}
+            }
+        }
+        assert!(
+            has_path_literal,
+            "targets should include the path Literal from callPackage"
+        );
+        assert!(
+            has_apply,
+            "targets should include the outer Apply from callPackage"
+        );
+    }
 }
 
 // ==============================================================================
