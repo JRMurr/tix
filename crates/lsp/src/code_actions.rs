@@ -180,10 +180,14 @@ fn find_attrset_insert_point(
     // If the set is a Reference, resolve it to the name's binding expression.
     let attrset_expr = match &analysis.syntax.module[set_expr] {
         Expr::Reference(_) => {
-            let name_id = analysis.syntax.name_res.get(set_expr).and_then(|r| match r {
-                lang_ast::nameres::ResolveResult::Definition(n) => Some(*n),
-                _ => None,
-            })?;
+            let name_id = analysis
+                .syntax
+                .name_res
+                .get(set_expr)
+                .and_then(|r| match r {
+                    lang_ast::nameres::ResolveResult::Definition(n) => Some(*n),
+                    _ => None,
+                })?;
             *analysis.syntax.module_indices.binding_expr.get(&name_id)?
         }
         // If it's already an AttrSet literal, use it directly.

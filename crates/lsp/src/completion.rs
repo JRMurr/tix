@@ -142,7 +142,6 @@ pub fn completion(
     None
 }
 
-
 /// Collect field names already present in an attrset literal by walking the
 /// fresh rnix tree directly. Unlike `collect_existing_fields`, this does not
 /// need the source_map — it reads ident tokens from `AttrpathValue` children.
@@ -210,7 +209,9 @@ fn find_name_type_by_text(
 
         // For lambda params, extract param type from the enclosing Lambda.
         if matches!(name.kind, NameKind::Param | NameKind::PatField) {
-            if let Some(&lambda_expr_id) = analysis.syntax.module_indices.param_to_lambda.get(&name_id) {
+            if let Some(&lambda_expr_id) =
+                analysis.syntax.module_indices.param_to_lambda.get(&name_id)
+            {
                 if let Some(lambda_ty) = inference.expr_ty_map.get(lambda_expr_id) {
                     if let Some(param_ty) = extract_lambda_param(lambda_ty) {
                         let resolved = if name.kind == NameKind::PatField {
@@ -344,7 +345,8 @@ fn resolve_base_type(
     // Lambda's canonicalized type.
     let name = &analysis.syntax.module[name_id];
     if matches!(name.kind, NameKind::Param | NameKind::PatField) {
-        if let Some(&lambda_expr_id) = analysis.syntax.module_indices.param_to_lambda.get(&name_id) {
+        if let Some(&lambda_expr_id) = analysis.syntax.module_indices.param_to_lambda.get(&name_id)
+        {
             if let Some(lambda_ty) = inference.expr_ty_map.get(lambda_expr_id) {
                 log::debug!(
                     "dot_completion fallback: lambda ty={lambda_ty} for param {:?}",
@@ -991,10 +993,11 @@ mod tests {
             .into_iter()
             .map(|(num, offset)| {
                 let pos = analysis.syntax.line_index.position(offset);
-                let items = match completion(&analysis, pos, &t.root, &docs, &analysis.syntax.line_index) {
-                    Some(CompletionResponse::Array(items)) => items,
-                    _ => Vec::new(),
-                };
+                let items =
+                    match completion(&analysis, pos, &t.root, &docs, &analysis.syntax.line_index) {
+                        Some(CompletionResponse::Array(items)) => items,
+                        _ => Vec::new(),
+                    };
                 (num, items)
             })
             .collect()
@@ -1563,7 +1566,10 @@ mod tests {
     /// parse of different source. Simulates the pending_text scenario: the
     /// analysis is from a previous version of the file, but the fresh text
     /// has a new edit (e.g. appended `.` or `{ }`).
-    fn stale_completion_at_markers(stale_src: &str, fresh_src: &str) -> BTreeMap<u32, Vec<CompletionItem>> {
+    fn stale_completion_at_markers(
+        stale_src: &str,
+        fresh_src: &str,
+    ) -> BTreeMap<u32, Vec<CompletionItem>> {
         let markers = parse_markers(fresh_src);
         assert!(!markers.is_empty(), "no markers found in fresh source");
 
@@ -1578,10 +1584,11 @@ mod tests {
             .into_iter()
             .map(|(num, offset)| {
                 let pos = fresh_line_index.position(offset);
-                let items = match completion(&stale_analysis, pos, &fresh_root, &docs, &fresh_line_index) {
-                    Some(CompletionResponse::Array(items)) => items,
-                    _ => Vec::new(),
-                };
+                let items =
+                    match completion(&stale_analysis, pos, &fresh_root, &docs, &fresh_line_index) {
+                        Some(CompletionResponse::Array(items)) => items,
+                        _ => Vec::new(),
+                    };
                 (num, items)
             })
             .collect()
@@ -1890,10 +1897,11 @@ mod tests {
             .into_iter()
             .map(|(num, offset)| {
                 let pos = analysis.syntax.line_index.position(offset);
-                let items = match completion(&analysis, pos, &root, docs, &analysis.syntax.line_index) {
-                    Some(CompletionResponse::Array(items)) => items,
-                    _ => Vec::new(),
-                };
+                let items =
+                    match completion(&analysis, pos, &root, docs, &analysis.syntax.line_index) {
+                        Some(CompletionResponse::Array(items)) => items,
+                        _ => Vec::new(),
+                    };
                 (num, items)
             })
             .collect()
@@ -2370,7 +2378,11 @@ mod tests {
         fn complete_at_markers(&self, relative_path: &str) -> BTreeMap<u32, Vec<CompletionItem>> {
             let path = self.temp_dir.join(relative_path);
             let src = std::fs::read_to_string(&path).unwrap();
-            let analysis = self.state.get_file(&path).expect("file not loaded").to_snapshot();
+            let analysis = self
+                .state
+                .get_file(&path)
+                .expect("file not loaded")
+                .to_snapshot();
             let root = rnix::Root::parse(&src).tree();
             let markers = parse_markers(&src);
             let docs = &self.state.registry.docs;
@@ -2380,7 +2392,13 @@ mod tests {
                 .into_iter()
                 .map(|(num, offset)| {
                     let pos = analysis.syntax.line_index.position(offset);
-                    let items = match completion(&analysis, pos, &root, docs, &analysis.syntax.line_index) {
+                    let items = match completion(
+                        &analysis,
+                        pos,
+                        &root,
+                        docs,
+                        &analysis.syntax.line_index,
+                    ) {
                         Some(CompletionResponse::Array(items)) => items,
                         _ => Vec::new(),
                     };
@@ -2875,10 +2893,11 @@ mod tests {
             .into_iter()
             .map(|(num, offset)| {
                 let pos = analysis.syntax.line_index.position(offset);
-                let items = match completion(&analysis, pos, &root, docs, &analysis.syntax.line_index) {
-                    Some(CompletionResponse::Array(items)) => items,
-                    _ => Vec::new(),
-                };
+                let items =
+                    match completion(&analysis, pos, &root, docs, &analysis.syntax.line_index) {
+                        Some(CompletionResponse::Array(items)) => items,
+                        _ => Vec::new(),
+                    };
                 (num, items)
             })
             .collect()

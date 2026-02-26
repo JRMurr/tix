@@ -103,7 +103,7 @@
             # rust-docker = rustAttrs.docker;
           };
 
-          checks = {
+          checks = rustAttrs.checks // {
             # Verify the with-stubs wrapper (TIX_BUILTIN_STUBS baked in via
             # makeWrapper) can type-check files that use @nixos and
             # @home-manager contexts end-to-end.

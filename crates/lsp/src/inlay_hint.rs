@@ -96,7 +96,12 @@ fn is_trivial_binding(analysis: &FileSnapshot, name_id: NameId) -> bool {
 
 /// Find the value ExprId for a name's binding via the pre-built module index.
 fn find_binding_expr(analysis: &FileSnapshot, target: NameId) -> Option<ExprId> {
-    analysis.syntax.module_indices.binding_expr.get(&target).copied()
+    analysis
+        .syntax
+        .module_indices
+        .binding_expr
+        .get(&target)
+        .copied()
 }
 
 #[cfg(test)]

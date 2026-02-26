@@ -14,7 +14,12 @@ use crate::state::FileSnapshot;
 #[allow(deprecated)] // DocumentSymbol.deprecated is deprecated but required by the struct
 pub fn document_symbols(analysis: &FileSnapshot, root: &rnix::Root) -> Vec<DocumentSymbol> {
     let mut symbols = Vec::new();
-    collect_symbols(analysis, root, analysis.syntax.module.entry_expr, &mut symbols);
+    collect_symbols(
+        analysis,
+        root,
+        analysis.syntax.module.entry_expr,
+        &mut symbols,
+    );
     symbols
 }
 
@@ -91,22 +96,23 @@ fn collect_binding_symbols(
 
         // For the full symbol range, combine the name range with the value
         // expression's range (if available).
-        let range = match value_expr_id.and_then(|eid| analysis.syntax.source_map.node_for_expr(eid)) {
-            Some(val_ptr) => {
-                let val_node = val_ptr.to_node(root.syntax());
-                let val_range = analysis.syntax.line_index.range(val_node.text_range());
-                // Combine: earliest start to latest end.
-                Range::new(
-                    std::cmp::min_by(selection_range.start, val_range.start, |a, b| {
-                        (a.line, a.character).cmp(&(b.line, b.character))
-                    }),
-                    std::cmp::max_by(selection_range.end, val_range.end, |a, b| {
-                        (a.line, a.character).cmp(&(b.line, b.character))
-                    }),
-                )
-            }
-            None => selection_range,
-        };
+        let range =
+            match value_expr_id.and_then(|eid| analysis.syntax.source_map.node_for_expr(eid)) {
+                Some(val_ptr) => {
+                    let val_node = val_ptr.to_node(root.syntax());
+                    let val_range = analysis.syntax.line_index.range(val_node.text_range());
+                    // Combine: earliest start to latest end.
+                    Range::new(
+                        std::cmp::min_by(selection_range.start, val_range.start, |a, b| {
+                            (a.line, a.character).cmp(&(b.line, b.character))
+                        }),
+                        std::cmp::max_by(selection_range.end, val_range.end, |a, b| {
+                            (a.line, a.character).cmp(&(b.line, b.character))
+                        }),
+                    )
+                }
+                None => selection_range,
+            };
 
         // Recurse into nested attrset values for children.
         let children = match value_expr_id {

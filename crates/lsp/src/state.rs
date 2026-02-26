@@ -611,8 +611,8 @@ impl AnalysisState {
         let mut name_to_import = HashMap::new();
         for group in grouped.iter() {
             for typedef in group {
-                let target = chase_import_target(&module, &import_targets, typedef.expr())
-                    .or_else(|| {
+                let target =
+                    chase_import_target(&module, &import_targets, typedef.expr()).or_else(|| {
                         let dir = file_dir.as_deref()?;
                         find_path_literal_target(&module, typedef.expr(), dir)
                     });

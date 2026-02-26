@@ -38,7 +38,9 @@ pub fn name_at_position(
         // to a definition.
         if let Some(expr_id) = analysis.syntax.source_map.expr_for_node(ptr) {
             if matches!(&analysis.syntax.module[expr_id], Expr::Reference(_)) {
-                if let Some(ResolveResult::Definition(name_id)) = analysis.syntax.name_res.get(expr_id) {
+                if let Some(ResolveResult::Definition(name_id)) =
+                    analysis.syntax.name_res.get(expr_id)
+                {
                     return Some(*name_id);
                 }
             }

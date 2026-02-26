@@ -636,9 +636,7 @@ impl LanguageServer for TixLanguageServer {
             self.cancel_flag.store(true, Ordering::Relaxed);
             self.pending_text.lock().remove(&path);
             self.state.lock().files.remove(&path);
-            self.event_tx
-                .send(AnalysisEvent::FileClosed { path })
-                .ok();
+            self.event_tx.send(AnalysisEvent::FileClosed { path }).ok();
         }
     }
 
@@ -766,12 +764,20 @@ impl LanguageServer for TixLanguageServer {
             let root = rnix::Root::parse(text).tree();
             let line_index = crate::convert::LineIndex::new(text);
             Ok(crate::completion::completion(
-                &snap_ref, pos, &root, &docs, &line_index,
+                &snap_ref,
+                pos,
+                &root,
+                &docs,
+                &line_index,
             ))
         } else {
             let root = snap_ref.syntax.parsed.tree();
             Ok(crate::completion::completion(
-                &snap_ref, pos, &root, &docs, &snap_ref.syntax.line_index,
+                &snap_ref,
+                pos,
+                &root,
+                &docs,
+                &snap_ref.syntax.line_index,
             ))
         }
     }
@@ -940,11 +946,7 @@ impl LanguageServer for TixLanguageServer {
             return Ok(Some(vec![]));
         }
         self.with_snapshot(&params.text_document.uri, |snapshot, root| {
-            Some(crate::inlay_hint::inlay_hints(
-                snapshot,
-                params.range,
-                root,
-            ))
+            Some(crate::inlay_hint::inlay_hints(snapshot, params.range, root))
         })
     }
 

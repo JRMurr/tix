@@ -137,7 +137,8 @@ pub fn rename(
 ///   let helper = ...; in { ... }  # LetIn whose body is AttrSet
 fn is_top_level_export(analysis: &FileSnapshot, target: NameId) -> bool {
     let entry = analysis.syntax.module.entry_expr;
-    fields_of_root_attrset(&analysis.syntax.module, entry).is_some_and(|fields| fields.contains(&target))
+    fields_of_root_attrset(&analysis.syntax.module, entry)
+        .is_some_and(|fields| fields.contains(&target))
 }
 
 /// Collect NameIds of fields in the root-level attrset, chasing through
@@ -285,8 +286,7 @@ fn resolve_to_name(
     expr_id: ExprId,
 ) -> Option<NameId> {
     if let Expr::Reference(_) = &module[expr_id] {
-        if let Some(lang_ast::nameres::ResolveResult::Definition(name_id)) = name_res.get(expr_id)
-        {
+        if let Some(lang_ast::nameres::ResolveResult::Definition(name_id)) = name_res.get(expr_id) {
             return Some(*name_id);
         }
     }
