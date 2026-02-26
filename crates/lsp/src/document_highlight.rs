@@ -8,10 +8,10 @@
 use rowan::ast::AstNode;
 use tower_lsp::lsp_types::{DocumentHighlight, DocumentHighlightKind, Position};
 
-use crate::state::FileAnalysis;
+use crate::state::FileSnapshot;
 
 pub fn document_highlight(
-    analysis: &FileAnalysis,
+    analysis: &FileSnapshot,
     pos: Position,
     root: &rnix::Root,
 ) -> Vec<DocumentHighlight> {
@@ -23,9 +23,9 @@ pub fn document_highlight(
     let mut highlights = Vec::new();
 
     // Definition site — WRITE.
-    if let Some(ptr) = analysis.source_map.nodes_for_name(target).next() {
+    if let Some(ptr) = analysis.syntax.source_map.nodes_for_name(target).next() {
         let node = ptr.to_node(root.syntax());
-        let range = analysis.line_index.range(node.text_range());
+        let range = analysis.syntax.line_index.range(node.text_range());
         highlights.push(DocumentHighlight {
             range,
             kind: Some(DocumentHighlightKind::WRITE),
@@ -33,10 +33,10 @@ pub fn document_highlight(
     }
 
     // Reference sites — READ.
-    for &expr_id in analysis.name_res.refs_to(target) {
-        if let Some(ptr) = analysis.source_map.node_for_expr(expr_id) {
+    for &expr_id in analysis.syntax.name_res.refs_to(target) {
+        if let Some(ptr) = analysis.syntax.source_map.node_for_expr(expr_id) {
             let node = ptr.to_node(root.syntax());
-            let range = analysis.line_index.range(node.text_range());
+            let range = analysis.syntax.line_index.range(node.text_range());
             highlights.push(DocumentHighlight {
                 range,
                 kind: Some(DocumentHighlightKind::READ),
@@ -57,9 +57,9 @@ mod tests {
         let markers = parse_markers(src);
         let offset = markers[&marker];
         let t = TestAnalysis::new(src);
-        let analysis = t.analysis();
-        let pos = analysis.line_index.position(offset);
-        document_highlight(analysis, pos, &t.root)
+        let analysis = t.snapshot();
+        let pos = analysis.syntax.line_index.position(offset);
+        document_highlight(&analysis, pos, &t.root)
     }
 
     fn count_kinds(highlights: &[DocumentHighlight]) -> (usize, usize) {

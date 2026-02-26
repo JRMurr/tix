@@ -17,7 +17,7 @@ use tower_lsp::lsp_types::{
     SignatureHelp, SignatureInformation,
 };
 
-use crate::state::FileAnalysis;
+use crate::state::FileSnapshot;
 
 /// Entry point: try to produce signature help for the given cursor position.
 ///
@@ -26,12 +26,12 @@ use crate::state::FileAnalysis;
 /// its inferred type, then builds a signature with the active parameter
 /// highlighted based on which argument subtree the cursor falls in.
 pub fn signature_help(
-    analysis: &FileAnalysis,
+    analysis: &FileSnapshot,
     pos: Position,
     root: &rnix::Root,
 ) -> Option<SignatureHelp> {
-    let inference = analysis.inference()?;
-    let offset = analysis.line_index.offset(pos);
+    let inference = analysis.inference_result()?;
+    let offset = analysis.syntax.line_index.offset(pos);
     let token = root
         .syntax()
         .token_at_offset(rowan::TextSize::from(offset))
@@ -58,7 +58,7 @@ pub fn signature_help(
     // The root function is the lambda (function) side of the innermost Apply.
     let root_fun_node = &chain[0].0;
     let root_fun_ptr = AstPtr::new(root_fun_node.syntax());
-    let root_fun_expr_id = analysis.source_map.expr_for_node(root_fun_ptr)?;
+    let root_fun_expr_id = analysis.syntax.source_map.expr_for_node(root_fun_ptr)?;
 
     // Look up the function's inferred type.
     let fun_ty = inference.expr_ty_map.get(root_fun_expr_id)?;
@@ -322,9 +322,9 @@ mod tests {
 
     /// Helper: get signature help at a byte offset.
     fn sig_help_at(t: &TestAnalysis, offset: u32) -> Option<SignatureHelp> {
-        let analysis = t.analysis();
-        let pos = analysis.line_index.position(offset);
-        signature_help(analysis, pos, &t.root)
+        let analysis = t.snapshot();
+        let pos = analysis.syntax.line_index.position(offset);
+        signature_help(&analysis, pos, &t.root)
     }
 
     /// Extract the signature label from a SignatureHelp result.
