@@ -9,21 +9,21 @@ use lang_ast::Expr;
 use rowan::ast::AstNode;
 use tower_lsp::lsp_types::{DocumentLink, Url};
 
-use crate::state::FileAnalysis;
+use crate::state::FileSnapshot;
 
-pub fn document_links(analysis: &FileAnalysis, root: &rnix::Root) -> Vec<DocumentLink> {
+pub fn document_links(analysis: &FileSnapshot, root: &rnix::Root) -> Vec<DocumentLink> {
     let mut links = Vec::new();
 
-    for (&expr_id, target_path) in &analysis.import_targets {
+    for (&expr_id, target_path) in &analysis.syntax.import_targets {
         // We want the range of the path literal specifically, not the whole
         // Apply expression. Walk the expression to find the innermost path
         // or string literal that represents the import target.
-        let range = match &analysis.module[expr_id] {
+        let range = match &analysis.syntax.module[expr_id] {
             Expr::Literal(lang_ast::Literal::Path(_)) => {
                 // This expr IS the path literal — use its range directly.
-                analysis.source_map.node_for_expr(expr_id).map(|ptr| {
+                analysis.syntax.source_map.node_for_expr(expr_id).map(|ptr| {
                     let node = ptr.to_node(root.syntax());
-                    analysis.line_index.range(node.text_range())
+                    analysis.syntax.line_index.range(node.text_range())
                 })
             }
             // For Apply expressions (e.g. `import ./foo.nix`), the import_targets
@@ -69,10 +69,10 @@ mod tests {
         let mut state = AnalysisState::new(TypeAliasRegistry::default());
         let contents = std::fs::read_to_string(&main_path).unwrap();
         state.update_file(main_path.clone(), contents.clone());
-        let analysis = state.get_file(&main_path).unwrap();
+        let analysis = state.get_file(&main_path).unwrap().to_snapshot();
         let root = rnix::Root::parse(&contents).tree();
 
-        let links = document_links(analysis, &root);
+        let links = document_links(&analysis, &root);
         assert!(!links.is_empty(), "should produce at least one link");
 
         let lib_uri = Url::from_file_path(&lib_path).unwrap();
@@ -92,10 +92,10 @@ mod tests {
         let mut state = AnalysisState::new(TypeAliasRegistry::default());
         let contents = std::fs::read_to_string(&main_path).unwrap();
         state.update_file(main_path.clone(), contents.clone());
-        let analysis = state.get_file(&main_path).unwrap();
+        let analysis = state.get_file(&main_path).unwrap().to_snapshot();
         let root = rnix::Root::parse(&contents).tree();
 
-        let links = document_links(analysis, &root);
+        let links = document_links(&analysis, &root);
         let lib_uri = Url::from_file_path(&lib_path).unwrap();
         let has_lib_link = links.iter().any(|l| l.target.as_ref() == Some(&lib_uri));
         assert!(has_lib_link, "should have a link to lib.nix");
@@ -106,10 +106,10 @@ mod tests {
         let path = temp_path("test.nix");
         let mut state = AnalysisState::new(TypeAliasRegistry::default());
         state.update_file(path.clone(), "42".to_string());
-        let analysis = state.get_file(&path).unwrap();
+        let analysis = state.get_file(&path).unwrap().to_snapshot();
         let root = rnix::Root::parse("42").tree();
 
-        let links = document_links(analysis, &root);
+        let links = document_links(&analysis, &root);
         assert!(links.is_empty());
     }
 }

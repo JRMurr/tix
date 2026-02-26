@@ -15,7 +15,7 @@ use lang_ty::{AttrSetTy, OutputTy, TyRef};
 use rowan::ast::AstNode;
 use smol_str::SmolStr;
 
-use crate::state::FileAnalysis;
+use crate::state::FileSnapshot;
 
 /// Extract a plain string literal from an rnix Str node (no interpolation).
 pub(crate) fn get_str_literal(s: &rnix::ast::Str) -> Option<SmolStr> {
@@ -57,7 +57,7 @@ pub(crate) fn resolve_through_segments(ty: &OutputTy, segments: &[SmolStr]) -> O
 /// Returns `None` when no pattern field or context arg type contains the
 /// given segment.
 pub(crate) fn get_module_config_type(
-    analysis: &FileAnalysis,
+    analysis: &FileSnapshot,
     inference: &lang_check::InferenceResult,
     first_segment: &SmolStr,
     context_arg_types: &HashMap<SmolStr, OutputTy>,
@@ -69,9 +69,9 @@ pub(crate) fn get_module_config_type(
         return None;
     }
 
-    let root_expr_id = analysis.module.entry_expr;
+    let root_expr_id = analysis.syntax.module.entry_expr;
 
-    match &analysis.module[root_expr_id] {
+    match &analysis.syntax.module[root_expr_id] {
         // Pattern lambda: check destructured fields first, then fall through
         // to context_arg_types if the pattern has `...`.
         Expr::Lambda { pat: Some(pat), .. } => {
@@ -122,10 +122,10 @@ pub(crate) fn get_module_config_type(
 /// `no-module`. Both line comments (`# no-module`) and block comments
 /// (`/** no-module */`) are recognized. Stops at the first non-trivia token
 /// (i.e. the first real code token).
-fn has_no_module_directive(analysis: &FileAnalysis) -> bool {
+fn has_no_module_directive(analysis: &FileSnapshot) -> bool {
     use rnix::SyntaxKind;
 
-    let root = analysis.parsed.tree();
+    let root = analysis.syntax.parsed.tree();
     for token in root.syntax().descendants_with_tokens() {
         let rowan::NodeOrToken::Token(t) = token else {
             continue;

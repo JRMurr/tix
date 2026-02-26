@@ -8,10 +8,10 @@
 
 use tower_lsp::lsp_types::{Position, SelectionRange};
 
-use crate::state::FileAnalysis;
+use crate::state::FileSnapshot;
 
 pub fn selection_ranges(
-    analysis: &FileAnalysis,
+    analysis: &FileSnapshot,
     positions: Vec<Position>,
     root: &rnix::Root,
 ) -> Vec<SelectionRange> {
@@ -22,13 +22,13 @@ pub fn selection_ranges(
 }
 
 fn build_selection_range(
-    analysis: &FileAnalysis,
+    analysis: &FileSnapshot,
     pos: Position,
     root: &rnix::Root,
 ) -> SelectionRange {
     use rowan::ast::AstNode;
 
-    let offset = analysis.line_index.offset(pos);
+    let offset = analysis.syntax.line_index.offset(pos);
     let token = root
         .syntax()
         .token_at_offset(rowan::TextSize::from(offset))
@@ -46,7 +46,7 @@ fn build_selection_range(
 
     // Collect all unique ranges from the token up through each ancestor node.
     let mut ranges = Vec::new();
-    let token_range = analysis.line_index.range(token.text_range());
+    let token_range = analysis.syntax.line_index.range(token.text_range());
     ranges.push(token_range);
 
     let mut node = match token.parent() {
@@ -60,7 +60,7 @@ fn build_selection_range(
     };
 
     loop {
-        let r = analysis.line_index.range(node.text_range());
+        let r = analysis.syntax.line_index.range(node.text_range());
         // Deduplicate: only add if different from the last range.
         if ranges.last() != Some(&r) {
             ranges.push(r);
@@ -99,10 +99,10 @@ mod tests {
         let markers = parse_markers(src);
         let offset = markers[&marker];
         let t = TestAnalysis::new(src);
-        let analysis = t.analysis();
-        let pos = analysis.line_index.position(offset);
+        let analysis = t.snapshot();
+        let pos = analysis.syntax.line_index.position(offset);
 
-        let results = selection_ranges(analysis, vec![pos], &t.root);
+        let results = selection_ranges(&analysis, vec![pos], &t.root);
         assert_eq!(results.len(), 1);
 
         // Flatten the linked list into a Vec.
@@ -147,12 +147,12 @@ mod tests {
         "};
         let markers = parse_markers(src);
         let t = TestAnalysis::new(src);
-        let analysis = t.analysis();
+        let analysis = t.snapshot();
 
-        let pos1 = analysis.line_index.position(markers[&1]);
-        let pos2 = analysis.line_index.position(markers[&2]);
+        let pos1 = analysis.syntax.line_index.position(markers[&1]);
+        let pos2 = analysis.syntax.line_index.position(markers[&2]);
 
-        let results = selection_ranges(analysis, vec![pos1, pos2], &t.root);
+        let results = selection_ranges(&analysis, vec![pos1, pos2], &t.root);
         assert_eq!(results.len(), 2);
     }
 

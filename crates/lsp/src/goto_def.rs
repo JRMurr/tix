@@ -15,17 +15,17 @@ use lang_ast::{AstDb, AstPtr, Expr, Literal};
 use rowan::ast::AstNode;
 use tower_lsp::lsp_types::{Location, Position, Range, Url};
 
-use crate::state::{AnalysisState, FileAnalysis};
+use crate::state::{AnalysisState, FileSnapshot};
 
 /// Try to find the definition location for the symbol at the given cursor position.
 pub fn goto_definition(
     state: &AnalysisState,
-    analysis: &FileAnalysis,
+    analysis: &FileSnapshot,
     pos: Position,
     uri: &Url,
     root: &rnix::Root,
 ) -> Option<Location> {
-    let offset = analysis.line_index.offset(pos);
+    let offset = analysis.syntax.line_index.offset(pos);
     let token = root
         .syntax()
         .token_at_offset(rowan::TextSize::from(offset))
@@ -42,14 +42,14 @@ pub fn goto_definition(
     loop {
         let ptr = AstPtr::new(&node);
 
-        if let Some(expr_id) = analysis.source_map.expr_for_node(ptr) {
+        if let Some(expr_id) = analysis.syntax.source_map.expr_for_node(ptr) {
             log::debug!(
                 "goto_definition: matched expr_id={expr_id:?}, expr={:?}",
-                &analysis.module[expr_id]
+                &analysis.syntax.module[expr_id]
             );
 
             // Cross-file: if this expression is part of `import <path>`, jump to the file.
-            if let Some(target_path) = analysis.import_targets.get(&expr_id) {
+            if let Some(target_path) = analysis.syntax.import_targets.get(&expr_id) {
                 let target_uri = Url::from_file_path(target_path).ok()?;
                 return Some(Location::new(
                     target_uri,
@@ -60,7 +60,7 @@ pub fn goto_definition(
             // Cross-file: if this is a Select field name (Literal(String)), and the
             // Select's base expression is bound to an import, jump to the field's
             // definition in the target file.
-            if let Expr::Literal(Literal::String(field_name)) = &analysis.module[expr_id] {
+            if let Expr::Literal(Literal::String(field_name)) = &analysis.syntax.module[expr_id] {
                 if let Some(location) = try_resolve_select_field(state, analysis, &node, field_name)
                 {
                     return Some(location);
@@ -68,16 +68,16 @@ pub fn goto_definition(
             }
 
             // Same-file: Reference expressions resolve via name resolution.
-            if matches!(&analysis.module[expr_id], Expr::Reference(_)) {
-                if let Some(res) = analysis.name_res.get(expr_id) {
+            if matches!(&analysis.syntax.module[expr_id], Expr::Reference(_)) {
+                if let Some(res) = analysis.syntax.name_res.get(expr_id) {
                     match res {
                         ResolveResult::Definition(name_id) => {
                             // Find the source location of the definition.
                             if let Some(def_ptr) =
-                                analysis.source_map.nodes_for_name(*name_id).next()
+                                analysis.syntax.source_map.nodes_for_name(*name_id).next()
                             {
                                 let def_node = def_ptr.to_node(root.syntax());
-                                let range = analysis.line_index.range(def_node.text_range());
+                                let range = analysis.syntax.line_index.range(def_node.text_range());
                                 return Some(Location::new(uri.clone(), range));
                             }
                         }
@@ -115,7 +115,7 @@ pub fn goto_definition(
 ///   incorrect jumps.
 fn try_resolve_select_field(
     state: &AnalysisState,
-    analysis: &FileAnalysis,
+    analysis: &FileSnapshot,
     field_node: &rowan::SyntaxNode<rnix::NixLanguage>,
     field_name: &str,
 ) -> Option<Location> {
@@ -127,32 +127,32 @@ fn try_resolve_select_field(
     // Get the Select's base expression (`x` in `x.child`).
     let base_syntax = select_node.expr()?;
     let base_ptr = AstPtr::new(base_syntax.syntax());
-    let base_expr_id = analysis.source_map.expr_for_node(base_ptr)?;
+    let base_expr_id = analysis.syntax.source_map.expr_for_node(base_ptr)?;
 
     log::debug!(
         "try_resolve_select_field: base_expr={:?}",
-        &analysis.module[base_expr_id]
+        &analysis.syntax.module[base_expr_id]
     );
 
     // Resolve the base to an import target path. Two cases:
     // 1. Base is directly an import Apply: check import_targets.
     // 2. Base is a Reference resolving to a name bound to an import: check name_to_import.
-    let target_path = if let Some(path) = analysis.import_targets.get(&base_expr_id) {
+    let target_path = if let Some(path) = analysis.syntax.import_targets.get(&base_expr_id) {
         log::debug!(
             "try_resolve_select_field: direct import target -> {}",
             path.display()
         );
         path
-    } else if let Expr::Reference(ref_name) = &analysis.module[base_expr_id] {
-        let res = analysis.name_res.get(base_expr_id)?;
+    } else if let Expr::Reference(ref_name) = &analysis.syntax.module[base_expr_id] {
+        let res = analysis.syntax.name_res.get(base_expr_id)?;
         log::debug!(
             "try_resolve_select_field: base is Reference({ref_name:?}), resolves to {res:?}"
         );
         if let ResolveResult::Definition(name_id) = res {
-            let result = analysis.name_to_import.get(name_id);
+            let result = analysis.syntax.name_to_import.get(name_id);
             log::debug!(
                 "try_resolve_select_field: name_to_import lookup for {:?} -> {:?}",
-                analysis.module[*name_id].text,
+                analysis.syntax.module[*name_id].text,
                 result
             );
             result?
@@ -229,17 +229,17 @@ mod tests {
 
         let mut state = AnalysisState::new(TypeAliasRegistry::default());
         let (uri, contents) = analyze(&mut state, &path);
-        let analysis = state.get_file(&path).unwrap();
+        let analysis = state.get_file(&path).unwrap().to_snapshot();
         let root = rnix::Root::parse(&contents).tree();
 
         // Cursor on the trailing `x` (the reference).
-        let pos = analysis.line_index.position(markers[&2]);
-        let loc = goto_definition(&state, analysis, pos, &uri, &root);
+        let pos = analysis.syntax.line_index.position(markers[&2]);
+        let loc = goto_definition(&state, &analysis, pos, &uri, &root);
         let loc = loc.expect("should resolve same-file reference");
 
         // Should jump to the definition `x` in `let x = 1`.
         assert_eq!(loc.uri, uri);
-        let expected_pos = analysis.line_index.position(markers[&1]);
+        let expected_pos = analysis.syntax.line_index.position(markers[&1]);
         assert_eq!(loc.range.start, expected_pos);
     }
 
@@ -254,12 +254,12 @@ mod tests {
 
         let mut state = AnalysisState::new(TypeAliasRegistry::default());
         let (uri, contents) = analyze(&mut state, &main_path);
-        let analysis = state.get_file(&main_path).unwrap();
+        let analysis = state.get_file(&main_path).unwrap().to_snapshot();
         let root = rnix::Root::parse(&contents).tree();
 
         // Cursor on `import` keyword.
         let pos = Position::new(0, 0);
-        let loc = goto_definition(&state, analysis, pos, &uri, &root);
+        let loc = goto_definition(&state, &analysis, pos, &uri, &root);
         let loc = loc.expect("should resolve import to target file");
 
         let lib_uri = Url::from_file_path(&lib_path).unwrap();
@@ -281,12 +281,12 @@ mod tests {
 
         let mut state = AnalysisState::new(TypeAliasRegistry::default());
         let (uri, contents) = analyze(&mut state, &main_path);
-        let analysis = state.get_file(&main_path).unwrap();
+        let analysis = state.get_file(&main_path).unwrap().to_snapshot();
         let root = rnix::Root::parse(&contents).tree();
 
         // Cursor on the path literal `./lib.nix`.
-        let pos = analysis.line_index.position(markers[&1]);
-        let loc = goto_definition(&state, analysis, pos, &uri, &root);
+        let pos = analysis.syntax.line_index.position(markers[&1]);
+        let loc = goto_definition(&state, &analysis, pos, &uri, &root);
         let loc = loc.expect("should resolve path literal to target file");
 
         let lib_uri = Url::from_file_path(&lib_path).unwrap();
@@ -310,12 +310,12 @@ mod tests {
 
         let mut state = AnalysisState::new(TypeAliasRegistry::default());
         let (uri, contents) = analyze(&mut state, &main_path);
-        let analysis = state.get_file(&main_path).unwrap();
+        let analysis = state.get_file(&main_path).unwrap().to_snapshot();
         let root = rnix::Root::parse(&contents).tree();
 
         // Cursor on `x` in `lib.x` (the field name after the dot).
-        let pos = analysis.line_index.position(markers[&1]);
-        let loc = goto_definition(&state, analysis, pos, &uri, &root);
+        let pos = analysis.syntax.line_index.position(markers[&1]);
+        let loc = goto_definition(&state, &analysis, pos, &uri, &root);
         let loc = loc.expect("should resolve select field to target file");
 
         let lib_uri = Url::from_file_path(&lib_path).unwrap();
@@ -350,12 +350,12 @@ mod tests {
 
         let mut state = AnalysisState::new(TypeAliasRegistry::default());
         let (uri, contents) = analyze(&mut state, &main_path);
-        let analysis = state.get_file(&main_path).unwrap();
+        let analysis = state.get_file(&main_path).unwrap().to_snapshot();
         let root = rnix::Root::parse(&contents).tree();
 
         // Cursor on `name` in `attrs.name`.
-        let pos = analysis.line_index.position(markers[&1]);
-        let loc = goto_definition(&state, analysis, pos, &uri, &root);
+        let pos = analysis.syntax.line_index.position(markers[&1]);
+        let loc = goto_definition(&state, &analysis, pos, &uri, &root);
         let loc = loc.expect("should resolve select field through applied import");
 
         let lib_uri = Url::from_file_path(&lib_path).unwrap();
@@ -390,12 +390,12 @@ mod tests {
 
         let mut state = AnalysisState::new(TypeAliasRegistry::default());
         let (uri, contents) = analyze(&mut state, &main_path);
-        let analysis = state.get_file(&main_path).unwrap();
+        let analysis = state.get_file(&main_path).unwrap().to_snapshot();
         let root = rnix::Root::parse(&contents).tree();
 
         // Cursor on `name` in `x.name`.
-        let pos = analysis.line_index.position(markers[&1]);
-        let loc = goto_definition(&state, analysis, pos, &uri, &root);
+        let pos = analysis.syntax.line_index.position(markers[&1]);
+        let loc = goto_definition(&state, &analysis, pos, &uri, &root);
         let loc = loc.expect("should resolve select field via path literal heuristic");
 
         let pkg_uri = Url::from_file_path(&pkg_path).unwrap();
@@ -428,12 +428,12 @@ mod tests {
 
         let mut state = AnalysisState::new(TypeAliasRegistry::default());
         let (uri, contents) = analyze(&mut state, &main_path);
-        let analysis = state.get_file(&main_path).unwrap();
+        let analysis = state.get_file(&main_path).unwrap().to_snapshot();
         let root = rnix::Root::parse(&contents).tree();
 
         // Cursor on `name` in `x.name`.
-        let pos = analysis.line_index.position(markers[&1]);
-        let loc = goto_definition(&state, analysis, pos, &uri, &root);
+        let pos = analysis.syntax.line_index.position(markers[&1]);
+        let loc = goto_definition(&state, &analysis, pos, &uri, &root);
         let loc = loc.expect("should resolve select field via directory path literal");
 
         let pkg_uri = Url::from_file_path(&pkg_path).unwrap();
@@ -456,11 +456,11 @@ mod tests {
 
         let mut state = AnalysisState::new(TypeAliasRegistry::default());
         let (uri, contents) = analyze(&mut state, &path);
-        let analysis = state.get_file(&path).unwrap();
+        let analysis = state.get_file(&path).unwrap().to_snapshot();
         let root = rnix::Root::parse(&contents).tree();
 
         let pos = Position::new(0, 0);
-        let loc = goto_definition(&state, analysis, pos, &uri, &root);
+        let loc = goto_definition(&state, &analysis, pos, &uri, &root);
         assert!(loc.is_none(), "literal should not resolve to a definition");
     }
 }

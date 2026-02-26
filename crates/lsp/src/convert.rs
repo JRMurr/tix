@@ -11,6 +11,7 @@
 use tower_lsp::lsp_types::{Position, Range};
 
 /// Pre-computed line start byte offsets for fast offset <-> position conversion.
+#[derive(Clone)]
 pub struct LineIndex {
     /// Byte offset of the start of each line (line 0 starts at offset 0).
     line_starts: Vec<u32>,

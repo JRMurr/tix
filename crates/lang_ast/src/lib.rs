@@ -22,13 +22,14 @@ pub use db::{AstDb, NixFile, RootDatabase};
 use derive_more::From;
 use la_arena::{Arena, ArenaMap, Idx as Id};
 use lower::lower;
-pub use nameres::{group_def, name_resolution, scopes, ModuleScopes, NameResolution};
+pub use nameres::{group_def, name_resolution, scopes, GroupedDefs, ModuleScopes, NameResolution};
 use rnix::NixLanguage;
 use smol_str::SmolStr;
 
 #[salsa::tracked]
 pub fn module_and_source_maps(db: &dyn crate::AstDb, file: NixFile) -> (Module, ModuleSourceMap) {
-    let root = db.parse_file(file);
+    let parsed = db.parse_file(file);
+    let root = parsed.tree();
 
     let docs = gather_doc_comments(&root);
 

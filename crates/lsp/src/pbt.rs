@@ -204,11 +204,12 @@ proptest! {
     fn pbt_hover_no_crash(src in arb_nix_source()) {
         let t = TestAnalysis::new(&src);
         let analysis = t.analysis();
+        let snapshot = t.snapshot();
         let positions = interesting_positions(analysis, &t.root);
         let docs = DocIndex::default();
         for ip in &positions {
-            let pos = analysis.line_index.position(ip.byte_offset());
-            let _ = hover(analysis, pos, &t.root, &docs);
+            let pos = snapshot.syntax.line_index.position(ip.byte_offset());
+            let _ = hover(&snapshot, pos, &t.root, &docs);
         }
     }
 
@@ -216,11 +217,12 @@ proptest! {
     fn pbt_goto_definition_no_crash(src in arb_nix_source()) {
         let t = TestAnalysis::new(&src);
         let analysis = t.analysis();
+        let snapshot = t.snapshot();
         let uri = t.uri();
         let positions = interesting_positions(analysis, &t.root);
         for ip in &positions {
-            let pos = analysis.line_index.position(ip.byte_offset());
-            let _ = goto_definition(&t.state, analysis, pos, &uri, &t.root);
+            let pos = snapshot.syntax.line_index.position(ip.byte_offset());
+            let _ = goto_definition(&t.state, &snapshot, pos, &uri, &t.root);
         }
     }
 
@@ -228,11 +230,12 @@ proptest! {
     fn pbt_completion_no_crash(src in arb_nix_source()) {
         let t = TestAnalysis::new(&src);
         let analysis = t.analysis();
+        let snapshot = t.snapshot();
         let docs = DocIndex::default();
         let positions = interesting_positions(analysis, &t.root);
         for ip in &positions {
-            let pos = analysis.line_index.position(ip.byte_offset());
-            let _ = completion(analysis, pos, &t.root, &docs, &analysis.line_index);
+            let pos = snapshot.syntax.line_index.position(ip.byte_offset());
+            let _ = completion(&snapshot, pos, &t.root, &docs, &snapshot.syntax.line_index);
         }
     }
 
@@ -240,11 +243,12 @@ proptest! {
     fn pbt_references_no_crash(src in arb_nix_source()) {
         let t = TestAnalysis::new(&src);
         let analysis = t.analysis();
+        let snapshot = t.snapshot();
         let uri = t.uri();
         let positions = interesting_positions(analysis, &t.root);
         for ip in &positions {
-            let pos = analysis.line_index.position(ip.byte_offset());
-            let _ = find_references(analysis, pos, &uri, &t.root, true);
+            let pos = snapshot.syntax.line_index.position(ip.byte_offset());
+            let _ = find_references(&snapshot, pos, &uri, &t.root, true);
         }
     }
 
@@ -252,10 +256,11 @@ proptest! {
     fn pbt_document_highlight_no_crash(src in arb_nix_source()) {
         let t = TestAnalysis::new(&src);
         let analysis = t.analysis();
+        let snapshot = t.snapshot();
         let positions = interesting_positions(analysis, &t.root);
         for ip in &positions {
-            let pos = analysis.line_index.position(ip.byte_offset());
-            let _ = document_highlight(analysis, pos, &t.root);
+            let pos = snapshot.syntax.line_index.position(ip.byte_offset());
+            let _ = document_highlight(&snapshot, pos, &t.root);
         }
     }
 
@@ -263,10 +268,11 @@ proptest! {
     fn pbt_prepare_rename_no_crash(src in arb_nix_source()) {
         let t = TestAnalysis::new(&src);
         let analysis = t.analysis();
+        let snapshot = t.snapshot();
         let positions = interesting_positions(analysis, &t.root);
         for ip in &positions {
-            let pos = analysis.line_index.position(ip.byte_offset());
-            let _ = prepare_rename(analysis, pos, &t.root);
+            let pos = snapshot.syntax.line_index.position(ip.byte_offset());
+            let _ = prepare_rename(&snapshot, pos, &t.root);
         }
     }
 
@@ -274,10 +280,11 @@ proptest! {
     fn pbt_signature_help_no_crash(src in arb_nix_source()) {
         let t = TestAnalysis::new(&src);
         let analysis = t.analysis();
+        let snapshot = t.snapshot();
         let positions = interesting_positions(analysis, &t.root);
         for ip in &positions {
-            let pos = analysis.line_index.position(ip.byte_offset());
-            let _ = signature_help(analysis, pos, &t.root);
+            let pos = snapshot.syntax.line_index.position(ip.byte_offset());
+            let _ = signature_help(&snapshot, pos, &t.root);
         }
     }
 
@@ -285,10 +292,11 @@ proptest! {
     fn pbt_selection_range_no_crash(src in arb_nix_source()) {
         let t = TestAnalysis::new(&src);
         let analysis = t.analysis();
+        let snapshot = t.snapshot();
         let positions = interesting_positions(analysis, &t.root);
         for ip in &positions {
-            let pos = analysis.line_index.position(ip.byte_offset());
-            let _ = selection_ranges(analysis, vec![pos], &t.root);
+            let pos = snapshot.syntax.line_index.position(ip.byte_offset());
+            let _ = selection_ranges(&snapshot, vec![pos], &t.root);
         }
     }
 
@@ -299,44 +307,45 @@ proptest! {
     #[test]
     fn pbt_semantic_tokens_no_crash(src in arb_nix_source()) {
         let t = TestAnalysis::new(&src);
-        let analysis = t.analysis();
-        let _ = semantic_tokens(analysis, &t.root);
+        let snapshot = t.snapshot();
+        let _ = semantic_tokens(&snapshot, &t.root);
     }
 
     #[test]
     fn pbt_inlay_hints_no_crash(src in arb_nix_source()) {
         let t = TestAnalysis::new(&src);
-        let analysis = t.analysis();
+        let snapshot = t.snapshot();
         let root_syntax = t.root.syntax();
         let text = root_syntax.to_string();
         // Full file range: line 0 col 0 to a generous end.
         let end_line = text.lines().count().saturating_sub(1) as u32;
         let end_col = text.lines().last().map_or(0, |l: &str| l.len()) as u32;
         let full_range = Range::new(Position::new(0, 0), Position::new(end_line, end_col));
-        let _ = inlay_hints(analysis, full_range, &t.root);
+        let _ = inlay_hints(&snapshot, full_range, &t.root);
     }
 
     #[test]
     fn pbt_document_symbols_no_crash(src in arb_nix_source()) {
         let t = TestAnalysis::new(&src);
-        let analysis = t.analysis();
-        let _ = document_symbols(analysis, &t.root);
+        let snapshot = t.snapshot();
+        let _ = document_symbols(&snapshot, &t.root);
     }
 
     #[test]
     fn pbt_document_links_no_crash(src in arb_nix_source()) {
         let t = TestAnalysis::new(&src);
-        let analysis = t.analysis();
-        let _ = document_links(analysis, &t.root);
+        let snapshot = t.snapshot();
+        let _ = document_links(&snapshot, &t.root);
     }
 
     #[test]
     fn pbt_code_actions_no_crash(src in arb_nix_source()) {
         let t = TestAnalysis::new(&src);
         let analysis = t.analysis();
+        let snapshot = t.snapshot();
         let positions = interesting_positions(analysis, &t.root);
         for ip in &positions {
-            let pos = analysis.line_index.position(ip.byte_offset());
+            let pos = snapshot.syntax.line_index.position(ip.byte_offset());
             let range = Range::new(pos, pos);
             let params = tower_lsp::lsp_types::CodeActionParams {
                 text_document: tower_lsp::lsp_types::TextDocumentIdentifier { uri: t.uri() },
@@ -349,7 +358,7 @@ proptest! {
                 work_done_progress_params: Default::default(),
                 partial_result_params: Default::default(),
             };
-            let _ = code_actions(analysis, &params, &t.root);
+            let _ = code_actions(&snapshot, &params, &t.root);
         }
     }
 }

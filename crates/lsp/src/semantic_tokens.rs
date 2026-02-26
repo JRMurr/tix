@@ -11,7 +11,7 @@ use lang_ast::{AstPtr, Expr, NameKind};
 use rowan::ast::AstNode;
 use tower_lsp::lsp_types::*;
 
-use crate::state::FileAnalysis;
+use crate::state::FileSnapshot;
 
 // ==============================================================================
 // Legend: token types and modifiers
@@ -44,7 +44,7 @@ pub fn legend() -> SemanticTokensLegend {
     }
 }
 
-pub fn semantic_tokens(analysis: &FileAnalysis, root: &rnix::Root) -> Vec<SemanticToken> {
+pub fn semantic_tokens(analysis: &FileSnapshot, root: &rnix::Root) -> Vec<SemanticToken> {
     let mut raw_tokens = Vec::new();
 
     // Walk all tokens in the syntax tree in source order.
@@ -59,7 +59,7 @@ pub fn semantic_tokens(analysis: &FileAnalysis, root: &rnix::Root) -> Vec<Semant
             None => continue,
         };
 
-        let range = analysis.line_index.range(token.text_range());
+        let range = analysis.syntax.line_index.range(token.text_range());
 
         // For multi-line tokens the LSP spec says `length` covers only the
         // portion on the starting line. Single-line: simple end - start.
@@ -119,7 +119,7 @@ struct RawToken {
 /// Classify a single syntax token. Returns (token_type_index, modifier_bitset)
 /// or None if the token should be skipped (whitespace, delimiters, etc.).
 fn classify_token(
-    analysis: &FileAnalysis,
+    analysis: &FileSnapshot,
     root: &rnix::Root,
     token: &rowan::SyntaxToken<rnix::NixLanguage>,
 ) -> Option<(u32, u32)> {
@@ -177,7 +177,7 @@ fn classify_token(
 
 /// Classify an identifier token using the source map and name resolution.
 fn classify_ident(
-    analysis: &FileAnalysis,
+    analysis: &FileSnapshot,
     _root: &rnix::Root,
     token: &rowan::SyntaxToken<rnix::NixLanguage>,
 ) -> Option<(u32, u32)> {
@@ -195,20 +195,20 @@ fn classify_ident(
         let ptr = AstPtr::new(&node);
 
         // Definition site: name node.
-        if let Some(name_id) = analysis.source_map.name_for_node(ptr) {
-            let kind = analysis.module[name_id].kind;
+        if let Some(name_id) = analysis.syntax.source_map.name_for_node(ptr) {
+            let kind = analysis.syntax.module[name_id].kind;
             let type_idx = name_kind_to_token_type(kind);
             return Some((type_idx, MOD_DEFINITION));
         }
 
         // Expression site.
-        if let Some(expr_id) = analysis.source_map.expr_for_node(ptr) {
-            if matches!(&analysis.module[expr_id], Expr::Reference(_)) {
-                if let Some(resolved) = analysis.name_res.get(expr_id) {
+        if let Some(expr_id) = analysis.syntax.source_map.expr_for_node(ptr) {
+            if matches!(&analysis.syntax.module[expr_id], Expr::Reference(_)) {
+                if let Some(resolved) = analysis.syntax.name_res.get(expr_id) {
                     return Some(match resolved {
                         ResolveResult::Builtin(_) => (3, MOD_DEFAULT_LIBRARY),
                         ResolveResult::Definition(name_id) => {
-                            let kind = analysis.module[*name_id].kind;
+                            let kind = analysis.syntax.module[*name_id].kind;
                             (name_kind_to_token_type(kind), 0)
                         }
                         ResolveResult::WithExprs(..) => (0, 0), // VARIABLE
@@ -242,9 +242,9 @@ mod tests {
     /// absolute positions (not delta-encoded) for easier assertions.
     fn get_tokens(src: &str) -> Vec<(u32, u32, u32, u32, u32)> {
         let t = TestAnalysis::new(src);
-        let analysis = t.analysis();
+        let analysis = t.snapshot();
 
-        let tokens = semantic_tokens(analysis, &t.root);
+        let tokens = semantic_tokens(&analysis, &t.root);
 
         // Convert delta-encoded tokens back to absolute positions.
         let mut result = Vec::new();

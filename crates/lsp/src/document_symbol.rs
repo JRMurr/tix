@@ -9,23 +9,23 @@
 use lang_ast::{BindingValue, Expr, ExprId, NameId};
 use tower_lsp::lsp_types::{DocumentSymbol, Range, SymbolKind};
 
-use crate::state::FileAnalysis;
+use crate::state::FileSnapshot;
 
 #[allow(deprecated)] // DocumentSymbol.deprecated is deprecated but required by the struct
-pub fn document_symbols(analysis: &FileAnalysis, root: &rnix::Root) -> Vec<DocumentSymbol> {
+pub fn document_symbols(analysis: &FileSnapshot, root: &rnix::Root) -> Vec<DocumentSymbol> {
     let mut symbols = Vec::new();
-    collect_symbols(analysis, root, analysis.module.entry_expr, &mut symbols);
+    collect_symbols(analysis, root, analysis.syntax.module.entry_expr, &mut symbols);
     symbols
 }
 
 /// Recursively collect symbols from an expression.
 fn collect_symbols(
-    analysis: &FileAnalysis,
+    analysis: &FileSnapshot,
     root: &rnix::Root,
     expr_id: ExprId,
     out: &mut Vec<DocumentSymbol>,
 ) {
-    match &analysis.module[expr_id] {
+    match &analysis.syntax.module[expr_id] {
         Expr::LetIn { bindings, body } => {
             collect_binding_symbols(analysis, root, &bindings.statics, false, out);
             collect_symbols(analysis, root, *body, out);
@@ -46,7 +46,7 @@ fn collect_symbols(
 /// Emit a symbol for each static binding in a let-in or attrset.
 #[allow(deprecated)]
 fn collect_binding_symbols(
-    analysis: &FileAnalysis,
+    analysis: &FileSnapshot,
     root: &rnix::Root,
     statics: &[(NameId, BindingValue)],
     is_attrset: bool,
@@ -55,13 +55,13 @@ fn collect_binding_symbols(
     use rowan::ast::AstNode;
 
     for &(name_id, ref binding_value) in statics {
-        let name = &analysis.module[name_id];
+        let name = &analysis.syntax.module[name_id];
         let name_text = name.text.to_string();
 
         // Determine symbol kind from the binding value expression.
         let (kind, value_expr_id) = match binding_value {
             BindingValue::Expr(expr_id) => {
-                let kind = match &analysis.module[*expr_id] {
+                let kind = match &analysis.syntax.module[*expr_id] {
                     Expr::Lambda { .. } => SymbolKind::FUNCTION,
                     _ if is_attrset => SymbolKind::PROPERTY,
                     _ => SymbolKind::VARIABLE,
@@ -81,20 +81,20 @@ fn collect_binding_symbols(
         };
 
         // Get the name's source range for selection_range.
-        let selection_range = match analysis.source_map.nodes_for_name(name_id).next() {
+        let selection_range = match analysis.syntax.source_map.nodes_for_name(name_id).next() {
             Some(ptr) => {
                 let node = ptr.to_node(root.syntax());
-                analysis.line_index.range(node.text_range())
+                analysis.syntax.line_index.range(node.text_range())
             }
             None => continue,
         };
 
         // For the full symbol range, combine the name range with the value
         // expression's range (if available).
-        let range = match value_expr_id.and_then(|eid| analysis.source_map.node_for_expr(eid)) {
+        let range = match value_expr_id.and_then(|eid| analysis.syntax.source_map.node_for_expr(eid)) {
             Some(val_ptr) => {
                 let val_node = val_ptr.to_node(root.syntax());
-                let val_range = analysis.line_index.range(val_node.text_range());
+                let val_range = analysis.syntax.line_index.range(val_node.text_range());
                 // Combine: earliest start to latest end.
                 Range::new(
                     std::cmp::min_by(selection_range.start, val_range.start, |a, b| {
@@ -110,7 +110,7 @@ fn collect_binding_symbols(
 
         // Recurse into nested attrset values for children.
         let children = match value_expr_id {
-            Some(eid) if matches!(&analysis.module[eid], Expr::AttrSet { .. }) => {
+            Some(eid) if matches!(&analysis.syntax.module[eid], Expr::AttrSet { .. }) => {
                 let mut child_symbols = Vec::new();
                 collect_symbols(analysis, root, eid, &mut child_symbols);
                 if child_symbols.is_empty() {
@@ -142,8 +142,8 @@ mod tests {
 
     fn get_symbols(src: &str) -> Vec<DocumentSymbol> {
         let t = TestAnalysis::new(src);
-        let analysis = t.analysis();
-        document_symbols(analysis, &t.root)
+        let analysis = t.snapshot();
+        document_symbols(&analysis, &t.root)
     }
 
     fn names(symbols: &[DocumentSymbol]) -> Vec<&str> {

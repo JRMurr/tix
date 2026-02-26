@@ -27,7 +27,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use dashmap::DashMap;
 use parking_lot::Mutex;
+use rowan::ast::AstNode;
 use tokio::sync::mpsc;
 
 use lang_check::aliases::TypeAliasRegistry;
@@ -36,7 +38,7 @@ use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 
 use crate::config::TixConfig;
-use crate::state::{AnalysisState, FileAnalysis};
+use crate::state::{AnalysisState, FileSnapshot, InferenceData};
 
 /// Quiescence delay for diagnostic publication. Diagnostics are held back
 /// until no new edits arrive for this duration, preventing flickering during
@@ -65,14 +67,20 @@ pub struct TixLanguageServer {
     no_default_stubs: bool,
     /// Channel to the single analysis loop (like RA's VFS channel).
     event_tx: mpsc::UnboundedSender<AnalysisEvent>,
-    /// Cancel flag for the currently running analysis. schedule_analysis()
-    /// sets this to true; the analysis loop swaps in a fresh flag before
-    /// starting each batch.
-    current_cancel: Arc<Mutex<Arc<AtomicBool>>>,
+    /// Shared cancel flag. `schedule_analysis()` / `did_close()` set this to
+    /// true; the analysis loop resets it to false at the start of each batch.
+    /// The same flag is passed to inference, which checks it periodically via
+    /// `check_limits()`.
+    cancel_flag: Arc<AtomicBool>,
     /// Latest document text received via didChange/didOpen, stored immediately
     /// so completion can re-parse on the fly while analysis catches up.
     /// Cleared once analysis catches up.
     pending_text: Arc<Mutex<HashMap<PathBuf, String>>>,
+    /// Lock-free per-file snapshots for handler access. The analysis loop
+    /// writes SyntaxData immediately after syntax analysis, then adds
+    /// InferenceData after type inference completes. Handlers read from
+    /// this without ever locking the analysis mutex.
+    snapshots: Arc<DashMap<PathBuf, FileSnapshot>>,
 }
 
 impl TixLanguageServer {
@@ -85,7 +93,8 @@ impl TixLanguageServer {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let state = Arc::new(Mutex::new(AnalysisState::new(registry)));
         let pending_text = Arc::new(Mutex::new(HashMap::new()));
-        let current_cancel = Arc::new(Mutex::new(Arc::new(AtomicBool::new(false))));
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let snapshots = Arc::new(DashMap::new());
 
         // Spawn the analysis loop eagerly. diagnostics_enabled defaults to
         // true; if the editor sends a different config via initializationOptions
@@ -95,7 +104,8 @@ impl TixLanguageServer {
             state.clone(),
             client.clone(),
             pending_text.clone(),
-            current_cancel.clone(),
+            cancel_flag.clone(),
+            snapshots.clone(),
             true, // diagnostics default on
         );
 
@@ -106,8 +116,9 @@ impl TixLanguageServer {
             cli_stub_paths,
             no_default_stubs,
             event_tx,
-            current_cancel,
+            cancel_flag,
             pending_text,
+            snapshots,
         }
     }
 
@@ -125,7 +136,7 @@ impl TixLanguageServer {
         self.pending_text.lock().insert(path.clone(), text.clone());
 
         // Cancel any in-flight analysis (like RA's trigger_cancellation()).
-        self.current_cancel.lock().store(true, Ordering::Relaxed);
+        self.cancel_flag.store(true, Ordering::Relaxed);
 
         // Send to analysis loop — it will drain and coalesce.
         self.event_tx
@@ -133,26 +144,24 @@ impl TixLanguageServer {
             .ok();
     }
 
-    /// Lock the state, look up the file analysis for `uri`, and call `f`.
-    ///
-    /// Returns `ContentModified` if the file hasn't been analyzed yet — this
-    /// tells the editor "data isn't ready, retry shortly" rather than "there
-    /// are no results." Returns `Ok(None)` only for non-file URIs.
-    fn with_analysis<T>(
+    /// Read from the DashMap snapshot. The callback receives the FileSnapshot
+    /// and the parsed rnix Root. Returns `ContentModified` if the file hasn't
+    /// been analyzed yet (no snapshot available).
+    fn with_snapshot<T>(
         &self,
         uri: &Url,
-        f: impl FnOnce(&AnalysisState, &FileAnalysis) -> Option<T>,
+        f: impl FnOnce(&FileSnapshot, &rnix::Root) -> Option<T>,
     ) -> Result<Option<T>> {
         let path = match uri_to_path(uri) {
             Some(p) => p,
             None => return Ok(None),
         };
-        let state = self.state.lock();
-        let analysis = match state.get_file(&path) {
-            Some(a) => a,
+        let snap_ref = match self.snapshots.get(&path) {
+            Some(s) => s,
             None => return Err(content_modified_error()),
         };
-        Ok(f(&state, analysis))
+        let root = snap_ref.syntax.parsed.tree();
+        Ok(f(&snap_ref, &root))
     }
 
     /// Build a fresh TypeAliasRegistry from CLI stubs and config stubs.
@@ -217,7 +226,8 @@ fn spawn_analysis_loop(
     state: Arc<Mutex<AnalysisState>>,
     client: Client,
     pending_text: Arc<Mutex<HashMap<PathBuf, String>>>,
-    current_cancel: Arc<Mutex<Arc<AtomicBool>>>,
+    cancel_flag: Arc<AtomicBool>,
+    _snapshots: Arc<DashMap<PathBuf, FileSnapshot>>,
     diagnostics_enabled: bool,
 ) {
     tokio::spawn(async move {
@@ -308,20 +318,22 @@ fn spawn_analysis_loop(
 
             // ── Phase 3: Analyze each changed file ──
             //
-            // Like RA's process_changes() → apply_change(), but we do
-            // per-file analysis since tix doesn't batch via Salsa.
-            // Create a fresh cancel flag (like RA's trigger_cancellation()).
-            let cancel_flag = Arc::new(AtomicBool::new(false));
-            *current_cancel.lock() = cancel_flag.clone();
+            // Split into syntax + inference phases. The mutex is held only for
+            // the fast syntax phase (~5-50ms). SyntaxData is written to the
+            // DashMap immediately, making handlers responsive. Inference runs
+            // without the mutex, so handlers never block on type inference.
+            //
+            // Reset the shared cancel flag for this batch. schedule_analysis()
+            // or did_close() may set it to true during inference.
+            cancel_flag.store(false, Ordering::Relaxed);
 
             let mut any_completed = false;
 
             for (path, text) in &changes {
-                // Check for new events between files. If the user typed more,
+                // Check for new events or external cancellation between files.
+                // If the user typed more (schedule_analysis sets the flag),
                 // bail out and let the next loop iteration coalesce them.
-                // This mirrors RA's cancellation-on-new-revision pattern.
-                if !rx.is_empty() {
-                    cancel_flag.store(true, Ordering::Relaxed);
+                if !rx.is_empty() || cancel_flag.load(Ordering::Relaxed) {
                     break;
                 }
 
@@ -330,38 +342,79 @@ fn spawn_analysis_loop(
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_else(|| path.display().to_string());
 
-                let (diags, timing_msg, was_cancelled) = {
+                // Phase A: Syntax update (mutex held ~5-50ms).
+                let (syntax_data, inference_inputs, syntax_duration) = {
                     let mut st = state.lock();
-                    let (analysis, timing) = st.update_file_with_cancel(
+                    st.update_syntax(path.clone(), text.clone())
+                };
+                // mutex released here
+
+                // Write SyntaxData to DashMap immediately — handlers can read
+                // fresh syntax data while inference is still running.
+                {
+                    // Preserve existing inference data when updating syntax.
+                    let prev_inference = _snapshots
+                        .get(path)
+                        .and_then(|snap| snap.inference.as_ref().cloned());
+                    _snapshots.insert(
                         path.clone(),
-                        text.clone(),
-                        cancel_flag.clone(),
+                        FileSnapshot {
+                            syntax: syntax_data,
+                            inference: prev_inference,
+                        },
                     );
+                }
 
-                    let was_cancelled = cancel_flag.load(Ordering::Relaxed);
-                    let timing_msg = format!("{file_name}: {timing}");
-                    if was_cancelled {
-                        log::info!("{timing_msg} (cancelled)");
-                    } else {
-                        log::info!("{timing_msg}");
-                    }
+                // Phase B: Type inference (NO mutex held).
+                let (check_result, infer_duration) =
+                    crate::state::run_inference(&inference_inputs, Some(cancel_flag.clone()));
 
-                    let diags = if diagnostics_enabled && !was_cancelled {
-                        let root = analysis.parsed.tree();
+                let was_cancelled = cancel_flag.load(Ordering::Relaxed);
+                let total = syntax_duration + infer_duration;
+                let timing = crate::state::AnalysisTiming {
+                    parse: syntax_duration, // folded for now
+                    lower: Duration::ZERO,
+                    name_res: Duration::ZERO,
+                    imports: Duration::ZERO,
+                    type_check: infer_duration,
+                    total,
+                };
+                let timing_msg = format!("{file_name}: {timing}");
+                if was_cancelled {
+                    log::info!("{timing_msg} (cancelled)");
+                } else {
+                    log::info!("{timing_msg}");
+                }
+
+                // Phase C: Store inference results in DashMap and legacy state.
+                if let Some(mut snap) = _snapshots.get_mut(path) {
+                    snap.inference = Some(InferenceData {
+                        check_result: check_result.clone(),
+                    });
+                }
+
+                // Also store in legacy state.files for backward compat.
+                let file_analysis =
+                    crate::state::build_file_analysis(inference_inputs, check_result.clone());
+                state.lock().files.insert(path.clone(), file_analysis);
+
+                let diags = if diagnostics_enabled && !was_cancelled {
+                    if let Some(snap) = _snapshots.get(path) {
+                        let root = snap.syntax.parsed.tree();
                         let file_uri = Url::from_file_path(path)
                             .unwrap_or_else(|_| Url::parse("file:///unknown").unwrap());
                         crate::diagnostics::to_lsp_diagnostics(
-                            &analysis.check_result.diagnostics,
-                            &analysis.source_map,
-                            &analysis.line_index,
+                            &check_result.diagnostics,
+                            &snap.syntax.source_map,
+                            &snap.syntax.line_index,
                             &root,
                             &file_uri,
                         )
                     } else {
                         vec![]
-                    };
-
-                    (diags, timing_msg, was_cancelled)
+                    }
+                } else {
+                    vec![]
                 };
 
                 if was_cancelled {
@@ -379,10 +432,6 @@ fn spawn_analysis_loop(
                 client.log_message(MessageType::INFO, &timing_msg).await;
 
                 // ── Phase 4: Defer diagnostic publication (quiescence) ──
-                //
-                // Like RA's `is_quiescent()` gate. Store diagnostics but
-                // don't publish yet. The timer at the top of the loop will
-                // publish them if no new edits arrive.
                 pending_diags.insert(path.clone(), diags);
                 any_completed = true;
             }
@@ -584,7 +633,7 @@ impl LanguageServer for TixLanguageServer {
             .await;
 
         if let Some(path) = uri_to_path(&params.text_document.uri) {
-            self.current_cancel.lock().store(true, Ordering::Relaxed);
+            self.cancel_flag.store(true, Ordering::Relaxed);
             self.pending_text.lock().remove(&path);
             self.state.lock().files.remove(&path);
             self.event_tx
@@ -650,18 +699,18 @@ impl LanguageServer for TixLanguageServer {
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
         let uri = &params.text_document_position_params.text_document.uri;
         let pos = params.text_document_position_params.position;
-        self.with_analysis(uri, |state, analysis| {
-            let root = analysis.parsed.tree();
-            crate::hover::hover(analysis, pos, &root, &state.registry.docs)
+        // Hover needs docs from the registry — lock state briefly for that.
+        let docs = self.state.lock().registry.docs.clone();
+        self.with_snapshot(uri, |snapshot, root| {
+            crate::hover::hover(snapshot, pos, root, &docs)
         })
     }
 
     async fn signature_help(&self, params: SignatureHelpParams) -> Result<Option<SignatureHelp>> {
         let uri = &params.text_document_position_params.text_document.uri;
         let pos = params.text_document_position_params.position;
-        self.with_analysis(uri, |_, analysis| {
-            let root = analysis.parsed.tree();
-            crate::signature_help::signature_help(analysis, pos, &root)
+        self.with_snapshot(uri, |snapshot, root| {
+            crate::signature_help::signature_help(snapshot, pos, root)
         })
     }
 
@@ -671,11 +720,24 @@ impl LanguageServer for TixLanguageServer {
     ) -> Result<Option<GotoDefinitionResponse>> {
         let uri = params.text_document_position_params.text_document.uri;
         let pos = params.text_document_position_params.position;
-        self.with_analysis(&uri, |state, analysis| {
-            let root = analysis.parsed.tree();
-            crate::goto_def::goto_definition(state, analysis, pos, &uri, &root)
-                .map(GotoDefinitionResponse::Scalar)
-        })
+        // goto_definition needs &AnalysisState for cross-file resolution
+        // (loading target files from the Salsa DB). Lock state alongside
+        // the DashMap snapshot — no deadlock risk since the analysis loop
+        // never holds both simultaneously.
+        let path = match uri_to_path(&uri) {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+        let snap_ref = match self.snapshots.get(&path) {
+            Some(s) => s,
+            None => return Err(content_modified_error()),
+        };
+        let root = snap_ref.syntax.parsed.tree();
+        let state = self.state.lock();
+        Ok(
+            crate::goto_def::goto_definition(&state, &snap_ref, pos, &uri, &root)
+                .map(GotoDefinitionResponse::Scalar),
+        )
     }
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
@@ -687,56 +749,29 @@ impl LanguageServer for TixLanguageServer {
             None => return Ok(None),
         };
 
-        // Check if we have fresher text than the last completed analysis.
-        // This happens when `.` triggers completion before the debounce timer
-        // fires — the stale analysis doesn't contain the `.` token.
+        let snap_ref = match self.snapshots.get(&path) {
+            Some(s) => s,
+            None => return Err(content_modified_error()),
+        };
+
+        // Lock state briefly for docs only.
+        let docs = self.state.lock().registry.docs.clone();
+
+        // Use the freshest available tree: pending_text if the analysis loop
+        // hasn't caught up yet (e.g. `.` trigger before debounce), otherwise
+        // the snapshot's own parsed tree. The unified completion() handles
+        // stale source_map via name-text fallbacks internally.
         let fresh_text = self.pending_text.lock().get(&path).cloned();
-
-        // Use try_lock() so completion never blocks waiting for an in-flight
-        // analysis to finish. If the lock is held (inference running), return
-        // ContentModified to tell the editor to retry shortly.
-        let state = match self.state.try_lock() {
-            Some(guard) => guard,
-            None => return Err(content_modified_error()),
-        };
-
-        let analysis = match state.get_file(&path) {
-            Some(a) => a,
-            None => return Err(content_modified_error()),
-        };
-
         if let Some(ref text) = fresh_text {
-            // Analysis hasn't caught up to the latest edit. Try full
-            // completion first — it works when the edit is in-place (e.g.
-            // `lib` → `lib.` without shifting ranges). Fall back to
-            // syntax-only completion (which handles range-shifted cases
-            // via name-text lookup) only if full completion returns None.
             let root = rnix::Root::parse(text).tree();
             let line_index = crate::convert::LineIndex::new(text);
-            let full_result = crate::completion::completion(
-                analysis,
-                pos,
-                &root,
-                &state.registry.docs,
-                &line_index,
-            );
-            if full_result.is_some() {
-                return Ok(full_result);
-            }
-            Ok(crate::completion::syntax_only_completion(
-                analysis,
-                pos,
-                &root,
-                &line_index,
+            Ok(crate::completion::completion(
+                &snap_ref, pos, &root, &docs, &line_index,
             ))
         } else {
-            let root = analysis.parsed.tree();
+            let root = snap_ref.syntax.parsed.tree();
             Ok(crate::completion::completion(
-                analysis,
-                pos,
-                &root,
-                &state.registry.docs,
-                &analysis.line_index,
+                &snap_ref, pos, &root, &docs, &snap_ref.syntax.line_index,
             ))
         }
     }
@@ -774,24 +809,23 @@ impl LanguageServer for TixLanguageServer {
         &self,
         params: DocumentSymbolParams,
     ) -> Result<Option<DocumentSymbolResponse>> {
-        self.with_analysis(&params.text_document.uri, |_, analysis| {
-            let root = analysis.parsed.tree();
-            let symbols = crate::document_symbol::document_symbols(analysis, &root);
+        self.with_snapshot(&params.text_document.uri, |snapshot, root| {
+            let symbols = crate::document_symbol::document_symbols(snapshot, root);
             Some(DocumentSymbolResponse::Nested(symbols))
         })
     }
 
     async fn document_link(&self, params: DocumentLinkParams) -> Result<Option<Vec<DocumentLink>>> {
-        self.with_analysis(&params.text_document.uri, |_, analysis| {
-            let root = analysis.parsed.tree();
-            Some(crate::document_link::document_links(analysis, &root))
+        self.with_snapshot(&params.text_document.uri, |snapshot, root| {
+            Some(crate::document_link::document_links(snapshot, root))
         })
     }
 
     async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
-        self.with_analysis(&params.text_document.uri, |state, analysis| {
-            let contents = analysis.nix_file.contents(&state.db);
-            crate::formatting::format_document(contents, &analysis.line_index)
+        self.with_snapshot(&params.text_document.uri, |snapshot, root| {
+            // Get file text from the green tree (Send-safe) instead of the Salsa DB.
+            let contents = root.syntax().text().to_string();
+            crate::formatting::format_document(&contents, &snapshot.syntax.line_index)
         })
     }
 
@@ -799,12 +833,11 @@ impl LanguageServer for TixLanguageServer {
         &self,
         params: SelectionRangeParams,
     ) -> Result<Option<Vec<SelectionRange>>> {
-        self.with_analysis(&params.text_document.uri, |_, analysis| {
-            let root = analysis.parsed.tree();
+        self.with_snapshot(&params.text_document.uri, |snapshot, root| {
             Some(crate::selection_range::selection_ranges(
-                analysis,
+                snapshot,
                 params.positions,
-                &root,
+                root,
             ))
         })
     }
@@ -813,13 +846,12 @@ impl LanguageServer for TixLanguageServer {
         let uri = params.text_document_position.text_document.uri;
         let pos = params.text_document_position.position;
         let include_declaration = params.context.include_declaration;
-        self.with_analysis(&uri, |_, analysis| {
-            let root = analysis.parsed.tree();
+        self.with_snapshot(&uri, |snapshot, root| {
             Some(crate::references::find_references(
-                analysis,
+                snapshot,
                 pos,
                 &uri,
-                &root,
+                root,
                 include_declaration,
             ))
         })
@@ -831,10 +863,9 @@ impl LanguageServer for TixLanguageServer {
     ) -> Result<Option<Vec<DocumentHighlight>>> {
         let uri = &params.text_document_position_params.text_document.uri;
         let pos = params.text_document_position_params.position;
-        self.with_analysis(uri, |_, analysis| {
-            let root = analysis.parsed.tree();
+        self.with_snapshot(uri, |snapshot, root| {
             Some(crate::document_highlight::document_highlight(
-                analysis, pos, &root,
+                snapshot, pos, root,
             ))
         })
     }
@@ -843,9 +874,8 @@ impl LanguageServer for TixLanguageServer {
         &self,
         params: TextDocumentPositionParams,
     ) -> Result<Option<PrepareRenameResponse>> {
-        self.with_analysis(&params.text_document.uri, |_, analysis| {
-            let root = analysis.parsed.tree();
-            crate::rename::prepare_rename(analysis, params.position, &root)
+        self.with_snapshot(&params.text_document.uri, |snapshot, root| {
+            crate::rename::prepare_rename(snapshot, params.position, root)
         })
     }
 
@@ -855,19 +885,28 @@ impl LanguageServer for TixLanguageServer {
         let new_name = params.new_name;
         let path = uri_to_path(&uri);
 
+        // Rename needs &AnalysisState for cross-file edits. Lock state
+        // alongside the DashMap snapshot.
         let (edit, warning) = {
-            let result = self.with_analysis(&uri, |state, analysis| {
-                let root = analysis.parsed.tree();
-                crate::rename::rename(
-                    analysis,
-                    pos,
-                    &new_name,
-                    &uri,
-                    &root,
-                    Some(state),
-                    path.as_ref(),
-                )
-            })?;
+            let file_path = match &path {
+                Some(p) => p,
+                None => return Ok(None),
+            };
+            let snap_ref = match self.snapshots.get(file_path) {
+                Some(s) => s,
+                None => return Err(content_modified_error()),
+            };
+            let root = snap_ref.syntax.parsed.tree();
+            let state = self.state.lock();
+            let result = crate::rename::rename(
+                &snap_ref,
+                pos,
+                &new_name,
+                &uri,
+                &root,
+                Some(&state),
+                path.as_ref(),
+            );
 
             match result {
                 Some(r) => (Some(r.edit), r.warning),
@@ -887,9 +926,8 @@ impl LanguageServer for TixLanguageServer {
         &self,
         params: SemanticTokensParams,
     ) -> Result<Option<SemanticTokensResult>> {
-        self.with_analysis(&params.text_document.uri, |_, analysis| {
-            let root = analysis.parsed.tree();
-            let tokens = crate::semantic_tokens::semantic_tokens(analysis, &root);
+        self.with_snapshot(&params.text_document.uri, |snapshot, root| {
+            let tokens = crate::semantic_tokens::semantic_tokens(snapshot, root);
             Some(SemanticTokensResult::Tokens(SemanticTokens {
                 result_id: None,
                 data: tokens,
@@ -901,20 +939,18 @@ impl LanguageServer for TixLanguageServer {
         if !self.config.lock().inlay_hints.enable {
             return Ok(Some(vec![]));
         }
-        self.with_analysis(&params.text_document.uri, |_, analysis| {
-            let root = analysis.parsed.tree();
+        self.with_snapshot(&params.text_document.uri, |snapshot, root| {
             Some(crate::inlay_hint::inlay_hints(
-                analysis,
+                snapshot,
                 params.range,
-                &root,
+                root,
             ))
         })
     }
 
     async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
-        self.with_analysis(&params.text_document.uri, |_, analysis| {
-            let root = analysis.parsed.tree();
-            let actions = crate::code_actions::code_actions(analysis, &params, &root);
+        self.with_snapshot(&params.text_document.uri, |snapshot, root| {
+            let actions = crate::code_actions::code_actions(snapshot, &params, root);
             if actions.is_empty() {
                 None
             } else {

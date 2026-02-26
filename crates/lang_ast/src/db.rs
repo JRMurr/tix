@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 
 use dashmap::DashMap;
-use rnix::Root;
 use salsa::{self, Setter};
 
 #[salsa::input]
@@ -11,16 +10,15 @@ pub struct NixFile {
     pub contents: String,
 }
 
-// // Wrapping this to add some traits salsa needs
-// #[derive(Error, Clone, Debug, PartialEq)]
-// #[error(transparent)]
-// pub struct ParseError(#[from] rnix::parser::ParseError);
-
-// impl Eq for ParseError {}
-
 #[salsa::db]
 pub trait AstDb: salsa::Database {
-    fn parse_file(&self, file: NixFile) -> Root;
+    /// Parse a Nix file, returning the `Parse<Root>` which stores the green
+    /// tree (Send+Sync). Callers get a Root via `.tree()` locally.
+    ///
+    /// Implementations must always read `file.contents(self)` so that Salsa
+    /// records the dependency when this is called from tracked functions
+    /// like `module_and_source_maps`.
+    fn parse_file(&self, file: NixFile) -> rnix::Parse<rnix::Root>;
 
     /// Load a file from disk by path. Returns None if the file doesn't exist
     /// or can't be read. Used by multi-file import resolution.
@@ -39,12 +37,13 @@ impl salsa::Database for RootDatabase {}
 
 #[salsa::db]
 impl AstDb for RootDatabase {
-    // TODO: I don't think this will be tracked by salsa so will re-parse if called many times
-    // Root is !Send + !Sync so having it tracked by salsa is sad.
-    // Could store it in the db itself but would need to handle re-parsing on file change
-    fn parse_file(&self, file: NixFile) -> Root {
+    fn parse_file(&self, file: NixFile) -> rnix::Parse<rnix::Root> {
+        // Must always read file.contents(self) so Salsa records the dependency
+        // when called from inside #[salsa::tracked] functions like
+        // module_and_source_maps. A manual cache here would bypass the read
+        // and break Salsa's invalidation tracking.
         let src = file.contents(self);
-        rnix::Root::parse(src).tree()
+        rnix::Root::parse(src)
     }
 
     fn load_file(&self, path: &std::path::Path) -> Option<NixFile> {

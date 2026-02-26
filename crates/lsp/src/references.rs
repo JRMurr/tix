@@ -10,16 +10,16 @@ use lang_ast::{AstPtr, Expr, NameId};
 use rowan::ast::AstNode;
 use tower_lsp::lsp_types::{Location, Position, Url};
 
-use crate::state::FileAnalysis;
+use crate::state::FileSnapshot;
 
 /// Find the NameId under the cursor. Works on both definition sites (where a
 /// name is bound) and reference sites (where a name is used).
 pub fn name_at_position(
-    analysis: &FileAnalysis,
+    analysis: &FileSnapshot,
     pos: Position,
     root: &rnix::Root,
 ) -> Option<NameId> {
-    let offset = analysis.line_index.offset(pos);
+    let offset = analysis.syntax.line_index.offset(pos);
     let token = root
         .syntax()
         .token_at_offset(rowan::TextSize::from(offset))
@@ -30,15 +30,15 @@ pub fn name_at_position(
         let ptr = AstPtr::new(&node);
 
         // Definition site: the cursor is on a name node (let binding, param, etc.).
-        if let Some(name_id) = analysis.source_map.name_for_node(ptr) {
+        if let Some(name_id) = analysis.syntax.source_map.name_for_node(ptr) {
             return Some(name_id);
         }
 
         // Reference site: the cursor is on a variable reference that resolves
         // to a definition.
-        if let Some(expr_id) = analysis.source_map.expr_for_node(ptr) {
-            if matches!(&analysis.module[expr_id], Expr::Reference(_)) {
-                if let Some(ResolveResult::Definition(name_id)) = analysis.name_res.get(expr_id) {
+        if let Some(expr_id) = analysis.syntax.source_map.expr_for_node(ptr) {
+            if matches!(&analysis.syntax.module[expr_id], Expr::Reference(_)) {
+                if let Some(ResolveResult::Definition(name_id)) = analysis.syntax.name_res.get(expr_id) {
                     return Some(*name_id);
                 }
             }
@@ -52,7 +52,7 @@ pub fn name_at_position(
 
 /// Find all reference locations for the name under the cursor.
 pub fn find_references(
-    analysis: &FileAnalysis,
+    analysis: &FileSnapshot,
     pos: Position,
     uri: &Url,
     root: &rnix::Root,
@@ -66,19 +66,19 @@ pub fn find_references(
     let mut locations = Vec::new();
 
     // Use the inverted index to find all references to the target name.
-    for &expr_id in analysis.name_res.refs_to(target) {
-        if let Some(ptr) = analysis.source_map.node_for_expr(expr_id) {
+    for &expr_id in analysis.syntax.name_res.refs_to(target) {
+        if let Some(ptr) = analysis.syntax.source_map.node_for_expr(expr_id) {
             let node = ptr.to_node(root.syntax());
-            let range = analysis.line_index.range(node.text_range());
+            let range = analysis.syntax.line_index.range(node.text_range());
             locations.push(Location::new(uri.clone(), range));
         }
     }
 
     // Add the declaration site itself.
     if include_declaration {
-        if let Some(ptr) = analysis.source_map.nodes_for_name(target).next() {
+        if let Some(ptr) = analysis.syntax.source_map.nodes_for_name(target).next() {
             let node = ptr.to_node(root.syntax());
-            let range = analysis.line_index.range(node.text_range());
+            let range = analysis.syntax.line_index.range(node.text_range());
             locations.push(Location::new(uri.clone(), range));
         }
     }
@@ -96,10 +96,10 @@ mod tests {
         let markers = parse_markers(src);
         let offset = markers[&marker];
         let t = TestAnalysis::new(src);
-        let analysis = t.analysis();
+        let analysis = t.snapshot();
         let uri = t.uri();
-        let pos = analysis.line_index.position(offset);
-        find_references(analysis, pos, &uri, &t.root, include_declaration)
+        let pos = analysis.syntax.line_index.position(offset);
+        find_references(&analysis, pos, &uri, &t.root, include_declaration)
     }
 
     #[test]

@@ -36,8 +36,9 @@ pub fn workspace_symbols(state: &AnalysisState, query: &str) -> Vec<SymbolInform
             Err(()) => continue,
         };
 
-        let root = analysis.parsed.tree();
-        let doc_symbols = crate::document_symbol::document_symbols(analysis, &root);
+        let snapshot = analysis.to_snapshot();
+        let root = snapshot.syntax.parsed.tree();
+        let doc_symbols = crate::document_symbol::document_symbols(&snapshot, &root);
 
         // Flatten the hierarchical DocumentSymbol tree into workspace-level
         // SymbolInformation entries, filtering by name as we go.

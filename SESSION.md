@@ -271,16 +271,18 @@ Nix code sizes (hundreds of bindings per file, not millions):
 
 ### LSP Blocks on Large Repos (Serial didOpen Processing)
 
-- RESOLVED: The LSP now uses RA-inspired event coalescing instead of per-file
-  timer debounce. A single analysis loop drains all pending events via `try_recv()`
-  before starting analysis, and diagnostic publication is deferred behind a 200ms
-  quiescence timer to prevent flicker. In-flight analysis is cancelled via a
-  cooperative `Arc<AtomicBool>` flag when new edits arrive. Completion uses
-  `try_lock()` to avoid blocking, falling back to syntax-only completions when
-  pending edits exist. Remaining limitation: `AnalysisState` is `!Sync` (Salsa
-  `RootDatabase` contains `RefCell`), so `RwLock` is not possible — analysis is
-  still serial. Moving to per-file state or making the database `Sync` would
-  allow concurrent analysis of different files.
+- PARTIALLY RESOLVED: All 6 phases of the Salsa concurrency migration are complete.
+  Handlers now read from a lock-free DashMap<PathBuf, FileSnapshot> instead of
+  locking the AnalysisState mutex. The analysis loop holds the mutex only during
+  the fast syntax phase (~5-50ms) and writes snapshots immediately, so handlers
+  are responsive even during type inference. Completion uses a single unified
+  codepath with name-text fallbacks for all strategies when source_map fails
+  (stale analysis). Cancel flag simplified from `Arc<Mutex<Arc<AtomicBool>>>`
+  to a single shared `Arc<AtomicBool>`. Parse results cached in RootDatabase
+  (DashMap) so repeated parse_file calls don't re-parse. Remaining cleanup:
+  - Legacy `pending_text` / `state.files` still exist alongside DashMap snapshots
+  - hover/completion still lock state briefly for DocIndex (should store separately)
+  - goto_def/rename cross-file still lock state for Salsa DB access
 
 ### `contains_union()` Doesn't See Through Alias References
 
