@@ -289,6 +289,8 @@ impl TypeAliasRegistry {
     /// Return the embedded source for a built-in context by name.
     ///
     /// Known contexts: `"nixos"`, `"home-manager"`.
+    /// Note: `"callpackage"` (and other module-derived contexts) are handled
+    /// by `load_context_by_name` via alias lookup, not by this function.
     pub fn builtin_context_source(name: &str) -> Option<&'static str> {
         match name {
             "nixos" => Some(NIXOS_CONTEXT_STUBS),
@@ -341,8 +343,32 @@ impl TypeAliasRegistry {
         }
 
         // Fall back to compiled-in stubs.
-        let source = Self::builtin_context_source(name)?;
-        Some(self.load_context_stubs(source))
+        if let Some(source) = Self::builtin_context_source(name) {
+            return Some(self.load_context_stubs(source));
+        }
+
+        // Derive context from a module alias: @callpackage -> Pkgs, @lib -> Lib, etc.
+        // If the corresponding alias exists as an attrset, extract its fields as
+        // context args. This avoids duplicating module declarations in separate
+        // context stub files — e.g. `module pkgs { ... }` in lib.tix already
+        // defines all the fields that a callPackage-style file would need.
+        //
+        // Well-known aliases map context names to their canonical alias:
+        //   "callpackage" -> "Pkgs" (callPackage-style files get the full package set)
+        // For other names, capitalize: "foo" -> "Foo".
+        let alias_name = match name {
+            "callpackage" => SmolStr::from("Pkgs"),
+            other => capitalize(other),
+        };
+        if let Some(ParsedTy::AttrSet(attr)) = self.aliases.get(&alias_name).cloned() {
+            let mut context_args = HashMap::new();
+            for (field_name, field_ty) in &attr.fields {
+                context_args.insert(field_name.clone(), (*field_ty.0).clone());
+            }
+            return Some(Ok(context_args));
+        }
+
+        None
     }
 
     /// Validate the registry for cycles in alias references.
@@ -1032,6 +1058,74 @@ mod tests {
                 .map(|s| s.as_str()),
             Some("Split a string by delimiter."),
             "nested doc from second file should be added"
+        );
+    }
+
+    // =========================================================================
+    // Context derivation from module aliases
+    // =========================================================================
+
+    #[test]
+    fn load_context_by_name_callpackage() {
+        // The built-in stubs define `module pkgs { ... }` which creates a `Pkgs` alias.
+        // `@callpackage` should derive context args from that alias's fields.
+        let mut registry = TypeAliasRegistry::with_builtins();
+        let result = registry.load_context_by_name("callpackage");
+        assert!(result.is_some(), "@callpackage context should be resolved");
+        let context_args = result.unwrap().expect("should parse");
+        assert!(
+            context_args.contains_key("lib"),
+            "Pkgs module should have a `lib` field"
+        );
+        assert!(
+            context_args.contains_key("stdenv"),
+            "Pkgs module should have a `stdenv` field"
+        );
+        assert!(
+            context_args.contains_key("fetchurl"),
+            "Pkgs module should have a `fetchurl` field"
+        );
+        assert!(
+            context_args.contains_key("mkDerivation"),
+            "Pkgs module should have a `mkDerivation` field"
+        );
+    }
+
+    #[test]
+    fn load_context_by_name_derives_from_module() {
+        // Any module alias can be used as a context source: @foo -> Foo.
+        let file = parse_tix_file(
+            r#"
+            module mycontext {
+                val config :: { ... };
+                val helper :: string -> int;
+            }
+            "#,
+        )
+        .expect("parse error");
+        let mut registry = TypeAliasRegistry::new();
+        registry.load_tix_file(&file);
+
+        let result = registry.load_context_by_name("mycontext");
+        assert!(
+            result.is_some(),
+            "@mycontext should resolve to Mycontext alias"
+        );
+        let context_args = result.unwrap().expect("should parse");
+        assert!(context_args.contains_key("config"));
+        assert!(context_args.contains_key("helper"));
+    }
+
+    #[test]
+    fn load_context_by_name_non_attrset_alias_ignored() {
+        // If the capitalized name exists but is NOT an attrset, don't use it.
+        let file = parse_tix_file("type Foo = int;").expect("parse error");
+        let mut registry = TypeAliasRegistry::new();
+        registry.load_tix_file(&file);
+
+        assert!(
+            registry.load_context_by_name("foo").is_none(),
+            "non-attrset alias should not be used as context"
         );
     }
 }

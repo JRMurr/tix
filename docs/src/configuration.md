@@ -36,6 +36,26 @@ When a file matches a context, tix automatically types the module's function par
 
 Gets `config`, `lib`, and `pkgs` typed according to the context's stubs, without any doc comment annotations in the file.
 
+### callPackage / dependency-injected files
+
+For files loaded via `callPackage` or `import` that take a package set as their parameter:
+
+```toml
+[context.callpackage]
+paths = ["pkgs/**/*.nix"]
+stubs = ["@callpackage"]
+```
+
+`@callpackage` derives its types from the built-in `Pkgs` module (the same one that types `pkgs.stdenv.mkDerivation`, `pkgs.fetchurl`, etc.). Parameters not covered by the built-in stubs remain untyped. Extend with auto-generated stubs for broader coverage:
+
+```toml
+[context.callpackage]
+paths = ["pkgs/**/*.nix"]
+stubs = ["@callpackage", "./generated-pkgs.tix"]
+```
+
+See [Stubs: Generating pkgs stubs](./stubs.md#generating-pkgs-stubs) for how to generate `generated-pkgs.tix`.
+
 ### Inline context annotation
 
 You can also set context per-file with a doc comment at the top:

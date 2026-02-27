@@ -67,9 +67,21 @@ Tix ships with stubs for common nixpkgs functions. These are compiled into the b
 
 Use `--no-default-stubs` if you want to replace them entirely with your own.
 
+## Built-in context stubs
+
+When used in a `tix.toml` context, `@`-prefixed stub names refer to built-in context sources:
+
+| Stub | Source | Provides |
+|------|--------|----------|
+| `@nixos` | Compiled-in NixOS context stubs | `config`, `lib`, `pkgs`, `options`, `modulesPath` |
+| `@home-manager` | Compiled-in Home Manager context stubs | `config`, `lib`, `pkgs`, `osConfig` |
+| `@callpackage` | Derived from `Pkgs` module alias | All fields from `module pkgs` in the built-in stubs (`stdenv`, `fetchurl`, `lib`, `mkDerivation`, etc.) |
+
+`@callpackage` doesn't require a separate stub file. It extracts the fields of the `Pkgs` type alias (created by `module pkgs { ... }` in the built-in stubs) and provides them as context args. This is the same mechanism that any `module foo { ... }` declaration uses: `@foo` resolves to `Foo`.
+
 ## Generating stubs
 
-Tix can generate stubs from NixOS and Home Manager option trees. This gives you typed access to `config`, `lib`, and `pkgs` parameters in module files.
+Tix can generate stubs from NixOS options, Home Manager options, and nixpkgs package sets. This gives you typed access to `config`, `lib`, `pkgs`, and other parameters in your Nix files.
 
 ### From a flake
 
@@ -99,6 +111,38 @@ tix-cli gen-stubs nixos --nixpkgs /path/to/nixpkgs -o nixos.tix
 | `-o, --output PATH` | Output file (default: stdout) |
 | `--max-depth N` | Maximum recursion depth for option tree walking (default: 8) |
 | `--descriptions` | Include option descriptions as doc comments |
+
+### Generating pkgs stubs
+
+For `callPackage`-style files, you can auto-generate `val` declarations for all of nixpkgs:
+
+```bash
+tix-cli gen-stubs pkgs -o generated-pkgs.tix
+```
+
+This evaluates `builtins.attrNames (import <nixpkgs> {})` and classifies each attribute:
+
+- Derivations become `val hello :: Derivation;`
+- Non-derivation attrsets become `val xorg :: { ... };`
+- Functions become `val callPackage :: a -> b;`
+
+The generated file supplements `@callpackage` by adding thousands of package names that the hand-curated built-in stubs don't cover.
+
+```bash
+# Generate from specific nixpkgs
+tix-cli gen-stubs pkgs --nixpkgs /path/to/nixpkgs -o generated-pkgs.tix
+
+# From pre-computed JSON (for reproducibility or CI)
+tix-cli gen-stubs pkgs --from-json classified.json -o generated-pkgs.tix
+```
+
+Then use both in your `tix.toml`:
+
+```toml
+[context.callpackage]
+paths = ["pkgs/**/*.nix"]
+stubs = ["@callpackage", "./generated-pkgs.tix"]
+```
 
 ### Using generated stubs with tix.toml
 

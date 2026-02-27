@@ -122,6 +122,21 @@ enum GenStubsSource {
         #[arg(long)]
         username: Option<String>,
     },
+
+    /// Generate val declarations for nixpkgs top-level packages
+    Pkgs {
+        /// Path to nixpkgs (default: <nixpkgs> from NIX_PATH)
+        #[arg(long)]
+        nixpkgs: Option<PathBuf>,
+
+        /// Read pre-computed classification JSON instead of running nix eval
+        #[arg(long)]
+        from_json: Option<PathBuf>,
+
+        /// Output file path (default: stdout)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -163,6 +178,15 @@ fn run_gen_stubs(source: GenStubsSource) -> Result<(), Box<dyn Error>> {
             common: common.into(),
             home_manager,
             username,
+        }),
+        GenStubsSource::Pkgs {
+            nixpkgs,
+            from_json,
+            output,
+        } => gen_stubs::run_pkgs(gen_stubs::PkgsOptions {
+            nixpkgs,
+            from_json,
+            output,
         }),
     }
 }
