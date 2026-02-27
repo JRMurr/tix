@@ -283,10 +283,18 @@ Nix code sizes (hundreds of bindings per file, not millions):
   codepath with name-text fallbacks for all strategies when source_map fails
   (stale analysis). Cancel flag simplified from `Arc<Mutex<Arc<AtomicBool>>>`
   to a single shared `Arc<AtomicBool>`. Parse results cached in RootDatabase
-  (DashMap) so repeated parse_file calls don't re-parse. Remaining cleanup:
-  - Legacy `pending_text` / `state.files` still exist alongside DashMap snapshots
-  - hover/completion still lock state briefly for DocIndex (should store separately)
-  - goto_def/rename cross-file still lock state for Salsa DB access
+  (DashMap) so repeated parse_file calls don't re-parse.
+  - Import resolution now uses Salsa-memoized `file_root_type` (via `StubConfig`
+    input) so previously-inferred imports return instantly on subsequent loads.
+    Aggregate deadline (30s) bounds the total import tree wall-clock time.
+    Canonicalization respects deadline to prevent 7s→11s overshoot.
+  - Remaining cleanup:
+    - Legacy `pending_text` / `state.files` still exist alongside DashMap snapshots
+    - hover/completion still lock state briefly for DocIndex (should store separately)
+    - goto_def/rename cross-file still lock state for Salsa DB access
+    - The mutex is still held during `update_syntax()`. On first load this can be
+      slow (bounded by aggregate deadline). True out-of-mutex inference would require
+      Salsa's `Storage` to be `Sync` — a future improvement.
 
 ### `contains_union()` Doesn't See Through Alias References
 

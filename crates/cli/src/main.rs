@@ -294,7 +294,20 @@ fn run_check(
         HashMap::new()
     };
 
-    let db: RootDatabase = Default::default();
+    let mut db: RootDatabase = Default::default();
+
+    // Set up StubConfig so that file_root_type (Salsa-memoized import
+    // inference) knows how to build the TypeAliasRegistry.
+    let use_builtins = !no_default_stubs;
+    let builtin_stubs_dir = std::env::var("TIX_BUILTIN_STUBS").ok().map(PathBuf::from);
+    // Collect all stub paths: CLI-provided + tix.toml config stubs.
+    let mut all_stub_paths = stub_paths.clone();
+    if let (Some(ref cfg), Some(ref dir)) = (&toml_config, &config_dir) {
+        for stub in &cfg.stubs {
+            all_stub_paths.push(dir.join(stub));
+        }
+    }
+    db.set_stub_config(all_stub_paths, builtin_stubs_dir, use_builtins);
 
     let file = db.read_file(file_path.clone())?;
 
@@ -312,6 +325,8 @@ fn run_check(
         &registry,
         &mut in_progress,
         &mut cache,
+        None,
+        None,
         None,
     );
     // Convert import resolution errors into TixDiagnostics so they render

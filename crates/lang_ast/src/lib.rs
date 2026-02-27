@@ -17,7 +17,7 @@ pub mod tests;
 use std::{collections::HashMap, fmt, ops};
 
 use comment::gather_doc_comments;
-pub use db::{AstDb, NixFile, RootDatabase};
+pub use db::{AstDb, NixFile, RootDatabase, StubConfig};
 // use derive_more::Debug;
 use derive_more::From;
 use la_arena::{Arena, ArenaMap, Idx as Id};

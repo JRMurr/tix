@@ -302,6 +302,20 @@ impl AnalysisState {
         }
     }
 
+    /// Initialize the Salsa StubConfig on the database from the current
+    /// registry's configuration. This enables Salsa-memoized `file_root_type`
+    /// for import resolution (the `resolve_imports` function uses this to
+    /// bypass manual inference when StubConfig is present).
+    pub fn init_stub_config(
+        &mut self,
+        stub_paths: Vec<PathBuf>,
+        builtin_stubs_dir: Option<PathBuf>,
+        use_builtins: bool,
+    ) {
+        self.db
+            .set_stub_config(stub_paths, builtin_stubs_dir, use_builtins);
+    }
+
     /// Update file contents and re-run analysis. Returns the cached analysis
     /// and a timing breakdown of each pipeline phase.
     pub fn update_file(
@@ -368,6 +382,8 @@ impl AnalysisState {
             &mut in_progress,
             &mut self.import_cache,
             self.import_deadline_secs,
+            None,
+            None,
         );
 
         // Convert import resolution errors into TixDiagnostics so they
@@ -579,6 +595,8 @@ impl AnalysisState {
             &mut in_progress,
             &mut self.import_cache,
             self.import_deadline_secs,
+            None,
+            None,
         );
 
         let import_diagnostics: Vec<TixDiagnostic> = import_resolution
@@ -685,9 +703,20 @@ impl AnalysisState {
 
     /// Replace the type alias registry and re-analyze all open files.
     /// Used when stubs configuration changes at runtime.
-    pub fn reload_registry(&mut self, registry: TypeAliasRegistry) {
+    pub fn reload_registry(
+        &mut self,
+        registry: TypeAliasRegistry,
+        stub_paths: Vec<PathBuf>,
+        builtin_stubs_dir: Option<PathBuf>,
+        use_builtins: bool,
+    ) {
         self.registry = registry;
         self.import_cache.clear();
+
+        // Update the Salsa StubConfig so file_root_type queries are
+        // invalidated and re-infer with the new stubs.
+        self.db
+            .set_stub_config(stub_paths, builtin_stubs_dir, use_builtins);
 
         // Re-analyze every open file with the new registry.
         let paths: Vec<PathBuf> = self.files.keys().cloned().collect();

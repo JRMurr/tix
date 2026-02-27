@@ -8,6 +8,7 @@ mod infer;
 pub(crate) mod infer_expr;
 mod narrow;
 mod operators;
+pub mod salsa_imports;
 pub(crate) mod storage;
 pub(crate) mod type_table;
 

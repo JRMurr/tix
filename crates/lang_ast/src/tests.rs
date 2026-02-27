@@ -25,6 +25,10 @@ impl AstDb for TestDatabase {
         // Single-file test database doesn't support imports.
         None
     }
+
+    fn stub_config(&self) -> Option<crate::db::StubConfig> {
+        None
+    }
 }
 
 #[salsa::tracked]
@@ -66,6 +70,10 @@ impl AstDb for MultiFileTestDatabase {
 
     fn load_file(&self, path: &std::path::Path) -> Option<NixFile> {
         self.files.get(path).copied()
+    }
+
+    fn stub_config(&self) -> Option<crate::db::StubConfig> {
+        None
     }
 }
 

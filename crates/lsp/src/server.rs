@@ -90,8 +90,17 @@ impl TixLanguageServer {
         cli_stub_paths: Vec<PathBuf>,
         no_default_stubs: bool,
     ) -> Self {
+        let use_builtins = !no_default_stubs;
+        let builtin_stubs_dir = std::env::var("TIX_BUILTIN_STUBS").ok().map(PathBuf::from);
+
         let (event_tx, event_rx) = mpsc::unbounded_channel();
-        let state = Arc::new(Mutex::new(AnalysisState::new(registry)));
+        let mut analysis_state = AnalysisState::new(registry);
+
+        // Initialize the Salsa StubConfig so file_root_type queries use
+        // Salsa memoization for import resolution.
+        analysis_state.init_stub_config(cli_stub_paths.clone(), builtin_stubs_dir, use_builtins);
+
+        let state = Arc::new(Mutex::new(analysis_state));
         let pending_text = Arc::new(Mutex::new(HashMap::new()));
         let cancel_flag = Arc::new(AtomicBool::new(false));
         let snapshots = Arc::new(DashMap::new());
@@ -165,24 +174,36 @@ impl TixLanguageServer {
     }
 
     /// Build a fresh TypeAliasRegistry from CLI stubs and config stubs.
-    fn build_registry(&self, config: &TixConfig) -> TypeAliasRegistry {
-        let mut registry = if self.no_default_stubs {
-            TypeAliasRegistry::new()
-        } else {
+    /// Also returns the StubConfig parameters (stub_paths, builtin_stubs_dir,
+    /// use_builtins) so they can be passed to `AnalysisState::reload_registry`
+    /// or `init_stub_config` to keep the Salsa StubConfig in sync.
+    fn build_registry(
+        &self,
+        config: &TixConfig,
+    ) -> (TypeAliasRegistry, Vec<PathBuf>, Option<PathBuf>, bool) {
+        let use_builtins = !self.no_default_stubs;
+        let mut registry = if use_builtins {
             TypeAliasRegistry::with_builtins()
+        } else {
+            TypeAliasRegistry::new()
         };
 
         // Allow overriding built-in context stubs via env var.
-        if let Ok(dir) = std::env::var("TIX_BUILTIN_STUBS") {
-            log::info!("TIX_BUILTIN_STUBS override: {dir}");
-            registry.set_builtin_stubs_dir(std::path::PathBuf::from(dir));
+        let builtin_stubs_dir = std::env::var("TIX_BUILTIN_STUBS").ok().map(PathBuf::from);
+        if let Some(ref dir) = builtin_stubs_dir {
+            log::info!("TIX_BUILTIN_STUBS override: {}", dir.display());
+            registry.set_builtin_stubs_dir(dir.clone());
         }
+
+        // Collect all stub paths for StubConfig.
+        let mut stub_paths: Vec<PathBuf> = Vec::new();
 
         // CLI stubs are always loaded first.
         for stub_path in &self.cli_stub_paths {
             if let Err(e) = crate::load_stubs(&mut registry, stub_path) {
                 log::warn!("Failed to load CLI stubs from {}: {e}", stub_path.display());
             }
+            stub_paths.push(stub_path.clone());
         }
 
         // Then config-provided stubs.
@@ -193,13 +214,14 @@ impl TixLanguageServer {
                     stub_path.display()
                 );
             }
+            stub_paths.push(stub_path.clone());
         }
 
         if let Err(cycles) = registry.validate() {
             log::warn!("Cyclic type aliases detected: {:?}", cycles);
         }
 
-        registry
+        (registry, stub_paths, builtin_stubs_dir, use_builtins)
     }
 }
 
@@ -470,8 +492,14 @@ impl LanguageServer for TixLanguageServer {
                         log::info!("Editor provided {} stub path(s)", init_config.stubs.len(),);
                         // Rebuild the registry to include both CLI and
                         // editor-configured stubs.
-                        let registry = self.build_registry(&init_config);
-                        self.state.lock().reload_registry(registry);
+                        let (registry, stub_paths, builtin_stubs_dir, use_builtins) =
+                            self.build_registry(&init_config);
+                        self.state.lock().reload_registry(
+                            registry,
+                            stub_paths,
+                            builtin_stubs_dir,
+                            use_builtins,
+                        );
                     }
                     *self.config.lock() = init_config;
                 }
@@ -658,9 +686,10 @@ impl LanguageServer for TixLanguageServer {
         // Collect diagnostics to publish while holding the lock, then
         // release the lock before awaiting the publish calls.
         let file_diagnostics = if stubs_changed {
-            let registry = self.build_registry(&new_config);
+            let (registry, stub_paths, builtin_stubs_dir, use_builtins) =
+                self.build_registry(&new_config);
             let mut state = self.state.lock();
-            state.reload_registry(registry);
+            state.reload_registry(registry, stub_paths, builtin_stubs_dir, use_builtins);
 
             let diagnostics_enabled = new_config.diagnostics.enable;
             state
