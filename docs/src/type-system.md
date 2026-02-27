@@ -317,3 +317,15 @@ builtins.typeOf    :: a -> string
 ```
 
 Unknown builtins get a fresh type variable — they won't cause errors, but they won't provide type information either.
+
+## Unknown types (`?`)
+
+When a binding's entire type is a bare type variable, it means "unconstrained / unknown" rather than "polymorphic". The LSP displays these as `?` instead of a letter:
+
+```
+craneLib :: ?              # unconstrained — entire type is unknown
+id :: a -> a               # compound type — letters preserved
+const :: a -> b -> a       # compound type — all params get letters
+```
+
+Lambda parameters and pattern fields always keep letter names since their type variables represent genuine polymorphism. Other bindings (let, attrset fields) show `?` when their entire inferred type is a single unconstrained variable.

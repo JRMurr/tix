@@ -221,6 +221,17 @@ impl OutputTy {
         }
     }
 
+    /// Like `normalize_vars`, but displays `?` when the entire type is a bare
+    /// type variable (meaning "unconstrained / unknown"). Compound types like
+    /// `a -> b -> a` keep normal letter names — those variables represent real
+    /// parameter types, not unknowns.
+    pub fn normalize_replacing_unknown(&self) -> OutputTy {
+        if matches!(self, OutputTy::TyVar(_)) {
+            return OutputTy::TyVar(UNKNOWN_TYVAR);
+        }
+        self.normalize_vars()
+    }
+
     /// Collect free type variables in order of first appearance, deduplicated.
     pub fn free_type_vars(&self) -> Vec<u32> {
         let mut result = Vec::new();
@@ -325,8 +336,15 @@ impl OutputTy {
 //   `&` is next
 //   atoms (primitives, lists, attrsets, type vars) are highest
 
+/// Sentinel index for type variables that should display as `?` (unknown type).
+const UNKNOWN_TYVAR: u32 = u32::MAX;
+
 /// Convert a type variable index to a letter-based name: 0→a, 1→b, ..., 25→z, 26→a1, ...
+/// The sentinel value `UNKNOWN_TYVAR` renders as `?`.
 fn tyvar_name(idx: u32) -> String {
+    if idx == UNKNOWN_TYVAR {
+        return "?".to_string();
+    }
     let letter = (b'a' + (idx % 26) as u8) as char;
     let suffix = idx / 26;
     if suffix == 0 {
@@ -483,5 +501,52 @@ impl AttrSetTy<TyRef> {
             }
         }
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_replacing_unknown_bare_tyvar() {
+        // A standalone TyVar appears once → replaced with `?`.
+        let ty = OutputTy::TyVar(5);
+        let result = ty.normalize_replacing_unknown();
+        assert_eq!(format!("{result}"), "?");
+    }
+
+    #[test]
+    fn normalize_replacing_unknown_compound_keeps_letters() {
+        // Compound types use normal normalize_vars — all vars get letters.
+        let ty = OutputTy::Lambda {
+            param: OutputTy::TyVar(0).into(),
+            body: OutputTy::TyVar(0).into(),
+        };
+        let result = ty.normalize_replacing_unknown();
+        assert_eq!(format!("{result}"), "a -> a");
+
+        // const :: a -> b -> a — b is a real parameter, not unknown.
+        let ty = OutputTy::Lambda {
+            param: OutputTy::TyVar(0).into(),
+            body: OutputTy::Lambda {
+                param: OutputTy::TyVar(1).into(),
+                body: OutputTy::TyVar(0).into(),
+            }
+            .into(),
+        };
+        let result = ty.normalize_replacing_unknown();
+        assert_eq!(format!("{result}"), "a -> b -> a");
+    }
+
+    #[test]
+    fn normalize_replacing_unknown_no_tyvars() {
+        // int -> string: no TyVars → unchanged.
+        let ty = OutputTy::Lambda {
+            param: OutputTy::Primitive(PrimitiveTy::Int).into(),
+            body: OutputTy::Primitive(PrimitiveTy::String).into(),
+        };
+        let result = ty.normalize_replacing_unknown();
+        assert_eq!(format!("{result}"), "int -> string");
     }
 }

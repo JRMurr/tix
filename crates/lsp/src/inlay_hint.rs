@@ -64,9 +64,17 @@ pub fn inlay_hints(analysis: &FileSnapshot, range: Range, root: &rnix::Root) -> 
         // Position the hint after the name.
         let position = name_range.end;
 
+        // Param/PatField: keep letter names (genuine polymorphism).
+        // All other bindings: replace single-occurrence TyVars with `?`.
+        let ty_str = if matches!(name.kind, NameKind::Param | NameKind::PatField) {
+            format!("{ty}")
+        } else {
+            format!("{}", ty.normalize_replacing_unknown())
+        };
+
         hints.push(InlayHint {
             position,
-            label: InlayHintLabel::String(format!(" :: {ty}")),
+            label: InlayHintLabel::String(format!(" :: {ty_str}")),
             kind: Some(InlayHintKind::TYPE),
             text_edits: None,
             tooltip: None,
@@ -223,5 +231,60 @@ mod tests {
         let range = Range::new(Position::new(100, 0), Position::new(101, 0));
         let hints = inlay_hints(&analysis, range, &t.root);
         assert!(hints.is_empty());
+    }
+
+    // ==================================================================
+    // Unknown type variable display (`?` for unconstrained)
+    // ==================================================================
+
+    #[test]
+    fn inlay_hint_param_shows_letter() {
+        // Lambda param with unconstrained type → letter, not `?`.
+        let src = "x: x + 1";
+        let hints = get_hints(src);
+        let labels = hint_labels(&hints);
+        // The param `x` should get a hint with a letter variable or concrete type.
+        let param_hint = labels
+            .iter()
+            .find(|l| l.contains("::"))
+            .expect("should have a hint for param");
+        assert!(
+            !param_hint.contains("?"),
+            "param hint should not show `?`, got: {param_hint}"
+        );
+    }
+
+    #[test]
+    fn inlay_hint_let_binding_unconstrained_shows_question_mark() {
+        // Unconstrained let binding → `?`.
+        let src = "x: let y = x; in y";
+        let hints = get_hints(src);
+        let labels = hint_labels(&hints);
+        // `y` is a let binding with an unconstrained type.
+        let y_hint = labels
+            .iter()
+            .find(|l| l.contains("?"))
+            .expect("should have a `?` hint for unconstrained let binding");
+        assert!(
+            y_hint.contains("?"),
+            "unconstrained let binding should show `?`, got: {y_hint}"
+        );
+    }
+
+    #[test]
+    fn inlay_hint_polymorphic_let_keeps_letters() {
+        // `id = x: x` — `a` appears in both param and body, so the let
+        // binding's type `a -> a` keeps letters.
+        let src = "let id = x: x; in id";
+        let hints = get_hints(src);
+        let labels = hint_labels(&hints);
+        let id_hint = labels
+            .iter()
+            .find(|l| l.contains("->"))
+            .expect("should have a function type hint for id");
+        assert!(
+            !id_hint.contains("?"),
+            "polymorphic let binding should not show `?`, got: {id_hint}"
+        );
     }
 }

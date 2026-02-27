@@ -7,12 +7,19 @@
 // then looks up the inferred type. If stub docs are available for the hovered
 // name or field, they're appended below the type.
 
-use lang_ast::{AstPtr, Expr};
+use lang_ast::nameres::ResolveResult;
+use lang_ast::{AstPtr, Expr, NameKind};
 use lang_check::aliases::DocIndex;
 use rowan::ast::AstNode;
 use tower_lsp::lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind, Position, Range};
 
 use crate::state::FileSnapshot;
+
+/// Whether this name kind represents a parameter (genuine polymorphism).
+/// Param/PatField keep letter names; all others use `?` for unknowns.
+fn is_param_kind(kind: NameKind) -> bool {
+    matches!(kind, NameKind::Param | NameKind::PatField)
+}
 
 /// Try to produce hover information for the given cursor position.
 pub fn hover(
@@ -49,8 +56,17 @@ pub fn hover(
                     doc = try_attrpath_key_field_doc(analysis, &token, docs);
                 }
 
+                // Param/PatField: keep letter names (genuine polymorphism).
+                // All other bindings: replace single-occurrence TyVars with `?`.
+                let kind = analysis.syntax.module[name_id].kind;
+                let ty_str = if is_param_kind(kind) {
+                    format!("{ty}")
+                } else {
+                    format!("{}", ty.normalize_replacing_unknown())
+                };
+
                 return Some(make_hover(
-                    format!("{name_text} :: {ty}"),
+                    format!("{name_text} :: {ty_str}"),
                     doc.as_deref(),
                     range,
                 ));
@@ -71,19 +87,46 @@ pub fn hover(
             if let Some(ty) = inference.expr_ty_map.get(expr_id) {
                 let range = analysis.syntax.line_index.range(node.text_range());
 
+                // Determine normalization mode: if this expression is a
+                // Reference to a Param/PatField, use regular normalization
+                // (letters for genuine polymorphism). Otherwise use
+                // unknown-replacing normalization (`?` for unknowns).
+                let is_param_ref = match &analysis.syntax.module[expr_id] {
+                    Expr::Reference(_) => analysis
+                        .syntax
+                        .name_res
+                        .get(expr_id)
+                        .and_then(|r| match r {
+                            ResolveResult::Definition(nid) => Some(*nid),
+                            _ => None,
+                        })
+                        .map(|nid| is_param_kind(analysis.syntax.module[nid].kind))
+                        .unwrap_or(false),
+                    _ => false,
+                };
+                let ty_display = if is_param_ref {
+                    ty.normalize_vars()
+                } else {
+                    ty.normalize_replacing_unknown()
+                };
+
                 // For Reference expressions (variable uses), look up decl_doc
                 // by the referenced name. This surfaces docs for global vals
                 // from stubs (e.g. hovering on `mkDerivation` shows its doc).
                 if let Expr::Reference(ref_name) = &analysis.syntax.module[expr_id] {
                     let doc = docs.decl_doc(ref_name.as_str());
-                    return Some(make_hover(format!("{ty}"), doc.map(|d| d.as_str()), range));
+                    return Some(make_hover(
+                        format!("{ty_display}"),
+                        doc.map(|d| d.as_str()),
+                        range,
+                    ));
                 }
 
                 // For Select expressions, try to find field-level docs by
                 // walking the Select chain to build a field path and finding
                 // the base name's type alias.
                 let doc = try_select_field_doc(analysis, expr_id, docs);
-                return Some(make_hover(format!("{ty}"), doc.as_deref(), range));
+                return Some(make_hover(format!("{ty_display}"), doc.as_deref(), range));
             }
         }
 
@@ -840,6 +883,103 @@ mod tests {
             doc1.as_deref(),
             Some("Network configuration."),
             "hover on `networking` in plain attrset module should show field doc"
+        );
+    }
+
+    // ==================================================================
+    // Unknown type variable display (`?` for unconstrained)
+    // ==================================================================
+
+    #[test]
+    fn hover_let_binding_unconstrained_shows_question_mark() {
+        // An unconstrained let binding should show `?` not a letter.
+        let src = indoc! {"
+            x: let y = x; in y
+            #      ^1
+        "};
+        let markers = parse_markers(src);
+        let t = TestAnalysis::new(src);
+        let h = hover_at(&t, markers[&1]).expect("hover on y");
+        let (type_text, _) = hover_parts(&h);
+
+        assert!(
+            type_text.contains("?"),
+            "unconstrained let binding should show `?`, got: {type_text}"
+        );
+    }
+
+    #[test]
+    fn hover_lambda_param_unconstrained_shows_letter() {
+        // A lambda param should keep a letter name even if unconstrained.
+        let src = indoc! {"
+            x: x
+            #^1
+        "};
+        let markers = parse_markers(src);
+        let t = TestAnalysis::new(src);
+        let h = hover_at(&t, markers[&1]).expect("hover on param x");
+        let (type_text, _) = hover_parts(&h);
+
+        assert!(
+            type_text.contains("a"),
+            "lambda param should keep letter name, got: {type_text}"
+        );
+        assert!(
+            !type_text.contains("?"),
+            "lambda param should not show `?`, got: {type_text}"
+        );
+    }
+
+    #[test]
+    fn hover_reference_to_let_binding_shows_question_mark() {
+        // Hovering on a reference to an unconstrained let binding should
+        // show `?` (expression path).
+        let src = "x: let y = x; in y";
+        let offset = find_offset(src, "in y") + 3; // position on the `y` reference
+        let t = TestAnalysis::new(src);
+        let h = hover_at(&t, offset).expect("hover on reference y");
+        let (type_text, _) = hover_parts(&h);
+
+        assert!(
+            type_text.contains("?"),
+            "reference to unconstrained let binding should show `?`, got: {type_text}"
+        );
+    }
+
+    #[test]
+    fn hover_reference_to_param_shows_letter() {
+        // Hovering on a reference to a lambda param should keep letters.
+        let src = "x: x + 1";
+        let offset = find_offset(src, ": x") + 2; // position on the `x` reference
+        let t = TestAnalysis::new(src);
+        let h = hover_at(&t, offset).expect("hover on reference x");
+        let (type_text, _) = hover_parts(&h);
+
+        assert!(
+            !type_text.contains("?"),
+            "reference to param should show letter, got: {type_text}"
+        );
+    }
+
+    #[test]
+    fn hover_polymorphic_let_keeps_letters() {
+        // `id = x: x` is non-param but `a` appears twice → kept as letter.
+        let src = indoc! {"
+            let id = x: x; in id
+            #   ^1
+        "};
+        let markers = parse_markers(src);
+        let t = TestAnalysis::new(src);
+        let h = hover_at(&t, markers[&1]).expect("hover on id");
+        let (type_text, _) = hover_parts(&h);
+
+        assert!(
+            type_text.contains("a -> a"),
+            "polymorphic let binding should keep letters, got: {type_text}"
+        );
+        assert!(
+            !type_text.contains("?"),
+            "polymorphic let binding should not show `?`, got: {type_text}"
         );
     }
 }
