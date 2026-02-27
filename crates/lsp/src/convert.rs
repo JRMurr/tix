@@ -15,6 +15,8 @@ use tower_lsp::lsp_types::{Position, Range};
 pub struct LineIndex {
     /// Byte offset of the start of each line (line 0 starts at offset 0).
     line_starts: Vec<u32>,
+    /// Total length of the source text in bytes.
+    len: u32,
 }
 
 impl LineIndex {
@@ -25,11 +27,15 @@ impl LineIndex {
                 line_starts.push((i + 1) as u32);
             }
         }
-        LineIndex { line_starts }
+        LineIndex {
+            line_starts,
+            len: text.len() as u32,
+        }
     }
 
     /// Convert a byte offset to an LSP Position (0-indexed line and character).
     pub fn position(&self, offset: u32) -> Position {
+        let offset = offset.min(self.len);
         // Binary search for the line containing this offset.
         let line = match self.line_starts.binary_search(&offset) {
             Ok(line) => line,      // Exact match: offset is at a line start.
@@ -42,12 +48,15 @@ impl LineIndex {
     /// Convert an LSP Position to a byte offset.
     pub fn offset(&self, pos: Position) -> u32 {
         let line = pos.line as usize;
-        if line < self.line_starts.len() {
-            self.line_starts[line] + pos.character
+        let line_start = if line < self.line_starts.len() {
+            self.line_starts[line]
         } else {
-            // Position beyond end of file — clamp to last known offset.
-            *self.line_starts.last().unwrap_or(&0)
-        }
+            // Position beyond end of file — clamp to end of file.
+            return self.len;
+        };
+        // Clamp the resulting offset to end of file to avoid producing
+        // out-of-range byte offsets from invalid character positions.
+        (line_start + pos.character).min(self.len)
     }
 
     /// Convert a rowan TextRange to an LSP Range.
@@ -88,5 +97,26 @@ mod tests {
         let pos = Position::new(1, 2);
         let offset = idx.offset(pos);
         assert_eq!(idx.position(offset), pos);
+    }
+
+    #[test]
+    fn offset_past_eof_clamps_to_end() {
+        let idx = LineIndex::new("abc\ndef"); // len = 7
+                                              // Line 99 doesn't exist — should clamp to end of file.
+        assert_eq!(idx.offset(Position::new(99, 0)), 7);
+    }
+
+    #[test]
+    fn offset_character_past_line_end_clamps() {
+        let idx = LineIndex::new("ab\ncd"); // len = 5
+                                            // Line 0 has 2 chars + newline. character=100 should clamp to EOF.
+        assert_eq!(idx.offset(Position::new(0, 100)), 5);
+    }
+
+    #[test]
+    fn position_past_eof_clamps() {
+        let idx = LineIndex::new("abc"); // len = 3
+                                         // Offset 10 is past EOF — should clamp to end.
+        assert_eq!(idx.position(10), Position::new(0, 3));
     }
 }

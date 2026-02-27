@@ -80,6 +80,11 @@ pub enum TixDiagnosticKind {
         path: String,
         message: String,
     },
+    /// A doc comment type annotation could not be parsed.
+    AnnotationParseError {
+        name: SmolStr,
+        error: SmolStr,
+    },
     /// Inference was aborted because the deadline was exceeded.
     /// Bindings inferred before the timeout still have types; only
     /// the remaining ones are missing.
@@ -145,6 +150,9 @@ impl fmt::Display for TixDiagnosticKind {
                     f,
                     "annotation for `{name}` accepted but not verified: {reason}"
                 )
+            }
+            TixDiagnosticKind::AnnotationParseError { name, error } => {
+                write!(f, "type annotation for `{name}` failed to parse: {error}")
             }
             TixDiagnosticKind::DuplicateKey { key, .. } => {
                 write!(f, "duplicate key `{key}` in binding set")
@@ -399,6 +407,10 @@ fn warning_to_diagnostic(warning: &LocatedWarning) -> TixDiagnostic {
         Warning::AnnotationUnchecked { name, reason } => TixDiagnosticKind::AnnotationUnchecked {
             name: name.clone(),
             reason: reason.clone(),
+        },
+        Warning::AnnotationParseError { name, error } => TixDiagnosticKind::AnnotationParseError {
+            name: name.clone(),
+            error: error.clone(),
         },
     };
 

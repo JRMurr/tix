@@ -211,6 +211,11 @@ pub enum Warning {
         name: smol_str::SmolStr,
         reason: smol_str::SmolStr,
     },
+    /// Doc comment type annotation failed to parse.
+    AnnotationParseError {
+        name: smol_str::SmolStr,
+        error: smol_str::SmolStr,
+    },
 }
 
 impl std::fmt::Display for Warning {
@@ -227,6 +232,9 @@ impl std::fmt::Display for Warning {
             ),
             Warning::AnnotationUnchecked { name, reason } => {
                 write!(f, "annotation for `{name}` accepted but not verified: {reason}")
+            }
+            Warning::AnnotationParseError { name, error } => {
+                write!(f, "type annotation for `{name}` failed to parse: {error}")
             }
         }
     }
@@ -750,24 +758,32 @@ impl<'db> CheckCtx<'db> {
     /// constrain `ty` to match the declared type. Returns Ok(()) if no annotation
     /// is present or if the constraint succeeds.
     fn apply_type_annotation(&mut self, name_id: NameId, ty: TyId) -> Result<(), LocatedError> {
-        let type_annotation = self
-            .module
-            .type_dec_map
-            .docs_for_name(name_id)
-            .and_then(|docs| {
-                let parsed: Vec<_> = docs
-                    .iter()
-                    .flat_map(|doc| parse_and_collect(doc).unwrap_or_default())
-                    .collect();
-                let name_str = &self.module[name_id].text;
-                parsed.into_iter().find_map(|decl| {
-                    if decl.identifier == *name_str {
-                        Some(decl.type_expr)
-                    } else {
-                        None
+        // Extract doc strings without borrowing self mutably so we can
+        // emit diagnostics for parse errors afterwards.
+        let docs = self.module.type_dec_map.docs_for_name(name_id).cloned();
+        let name_str = self.module[name_id].text.clone();
+
+        let type_annotation = docs.and_then(|docs| {
+            let mut all_decls = Vec::new();
+            for doc in docs.iter() {
+                match parse_and_collect(doc) {
+                    Ok(decls) => all_decls.extend(decls),
+                    Err(err) => {
+                        self.emit_warning(Warning::AnnotationParseError {
+                            name: name_str.clone(),
+                            error: err.to_string().into(),
+                        });
                     }
-                })
-            });
+                }
+            }
+            all_decls.into_iter().find_map(|decl| {
+                if decl.identifier == *name_str {
+                    Some(decl.type_expr)
+                } else {
+                    None
+                }
+            })
+        });
 
         if let Some(known_ty) = type_annotation {
             // Intersection-of-lambda annotations declare overloaded function types.
@@ -954,10 +970,18 @@ impl<'db> CheckCtx<'db> {
                         return self.new_var();
                     }
                 }
-                let replacement = substitutions
-                    .get(var)
-                    .unwrap_or_else(|| panic!("No replacement for {var:?}"));
-                *replacement
+                match substitutions.get(var) {
+                    Some(replacement) => *replacement,
+                    None => {
+                        // free_vars() missed this variable — shouldn't happen,
+                        // but degrade to a fresh variable instead of panicking.
+                        debug_assert!(
+                            false,
+                            "No substitution for {var:?}; free_vars() may be incomplete"
+                        );
+                        self.new_var()
+                    }
+                }
             }
             ParsedTy::Primitive(prim) => self.alloc_prim(*prim),
             ParsedTy::List(inner) => {

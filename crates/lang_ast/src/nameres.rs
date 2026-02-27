@@ -586,7 +586,11 @@ pub fn group_def(db: &dyn crate::AstDb, file: NixFile) -> GroupedDefs {
 
     for (name_id, _) in module.names() {
         let node_id = dep_graph.add_node(name_id);
-        name_to_node_id.insert(name_id, node_id);
+        let prev = name_to_node_id.insert(name_id, node_id);
+        debug_assert!(
+            prev.is_none(),
+            "duplicate NameId {name_id:?} in module.names() — lowering bug"
+        );
 
         // Self-edge ensures every name appears in at least one SCC group,
         // even if it has no dependencies on other names.
@@ -594,8 +598,12 @@ pub fn group_def(db: &dyn crate::AstDb, file: NixFile) -> GroupedDefs {
     }
 
     for (from, to) in name_deps.edges {
-        let from = name_to_node_id.get(&from).unwrap();
-        let to = name_to_node_id.get(&to).unwrap();
+        // Edges may reference names outside this module (e.g. function
+        // parameters that aren't tracked as module-level names). Skip
+        // edges where either endpoint isn't in the dependency graph.
+        let (Some(from), Some(to)) = (name_to_node_id.get(&from), name_to_node_id.get(&to)) else {
+            continue;
+        };
 
         dep_graph.add_edge(*from, *to, ());
     }

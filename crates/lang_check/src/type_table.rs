@@ -13,6 +13,27 @@ use super::TyId;
 use crate::storage::{TypeEntry, TypeStorage, TypeVariable};
 use lang_ty::{PrimitiveTy, Ty};
 
+/// Storage layer for type allocation, caching, and resolution.
+///
+/// # Cache Invalidation Rules
+///
+/// All caches are scoped to the lifetime of a single `CheckCtx` (one per
+/// file). None are cleared between SCC groups within a file. This is safe
+/// because `TypeStorage` is **append-only**: once a TyId is allocated, its
+/// entry never changes (variables accumulate bounds but their identity and
+/// structural type entries are immutable).
+///
+/// | Cache               | Key                    | Invalidation          | Safety invariant                                          |
+/// |---------------------|------------------------|-----------------------|-----------------------------------------------------------|
+/// | `constrain_cache`   | `(TyId, TyId)`         | Never (per-file life) | Prevents re-processing identical constraint pairs         |
+/// | `neg_cache`         | `TyId → TyId`          | Never (per-file life) | Deduplicates `Neg(x)` for TyId-equality in absorption    |
+/// | `prim_cache`        | `PrimitiveTy → TyId`   | Never (per-file life) | Deduplicates primitive type allocations                   |
+/// | `inter_var_cache`   | `TyId → bool`          | Never (per-file life) | Inter/Var structure is immutable once allocated            |
+/// | `union_member_cache`| `(TyId, TyId)`         | Never (per-file life) | Union structure is immutable once allocated                |
+///
+/// **Important**: if `TypeStorage` is ever changed to allow mutation of
+/// existing entries (e.g. in-place type narrowing), all caches must be
+/// reviewed for staleness.
 #[derive(Debug, Clone)]
 pub(crate) struct TypeTable {
     pub(crate) storage: TypeStorage,

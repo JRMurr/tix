@@ -316,6 +316,39 @@ Nix code sizes (hundreds of bindings per file, not millions):
   for the narrowing case, but the underlying issue could cause other subtle
   problems if poly_type_env entries are expected to represent the full type.
 
+### Code Review: Deferred Low-Priority Items
+
+- **LSP `LineIndex` assumes ASCII** (`lsp/src/convert.rs`): character offset ==
+  byte offset. Files with multi-byte UTF-8 in comments/strings get misaligned
+  hover/completion after the first non-ASCII character. Fix requires UTF-16 offset
+  counting per the LSP spec.
+
+- **`collect.rs` is ~1756 lines** with intertwined canonicalization and normalization.
+  Could benefit from phase separation (canonicalize, then normalize as a separate pass).
+
+- **`BindingValueKind::ImplicitSet`** (`lower.rs:354`) is never constructed.
+  Dead code — `#[allow(dead_code)]` is already present. Could be removed or implemented.
+
+- **Dynamic attrset keys not tracked in recursive sets** (`nameres.rs:333-335`):
+  `rec { "${x}_key" = expr; x = ...; }` — dependency on `x` in the dynamic key
+  isn't recorded. Could cause incorrect SCC grouping in edge cases.
+
+- **Narrowing silently produces no result on complex attrpaths** (`narrow.rs:453`):
+  `single_static_attrpath_key()` returns `None` for multi-segment paths. Narrowing
+  stops working on `x.a.b ? "default"` patterns with no indication why.
+
+- **Hardcoded conditional function list for narrowing** (`narrow.rs:89-97`):
+  `ConditionalFn` enum is hardcoded. Adding new library functions with narrowing
+  semantics requires code changes. Could be data-driven via `.tix` stub annotations.
+
+- **Extrude carried-overload loop is O(n^2)** (`infer.rs:383-441`): re-scans all
+  carried overloads on each iteration. Linear with a worklist approach. Only matters
+  for deeply chained expressions like `a + b + c + ... + z`.
+
+- **Stale analysis name lookup may pick wrong shadowed binding**
+  (`completion.rs:281-283`): `find_name_type_by_text()` returns first match when
+  source_map fails, which may be wrong with shadowing.
+
 ### Doc Comment Collection Panics (collect.rs) — RESOLVED
 
 - Converted all `unreachable!()`/`unwrap()` calls in both `collect.rs` and

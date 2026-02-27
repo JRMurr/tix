@@ -62,6 +62,7 @@ pub fn to_lsp_diagnostics(
                 TixDiagnosticKind::UnresolvedName { .. }
                 | TixDiagnosticKind::AnnotationArityMismatch { .. }
                 | TixDiagnosticKind::AnnotationUnchecked { .. }
+                | TixDiagnosticKind::AnnotationParseError { .. }
                 | TixDiagnosticKind::DuplicateKey { .. }
                 | TixDiagnosticKind::ImportNotFound { .. }
                 | TixDiagnosticKind::ImportCyclic { .. }

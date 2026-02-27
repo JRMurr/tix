@@ -714,6 +714,13 @@ impl CheckCtx<'_> {
 
     /// Install narrowing overrides for a slice of NarrowBindings.
     /// Returns the saved state for restoration via `restore_narrow_overrides`.
+    ///
+    /// SAFETY INVARIANT: every call to `install_narrow_overrides` MUST be
+    /// paired with `restore_narrow_overrides` on ALL exit paths (Ok, Err).
+    /// A true RAII guard is not possible here because the guard would hold
+    /// `&mut self` while the caller also needs `&mut self` for inference.
+    /// If the code between install/restore panics, narrowing state is
+    /// corrupted — this is acceptable because panics abort inference.
     pub(crate) fn install_narrow_overrides(
         &mut self,
         bindings: &[crate::narrow::NarrowBinding],

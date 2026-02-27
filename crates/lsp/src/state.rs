@@ -332,6 +332,9 @@ impl AnalysisState {
         contents: String,
         cancel_flag: Option<Arc<AtomicBool>>,
     ) -> (&FileAnalysis, AnalysisTiming) {
+        // Canonicalize the path so that the same file accessed via different
+        // paths (symlinks, `..` components) shares a single cache entry.
+        let path = path.canonicalize().unwrap_or(path);
         let t_total = Instant::now();
 
         // -- Phase 1: Parse --
@@ -550,6 +553,7 @@ impl AnalysisState {
         path: PathBuf,
         contents: String,
     ) -> (SyntaxData, InferenceInputs, Duration) {
+        let path = path.canonicalize().unwrap_or(path);
         let t0 = Instant::now();
 
         // -- Parse --

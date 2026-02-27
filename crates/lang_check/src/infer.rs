@@ -623,10 +623,26 @@ impl CheckCtx<'_> {
     // and merge constraints. These are deferred because they need both operand
     // types to be at least partially known.
 
+    /// Maximum number of fixed-point iterations for pending constraint
+    /// resolution. Prevents infinite loops from constraints that alternate
+    /// between `PartialProgress` and `NoProgress`.
+    const MAX_RESOLVE_ITERATIONS: usize = 256;
+
     fn resolve_pending(&mut self) -> Result<(), LocatedError> {
         // Fixed-point loop: keep trying until no more progress.
+        let mut iterations = 0;
         loop {
             if self.deadline_exceeded || self.past_deadline() {
+                break;
+            }
+
+            iterations += 1;
+            if iterations > Self::MAX_RESOLVE_ITERATIONS {
+                log::warn!(
+                    "resolve_pending hit iteration limit ({}) with {} constraints remaining",
+                    Self::MAX_RESOLVE_ITERATIONS,
+                    self.deferred.active.len(),
+                );
                 break;
             }
 

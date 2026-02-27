@@ -120,7 +120,7 @@ impl CheckCtx<'_> {
                     .types
                     .storage
                     .get_var(sub)
-                    .unwrap()
+                    .expect("is_var(sub) was true but get_var(sub) returned None")
                     .lower_bounds
                     .clone();
                 for lb in lower_bounds {
@@ -138,7 +138,7 @@ impl CheckCtx<'_> {
                     .types
                     .storage
                     .get_var(sup)
-                    .unwrap()
+                    .expect("is_var(sup) was true but get_var(sup) returned None")
                     .upper_bounds
                     .clone();
                 for ub in upper_bounds {
@@ -363,7 +363,14 @@ impl CheckCtx<'_> {
             }
             _ => {
                 // Both have variables or neither — can't isolate cleanly.
-                // Constrain each member individually. This is conservative.
+                // Constrain each member individually. This is conservative
+                // (over-constraining): it skips the disjointness check that
+                // the variable-isolation paths perform. For example,
+                // `Inter(α, String) <: Int` going through this path would
+                // over-constrain α rather than detecting the disjointness.
+                // This only triggers for nested Inter trees with variables
+                // on both sides, which is rare in practice.
+                // TODO: handle both-variable case with DNF decomposition.
                 self.constrain(a, sup_id)?;
                 self.constrain(b, sup_id)
             }
