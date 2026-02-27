@@ -644,26 +644,40 @@ pub struct PkgsOptions {
     /// Pre-computed classification JSON. When set, skip `nix eval` and read from this file.
     pub from_json: Option<PathBuf>,
     pub output: Option<PathBuf>,
+    /// Maximum depth for recursing into sub-package-sets (e.g. llvmPackages, python3Packages).
+    /// 0 = flat (no recursion), 1 = one level deep (default).
+    pub max_depth: u32,
 }
 
-/// A single classified nixpkgs attribute from the nix evaluation.
+/// A classified nixpkgs attribute. The name is the map key (not stored here).
+/// Non-derivation attrsets with `recurseForDerivations = true` get `children`
+/// populated recursively up to the configured max depth.
 #[derive(Debug, Deserialize)]
 struct PkgClassification {
-    name: String,
     #[serde(rename = "type")]
     nix_type: String,
     is_derivation: bool,
+    #[serde(default)]
+    children: Option<std::collections::BTreeMap<String, PkgClassification>>,
 }
 
-/// Build the nix expression that classifies all top-level nixpkgs attributes.
+/// Recursive tree of classified nixpkgs attributes.
+type PkgTree = std::collections::BTreeMap<String, PkgClassification>;
+
+/// Build the nix expression that recursively classifies nixpkgs attributes.
 ///
 /// For each attr, we try to evaluate it and record:
-///   - `name`: the attribute name
 ///   - `type`: result of `builtins.typeOf`
 ///   - `is_derivation`: whether `value.type == "derivation"` (the conventional derivation marker)
+///   - `children`: (optional) recursed sub-package-set contents
+///
+/// Non-derivation attrsets with `recurseForDerivations = true` are recursed into
+/// up to `max_depth` levels. This is the same mechanism `nix search`, `nix-env -qa`,
+/// and Hydra use to discover packages inside sub-package-sets like `llvmPackages`
+/// and `python3Packages`.
 ///
 /// Attrs that fail `tryEval` (broken or platform-restricted packages) are skipped.
-fn build_pkgs_classify_expr(nixpkgs: &Option<PathBuf>) -> String {
+fn build_pkgs_classify_expr(nixpkgs: &Option<PathBuf>, max_depth: u32) -> String {
     let nixpkgs_path = match nixpkgs {
         Some(ref p) => format!("{}", p.display()),
         None => "<nixpkgs>".to_string(),
@@ -671,29 +685,37 @@ fn build_pkgs_classify_expr(nixpkgs: &Option<PathBuf>) -> String {
     format!(
         r#"let
   pkgs = import {nixpkgs_path} {{}};
-  classify = name: let
-    v = builtins.tryEval (builtins.getAttr name pkgs);
-  in if !v.success then null
-     else {{
-       inherit name;
-       type = builtins.typeOf v.value;
-       is_derivation = (builtins.tryEval ((v.value.type or null) == "derivation")).value or false;
-     }};
-  names = builtins.attrNames pkgs;
-in builtins.filter (x: x != null) (builtins.map classify names)"#,
+  classifySet = depth: attrset:
+    builtins.listToAttrs (builtins.concatMap (name:
+      let v = builtins.tryEval (builtins.getAttr name attrset);
+      in if !v.success then []
+      else let
+        ty = builtins.typeOf v.value;
+        isDrv = (builtins.tryEval ((v.value.type or null) == "derivation")).value or false;
+        shouldRecurse = !isDrv && ty == "set" && depth > 0
+          && ((builtins.tryEval (v.value.recurseForDerivations or false)).value or false);
+        children = if shouldRecurse then classifySet (depth - 1) v.value else null;
+      in [{{
+        inherit name;
+        value = {{ type = ty; is_derivation = isDrv; }}
+          // (if children != null then {{ inherit children; }} else {{}});
+      }}]
+    ) (builtins.attrNames attrset));
+in classifySet {max_depth} pkgs"#,
     )
 }
 
-/// Invoke `nix eval --json` to classify nixpkgs top-level attributes.
+/// Invoke `nix eval --json` to classify nixpkgs attributes recursively.
 fn invoke_pkgs_classify(
     nixpkgs: &Option<PathBuf>,
-) -> Result<Vec<PkgClassification>, Box<dyn std::error::Error>> {
-    let expr = build_pkgs_classify_expr(nixpkgs);
+    max_depth: u32,
+) -> Result<PkgTree, Box<dyn std::error::Error>> {
+    let expr = build_pkgs_classify_expr(nixpkgs, max_depth);
     let mut cmd = Command::new("nix");
     cmd.args(["eval", "--json", "--expr", &expr]);
     cmd.arg("--impure");
 
-    eprintln!("Classifying nixpkgs top-level attributes (this may take a while)...");
+    eprintln!("Classifying nixpkgs attributes (max depth {max_depth}, this may take a while)...");
     let output = cmd.output()?;
 
     if !output.status.success() {
@@ -701,81 +723,111 @@ fn invoke_pkgs_classify(
         return Err(format!("nix eval failed:\n{}", stderr).into());
     }
 
-    let classifications: Vec<PkgClassification> = serde_json::from_slice(&output.stdout)?;
-    Ok(classifications)
+    let tree: PkgTree = serde_json::from_slice(&output.stdout)?;
+    Ok(tree)
 }
 
-/// Generate a .tix file from classified nixpkgs attributes.
+/// Accumulates classification statistics during .tix emission.
+#[derive(Default)]
+struct PkgsStats {
+    derivations: usize,
+    attrsets: usize,
+    functions: usize,
+    sub_package_sets: usize,
+}
+
+/// Generate a .tix file from a recursive tree of classified nixpkgs attributes.
 ///
 /// Classification rules:
 ///   - `type == "set" && is_derivation` → `val name :: Derivation;`
-///   - `type == "set" && !is_derivation` → `val name :: { ... };` (open attrset, sub-package-set)
+///   - `type == "set" && !is_derivation` with children → `module name { ... }` (nested sub-package-set)
+///   - `type == "set" && !is_derivation` without children → `val name :: { ... };` (opaque attrset)
 ///   - `type == "lambda"` → `val name :: a -> b;` (generic function, args unknowable without evaluation)
 ///   - Other types (string, list, etc.) → skip (rare, not useful as context args)
-fn generate_pkgs_tix(classifications: &[PkgClassification]) -> String {
+fn generate_pkgs_tix(tree: &PkgTree) -> String {
     let mut lines = vec![
-        "# Auto-generated nixpkgs top-level attribute stubs.".to_string(),
+        "# Auto-generated nixpkgs attribute stubs.".to_string(),
         "# Generated by: tix-cli gen-stubs pkgs".to_string(),
         "#".to_string(),
         "# Re-generate with: tix-cli gen-stubs pkgs -o <this-file>".to_string(),
         "#".to_string(),
         "# Load via --stubs to extend the built-in Pkgs type alias with all".to_string(),
-        "# nixpkgs top-level attributes. The module merges with the hand-curated".to_string(),
+        "# nixpkgs attributes. The module merges with the hand-curated".to_string(),
         "# `module pkgs` in the built-in stubs, so @callpackage picks these up".to_string(),
         "# automatically.".to_string(),
         String::new(),
         "module pkgs {".to_string(),
     ];
 
-    let mut derivation_count = 0;
-    let mut attrset_count = 0;
-    let mut function_count = 0;
-
-    for pkg in classifications {
-        let val_line = match (pkg.nix_type.as_str(), pkg.is_derivation) {
-            ("set", true) => {
-                derivation_count += 1;
-                format!("  val {} :: Derivation;", pkg.name)
-            }
-            ("set", false) => {
-                attrset_count += 1;
-                format!("  val {} :: {{ ... }};", pkg.name)
-            }
-            ("lambda", _) => {
-                function_count += 1;
-                format!("  val {} :: a -> b;", pkg.name)
-            }
-            _ => continue,
-        };
-        lines.push(val_line);
-    }
+    let mut stats = PkgsStats::default();
+    emit_pkg_tree(tree, 1, &mut lines, &mut stats);
 
     lines.push("}".to_string());
 
     eprintln!(
-        "Classified {} attributes: {} derivations, {} attrsets, {} functions",
-        derivation_count + attrset_count + function_count,
-        derivation_count,
-        attrset_count,
-        function_count,
+        "Classified {} attributes: {} derivations, {} attrsets, {} functions, {} sub-package-sets",
+        stats.derivations + stats.attrsets + stats.functions + stats.sub_package_sets,
+        stats.derivations,
+        stats.attrsets,
+        stats.functions,
+        stats.sub_package_sets,
     );
 
     lines.push(String::new()); // trailing newline
     lines.join("\n")
 }
 
+/// Recursively emit val/module declarations for a package tree at the given
+/// indentation level. Names that cannot be valid bare identifiers are emitted
+/// as `val "quoted.name" :: ...;` rather than modules.
+fn emit_pkg_tree(tree: &PkgTree, indent: usize, lines: &mut Vec<String>, stats: &mut PkgsStats) {
+    let pad = "  ".repeat(indent);
+
+    for (name, pkg) in tree {
+        match (pkg.nix_type.as_str(), pkg.is_derivation) {
+            ("set", true) => {
+                stats.derivations += 1;
+                lines.push(format!("{pad}val {name} :: Derivation;"));
+            }
+            ("set", false) => {
+                // Sub-package-sets with children become nested modules,
+                // unless the name requires quoting (dots etc.) — those
+                // can't be module names, so fall back to a val declaration.
+                if let Some(ref children) = pkg.children {
+                    if !children.is_empty() && !needs_quoting(name) {
+                        stats.sub_package_sets += 1;
+                        lines.push(format!("{pad}module {name} {{"));
+                        emit_pkg_tree(children, indent + 1, lines, stats);
+                        lines.push(format!("{pad}}}"));
+                        continue;
+                    }
+                }
+                stats.attrsets += 1;
+                let field_name = format_field_name(name);
+                lines.push(format!("{pad}val {field_name} :: {{ ... }};"));
+            }
+            ("lambda", _) => {
+                stats.functions += 1;
+                let field_name = format_field_name(name);
+                lines.push(format!("{pad}val {field_name} :: a -> b;"));
+            }
+            _ => continue,
+        }
+    }
+}
+
 /// Run the `gen-stubs pkgs` subcommand.
 pub fn run_pkgs(opts: PkgsOptions) -> Result<(), Box<dyn std::error::Error>> {
-    let classifications = match opts.from_json {
+    let tree: PkgTree = match opts.from_json {
         Some(ref path) => {
             let data = std::fs::read(path)
                 .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
             serde_json::from_slice(&data)
                 .map_err(|e| format!("failed to parse JSON from {}: {}", path.display(), e))?
         }
-        None => invoke_pkgs_classify(&opts.nixpkgs)?,
+        None => invoke_pkgs_classify(&opts.nixpkgs, opts.max_depth)?,
     };
-    let tix_content = generate_pkgs_tix(&classifications);
+    let tix_content = generate_pkgs_tix(&tree);
     write_generated_stubs(&tix_content, opts.output.as_ref(), "pkgs")
 }
 
@@ -1712,71 +1764,59 @@ mod tests {
     // gen-stubs pkgs
     // -------------------------------------------------------------------------
 
+    /// Helper to build a flat PkgTree entry (no children).
+    fn pkg(nix_type: &str, is_derivation: bool) -> PkgClassification {
+        PkgClassification {
+            nix_type: nix_type.to_string(),
+            is_derivation,
+            children: None,
+        }
+    }
+
+    /// Helper to build a sub-package-set entry with children.
+    fn pkg_with_children(children: PkgTree) -> PkgClassification {
+        PkgClassification {
+            nix_type: "set".to_string(),
+            is_derivation: false,
+            children: Some(children),
+        }
+    }
+
     #[test]
     fn generate_pkgs_tix_derivations() {
-        let classifications = vec![
-            PkgClassification {
-                name: "hello".to_string(),
-                nix_type: "set".to_string(),
-                is_derivation: true,
-            },
-            PkgClassification {
-                name: "coreutils".to_string(),
-                nix_type: "set".to_string(),
-                is_derivation: true,
-            },
-        ];
-        let tix = generate_pkgs_tix(&classifications);
+        let mut tree = PkgTree::new();
+        tree.insert("hello".to_string(), pkg("set", true));
+        tree.insert("coreutils".to_string(), pkg("set", true));
+        let tix = generate_pkgs_tix(&tree);
         assert!(tix.contains("val hello :: Derivation;"));
         assert!(tix.contains("val coreutils :: Derivation;"));
     }
 
     #[test]
     fn generate_pkgs_tix_attrsets_and_functions() {
-        let classifications = vec![
-            PkgClassification {
-                name: "xorg".to_string(),
-                nix_type: "set".to_string(),
-                is_derivation: false,
-            },
-            PkgClassification {
-                name: "callPackage".to_string(),
-                nix_type: "lambda".to_string(),
-                is_derivation: false,
-            },
-        ];
-        let tix = generate_pkgs_tix(&classifications);
+        let mut tree = PkgTree::new();
+        tree.insert("xorg".to_string(), pkg("set", false));
+        tree.insert("callPackage".to_string(), pkg("lambda", false));
+        let tix = generate_pkgs_tix(&tree);
         assert!(tix.contains("val xorg :: { ... };"));
         assert!(tix.contains("val callPackage :: a -> b;"));
     }
 
     #[test]
     fn generate_pkgs_tix_skips_other_types() {
-        let classifications = vec![
-            PkgClassification {
-                name: "version".to_string(),
-                nix_type: "string".to_string(),
-                is_derivation: false,
-            },
-            PkgClassification {
-                name: "hello".to_string(),
-                nix_type: "set".to_string(),
-                is_derivation: true,
-            },
-        ];
-        let tix = generate_pkgs_tix(&classifications);
+        let mut tree = PkgTree::new();
+        tree.insert("version".to_string(), pkg("string", false));
+        tree.insert("hello".to_string(), pkg("set", true));
+        let tix = generate_pkgs_tix(&tree);
         assert!(!tix.contains("val version"));
         assert!(tix.contains("val hello :: Derivation;"));
     }
 
     #[test]
     fn generate_pkgs_tix_wrapped_in_module() {
-        let classifications = vec![PkgClassification {
-            name: "hello".to_string(),
-            nix_type: "set".to_string(),
-            is_derivation: true,
-        }];
-        let tix = generate_pkgs_tix(&classifications);
+        let mut tree = PkgTree::new();
+        tree.insert("hello".to_string(), pkg("set", true));
+        let tix = generate_pkgs_tix(&tree);
         assert!(
             tix.contains("module pkgs {"),
             "should wrap vals in module pkgs"
@@ -1788,12 +1828,9 @@ mod tests {
     fn generate_pkgs_tix_merges_with_builtins() {
         // Verify that loading generated pkgs stubs alongside the built-in stubs
         // merges into the Pkgs alias, giving both hand-curated and generated fields.
-        let classifications = vec![PkgClassification {
-            name: "hello".to_string(),
-            nix_type: "set".to_string(),
-            is_derivation: true,
-        }];
-        let tix = generate_pkgs_tix(&classifications);
+        let mut tree = PkgTree::new();
+        tree.insert("hello".to_string(), pkg("set", true));
+        let tix = generate_pkgs_tix(&tree);
         let file = comment_parser::parse_tix_file(&tix).expect("should parse");
 
         let mut registry = lang_check::aliases::TypeAliasRegistry::with_builtins();
@@ -1819,29 +1856,151 @@ mod tests {
 
     #[test]
     fn generate_pkgs_tix_round_trip_parses() {
-        let classifications = vec![
-            PkgClassification {
-                name: "hello".to_string(),
-                nix_type: "set".to_string(),
-                is_derivation: true,
-            },
-            PkgClassification {
-                name: "pythonPackages".to_string(),
-                nix_type: "set".to_string(),
-                is_derivation: false,
-            },
-            PkgClassification {
-                name: "writeText".to_string(),
-                nix_type: "lambda".to_string(),
-                is_derivation: false,
-            },
-        ];
-        let tix = generate_pkgs_tix(&classifications);
+        let mut tree = PkgTree::new();
+        tree.insert("hello".to_string(), pkg("set", true));
+        tree.insert("pythonPackages".to_string(), pkg("set", false));
+        tree.insert("writeText".to_string(), pkg("lambda", false));
+        let tix = generate_pkgs_tix(&tree);
         comment_parser::parse_tix_file(&tix).unwrap_or_else(|e| {
             panic!(
                 "Generated pkgs .tix failed to parse:\n{}\n\nError: {}",
                 tix, e
             );
         });
+    }
+
+    // -------------------------------------------------------------------------
+    // gen-stubs pkgs: recursive sub-package-sets
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn deserialize_recursive_pkg_tree() {
+        let json = r#"{
+            "hello": { "type": "set", "is_derivation": true },
+            "llvmPackages": {
+                "type": "set", "is_derivation": false,
+                "children": {
+                    "clang": { "type": "set", "is_derivation": true },
+                    "llvm": { "type": "set", "is_derivation": true }
+                }
+            }
+        }"#;
+        let tree: PkgTree = serde_json::from_str(json).unwrap();
+        assert_eq!(tree.len(), 2);
+        assert!(tree["hello"].is_derivation);
+        let children = tree["llvmPackages"].children.as_ref().unwrap();
+        assert_eq!(children.len(), 2);
+        assert!(children["clang"].is_derivation);
+        assert!(children["llvm"].is_derivation);
+    }
+
+    #[test]
+    fn generate_pkgs_tix_nested_modules() {
+        let mut children = PkgTree::new();
+        children.insert("clang".to_string(), pkg("set", true));
+        children.insert("llvm".to_string(), pkg("set", true));
+
+        let mut tree = PkgTree::new();
+        tree.insert("hello".to_string(), pkg("set", true));
+        tree.insert("llvmPackages".to_string(), pkg_with_children(children));
+
+        let tix = generate_pkgs_tix(&tree);
+        assert!(tix.contains("val hello :: Derivation;"));
+        assert!(
+            tix.contains("module llvmPackages {"),
+            "sub-package-set should become nested module"
+        );
+        assert!(
+            tix.contains("val clang :: Derivation;"),
+            "children should be emitted inside nested module"
+        );
+        assert!(tix.contains("val llvm :: Derivation;"));
+    }
+
+    #[test]
+    fn generate_pkgs_tix_nested_round_trip_parses() {
+        let mut children = PkgTree::new();
+        children.insert("clang".to_string(), pkg("set", true));
+        children.insert("buildTools".to_string(), pkg("lambda", false));
+
+        let mut tree = PkgTree::new();
+        tree.insert("hello".to_string(), pkg("set", true));
+        tree.insert("llvmPackages".to_string(), pkg_with_children(children));
+        tree.insert("writeText".to_string(), pkg("lambda", false));
+
+        let tix = generate_pkgs_tix(&tree);
+        comment_parser::parse_tix_file(&tix).unwrap_or_else(|e| {
+            panic!(
+                "Generated nested pkgs .tix failed to parse:\n{}\n\nError: {}",
+                tix, e
+            );
+        });
+    }
+
+    #[test]
+    fn generate_pkgs_tix_nested_merges_with_builtins() {
+        // Nested modules should merge into the Pkgs alias alongside built-in stubs.
+        let mut children = PkgTree::new();
+        children.insert("clang".to_string(), pkg("set", true));
+
+        let mut tree = PkgTree::new();
+        tree.insert("hello".to_string(), pkg("set", true));
+        tree.insert("llvmPackages".to_string(), pkg_with_children(children));
+
+        let tix = generate_pkgs_tix(&tree);
+        let file = comment_parser::parse_tix_file(&tix).expect("should parse");
+
+        let mut registry = lang_check::aliases::TypeAliasRegistry::with_builtins();
+        registry.load_tix_file(&file);
+
+        let pkgs_ty = registry.get("Pkgs").expect("Pkgs alias should exist");
+        match pkgs_ty {
+            comment_parser::ParsedTy::AttrSet(attr) => {
+                assert!(
+                    attr.fields.contains_key("hello"),
+                    "should have generated hello"
+                );
+                assert!(
+                    attr.fields.contains_key("llvmPackages"),
+                    "should have generated llvmPackages"
+                );
+            }
+            other => panic!("expected AttrSet for Pkgs, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn generate_pkgs_tix_empty_children_becomes_val() {
+        // An attrset with empty children should not become a module.
+        let mut tree = PkgTree::new();
+        tree.insert("emptySet".to_string(), pkg_with_children(PkgTree::new()));
+        let tix = generate_pkgs_tix(&tree);
+        assert!(
+            tix.contains("val emptySet :: { ... };"),
+            "empty children should fall back to val: {tix}"
+        );
+        assert!(
+            !tix.contains("module emptySet"),
+            "should not emit module for empty children"
+        );
+    }
+
+    #[test]
+    fn generate_pkgs_tix_quoted_name_no_module() {
+        // Names requiring quoting (e.g. dots) can't be modules.
+        let mut children = PkgTree::new();
+        children.insert("inner".to_string(), pkg("set", true));
+
+        let mut tree = PkgTree::new();
+        tree.insert("name.with.dots".to_string(), pkg_with_children(children));
+        let tix = generate_pkgs_tix(&tree);
+        assert!(
+            tix.contains("val \"name.with.dots\" :: { ... };"),
+            "dotted name should be quoted val, not module: {tix}"
+        );
+        assert!(
+            !tix.contains("module \"name.with.dots\""),
+            "should not emit module for dotted name"
+        );
     }
 }

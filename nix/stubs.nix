@@ -70,25 +70,32 @@ let
   );
 
   # ============================================================================
-  # Pkgs top-level attribute classification (evaluated at Nix eval time)
+  # Pkgs attribute classification (evaluated at Nix eval time)
   # ============================================================================
   #
-  # Classifies every top-level nixpkgs attribute into derivation, attrset, or
-  # function. Broken/unevaluable packages are skipped via tryEval.
+  # Recursively classifies nixpkgs attributes into derivation, attrset, or
+  # function. Non-derivation attrsets with `recurseForDerivations = true` are
+  # recursed into (same mechanism as `nix search` and Hydra). Broken or
+  # unevaluable packages are skipped via tryEval.
 
-  classifyPkg = name: let
-    v = builtins.tryEval (builtins.getAttr name pkgs);
-  in if !v.success then null
-     else {
-       inherit name;
-       type = builtins.typeOf v.value;
-       is_derivation = (builtins.tryEval ((v.value.type or null) == "derivation")).value or false;
-     };
+  classifySet = depth: attrset:
+    builtins.listToAttrs (builtins.concatMap (name:
+      let v = builtins.tryEval (builtins.getAttr name attrset);
+      in if !v.success then []
+      else let
+        ty = builtins.typeOf v.value;
+        isDrv = (builtins.tryEval ((v.value.type or null) == "derivation")).value or false;
+        shouldRecurse = !isDrv && ty == "set" && depth > 0
+          && ((builtins.tryEval (v.value.recurseForDerivations or false)).value or false);
+        children = if shouldRecurse then classifySet (depth - 1) v.value else null;
+      in [{
+        inherit name;
+        value = { type = ty; is_derivation = isDrv; }
+          // (if children != null then { inherit children; } else {});
+      }]
+    ) (builtins.attrNames attrset));
 
-  pkgsClassification = builtins.filter (x: x != null)
-    (builtins.map classifyPkg (builtins.attrNames pkgs));
-
-  pkgsClassificationJson = builtins.toJSON pkgsClassification;
+  pkgsClassificationJson = builtins.toJSON (classifySet 1 pkgs);
 
   # ============================================================================
   # Convert JSON → .tix using tix-cli --from-json

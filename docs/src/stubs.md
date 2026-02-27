@@ -120,17 +120,38 @@ For `callPackage`-style files, you can auto-generate `val` declarations for all 
 tix-cli gen-stubs pkgs -o generated-pkgs.tix
 ```
 
-This evaluates `builtins.attrNames (import <nixpkgs> {})` and classifies each attribute:
+This evaluates nixpkgs and classifies each attribute:
 
 - Derivations become `val hello :: Derivation;`
 - Non-derivation attrsets become `val xorg :: { ... };`
 - Functions become `val callPackage :: a -> b;`
+
+Sub-package-sets like `llvmPackages`, `python3Packages`, and `xorg` that have `recurseForDerivations = true` are recursed into and emitted as nested modules:
+
+```tix
+module pkgs {
+  val hello :: Derivation;
+  module llvmPackages {
+    val clang :: Derivation;
+    val llvm :: Derivation;
+  }
+  val writeText :: a -> b;
+}
+```
+
+Use `--max-depth` to control recursion depth (default: 1). Higher values give more coverage but increase eval time — `python3Packages` alone has ~10k attributes. Use `--max-depth 0` for flat output (no recursion).
 
 The output is a `module pkgs { ... }` block that merges with the hand-curated `module pkgs` in the built-in stubs, extending the `Pkgs` type alias with thousands of additional fields. Since `@callpackage` derives its context from `Pkgs`, the generated packages are picked up automatically.
 
 ```bash
 # Generate from specific nixpkgs
 tix-cli gen-stubs pkgs --nixpkgs /path/to/nixpkgs -o generated-pkgs.tix
+
+# Recurse deeper into sub-package-sets
+tix-cli gen-stubs pkgs --max-depth 2 -o generated-pkgs.tix
+
+# Flat output (no sub-package-set recursion, like pre-v0.x behavior)
+tix-cli gen-stubs pkgs --max-depth 0 -o generated-pkgs.tix
 
 # From pre-computed JSON (for reproducibility or CI)
 tix-cli gen-stubs pkgs --from-json classified.json -o generated-pkgs.tix

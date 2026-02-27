@@ -123,7 +123,7 @@ enum GenStubsSource {
         username: Option<String>,
     },
 
-    /// Generate val declarations for nixpkgs top-level packages
+    /// Generate val declarations for nixpkgs packages
     Pkgs {
         /// Path to nixpkgs (default: <nixpkgs> from NIX_PATH)
         #[arg(long)]
@@ -136,6 +136,11 @@ enum GenStubsSource {
         /// Output file path (default: stdout)
         #[arg(short, long)]
         output: Option<PathBuf>,
+
+        /// Maximum depth for recursing into sub-package-sets like llvmPackages,
+        /// python3Packages, etc. (0 = flat, default: 1)
+        #[arg(long, default_value = "1")]
+        max_depth: u32,
     },
 }
 
@@ -183,10 +188,12 @@ fn run_gen_stubs(source: GenStubsSource) -> Result<(), Box<dyn Error>> {
             nixpkgs,
             from_json,
             output,
+            max_depth,
         } => gen_stubs::run_pkgs(gen_stubs::PkgsOptions {
             nixpkgs,
             from_json,
             output,
+            max_depth,
         }),
     }
 }
