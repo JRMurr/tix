@@ -97,63 +97,68 @@ impl CheckCtx<'_> {
             return Ok(());
         }
 
-        // Check entry discriminants without cloning. We only clone the data
-        // we actually need for each case: bounds Vecs for variables (cheap —
-        // Vec<TyId> is Vec<u32>), or the full Ty for concrete types.
-        let sub_is_var = self.types.is_var(sub);
-        let sup_is_var = self.types.is_var(sup);
+        // Guard against stack overflow: constrain() recurses through variable
+        // bounds chains and structural children, which can be very deep on
+        // complex type graphs.
+        stacker::maybe_grow(256 * 1024, 1024 * 1024, || {
+            // Check entry discriminants without cloning. We only clone the data
+            // we actually need for each case: bounds Vecs for variables (cheap —
+            // Vec<TyId> is Vec<u32>), or the full Ty for concrete types.
+            let sub_is_var = self.types.is_var(sub);
+            let sup_is_var = self.types.is_var(sup);
 
-        match (sub_is_var, sup_is_var) {
-            // sub is a variable — record sup as upper bound, propagate to existing lower bounds.
-            (true, _) => {
-                // If this variable was pre-allocated for an expression, update
-                // current_expr so that any mismatch discovered during propagation
-                // is attributed to a specific sub-expression rather than a distant
-                // ancestor (e.g. the root lambda).
-                if let Some(expr) = self.expr_for_ty(sub) {
-                    self.current_expr = expr;
+            match (sub_is_var, sup_is_var) {
+                // sub is a variable — record sup as upper bound, propagate to existing lower bounds.
+                (true, _) => {
+                    // If this variable was pre-allocated for an expression, update
+                    // current_expr so that any mismatch discovered during propagation
+                    // is attributed to a specific sub-expression rather than a distant
+                    // ancestor (e.g. the root lambda).
+                    if let Some(expr) = self.expr_for_ty(sub) {
+                        self.current_expr = expr;
+                    }
+                    self.types.storage.add_upper_bound(sub, sup);
+                    // Clone just the bounds Vec (Vec<TyId> ~ Vec<u32>, cheap)
+                    // to release the borrow on storage before recursive calls.
+                    let lower_bounds = self
+                        .types
+                        .storage
+                        .get_var(sub)
+                        .expect("is_var(sub) was true but get_var(sub) returned None")
+                        .lower_bounds
+                        .clone();
+                    for lb in lower_bounds {
+                        self.constrain(lb, sup)?;
+                    }
+                    Ok(())
                 }
-                self.types.storage.add_upper_bound(sub, sup);
-                // Clone just the bounds Vec (Vec<TyId> ~ Vec<u32>, cheap)
-                // to release the borrow on storage before recursive calls.
-                let lower_bounds = self
-                    .types
-                    .storage
-                    .get_var(sub)
-                    .expect("is_var(sub) was true but get_var(sub) returned None")
-                    .lower_bounds
-                    .clone();
-                for lb in lower_bounds {
-                    self.constrain(lb, sup)?;
+                // sup is a variable — record sub as lower bound, propagate to existing upper bounds.
+                (_, true) => {
+                    if let Some(expr) = self.expr_for_ty(sup) {
+                        self.current_expr = expr;
+                    }
+                    self.types.storage.add_lower_bound(sup, sub);
+                    let upper_bounds = self
+                        .types
+                        .storage
+                        .get_var(sup)
+                        .expect("is_var(sup) was true but get_var(sup) returned None")
+                        .upper_bounds
+                        .clone();
+                    for ub in upper_bounds {
+                        self.constrain(sub, ub)?;
+                    }
+                    Ok(())
                 }
-                Ok(())
-            }
-            // sup is a variable — record sub as lower bound, propagate to existing upper bounds.
-            (_, true) => {
-                if let Some(expr) = self.expr_for_ty(sup) {
-                    self.current_expr = expr;
-                }
-                self.types.storage.add_lower_bound(sup, sub);
-                let upper_bounds = self
-                    .types
-                    .storage
-                    .get_var(sup)
-                    .expect("is_var(sup) was true but get_var(sup) returned None")
-                    .upper_bounds
-                    .clone();
-                for ub in upper_bounds {
-                    self.constrain(sub, ub)?;
-                }
-                Ok(())
-            }
 
-            // Both concrete — structural subtyping. Clone only the Ty values.
-            (false, false) => {
-                let sub_ty = self.types.expect_concrete(sub);
-                let sup_ty = self.types.expect_concrete(sup);
-                self.constrain_concrete(sub, sup, &sub_ty, &sup_ty)
+                // Both concrete — structural subtyping. Clone only the Ty values.
+                (false, false) => {
+                    let sub_ty = self.types.expect_concrete(sub);
+                    let sup_ty = self.types.expect_concrete(sup);
+                    self.constrain_concrete(sub, sup, &sub_ty, &sup_ty)
+                }
             }
-        }
+        })
     }
 
     /// Structural subtyping between two concrete types.

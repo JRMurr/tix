@@ -60,12 +60,17 @@ impl<'a> Canonicalizer<'a> {
             return OutputTy::TyVar(ty_id.0);
         }
 
-        self.in_progress.insert(key);
-        let result = self.canonicalize_inner(ty_id, polarity);
-        self.in_progress.remove(&key);
+        // Guard against stack overflow on deeply nested type graphs.
+        // canonicalize is the single recursive entry point — expand_bounds,
+        // canonicalize_inner, and canonicalize_concrete all recurse through here.
+        stacker::maybe_grow(256 * 1024, 1024 * 1024, || {
+            self.in_progress.insert(key);
+            let result = self.canonicalize_inner(ty_id, polarity);
+            self.in_progress.remove(&key);
 
-        self.cache.insert(key, result.clone());
-        result
+            self.cache.insert(key, result.clone());
+            result
+        })
     }
 
     fn canonicalize_inner(&mut self, ty_id: TyId, polarity: Polarity) -> OutputTy {
@@ -359,7 +364,9 @@ pub fn canonicalize_standalone(
 ///
 /// Recurses on each member so nested structures are fully normalized.
 fn negate_output_ty(inner: OutputTy) -> OutputTy {
-    match inner {
+    // Guard against stack overflow on deeply nested Union/Intersection trees
+    // (De Morgan expansion recurses independently of canonicalize).
+    stacker::maybe_grow(256 * 1024, 1024 * 1024, || match inner {
         // ¬(¬A) → A
         OutputTy::Neg(a) => (*a.0).clone(),
 
@@ -381,7 +388,7 @@ fn negate_output_ty(inner: OutputTy) -> OutputTy {
 
         // Leaf or compound type that isn't union/intersection/neg — just wrap.
         other => OutputTy::Neg(TyRef::from(other)),
-    }
+    })
 }
 
 /// Remove tautological pairs from a union: `T ∨ ¬T` = ⊤.
