@@ -719,12 +719,12 @@ fn generate_pkgs_tix(classifications: &[PkgClassification]) -> String {
         "#".to_string(),
         "# Re-generate with: tix-cli gen-stubs pkgs -o <this-file>".to_string(),
         "#".to_string(),
-        "# Use alongside @callpackage in tix.toml:".to_string(),
-        "#".to_string(),
-        "#   [context.callpackage]".to_string(),
-        "#   paths = [\"pkgs/**/*.nix\"]".to_string(),
-        "#   stubs = [\"@callpackage\", \"./path/to/this-file.tix\"]".to_string(),
+        "# Load via --stubs to extend the built-in Pkgs type alias with all".to_string(),
+        "# nixpkgs top-level attributes. The module merges with the hand-curated".to_string(),
+        "# `module pkgs` in the built-in stubs, so @callpackage picks these up".to_string(),
+        "# automatically.".to_string(),
         String::new(),
+        "module pkgs {".to_string(),
     ];
 
     let mut derivation_count = 0;
@@ -732,26 +732,25 @@ fn generate_pkgs_tix(classifications: &[PkgClassification]) -> String {
     let mut function_count = 0;
 
     for pkg in classifications {
-        // Skip names that are likely internal or would shadow built-in stubs.
-        // The built-in `module pkgs` already covers stdenv, fetchurl, lib, etc.
-        // with precise signatures — generic `Derivation` would be a downgrade.
         let val_line = match (pkg.nix_type.as_str(), pkg.is_derivation) {
             ("set", true) => {
                 derivation_count += 1;
-                format!("val {} :: Derivation;", pkg.name)
+                format!("  val {} :: Derivation;", pkg.name)
             }
             ("set", false) => {
                 attrset_count += 1;
-                format!("val {} :: {{ ... }};", pkg.name)
+                format!("  val {} :: {{ ... }};", pkg.name)
             }
             ("lambda", _) => {
                 function_count += 1;
-                format!("val {} :: a -> b;", pkg.name)
+                format!("  val {} :: a -> b;", pkg.name)
             }
             _ => continue,
         };
         lines.push(val_line);
     }
+
+    lines.push("}".to_string());
 
     eprintln!(
         "Classified {} attributes: {} derivations, {} attrsets, {} functions",
@@ -1768,6 +1767,54 @@ mod tests {
         let tix = generate_pkgs_tix(&classifications);
         assert!(!tix.contains("val version"));
         assert!(tix.contains("val hello :: Derivation;"));
+    }
+
+    #[test]
+    fn generate_pkgs_tix_wrapped_in_module() {
+        let classifications = vec![PkgClassification {
+            name: "hello".to_string(),
+            nix_type: "set".to_string(),
+            is_derivation: true,
+        }];
+        let tix = generate_pkgs_tix(&classifications);
+        assert!(
+            tix.contains("module pkgs {"),
+            "should wrap vals in module pkgs"
+        );
+        assert!(tix.contains('}'), "module should be closed");
+    }
+
+    #[test]
+    fn generate_pkgs_tix_merges_with_builtins() {
+        // Verify that loading generated pkgs stubs alongside the built-in stubs
+        // merges into the Pkgs alias, giving both hand-curated and generated fields.
+        let classifications = vec![PkgClassification {
+            name: "hello".to_string(),
+            nix_type: "set".to_string(),
+            is_derivation: true,
+        }];
+        let tix = generate_pkgs_tix(&classifications);
+        let file = comment_parser::parse_tix_file(&tix).expect("should parse");
+
+        let mut registry = lang_check::aliases::TypeAliasRegistry::with_builtins();
+        registry.load_tix_file(&file);
+
+        let pkgs_ty = registry.get("Pkgs").expect("Pkgs alias should exist");
+        match pkgs_ty {
+            comment_parser::ParsedTy::AttrSet(attr) => {
+                // Hand-curated field from built-in stubs.
+                assert!(
+                    attr.fields.contains_key("stdenv"),
+                    "should keep built-in stdenv"
+                );
+                // Generated field from the pkgs stubs.
+                assert!(
+                    attr.fields.contains_key("hello"),
+                    "should have generated hello"
+                );
+            }
+            other => panic!("expected AttrSet for Pkgs, got: {other:?}"),
+        }
     }
 
     #[test]

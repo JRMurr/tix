@@ -52,8 +52,12 @@ gen-stubs-hm-flake flake username="": _ensure-stubs-dir
         {{ if username != "" { "--username " + username } else { "" } }} \
         -o {{ stubs_dir }}/home-manager.tix
 
-# Generate all stubs (NixOS + Home Manager)
-gen-stubs: gen-stubs-nixos gen-stubs-home-manager
+# Generate nixpkgs top-level package stubs (for @callpackage context)
+gen-stubs-pkgs *args="": _ensure-stubs-dir
+    cargo run --bin tix-cli -- gen-stubs pkgs -o {{ stubs_dir }}/pkgs.tix {{ args }}
+
+# Generate all stubs (NixOS + Home Manager + Pkgs)
+gen-stubs: gen-stubs-nixos gen-stubs-home-manager gen-stubs-pkgs
 
 _ensure-stubs-dir:
     @mkdir -p {{ stubs_dir }}

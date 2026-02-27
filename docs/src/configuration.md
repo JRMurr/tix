@@ -46,15 +46,7 @@ paths = ["pkgs/**/*.nix"]
 stubs = ["@callpackage"]
 ```
 
-`@callpackage` derives its types from the built-in `Pkgs` module (the same one that types `pkgs.stdenv.mkDerivation`, `pkgs.fetchurl`, etc.). Parameters not covered by the built-in stubs remain untyped. Extend with auto-generated stubs for broader coverage:
-
-```toml
-[context.callpackage]
-paths = ["pkgs/**/*.nix"]
-stubs = ["@callpackage", "./generated-pkgs.tix"]
-```
-
-See [Stubs: Generating pkgs stubs](./stubs.md#generating-pkgs-stubs) for how to generate `generated-pkgs.tix`.
+`@callpackage` derives its types from the built-in `Pkgs` module (the same one that types `pkgs.stdenv.mkDerivation`, `pkgs.fetchurl`, etc.). Parameters not covered by the built-in stubs remain untyped. For broader coverage, [generate pkgs stubs](./stubs.md#generating-pkgs-stubs) and load them via `--stubs` or the `stubs` config key — they merge into the `Pkgs` type alias automatically.
 
 ### Inline context annotation
 

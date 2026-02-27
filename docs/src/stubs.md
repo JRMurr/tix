@@ -126,7 +126,7 @@ This evaluates `builtins.attrNames (import <nixpkgs> {})` and classifies each at
 - Non-derivation attrsets become `val xorg :: { ... };`
 - Functions become `val callPackage :: a -> b;`
 
-The generated file supplements `@callpackage` by adding thousands of package names that the hand-curated built-in stubs don't cover.
+The output is a `module pkgs { ... }` block that merges with the hand-curated `module pkgs` in the built-in stubs, extending the `Pkgs` type alias with thousands of additional fields. Since `@callpackage` derives its context from `Pkgs`, the generated packages are picked up automatically.
 
 ```bash
 # Generate from specific nixpkgs
@@ -136,12 +136,14 @@ tix-cli gen-stubs pkgs --nixpkgs /path/to/nixpkgs -o generated-pkgs.tix
 tix-cli gen-stubs pkgs --from-json classified.json -o generated-pkgs.tix
 ```
 
-Then use both in your `tix.toml`:
+Load the generated file via `--stubs` or the `stubs` config key:
 
 ```toml
+stubs = ["./generated-pkgs.tix"]
+
 [context.callpackage]
 paths = ["pkgs/**/*.nix"]
-stubs = ["@callpackage", "./generated-pkgs.tix"]
+stubs = ["@callpackage"]
 ```
 
 ### Using generated stubs with tix.toml
