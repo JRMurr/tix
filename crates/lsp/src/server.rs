@@ -984,10 +984,15 @@ fn content_modified_error() -> tower_lsp::jsonrpc::Error {
     }
 }
 
-/// Convert a file:// URI to a PathBuf. Returns None for non-file URIs.
+/// Convert a file:// URI to a PathBuf, canonicalizing to resolve symlinks and
+/// `..` components. This ensures all downstream caches (snapshots, pending_text,
+/// state.files, Salsa DB) use consistent keys. Falls back to the raw path for
+/// files that don't exist on disk yet (e.g. unsaved buffers).
 fn uri_to_path(uri: &Url) -> Option<PathBuf> {
     if uri.scheme() != "file" {
         return None;
     }
-    uri.to_file_path().ok()
+    uri.to_file_path()
+        .ok()
+        .map(|p| p.canonicalize().unwrap_or(p))
 }
