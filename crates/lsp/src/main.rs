@@ -43,8 +43,20 @@ struct Cli {
     no_default_stubs: bool,
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    // Build a custom tokio runtime with 16MB worker thread stacks. The default
+    // (~8MB on Linux) can overflow on deep import trees where file_root_type
+    // recurses through many transitive imports, each allocating Module,
+    // NameResolution, CheckCtx, etc. on the stack.
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(16 * 1024 * 1024)
+        .build()
+        .expect("failed to build tokio runtime");
+    rt.block_on(async_main());
+}
+
+async fn async_main() {
     // Default to info-level for tix/lang crates, warn for everything else.
     // RUST_LOG env var overrides this if set.
     env_logger::Builder::from_env(

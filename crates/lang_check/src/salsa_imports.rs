@@ -105,10 +105,15 @@ fn load_single_stub(
 /// file's contents change (via `set_file_contents`), Salsa automatically
 /// invalidates this query and all queries that depend on it.
 ///
-/// Uses `cycle_initial` for Salsa's fixpoint iteration on cyclic imports:
-/// cyclic imports start with `OutputTy::TyVar(0)` (unconstrained), matching
-/// the previous behavior of `resolve_imports`.
-#[salsa::tracked(cycle_initial = file_root_type_initial)]
+/// Uses `cycle_result` for Salsa's immediate fallback on cyclic imports:
+/// when a cycle is detected, Salsa returns `OutputTy::TyVar(0)` (unconstrained)
+/// without iterating, matching the previous behavior of `resolve_imports`.
+///
+/// NOTE: `cycle_initial` (Fixpoint strategy) was tried first but caused stack
+/// overflows — it re-executes the cycle up to 200 times, each running full
+/// type inference. `cycle_result` (FallbackImmediate) returns the fallback
+/// value once without iteration, which is the correct semantic for imports.
+#[salsa::tracked(cycle_result = file_root_type_cycle)]
 pub fn file_root_type(db: &dyn AstDb, file: NixFile) -> OutputTy {
     let module = lang_ast::module(db, file);
     let name_res = lang_ast::name_resolution(db, file);
@@ -154,10 +159,10 @@ pub fn file_root_type(db: &dyn AstDb, file: NixFile) -> OutputTy {
         .unwrap_or(OutputTy::TyVar(0))
 }
 
-/// Cycle initial value: unconstrained type variable.
-/// When Salsa detects a cycle in file_root_type, the cycle head starts
-/// with this value. Salsa iterates until the value converges.
-fn file_root_type_initial(_db: &dyn AstDb, _id: salsa::Id, _file: NixFile) -> OutputTy {
+/// Cycle fallback value: unconstrained type variable.
+/// When Salsa detects a cycle in file_root_type, it returns this value
+/// immediately without iterating (FallbackImmediate strategy).
+fn file_root_type_cycle(_db: &dyn AstDb, _id: salsa::Id, _file: NixFile) -> OutputTy {
     OutputTy::TyVar(0)
 }
 
