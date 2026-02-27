@@ -73,6 +73,14 @@ pub fn scan_literal_imports(
             continue;
         };
 
+        // Skip angle bracket search paths (e.g. `<nixpkgs>`). These require
+        // NIX_PATH resolution which we don't implement yet — treating them as
+        // literal path components produces nonsensical paths.
+        // TODO: resolve via NIX_PATH
+        if path_str.starts_with('<') {
+            continue;
+        }
+
         let resolved = base_dir.join(path_str);
         imports.push((expr_id, resolved));
     }
@@ -145,6 +153,12 @@ fn scan_callpackage_imports(
         let Expr::Literal(Literal::Path(path_str)) = &module[*path_arg_id] else {
             continue;
         };
+
+        // Skip angle bracket search paths (e.g. `<nixpkgs>`).
+        // TODO: resolve via NIX_PATH
+        if path_str.starts_with('<') {
+            continue;
+        }
 
         let resolved = base_dir.join(path_str);
         results.push((outer_id, *inner_apply_id, *path_arg_id, resolved));

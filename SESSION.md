@@ -87,6 +87,10 @@ extrusion.
 
 ### Multi-File Imports
 
+- Angle bracket search paths (`<nixpkgs>`) are silently skipped during import
+  resolution. They need NIX_PATH lookup to resolve properly — tracked as a TODO
+  in `imports.rs`.
+
 - Deferred overloads (e.g. `+` in `a: b: a + b`) don't survive the OutputTy
   boundary between files. When file A imports file B that exports an overloaded
   function, the overload context is lost — the exported type has free type vars
