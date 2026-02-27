@@ -475,7 +475,12 @@ pub fn resolve_imports(
 
         if use_salsa {
             let t0 = Instant::now();
-            let root_ty = crate::salsa_imports::file_root_type(db, target_file);
+            // Grow the stack before recursing into file_root_type — it recurses
+            // through resolve_import_types_salsa for the entire transitive import
+            // graph, which can overflow the default thread stack.
+            let root_ty = stacker::maybe_grow(256 * 1024, 1024 * 1024, || {
+                crate::salsa_imports::file_root_type(db, target_file)
+            });
             let t_infer = t0.elapsed();
 
             cache.insert(target_path.clone(), root_ty.clone());

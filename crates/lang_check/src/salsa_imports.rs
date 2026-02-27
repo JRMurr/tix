@@ -172,6 +172,11 @@ fn file_root_type_initial(_db: &dyn AstDb, _id: salsa::Id, _file: NixFile) -> Ou
 /// This replaces the manual recursive walk in `resolve_imports()` for the
 /// type resolution portion. Navigation targets and error collection still
 /// use the existing `resolve_imports()` in the LSP path.
+///
+/// Each `file_root_type` call may recurse back into this function for the
+/// target's own imports, creating a call chain as deep as the import graph.
+/// `stacker::maybe_grow` ensures we don't overflow the thread stack on deep
+/// or wide import trees (same pattern as rustc and rust-analyzer).
 fn resolve_import_types_salsa(
     db: &dyn AstDb,
     module: &Module,
@@ -196,7 +201,11 @@ fn resolve_import_types_salsa(
             continue;
         };
 
-        let root_ty = file_root_type(db, target_file);
+        // Grow the stack before recursing into file_root_type. Each recursive
+        // call allocates Module, NameResolution, CheckCtx, etc. on the stack.
+        // 256KB red zone, 1MB new segment when exceeded.
+        let root_ty =
+            stacker::maybe_grow(256 * 1024, 1024 * 1024, || file_root_type(db, target_file));
         types.insert(apply_expr_id, root_ty);
     }
 
@@ -214,7 +223,8 @@ fn resolve_import_types_salsa(
             continue;
         };
 
-        let root_ty = file_root_type(db, target_file);
+        let root_ty =
+            stacker::maybe_grow(256 * 1024, 1024 * 1024, || file_root_type(db, target_file));
         types.insert(inner_apply_id, root_ty.clone());
         types.insert(outer_apply_id, extract_return_type(&root_ty));
     }
