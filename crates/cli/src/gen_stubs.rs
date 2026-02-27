@@ -784,17 +784,22 @@ fn emit_pkg_tree(tree: &PkgTree, indent: usize, lines: &mut Vec<String>, stats: 
     let pad = "  ".repeat(indent);
 
     for (name, pkg) in tree {
+        // `val` declarations require bare identifiers — the .tix grammar
+        // doesn't support quoted names in val/module position. Skip names
+        // that contain characters like `+`, `.`, etc.
+        if needs_quoting(name) {
+            continue;
+        }
+
         match (pkg.nix_type.as_str(), pkg.is_derivation) {
             ("set", true) => {
                 stats.derivations += 1;
                 lines.push(format!("{pad}val {name} :: Derivation;"));
             }
             ("set", false) => {
-                // Sub-package-sets with children become nested modules,
-                // unless the name requires quoting (dots etc.) — those
-                // can't be module names, so fall back to a val declaration.
+                // Sub-package-sets with children become nested modules.
                 if let Some(ref children) = pkg.children {
-                    if !children.is_empty() && !needs_quoting(name) {
+                    if !children.is_empty() {
                         stats.sub_package_sets += 1;
                         lines.push(format!("{pad}module {name} {{"));
                         emit_pkg_tree(children, indent + 1, lines, stats);
@@ -803,13 +808,11 @@ fn emit_pkg_tree(tree: &PkgTree, indent: usize, lines: &mut Vec<String>, stats: 
                     }
                 }
                 stats.attrsets += 1;
-                let field_name = format_field_name(name);
-                lines.push(format!("{pad}val {field_name} :: {{ ... }};"));
+                lines.push(format!("{pad}val {name} :: {{ ... }};"));
             }
             ("lambda", _) => {
                 stats.functions += 1;
-                let field_name = format_field_name(name);
-                lines.push(format!("{pad}val {field_name} :: a -> b;"));
+                lines.push(format!("{pad}val {name} :: a -> b;"));
             }
             _ => continue,
         }
@@ -1986,21 +1989,26 @@ mod tests {
     }
 
     #[test]
-    fn generate_pkgs_tix_quoted_name_no_module() {
-        // Names requiring quoting (e.g. dots) can't be modules.
+    fn generate_pkgs_tix_invalid_names_skipped() {
+        // Names requiring quoting (dots, `+`, etc.) can't be used in val/module
+        // declarations — the .tix grammar only supports bare identifiers there.
+        // These names are skipped entirely.
         let mut children = PkgTree::new();
         children.insert("inner".to_string(), pkg("set", true));
 
         let mut tree = PkgTree::new();
         tree.insert("name.with.dots".to_string(), pkg_with_children(children));
+        tree.insert("m+".to_string(), pkg("set", true));
+        tree.insert("hello".to_string(), pkg("set", true));
         let tix = generate_pkgs_tix(&tree);
         assert!(
-            tix.contains("val \"name.with.dots\" :: { ... };"),
-            "dotted name should be quoted val, not module: {tix}"
+            !tix.contains("name.with.dots"),
+            "dotted name should be skipped: {tix}"
         );
-        assert!(
-            !tix.contains("module \"name.with.dots\""),
-            "should not emit module for dotted name"
-        );
+        assert!(!tix.contains("m+"), "m+ should be skipped: {tix}");
+        assert!(tix.contains("val hello :: Derivation;"));
+        comment_parser::parse_tix_file(&tix).unwrap_or_else(|e| {
+            panic!("Skipped-names pkgs .tix failed to parse:\n{tix}\n\nError: {e}");
+        });
     }
 }
