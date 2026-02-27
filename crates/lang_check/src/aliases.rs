@@ -210,6 +210,12 @@ impl TypeAliasRegistry {
                     // e.g. `module lib { ## identity fn \n val id :: a -> a; }` →
                     //   field doc on Lib.id
                     self.collect_module_field_docs(&alias_name, declarations, &[]);
+
+                    // Also register nested modules as top-level aliases so they
+                    // can be referenced by val declarations (e.g. alias targets
+                    // like `val python3Packages :: Python313Packages;` inside
+                    // `module pkgs { ... }`).
+                    self.register_nested_module_aliases(declarations);
                 }
             }
         }
@@ -261,6 +267,29 @@ impl TypeAliasRegistry {
                     self.collect_module_field_docs(alias_name, nested, &child_prefix);
                 }
                 TixDeclaration::TypeAlias { .. } => {}
+            }
+        }
+    }
+
+    /// Register nested module declarations as top-level type aliases.
+    /// This enables references like `val python3Packages :: Python313Packages;`
+    /// inside `module pkgs { ... }` where `python313Packages` is a nested module.
+    fn register_nested_module_aliases(&mut self, declarations: &[TixDeclaration]) {
+        for decl in declarations {
+            if let TixDeclaration::Module {
+                name,
+                declarations: nested,
+                ..
+            } = decl
+            {
+                let alias_name = capitalize(name);
+                // Only register if not already present — don't overwrite
+                // explicitly declared top-level aliases.
+                self.aliases
+                    .entry(alias_name)
+                    .or_insert_with(|| module_to_attrset(nested));
+                // Recurse into deeper nesting.
+                self.register_nested_module_aliases(nested);
             }
         }
     }

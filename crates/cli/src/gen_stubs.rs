@@ -659,6 +659,11 @@ struct PkgClassification {
     is_derivation: bool,
     #[serde(default)]
     children: Option<std::collections::BTreeMap<String, PkgClassification>>,
+    /// When set, this package is an alias for another (e.g. `python3Packages`
+    /// aliasing `python313Packages`). Detected via `dontRecurseIntoAttrs`
+    /// + matching `builtins.attrNames`.
+    #[serde(default)]
+    alias_of: Option<String>,
 }
 
 /// Recursive tree of classified nixpkgs attributes.
@@ -701,7 +706,36 @@ fn build_pkgs_classify_expr(nixpkgs: &Option<PathBuf>, max_depth: u32) -> String
           // (if children != null then {{ inherit children; }} else {{}});
       }}]
     ) (builtins.attrNames attrset));
-in classifySet {max_depth} pkgs"#,
+
+  # Alias detection: for non-recursed attrsets where recurseForDerivations is
+  # explicitly false (the dontRecurseIntoAttrs signature), find a recursed
+  # sibling with identical attrNames. Only runs at the top level.
+  namesOf = s: builtins.filter (n: n != "recurseForDerivations") (builtins.attrNames s);
+
+  detectAliases = tree: attrset:
+    let
+      recursedNames = builtins.filter (name:
+        (tree.${{name}} or {{}}) ? children
+      ) (builtins.attrNames tree);
+    in builtins.mapAttrs (name: entry:
+      if entry ? children || entry ? alias_of
+         || entry.is_derivation || entry.type != "set" then entry
+      else let
+        val = builtins.tryEval (builtins.getAttr name attrset);
+        hasExplicitFalse = val.success
+          && val.value ? recurseForDerivations
+          && val.value.recurseForDerivations == false;
+      in if !hasExplicitFalse then entry
+      else let
+        candNames = namesOf val.value;
+        match = builtins.filter (rName:
+          namesOf (builtins.getAttr rName attrset) == candNames
+        ) recursedNames;
+      in if match == [] then entry
+         else entry // {{ alias_of = builtins.head match; }}
+    ) tree;
+
+in detectAliases (classifySet {max_depth} pkgs) pkgs"#,
     )
 }
 
@@ -734,6 +768,17 @@ struct PkgsStats {
     attrsets: usize,
     functions: usize,
     sub_package_sets: usize,
+    aliases: usize,
+}
+
+/// Capitalize a name for use as a type alias reference (first char uppercase,
+/// rest unchanged). Module names like `python313Packages` become `Python313Packages`.
+fn capitalize(name: &str) -> String {
+    let mut chars = name.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(c) => c.to_uppercase().to_string() + chars.as_str(),
+    }
 }
 
 /// Generate a .tix file from a recursive tree of classified nixpkgs attributes.
@@ -765,12 +810,13 @@ fn generate_pkgs_tix(tree: &PkgTree) -> String {
     lines.push("}".to_string());
 
     eprintln!(
-        "Classified {} attributes: {} derivations, {} attrsets, {} functions, {} sub-package-sets",
-        stats.derivations + stats.attrsets + stats.functions + stats.sub_package_sets,
+        "Classified {} attributes: {} derivations, {} attrsets, {} functions, {} sub-package-sets, {} aliases",
+        stats.derivations + stats.attrsets + stats.functions + stats.sub_package_sets + stats.aliases,
         stats.derivations,
         stats.attrsets,
         stats.functions,
         stats.sub_package_sets,
+        stats.aliases,
     );
 
     lines.push(String::new()); // trailing newline
@@ -788,6 +834,15 @@ fn emit_pkg_tree(tree: &PkgTree, indent: usize, lines: &mut Vec<String>, stats: 
         // doesn't support quoted names in val/module position. Skip names
         // that contain characters like `+`, `.`, etc.
         if needs_quoting(name) {
+            continue;
+        }
+
+        // Alias reference: emit `val name :: AliasTarget;` where AliasTarget
+        // is the capitalized module name (e.g. Python313Packages).
+        if let Some(ref target) = pkg.alias_of {
+            let alias_type = capitalize(target);
+            stats.aliases += 1;
+            lines.push(format!("{pad}val {name} :: {alias_type};"));
             continue;
         }
 
@@ -1773,6 +1828,7 @@ mod tests {
             nix_type: nix_type.to_string(),
             is_derivation,
             children: None,
+            alias_of: None,
         }
     }
 
@@ -1782,6 +1838,17 @@ mod tests {
             nix_type: "set".to_string(),
             is_derivation: false,
             children: Some(children),
+            alias_of: None,
+        }
+    }
+
+    /// Helper to build an alias entry pointing at another package set.
+    fn pkg_alias(target: &str) -> PkgClassification {
+        PkgClassification {
+            nix_type: "set".to_string(),
+            is_derivation: false,
+            children: None,
+            alias_of: Some(target.to_string()),
         }
     }
 
@@ -2010,5 +2077,136 @@ mod tests {
         comment_parser::parse_tix_file(&tix).unwrap_or_else(|e| {
             panic!("Skipped-names pkgs .tix failed to parse:\n{tix}\n\nError: {e}");
         });
+    }
+
+    // -------------------------------------------------------------------------
+    // gen-stubs pkgs: alias detection
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn deserialize_alias_of_field() {
+        let json = r#"{
+            "python3Packages": {
+                "type": "set", "is_derivation": false,
+                "alias_of": "python313Packages"
+            },
+            "python313Packages": {
+                "type": "set", "is_derivation": false,
+                "children": {
+                    "numpy": { "type": "set", "is_derivation": true }
+                }
+            }
+        }"#;
+        let tree: PkgTree = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            tree["python3Packages"].alias_of.as_deref(),
+            Some("python313Packages")
+        );
+        assert!(tree["python313Packages"].children.is_some());
+        assert!(tree["python313Packages"].alias_of.is_none());
+    }
+
+    #[test]
+    fn generate_pkgs_tix_alias_emits_type_ref() {
+        let mut children = PkgTree::new();
+        children.insert("numpy".to_string(), pkg("set", true));
+
+        let mut tree = PkgTree::new();
+        tree.insert("python313Packages".to_string(), pkg_with_children(children));
+        tree.insert(
+            "python3Packages".to_string(),
+            pkg_alias("python313Packages"),
+        );
+
+        let tix = generate_pkgs_tix(&tree);
+        assert!(
+            tix.contains("module python313Packages {"),
+            "should emit module for recursed set: {tix}"
+        );
+        assert!(
+            tix.contains("val python3Packages :: Python313Packages;"),
+            "alias should reference capitalized module type: {tix}"
+        );
+        assert!(
+            !tix.contains("module python3Packages"),
+            "alias should not become a module: {tix}"
+        );
+    }
+
+    #[test]
+    fn generate_pkgs_tix_alias_round_trip_parses() {
+        let mut children = PkgTree::new();
+        children.insert("numpy".to_string(), pkg("set", true));
+        children.insert("pandas".to_string(), pkg("set", true));
+
+        let mut tree = PkgTree::new();
+        tree.insert("hello".to_string(), pkg("set", true));
+        tree.insert("python313Packages".to_string(), pkg_with_children(children));
+        tree.insert(
+            "python3Packages".to_string(),
+            pkg_alias("python313Packages"),
+        );
+
+        let tix = generate_pkgs_tix(&tree);
+        comment_parser::parse_tix_file(&tix).unwrap_or_else(|e| {
+            panic!("Alias pkgs .tix failed to parse:\n{tix}\n\nError: {e}");
+        });
+    }
+
+    #[test]
+    fn generate_pkgs_tix_alias_resolves_in_registry() {
+        // Verify that the alias type reference can be resolved through
+        // the TypeAliasRegistry after loading the generated stubs.
+        let mut children = PkgTree::new();
+        children.insert("numpy".to_string(), pkg("set", true));
+
+        let mut tree = PkgTree::new();
+        tree.insert("python313Packages".to_string(), pkg_with_children(children));
+        tree.insert(
+            "python3Packages".to_string(),
+            pkg_alias("python313Packages"),
+        );
+
+        let tix = generate_pkgs_tix(&tree);
+        let file = comment_parser::parse_tix_file(&tix).expect("should parse");
+
+        let mut registry = lang_check::aliases::TypeAliasRegistry::with_builtins();
+        registry.load_tix_file(&file);
+
+        let pkgs_ty = registry.get("Pkgs").expect("Pkgs alias should exist");
+        match pkgs_ty {
+            comment_parser::ParsedTy::AttrSet(attr) => {
+                // The alias should resolve to a Reference to the module type.
+                match attr.fields.get("python3Packages") {
+                    Some(comment_parser::ParsedTyRef(ty)) => match ty.as_ref() {
+                        comment_parser::ParsedTy::TyVar(
+                            comment_parser::TypeVarValue::Reference(name),
+                        ) => {
+                            assert_eq!(
+                                name.as_str(),
+                                "Python313Packages",
+                                "alias val should reference the capitalized module type"
+                            );
+                        }
+                        other => panic!("expected Reference for python3Packages, got: {other:?}"),
+                    },
+                    other => panic!("expected ParsedTyRef for python3Packages, got: {other:?}"),
+                }
+                // The module target itself should exist as a type alias.
+                assert!(
+                    registry.get("Python313Packages").is_some(),
+                    "Python313Packages type alias should exist from module declaration"
+                );
+            }
+            other => panic!("expected AttrSet for Pkgs, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn capitalize_helper() {
+        assert_eq!(capitalize("python313Packages"), "Python313Packages");
+        assert_eq!(capitalize("llvmPackages"), "LlvmPackages");
+        assert_eq!(capitalize(""), "");
+        assert_eq!(capitalize("a"), "A");
     }
 }

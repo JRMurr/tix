@@ -131,13 +131,16 @@ Sub-package-sets like `llvmPackages`, `python3Packages`, and `xorg` that have `r
 ```tix
 module pkgs {
   val hello :: Derivation;
-  module llvmPackages {
-    val clang :: Derivation;
-    val llvm :: Derivation;
+  module python313Packages {
+    val numpy :: Derivation;
+    val pandas :: Derivation;
   }
+  val python3Packages :: Python313Packages;
   val writeText :: a -> b;
 }
 ```
+
+**Alias detection:** Nixpkgs uses `dontRecurseIntoAttrs` on alias package sets (e.g. `python3Packages = dontRecurseIntoAttrs python313Packages`). When a non-recursed attrset has `recurseForDerivations` explicitly set to `false` and its `builtins.attrNames` matches a recursed sibling, tix emits a type alias reference (`val python3Packages :: Python313Packages;`) instead of an opaque `{ ... }`. This gives alias sets the same typed fields as their targets.
 
 Use `--max-depth` to control recursion depth (default: 1). Higher values give more coverage but increase eval time — `python3Packages` alone has ~10k attributes. Use `--max-depth 0` for flat output (no recursion).
 

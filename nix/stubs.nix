@@ -95,7 +95,35 @@ let
       }]
     ) (builtins.attrNames attrset));
 
-  pkgsClassificationJson = builtins.toJSON (classifySet 1 pkgs);
+  # Alias detection: for non-recursed attrsets where recurseForDerivations is
+  # explicitly false (the dontRecurseIntoAttrs signature), find a recursed
+  # sibling with identical attrNames. Only runs at the top level.
+  namesOf = s: builtins.filter (n: n != "recurseForDerivations") (builtins.attrNames s);
+
+  detectAliases = tree: attrset:
+    let
+      recursedNames = builtins.filter (name:
+        (tree.${name} or {}) ? children
+      ) (builtins.attrNames tree);
+    in builtins.mapAttrs (name: entry:
+      if entry ? children || entry ? alias_of
+         || entry.is_derivation || entry.type != "set" then entry
+      else let
+        val = builtins.tryEval (builtins.getAttr name attrset);
+        hasExplicitFalse = val.success
+          && val.value ? recurseForDerivations
+          && val.value.recurseForDerivations == false;
+      in if !hasExplicitFalse then entry
+      else let
+        candNames = namesOf val.value;
+        match = builtins.filter (rName:
+          namesOf (builtins.getAttr rName attrset) == candNames
+        ) recursedNames;
+      in if match == [] then entry
+         else entry // { alias_of = builtins.head match; }
+    ) tree;
+
+  pkgsClassificationJson = builtins.toJSON (detectAliases (classifySet 1 pkgs) pkgs);
 
   # ============================================================================
   # Convert JSON → .tix using tix-cli --from-json
