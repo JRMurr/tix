@@ -984,19 +984,21 @@ impl<'db> Collector<'db> {
                     // likely because enclosing lambda parameter annotations hadn't
                     // propagated yet. Fall back to late canonicalization which sees
                     // the fully-constrained bounds — unless the deadline was exceeded,
-                    // in which case skip the potentially expensive canonicalization.
+                    // in which case use a degraded unconstrained type to avoid
+                    // expensive canonicalization on degenerate type graphs.
                     if deadline_exceeded {
-                        continue;
+                        OutputTy::TyVar(0)
+                    } else {
+                        canon.canonicalize(ty, Positive)
                     }
-                    canon.canonicalize(ty, Positive)
                 } else {
                     early.clone()
                 }
             } else if deadline_exceeded {
-                // When the deadline was exceeded, skip names that don't have an
-                // early-canonical snapshot. Late canonicalization can be very
-                // expensive on degenerate type graphs from partial inference.
-                continue;
+                // When the deadline was exceeded, use a degraded unconstrained type
+                // for names without an early-canonical snapshot. Late canonicalization
+                // can be very expensive on degenerate type graphs from partial inference.
+                OutputTy::TyVar(0)
             } else {
                 canon.canonicalize(ty, Positive)
             };
