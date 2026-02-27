@@ -930,6 +930,7 @@ dependencies = [
  "proptest",
  "rustc-hash 2.1.0",
  "smol_str",
+ "stacker",
 ]
 
 [[package]]

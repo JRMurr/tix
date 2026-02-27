@@ -182,7 +182,9 @@ impl OutputTy {
             let new_idx = free.get(x).unwrap();
             return OutputTy::TyVar(*new_idx);
         }
-        self.map_children(&mut |child| child.normalize_inner(free))
+        stacker::maybe_grow(256 * 1024, 1024 * 1024, || {
+            self.map_children(&mut |child| child.normalize_inner(free))
+        })
     }
 
     /// Returns true if any Lambda in this type has a non-primitive param type.
@@ -247,7 +249,9 @@ impl OutputTy {
             }
             return;
         }
-        self.for_each_child(&mut |child| child.collect_free_type_vars(result, seen));
+        stacker::maybe_grow(256 * 1024, 1024 * 1024, || {
+            self.for_each_child(&mut |child| child.collect_free_type_vars(result, seen));
+        });
     }
 
     // ==========================================================================
@@ -356,7 +360,8 @@ fn tyvar_name(idx: u32) -> String {
 
 impl fmt::Display for OutputTy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
+        // Guard against stack overflow on deeply nested type trees.
+        stacker::maybe_grow(256 * 1024, 1024 * 1024, || match self {
             OutputTy::TyVar(x) => write!(f, "{}", tyvar_name(*x)),
             OutputTy::Primitive(p) => write!(f, "{p}"),
             OutputTy::List(inner) => write!(f, "[{inner}]"),
@@ -420,7 +425,7 @@ impl fmt::Display for OutputTy {
             }
             OutputTy::Bottom => write!(f, "never"),
             OutputTy::Top => write!(f, "any"),
-        }
+        })
     }
 }
 

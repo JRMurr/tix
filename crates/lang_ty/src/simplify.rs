@@ -84,71 +84,74 @@ fn analyze(
     path: &mut Vec<PathSegment>,
     vars: &mut FxHashMap<u32, VarInfo>,
 ) {
-    let pol = if positive {
-        Polarity::Positive
-    } else {
-        Polarity::Negative
-    };
+    // Guard against stack overflow on deeply nested type trees.
+    stacker::maybe_grow(256 * 1024, 1024 * 1024, || {
+        let pol = if positive {
+            Polarity::Positive
+        } else {
+            Polarity::Negative
+        };
 
-    match ty {
-        OutputTy::TyVar(v) => {
-            let type_path = TypePath(path.clone());
-            vars.entry(*v)
-                .and_modify(|info| {
-                    info.polarity = info.polarity.merge(pol);
-                    info.occurrences.insert(type_path.clone());
-                })
-                .or_insert_with(|| VarInfo::new(pol, type_path));
-        }
-        OutputTy::Primitive(_) | OutputTy::Bottom | OutputTy::Top => {}
-        OutputTy::List(inner) => {
-            path.push(PathSegment::ListElem);
-            analyze(&inner.0, positive, path, vars);
-            path.pop();
-        }
-        OutputTy::Lambda { param, body } => {
-            path.push(PathSegment::LambdaParam);
-            analyze(&param.0, !positive, path, vars);
-            path.pop();
+        match ty {
+            OutputTy::TyVar(v) => {
+                let type_path = TypePath(path.clone());
+                vars.entry(*v)
+                    .and_modify(|info| {
+                        info.polarity = info.polarity.merge(pol);
+                        info.occurrences.insert(type_path.clone());
+                    })
+                    .or_insert_with(|| VarInfo::new(pol, type_path));
+            }
+            OutputTy::Primitive(_) | OutputTy::Bottom | OutputTy::Top => {}
+            OutputTy::List(inner) => {
+                path.push(PathSegment::ListElem);
+                analyze(&inner.0, positive, path, vars);
+                path.pop();
+            }
+            OutputTy::Lambda { param, body } => {
+                path.push(PathSegment::LambdaParam);
+                analyze(&param.0, !positive, path, vars);
+                path.pop();
 
-            path.push(PathSegment::LambdaBody);
-            analyze(&body.0, positive, path, vars);
-            path.pop();
-        }
-        OutputTy::AttrSet(attr) => {
-            for (k, v) in &attr.fields {
-                path.push(PathSegment::AttrField(k.clone()));
-                analyze(&v.0, positive, path, vars);
+                path.push(PathSegment::LambdaBody);
+                analyze(&body.0, positive, path, vars);
                 path.pop();
             }
-            if let Some(dyn_ty) = &attr.dyn_ty {
-                path.push(PathSegment::AttrDyn);
-                analyze(&dyn_ty.0, positive, path, vars);
-                path.pop();
+            OutputTy::AttrSet(attr) => {
+                for (k, v) in &attr.fields {
+                    path.push(PathSegment::AttrField(k.clone()));
+                    analyze(&v.0, positive, path, vars);
+                    path.pop();
+                }
+                if let Some(dyn_ty) = &attr.dyn_ty {
+                    path.push(PathSegment::AttrDyn);
+                    analyze(&dyn_ty.0, positive, path, vars);
+                    path.pop();
+                }
+            }
+            OutputTy::Union(members) => {
+                for (i, m) in members.iter().enumerate() {
+                    path.push(PathSegment::UnionMember(i));
+                    analyze(&m.0, positive, path, vars);
+                    path.pop();
+                }
+            }
+            OutputTy::Intersection(members) => {
+                for (i, m) in members.iter().enumerate() {
+                    path.push(PathSegment::IntersectionMember(i));
+                    analyze(&m.0, positive, path, vars);
+                    path.pop();
+                }
+            }
+            OutputTy::Named(_, inner) => {
+                analyze(&inner.0, positive, path, vars);
+            }
+            // Negation flips polarity, like Lambda param.
+            OutputTy::Neg(inner) => {
+                analyze(&inner.0, !positive, path, vars);
             }
         }
-        OutputTy::Union(members) => {
-            for (i, m) in members.iter().enumerate() {
-                path.push(PathSegment::UnionMember(i));
-                analyze(&m.0, positive, path, vars);
-                path.pop();
-            }
-        }
-        OutputTy::Intersection(members) => {
-            for (i, m) in members.iter().enumerate() {
-                path.push(PathSegment::IntersectionMember(i));
-                analyze(&m.0, positive, path, vars);
-                path.pop();
-            }
-        }
-        OutputTy::Named(_, inner) => {
-            analyze(&inner.0, positive, path, vars);
-        }
-        // Negation flips polarity, like Lambda param.
-        OutputTy::Neg(inner) => {
-            analyze(&inner.0, !positive, path, vars);
-        }
-    }
+    });
 }
 
 // ==============================================================================
@@ -227,7 +230,8 @@ fn apply_simplification(
     substitution: &FxHashMap<u32, u32>,
     removable: &FxHashSet<u32>,
 ) -> OutputTy {
-    match ty {
+    // Guard against stack overflow on deeply nested type trees.
+    stacker::maybe_grow(256 * 1024, 1024 * 1024, || match ty {
         OutputTy::TyVar(v) => {
             let resolved = substitution.get(v).copied().unwrap_or(*v);
             OutputTy::TyVar(resolved)
@@ -344,7 +348,7 @@ fn apply_simplification(
             substitution,
             removable,
         ))),
-    }
+    })
 }
 
 // ==============================================================================

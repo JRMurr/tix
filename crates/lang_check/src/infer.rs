@@ -472,104 +472,108 @@ impl CheckCtx<'_> {
             _ => {}
         }
 
-        // For polymorphic variables and structural concrete types, clone to
-        // release the borrow on storage before calling &mut self methods.
-        let entry = self.types.storage.get(ty_id).clone();
+        // Guard against stack overflow on deeply nested type graphs.
+        stacker::maybe_grow(256 * 1024, 1024 * 1024, || {
+            // For polymorphic variables and structural concrete types, clone to
+            // release the borrow on storage before calling &mut self methods.
+            let entry = self.types.storage.get(ty_id).clone();
 
-        match entry {
-            TypeEntry::Variable(ref v) if v.level >= self.types.storage.current_level => {
-                // This variable was bound at a deeper level — it's polymorphic.
-                // However, if it has been pinned to a concrete type (has the same
-                // concrete type as both a direct lower and upper bound), it was
-                // fully resolved by e.g. overload resolution. Extrude the concrete
-                // type instead of creating a fresh variable, to avoid losing the
-                // resolved type information.
-                if let Some(pinned) = self.types.find_pinned_concrete(v) {
-                    // Insert into cache so deferred overload re-instantiation
-                    // can find this var was extruded.
-                    let concrete_id = self.alloc_concrete(pinned);
-                    let result = self.extrude_inner(concrete_id, polarity, cache);
-                    cache.insert(ty_id, result);
-                    return result;
+            match entry {
+                TypeEntry::Variable(ref v) if v.level >= self.types.storage.current_level => {
+                    // This variable was bound at a deeper level — it's polymorphic.
+                    // However, if it has been pinned to a concrete type (has the same
+                    // concrete type as both a direct lower and upper bound), it was
+                    // fully resolved by e.g. overload resolution. Extrude the concrete
+                    // type instead of creating a fresh variable, to avoid losing the
+                    // resolved type information.
+                    if let Some(pinned) = self.types.find_pinned_concrete(v) {
+                        // Insert into cache so deferred overload re-instantiation
+                        // can find this var was extruded.
+                        let concrete_id = self.alloc_concrete(pinned);
+                        let result = self.extrude_inner(concrete_id, polarity, cache);
+                        cache.insert(ty_id, result);
+                        return result;
+                    }
+
+                    // Truly polymorphic — create a fresh variable at the current level.
+                    let fresh = self.new_var();
+                    cache.insert(ty_id, fresh);
+                    self.link_extruded_var(ty_id, fresh, polarity, v.clone(), cache);
+                    fresh
                 }
-
-                // Truly polymorphic — create a fresh variable at the current level.
-                let fresh = self.new_var();
-                cache.insert(ty_id, fresh);
-                self.link_extruded_var(ty_id, fresh, polarity, v.clone(), cache);
-                fresh
-            }
-            TypeEntry::Variable(_) => {
-                // Non-polymorphic variables are handled by the fast path above.
-                unreachable!()
-            }
-            TypeEntry::Concrete(ty) => {
-                let result = match ty {
-                    Ty::Lambda { param, body } => {
-                        // Insert a placeholder to handle recursive types.
-                        let placeholder = self.new_var();
-                        cache.insert(ty_id, placeholder);
-
-                        let p = self.extrude_inner(param, polarity.flip(), cache); // flip polarity
-                        let b = self.extrude_inner(body, polarity, cache);
-                        let result = self.alloc_concrete(Ty::Lambda { param: p, body: b });
-
-                        // Link placeholder to result.
-                        self.constrain(result, placeholder).expect("extrude link");
-                        self.constrain(placeholder, result).expect("extrude link");
-
-                        result
-                    }
-                    Ty::List(elem) => {
-                        let e = self.extrude_inner(elem, polarity, cache);
-                        self.alloc_concrete(Ty::List(e))
-                    }
-                    Ty::AttrSet(attr) => {
-                        let new_fields = attr
-                            .fields
-                            .iter()
-                            .map(|(k, &v)| (k.clone(), self.extrude_inner(v, polarity, cache)))
-                            .collect();
-                        let new_dyn = attr.dyn_ty.map(|d| self.extrude_inner(d, polarity, cache));
-                        self.alloc_concrete(Ty::AttrSet(AttrSetTy {
-                            fields: new_fields,
-                            dyn_ty: new_dyn,
-                            open: attr.open,
-                            optional_fields: attr.optional_fields.clone(),
-                        }))
-                    }
-                    // Primitives and TyVar are handled by the fast path above.
-                    Ty::Primitive(_) | Ty::TyVar(_) => unreachable!(),
-                    // Negation flips polarity, same as Lambda param.
-                    Ty::Neg(inner) => {
-                        let e = self.extrude_inner(inner, polarity.flip(), cache);
-                        self.alloc_concrete(Ty::Neg(e))
-                    }
-                    // Intersection and Union: covariant — polarity preserved.
-                    // This is what makes narrowing survive generalization:
-                    // Inter(α, ¬T) extrudes to Inter(α', ¬T') where α' is
-                    // the fresh call-site copy.
-                    Ty::Inter(a, b) => {
-                        let ea = self.extrude_inner(a, polarity, cache);
-                        let eb = self.extrude_inner(b, polarity, cache);
-                        self.alloc_concrete(Ty::Inter(ea, eb))
-                    }
-                    Ty::Union(a, b) => {
-                        let ea = self.extrude_inner(a, polarity, cache);
-                        let eb = self.extrude_inner(b, polarity, cache);
-                        self.alloc_concrete(Ty::Union(ea, eb))
-                    }
-                };
-
-                // Propagate alias provenance through extrusion so that
-                // references to aliased types preserve the alias name.
-                if let Some(name) = self.alias_provenance.get(&ty_id).cloned() {
-                    self.alias_provenance.insert(result, name);
+                TypeEntry::Variable(_) => {
+                    // Non-polymorphic variables are handled by the fast path above.
+                    unreachable!()
                 }
+                TypeEntry::Concrete(ty) => {
+                    let result = match ty {
+                        Ty::Lambda { param, body } => {
+                            // Insert a placeholder to handle recursive types.
+                            let placeholder = self.new_var();
+                            cache.insert(ty_id, placeholder);
 
-                result
+                            let p = self.extrude_inner(param, polarity.flip(), cache); // flip polarity
+                            let b = self.extrude_inner(body, polarity, cache);
+                            let result = self.alloc_concrete(Ty::Lambda { param: p, body: b });
+
+                            // Link placeholder to result.
+                            self.constrain(result, placeholder).expect("extrude link");
+                            self.constrain(placeholder, result).expect("extrude link");
+
+                            result
+                        }
+                        Ty::List(elem) => {
+                            let e = self.extrude_inner(elem, polarity, cache);
+                            self.alloc_concrete(Ty::List(e))
+                        }
+                        Ty::AttrSet(attr) => {
+                            let new_fields = attr
+                                .fields
+                                .iter()
+                                .map(|(k, &v)| (k.clone(), self.extrude_inner(v, polarity, cache)))
+                                .collect();
+                            let new_dyn =
+                                attr.dyn_ty.map(|d| self.extrude_inner(d, polarity, cache));
+                            self.alloc_concrete(Ty::AttrSet(AttrSetTy {
+                                fields: new_fields,
+                                dyn_ty: new_dyn,
+                                open: attr.open,
+                                optional_fields: attr.optional_fields.clone(),
+                            }))
+                        }
+                        // Primitives and TyVar are handled by the fast path above.
+                        Ty::Primitive(_) | Ty::TyVar(_) => unreachable!(),
+                        // Negation flips polarity, same as Lambda param.
+                        Ty::Neg(inner) => {
+                            let e = self.extrude_inner(inner, polarity.flip(), cache);
+                            self.alloc_concrete(Ty::Neg(e))
+                        }
+                        // Intersection and Union: covariant — polarity preserved.
+                        // This is what makes narrowing survive generalization:
+                        // Inter(α, ¬T) extrudes to Inter(α', ¬T') where α' is
+                        // the fresh call-site copy.
+                        Ty::Inter(a, b) => {
+                            let ea = self.extrude_inner(a, polarity, cache);
+                            let eb = self.extrude_inner(b, polarity, cache);
+                            self.alloc_concrete(Ty::Inter(ea, eb))
+                        }
+                        Ty::Union(a, b) => {
+                            let ea = self.extrude_inner(a, polarity, cache);
+                            let eb = self.extrude_inner(b, polarity, cache);
+                            self.alloc_concrete(Ty::Union(ea, eb))
+                        }
+                    };
+
+                    // Propagate alias provenance through extrusion so that
+                    // references to aliased types preserve the alias name.
+                    if let Some(name) = self.alias_provenance.get(&ty_id).cloned() {
+                        self.alias_provenance.insert(result, name);
+                    }
+
+                    result
+                }
             }
-        }
+        })
     }
 
     /// Link a freshly extruded variable to the original polymorphic variable.
