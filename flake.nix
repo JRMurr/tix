@@ -91,7 +91,6 @@
             rust-bin = rustAttrs.binary;
             stubs = tix-stubs;
             with-stubs = tix-with-stubs;
-            nixpkgs-src = nixpkgs.outPath;
             inherit tix-code tix-code-dev;
             docs = pkgs.stdenv.mkDerivation {
               name = "tix-docs";
@@ -130,6 +129,12 @@
         }
       )
       // {
+
+        # Exposed as a plain string attribute so scripts can resolve the
+        # pinned nixpkgs source via `nix eval --raw .#nixpkgs-src`.
+        # Kept outside `packages` because it's not a derivation and
+        # `nix flake check` rejects non-derivation package outputs.
+        nixpkgs-src = nixpkgs.outPath;
 
         overlays = {
           # compose with rust-overlay so the nix build wokred
