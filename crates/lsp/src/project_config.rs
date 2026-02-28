@@ -34,6 +34,22 @@ pub struct ProjectConfig {
     #[serde(default)]
     #[allow(dead_code)]
     pub import_deadline: Option<u64>,
+
+    /// Project-wide analysis configuration.
+    #[serde(default)]
+    pub project: Option<ProjectSection>,
+}
+
+/// The `[project]` section of `tix.toml`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ProjectSection {
+    /// Glob patterns for files to analyze in the background when the LSP
+    /// starts. Their inferred types become ephemeral stubs available to all
+    /// open files. Patterns are relative to the tix.toml directory.
+    ///
+    /// Example: `analyze = ["lib/*.nix", "pkgs/**/*.nix"]`
+    #[serde(default)]
+    pub analyze: Vec<String>,
 }
 
 /// A single context definition within `tix.toml`.
@@ -117,4 +133,72 @@ pub fn resolve_context_for_file(
     }
 
     Ok(HashMap::new())
+}
+
+/// Expand the `[project] analyze` glob patterns into concrete file paths.
+///
+/// Patterns are relative to `config_dir` (the directory containing tix.toml).
+/// Returns deduplicated paths. Uses a recursive directory walk + globset
+/// matching (no extra `glob` crate dependency).
+pub fn resolve_analyze_globs(config: &ProjectConfig, config_dir: &Path) -> Vec<PathBuf> {
+    let section = match config.project {
+        Some(ref p) if !p.analyze.is_empty() => p,
+        _ => return Vec::new(),
+    };
+
+    // Build a combined GlobSet from all patterns.
+    let mut builder = globset::GlobSetBuilder::new();
+    for pattern in &section.analyze {
+        match globset::GlobBuilder::new(pattern)
+            .literal_separator(true)
+            .build()
+        {
+            Ok(glob) => {
+                builder.add(glob);
+            }
+            Err(e) => {
+                log::warn!("Invalid analyze glob pattern '{pattern}': {e}");
+            }
+        }
+    }
+    let glob_set = match builder.build() {
+        Ok(gs) => gs,
+        Err(e) => {
+            log::warn!("Failed to build glob set: {e}");
+            return Vec::new();
+        }
+    };
+
+    // Walk the config directory recursively, matching .nix files.
+    let mut paths = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    walk_dir_matching(config_dir, config_dir, &glob_set, &mut seen, &mut paths);
+    paths
+}
+
+/// Recursively walk `dir`, matching files against `glob_set` using paths
+/// relative to `root`.
+fn walk_dir_matching(
+    dir: &Path,
+    root: &Path,
+    glob_set: &globset::GlobSet,
+    seen: &mut std::collections::HashSet<PathBuf>,
+    out: &mut Vec<PathBuf>,
+) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            walk_dir_matching(&path, root, glob_set, seen, out);
+        } else if path.is_file() && path.extension().is_some_and(|e| e == "nix") {
+            let relative = path.strip_prefix(root).unwrap_or(&path);
+            if glob_set.is_match(relative) && seen.insert(path.clone()) {
+                out.push(path);
+            }
+        }
+    }
 }

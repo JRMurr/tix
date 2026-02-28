@@ -619,8 +619,35 @@ impl LanguageServer for TixLanguageServer {
                                 state.deadline_secs = secs;
                             }
 
+                            // Resolve analyze globs before moving config into state.
+                            let analyze_files = crate::project_config::resolve_analyze_globs(
+                                &project_cfg,
+                                &config_dir,
+                            );
+
                             state.project_config = Some(project_cfg);
                             state.config_dir = Some(config_dir);
+                            drop(state); // release lock before file I/O
+
+                            // Queue background analysis for [project] analyze files.
+                            // These are lower priority than user edits — the event loop
+                            // will process them after any pending changes.
+                            if !analyze_files.is_empty() {
+                                log::info!(
+                                    "Queuing {} project files for background analysis",
+                                    analyze_files.len()
+                                );
+                                for file_path in analyze_files {
+                                    if let Ok(text) = std::fs::read_to_string(&file_path) {
+                                        self.event_tx
+                                            .send(AnalysisEvent::FileChanged {
+                                                path: file_path,
+                                                text,
+                                            })
+                                            .ok();
+                                    }
+                                }
+                            }
                         }
                         Err(e) => {
                             log::warn!("Failed to load {}: {e}", config_path.display());

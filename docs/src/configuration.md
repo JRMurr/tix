@@ -60,13 +60,23 @@ You can also set context per-file with a doc comment at the top:
 }
 ```
 
+### Project analysis
+
+The `[project]` section configures background analysis of project files. When the LSP starts, files matching the `analyze` globs are inferred and their types become available as ephemeral stubs to all open files. This gives you cross-file type information without writing `.tix` stub files.
+
+```toml
+[project]
+analyze = ["lib/*.nix", "pkgs/**/*.nix"]
+```
+
+Files are analyzed in the background after initialization. As each file's type is inferred, any open files that import it are automatically re-analyzed with the updated type information.
+
 ### Inference deadline
 
-By default the LSP aborts type inference after 10 seconds per file (5 seconds per imported file) and returns partial results. If you work with large files that need more time, increase the deadlines:
+By default the LSP aborts type inference after 10 seconds per file and returns partial results. If you work with large files that need more time:
 
 ```toml
 deadline = 30          # seconds per top-level file (default: 10)
-import_deadline = 15   # seconds per imported file (default: 5)
 ```
 
 ### No-module escape hatch

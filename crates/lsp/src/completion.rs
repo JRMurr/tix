@@ -2308,6 +2308,7 @@ mod tests {
             context: context_map,
             deadline: None,
             import_deadline: None,
+            project: None,
         });
         state.config_dir = Some(temp_dir.clone());
 
@@ -2356,6 +2357,7 @@ mod tests {
             context: context_map,
             deadline: None,
             import_deadline: None,
+            project: None,
         });
         state.config_dir = Some(temp_dir.clone());
 
@@ -2800,6 +2802,7 @@ mod tests {
             context: context_map,
             deadline: None,
             import_deadline: None,
+            project: None,
         });
         state.config_dir = Some(temp_dir.clone());
 

@@ -180,6 +180,7 @@ impl ContextTestSetup {
             context,
             deadline: None,
             import_deadline: None,
+            project: None,
         });
         state.config_dir = Some(temp_dir.clone());
 
