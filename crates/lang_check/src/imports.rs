@@ -261,6 +261,116 @@ pub struct ImportResolution {
     pub targets: HashMap<ExprId, PathBuf>,
 }
 
+// ==============================================================================
+// Stubs-Based Import Resolution
+// ==============================================================================
+
+/// Resolve import types using ephemeral stubs only (no recursive inference).
+///
+/// For each scanned import target path:
+/// 1. Records navigation targets (for goto-def) regardless of type availability
+/// 2. Looks up type from `ephemeral_stubs` (inferred types of open/analyzed files)
+/// 3. Falls through to ⊤ (no entry in result map → builtin `import :: a -> b`)
+///
+/// Also builds the `import_targets` and `name_to_import` maps for navigation.
+/// This replaces the recursive `resolve_imports()` path: files are inferred
+/// independently, and cross-file types come from stubs or ephemeral stubs.
+pub fn resolve_import_types_from_stubs(
+    module: &Module,
+    name_res: &NameResolution,
+    base_dir: &Path,
+    ephemeral_stubs: &HashMap<PathBuf, OutputTy>,
+) -> ImportResolution {
+    let literal_imports = scan_literal_imports(module, name_res, base_dir);
+    let callpackage_imports = scan_callpackage_imports(module, base_dir);
+
+    // Track which paths are already handled by regular imports so we don't
+    // double-resolve files that appear in both `import ./x` and `callPackage ./x`.
+    let import_paths: HashSet<PathBuf> = literal_imports
+        .iter()
+        .filter_map(|(_, p)| p.canonicalize().ok())
+        .collect();
+
+    let mut types = HashMap::new();
+    let mut errors = Vec::new();
+    let mut targets = HashMap::new();
+
+    // ---- Literal imports ----
+    for (apply_expr_id, target_path) in literal_imports {
+        let target_path = target_path.canonicalize().unwrap_or(target_path);
+
+        let target_path = match resolve_directory_path(target_path.clone()) {
+            Some(p) => p,
+            None => {
+                // Directory exists but has no default.nix — or path not found on disk.
+                // Only emit FileNotFound if the original path doesn't exist at all.
+                if !target_path.exists() {
+                    errors.push(ImportError {
+                        kind: ImportErrorKind::FileNotFound(target_path),
+                        at_expr: apply_expr_id,
+                    });
+                }
+                continue;
+            }
+        };
+
+        // Record navigation targets (Apply, fun/Reference, arg/Literal).
+        if let Expr::Apply { fun, arg } = &module[apply_expr_id] {
+            targets.insert(*fun, target_path.clone());
+            targets.insert(*arg, target_path.clone());
+        }
+        targets.insert(apply_expr_id, target_path.clone());
+
+        // Look up ephemeral stub — if found, use it; otherwise falls through
+        // to the generic `import :: a -> b` builtin type.
+        if let Some(stub_ty) = ephemeral_stubs.get(&target_path) {
+            types.insert(apply_expr_id, stub_ty.clone());
+        }
+    }
+
+    // ---- callPackage imports ----
+    for (outer_apply_id, inner_apply_id, path_literal_id, target_path) in callpackage_imports {
+        let target_path = target_path
+            .canonicalize()
+            .unwrap_or_else(|_| target_path.clone());
+
+        // Skip if a regular import already covers this file.
+        if import_paths.contains(&target_path) {
+            continue;
+        }
+
+        let target_path = match resolve_directory_path(target_path.clone()) {
+            Some(p) => p,
+            None => {
+                if !target_path.exists() {
+                    errors.push(ImportError {
+                        kind: ImportErrorKind::FileNotFound(target_path),
+                        at_expr: outer_apply_id,
+                    });
+                }
+                continue;
+            }
+        };
+
+        // Record navigation targets.
+        targets.insert(path_literal_id, target_path.clone());
+        targets.insert(outer_apply_id, target_path.clone());
+        targets.insert(inner_apply_id, target_path.clone());
+
+        // Look up ephemeral stub.
+        if let Some(stub_ty) = ephemeral_stubs.get(&target_path) {
+            types.insert(inner_apply_id, stub_ty.clone());
+            types.insert(outer_apply_id, extract_return_type(stub_ty));
+        }
+    }
+
+    ImportResolution {
+        types,
+        errors,
+        targets,
+    }
+}
+
 /// Recursively resolve all literal imports and callPackage patterns in a file.
 ///
 /// For each `import <literal-path>` or `callPackage <literal-path> <overrides>`:
