@@ -15,6 +15,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use lang_ast::{AstDb, ExprId, Module, NameResolution, NixFile, StubConfig};
@@ -139,8 +140,15 @@ pub fn file_root_type(db: &dyn AstDb, file: NixFile) -> OutputTy {
     // Resolve imports via recursive Salsa calls.
     let import_types = resolve_import_types_salsa(db, &module, &name_res, file);
 
-    // Run inference with a per-file deadline to prevent unbounded inference.
-    let check = crate::CheckCtx::new(
+    // Per-file deadline: cap at 5s, but also respect the aggregate deadline
+    // from the side-channel (if set). Use whichever is sooner.
+    let per_file = Instant::now() + Duration::from_secs(5);
+    let deadline = match db.import_aggregate_deadline() {
+        Some(agg) => per_file.min(agg),
+        None => per_file,
+    };
+
+    let mut check = crate::CheckCtx::new(
         &module,
         &name_res,
         &indices.binding_expr,
@@ -148,7 +156,11 @@ pub fn file_root_type(db: &dyn AstDb, file: NixFile) -> OutputTy {
         import_types,
         HashMap::new(),
     )
-    .with_deadline(Instant::now() + Duration::from_secs(5));
+    .with_deadline(deadline);
+
+    if let Some(flag) = db.import_cancel_flag() {
+        check = check.with_cancel_flag(flag);
+    }
 
     let (result, _, _) = check.infer_prog_partial(grouped);
 
@@ -191,10 +203,49 @@ fn resolve_import_types_salsa(
     let file_path = file.path(db);
     let base_dir = file_path.parent().unwrap_or(Path::new("/"));
     let mut types = HashMap::new();
+    let mut resolved_count: usize = 0;
+
+    // Read side-channel limits once per call.
+    let aggregate_deadline = db.import_aggregate_deadline();
+    let cancel_flag = db.import_cancel_flag();
+    let max_imports = db.import_max();
+
+    /// Check whether import resolution should stop due to limits.
+    fn check_limits(
+        aggregate_deadline: &Option<Instant>,
+        cancel_flag: &Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+        max_imports: &Option<usize>,
+        resolved_count: usize,
+    ) -> bool {
+        if aggregate_deadline.is_some_and(|d| Instant::now() > d) {
+            log::warn!("salsa import: aggregate deadline exceeded");
+            return true;
+        }
+        if let Some(ref flag) = cancel_flag {
+            if flag.load(Ordering::Relaxed) {
+                log::info!("salsa import: cancelled");
+                return true;
+            }
+        }
+        if max_imports.is_some_and(|cap| resolved_count >= cap) {
+            log::warn!("salsa import: cap ({}) reached", max_imports.unwrap());
+            return true;
+        }
+        false
+    }
 
     // Regular imports: `import ./path.nix`
     let literal_imports = scan_literal_imports(module, name_res, base_dir);
     for (apply_expr_id, target_path) in literal_imports {
+        if check_limits(
+            &aggregate_deadline,
+            &cancel_flag,
+            &max_imports,
+            resolved_count,
+        ) {
+            break;
+        }
+
         let target_path = target_path
             .canonicalize()
             .unwrap_or_else(|_| target_path.clone());
@@ -212,11 +263,21 @@ fn resolve_import_types_salsa(
         let root_ty =
             stacker::maybe_grow(256 * 1024, 1024 * 1024, || file_root_type(db, target_file));
         types.insert(apply_expr_id, root_ty);
+        resolved_count += 1;
     }
 
     // callPackage imports: `callPackage ./path.nix {}`
     let callpackage_imports = scan_callpackage_imports(module, base_dir);
     for (outer_apply_id, inner_apply_id, _path_literal_id, target_path) in callpackage_imports {
+        if check_limits(
+            &aggregate_deadline,
+            &cancel_flag,
+            &max_imports,
+            resolved_count,
+        ) {
+            break;
+        }
+
         let target_path = target_path
             .canonicalize()
             .unwrap_or_else(|_| target_path.clone());
@@ -232,6 +293,7 @@ fn resolve_import_types_salsa(
             stacker::maybe_grow(256 * 1024, 1024 * 1024, || file_root_type(db, target_file));
         types.insert(inner_apply_id, root_ty.clone());
         types.insert(outer_apply_id, extract_return_type(&root_ty));
+        resolved_count += 1;
     }
 
     types

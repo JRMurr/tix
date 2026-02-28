@@ -1,4 +1,7 @@
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
+use std::time::Instant;
 
 use dashmap::DashMap;
 use salsa::{self, Setter};
@@ -48,6 +51,30 @@ pub trait AstDb: salsa::Database {
     /// Retrieve the Salsa-managed stub configuration. Returns `None` until
     /// the LSP or CLI sets it via `RootDatabase::set_stub_config()`.
     fn stub_config(&self) -> Option<StubConfig>;
+
+    // ======================================================================
+    // Side-channel fields for import resolution limits
+    // ======================================================================
+    //
+    // These are NOT Salsa inputs — changing them does not invalidate cached
+    // results. They are read by resolve_import_types_salsa and file_root_type
+    // only on cache misses (actual computation), not on cached hits.
+
+    /// Aggregate deadline for import resolution. When exceeded, remaining
+    /// imports are skipped.
+    fn import_aggregate_deadline(&self) -> Option<Instant> {
+        None
+    }
+
+    /// External cancellation flag for import resolution.
+    fn import_cancel_flag(&self) -> Option<Arc<AtomicBool>> {
+        None
+    }
+
+    /// Maximum number of imports to resolve before stopping.
+    fn import_max(&self) -> Option<usize> {
+        None
+    }
 }
 
 #[derive(Clone)]
@@ -58,6 +85,13 @@ pub struct RootDatabase {
     /// Salsa input for stub configuration. Created by the LSP/CLI at startup.
     /// Just a Copy integer ID internally — no cross-crate type dependency.
     stub_config: Option<StubConfig>,
+
+    // Side-channel fields for import resolution limits. NOT Salsa inputs —
+    // changing them does not invalidate cached results. Set before calling
+    // file_root_type(); read only on cache misses.
+    import_aggregate_deadline: Option<Instant>,
+    import_cancel_flag: Option<Arc<AtomicBool>>,
+    import_max: Option<usize>,
 }
 
 impl Default for RootDatabase {
@@ -66,6 +100,9 @@ impl Default for RootDatabase {
             storage: Default::default(),
             files: Default::default(),
             stub_config: None,
+            import_aggregate_deadline: None,
+            import_cancel_flag: None,
+            import_max: None,
         };
         // Always initialize a default StubConfig so the Salsa-memoized import
         // path (`file_root_type`) is used unconditionally. Without this, test
@@ -96,6 +133,18 @@ impl AstDb for RootDatabase {
 
     fn stub_config(&self) -> Option<StubConfig> {
         self.stub_config
+    }
+
+    fn import_aggregate_deadline(&self) -> Option<Instant> {
+        self.import_aggregate_deadline
+    }
+
+    fn import_cancel_flag(&self) -> Option<Arc<AtomicBool>> {
+        self.import_cancel_flag.clone()
+    }
+
+    fn import_max(&self) -> Option<usize> {
+        self.import_max
     }
 }
 
@@ -136,6 +185,20 @@ impl RootDatabase {
             self.stub_config = Some(config);
             config
         }
+    }
+
+    /// Set side-channel import resolution limits. These are NOT Salsa inputs
+    /// — changing them does not invalidate cached results. Set before calling
+    /// file_root_type(); read by resolve_import_types_salsa on cache misses.
+    pub fn set_import_limits(
+        &mut self,
+        deadline: Option<Instant>,
+        cancel_flag: Option<Arc<AtomicBool>>,
+        max_imports: Option<usize>,
+    ) {
+        self.import_aggregate_deadline = deadline;
+        self.import_cancel_flag = cancel_flag;
+        self.import_max = max_imports;
     }
 
     /// Create or update a NixFile from editor-provided contents (for LSP).
