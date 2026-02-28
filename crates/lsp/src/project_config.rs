@@ -178,6 +178,10 @@ pub fn resolve_analyze_globs(config: &ProjectConfig, config_dir: &Path) -> Vec<P
 
 /// Recursively walk `dir`, matching files against `glob_set` using paths
 /// relative to `root`.
+/// Note: `walk_dir_matching` does not follow directory symlinks recursively
+/// (it uses `read_dir` which lists entries without following symlinks for
+/// directories). This is intentional to avoid potential infinite loops from
+/// circular symlinks.
 fn walk_dir_matching(
     dir: &Path,
     root: &Path,
@@ -200,5 +204,87 @@ fn walk_dir_matching(
                 out.push(path);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config_with_analyze(patterns: Vec<&str>) -> ProjectConfig {
+        ProjectConfig {
+            project: Some(ProjectSection {
+                analyze: patterns.into_iter().map(String::from).collect(),
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn empty_analyze_returns_empty() {
+        let config = ProjectConfig::default();
+        let dir = tempfile::tempdir().unwrap();
+        let result = resolve_analyze_globs(&config, dir.path());
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn single_glob_matches_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib_dir = dir.path().join("lib");
+        std::fs::create_dir(&lib_dir).unwrap();
+        std::fs::write(lib_dir.join("strings.nix"), "42").unwrap();
+        std::fs::write(lib_dir.join("lists.nix"), "42").unwrap();
+        // Non-.nix file should not match.
+        std::fs::write(lib_dir.join("README.md"), "hello").unwrap();
+
+        let config = config_with_analyze(vec!["lib/*.nix"]);
+        let result = resolve_analyze_globs(&config, dir.path());
+        assert_eq!(result.len(), 2, "should match both .nix files");
+    }
+
+    #[test]
+    fn single_glob_does_not_cross_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib_dir = dir.path().join("lib");
+        let sub_dir = lib_dir.join("sub");
+        std::fs::create_dir_all(&sub_dir).unwrap();
+        std::fs::write(lib_dir.join("top.nix"), "42").unwrap();
+        std::fs::write(sub_dir.join("deep.nix"), "42").unwrap();
+
+        // lib/*.nix should NOT match lib/sub/deep.nix.
+        let config = config_with_analyze(vec!["lib/*.nix"]);
+        let result = resolve_analyze_globs(&config, dir.path());
+        assert_eq!(result.len(), 1, "should only match top-level lib/ files");
+        assert!(result[0].ends_with("top.nix"));
+    }
+
+    #[test]
+    fn double_star_matches_deep_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib_dir = dir.path().join("lib");
+        let sub_dir = lib_dir.join("sub");
+        std::fs::create_dir_all(&sub_dir).unwrap();
+        std::fs::write(lib_dir.join("top.nix"), "42").unwrap();
+        std::fs::write(sub_dir.join("deep.nix"), "42").unwrap();
+
+        let config = config_with_analyze(vec!["lib/**/*.nix"]);
+        let result = resolve_analyze_globs(&config, dir.path());
+        assert_eq!(result.len(), 2, "** should match files at any depth");
+    }
+
+    #[test]
+    fn invalid_pattern_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("test.nix"), "42").unwrap();
+
+        // An invalid glob pattern should be skipped (logged as warning),
+        // not crash.
+        let config = config_with_analyze(vec!["[invalid"]);
+        let result = resolve_analyze_globs(&config, dir.path());
+        assert!(
+            result.is_empty(),
+            "invalid pattern should not match anything"
+        );
     }
 }

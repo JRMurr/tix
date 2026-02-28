@@ -28,6 +28,7 @@ globset = { workspace = true }
 [dev-dependencies]
 indoc = "2.0.5"
 proptest = { workspace = true }
+tempfile = "3"
 
 [[bin]]
 name = "tix-lsp"
