@@ -50,7 +50,7 @@ pub trait AstDb: salsa::Database {
     fn stub_config(&self) -> Option<StubConfig>;
 }
 
-#[derive(Default, Clone)]
+#[derive(Clone)]
 #[salsa::db]
 pub struct RootDatabase {
     storage: salsa::Storage<Self>,
@@ -58,6 +58,22 @@ pub struct RootDatabase {
     /// Salsa input for stub configuration. Created by the LSP/CLI at startup.
     /// Just a Copy integer ID internally — no cross-crate type dependency.
     stub_config: Option<StubConfig>,
+}
+
+impl Default for RootDatabase {
+    fn default() -> Self {
+        let mut db = Self {
+            storage: Default::default(),
+            files: Default::default(),
+            stub_config: None,
+        };
+        // Always initialize a default StubConfig so the Salsa-memoized import
+        // path (`file_root_type`) is used unconditionally. Without this, test
+        // databases and freshly created databases fall through to the legacy
+        // manual inference path in resolve_imports().
+        db.set_stub_config(vec![], None, true);
+        db
+    }
 }
 
 #[salsa::db]

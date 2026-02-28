@@ -5,10 +5,23 @@ use crate::{db::NixFile, AstDb};
 
 const DEFAULT_IMPORT_FILE: &str = "default.nix";
 
-#[derive(Default, Clone)]
+#[derive(Clone)]
 #[salsa::db]
 pub struct TestDatabase {
     storage: salsa::Storage<Self>,
+    stub_config: Option<crate::db::StubConfig>,
+}
+
+impl Default for TestDatabase {
+    fn default() -> Self {
+        let mut db = Self {
+            storage: Default::default(),
+            stub_config: None,
+        };
+        let config = crate::db::StubConfig::new(&db, vec![], None, true);
+        db.stub_config = Some(config);
+        db
+    }
 }
 
 #[salsa::db]
@@ -27,7 +40,7 @@ impl AstDb for TestDatabase {
     }
 
     fn stub_config(&self) -> Option<crate::db::StubConfig> {
-        None
+        self.stub_config
     }
 }
 
@@ -56,6 +69,7 @@ impl TestDatabase {
 pub struct MultiFileTestDatabase {
     storage: salsa::Storage<Self>,
     files: HashMap<PathBuf, NixFile>,
+    stub_config: Option<crate::db::StubConfig>,
 }
 
 #[salsa::db]
@@ -73,7 +87,7 @@ impl AstDb for MultiFileTestDatabase {
     }
 
     fn stub_config(&self) -> Option<crate::db::StubConfig> {
-        None
+        self.stub_config
     }
 }
 
@@ -87,7 +101,10 @@ impl MultiFileTestDatabase {
         let mut db = Self {
             storage: Default::default(),
             files: HashMap::new(),
+            stub_config: None,
         };
+        let config = crate::db::StubConfig::new(&db, vec![], None, true);
+        db.stub_config = Some(config);
 
         let mut entry_file = None;
 

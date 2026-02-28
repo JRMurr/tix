@@ -28,8 +28,6 @@ use lang_ast::nameres::ResolveResult;
 use lang_ast::{AstDb, Expr, ExprId, Literal, Module, NameResolution, NixFile};
 use lang_ty::OutputTy;
 
-use crate::aliases::TypeAliasRegistry;
-
 /// Default aggregate deadline for the entire import tree (30 seconds).
 /// Individual files may have their own per-file deadline (import_deadline_secs),
 /// but the aggregate ensures the total wall-clock time for recursively resolving
@@ -282,7 +280,6 @@ pub fn resolve_imports(
     file: NixFile,
     module: &Module,
     name_res: &NameResolution,
-    aliases: &TypeAliasRegistry,
     in_progress: &mut HashSet<PathBuf>,
     cache: &mut HashMap<PathBuf, OutputTy>,
     import_deadline_secs: Option<u64>,
@@ -450,7 +447,6 @@ pub fn resolve_imports(
         }
 
         log::info!("{indent}  {target_name}: loading...");
-        let t_import = Instant::now();
 
         // Load and infer the target file.
         let Some(target_file) = db.load_file(&target_path) else {
@@ -462,157 +458,38 @@ pub fn resolve_imports(
             continue;
         };
 
-        // Two inference paths:
-        //
-        // 1. Salsa path (when StubConfig is configured): Use file_root_type()
-        //    which is Salsa-memoized. Cached results return instantly; only
-        //    files whose contents changed trigger re-inference. Cycles are
-        //    handled by Salsa's cycle_initial recovery.
-        //
-        // 2. Legacy path (CLI, tests without StubConfig): Manual recursive
-        //    inference with in_progress cycle detection and the import cache.
-        let use_salsa = db.stub_config().is_some();
+        // Infer via Salsa-memoized file_root_type. Cached results return
+        // instantly; only files whose contents changed trigger re-inference.
+        // Cycles are handled by Salsa's cycle_result recovery.
+        let t0 = Instant::now();
+        // Grow the stack before recursing into file_root_type — it recurses
+        // through resolve_import_types_salsa for the entire transitive import
+        // graph, which can overflow the default thread stack.
+        let root_ty = stacker::maybe_grow(256 * 1024, 1024 * 1024, || {
+            crate::salsa_imports::file_root_type(db, target_file)
+        });
+        let t_infer = t0.elapsed();
 
-        if use_salsa {
-            let t0 = Instant::now();
-            // Grow the stack before recursing into file_root_type — it recurses
-            // through resolve_import_types_salsa for the entire transitive import
-            // graph, which can overflow the default thread stack.
-            let root_ty = stacker::maybe_grow(256 * 1024, 1024 * 1024, || {
-                crate::salsa_imports::file_root_type(db, target_file)
-            });
-            let t_infer = t0.elapsed();
+        cache.insert(target_path.clone(), root_ty.clone());
 
-            cache.insert(target_path.clone(), root_ty.clone());
-
-            match &kind {
-                ImportKind::Import { apply_expr_id } => {
-                    types.insert(*apply_expr_id, root_ty);
-                }
-                ImportKind::CallPackage {
-                    outer_apply_id,
-                    inner_apply_id,
-                    ..
-                } => {
-                    types.insert(*inner_apply_id, root_ty.clone());
-                    types.insert(*outer_apply_id, extract_return_type(&root_ty));
-                }
+        match &kind {
+            ImportKind::Import { apply_expr_id } => {
+                types.insert(*apply_expr_id, root_ty);
             }
-
-            log::info!(
-                "{indent}  {target_name}: {:.1}ms (salsa memoized)",
-                t_infer.as_secs_f64() * 1000.0,
-            );
-        } else {
-            // Legacy manual inference path.
-            let t0 = Instant::now();
-            let target_module = lang_ast::module(db, target_file);
-            let target_name_res = lang_ast::name_resolution(db, target_file);
-            let target_grouped = lang_ast::group_def(db, target_file);
-            let t_parse = t0.elapsed();
-
-            // Mark as in-progress before recursing to detect cycles.
-            in_progress.insert(target_path.clone());
-
-            // Recursively resolve imports in the target file.
-            let t0 = Instant::now();
-            let target_imports = resolve_imports(
-                db,
-                target_file,
-                &target_module,
-                &target_name_res,
-                aliases,
-                in_progress,
-                cache,
-                import_deadline_secs,
-                Some(aggregate_deadline),
-                cancel_flag,
-            );
-            let t_sub_imports = t0.elapsed();
-
-            in_progress.remove(&target_path);
-
-            // Collect import errors from the target file (propagate diagnostics).
-            errors.extend(target_imports.errors);
-
-            // Infer the target file with its own resolved imports.
-            // Imported files don't get context args — those only apply to the
-            // root file being type-checked (or via per-lambda doc comments).
-            let target_indices = lang_ast::module_indices(db, target_file);
-            let check = crate::CheckCtx::new(
-                &target_module,
-                &target_name_res,
-                &target_indices.binding_expr,
-                aliases.clone(),
-                target_imports.types,
-                std::collections::HashMap::new(),
-            )
-            // Per-import deadline (default 5s, configurable via tix.toml
-            // `import_deadline`). If inference hangs (e.g. due to pathological
-            // constraint propagation), bail out with partial results rather
-            // than blocking the LSP indefinitely.
-            .with_deadline(Instant::now() + Duration::from_secs(import_deadline_secs.unwrap_or(5)));
-
-            log::info!(
-                "{indent}  {target_name}: inferring ({} SCC groups)...",
-                target_grouped.len()
-            );
-            let t0 = Instant::now();
-            let (result, diagnostics, _timed_out) = check.infer_prog_partial(target_grouped);
-
-            let t_infer = t0.elapsed();
-            let has_errors = diagnostics.iter().any(|d| {
-                !matches!(
-                    d.kind,
-                    crate::diagnostic::TixDiagnosticKind::UnresolvedName { .. }
-                        | crate::diagnostic::TixDiagnosticKind::AnnotationArityMismatch { .. }
-                        | crate::diagnostic::TixDiagnosticKind::AnnotationUnchecked { .. }
-                )
-            });
-
-            let root_ty = result
-                .expr_ty_map
-                .get(target_module.entry_expr)
-                .cloned()
-                .unwrap_or(OutputTy::TyVar(0));
-
-            // Always cache the raw file type — even partial/errored results.
-            cache.insert(target_path.clone(), root_ty.clone());
-
-            match &kind {
-                ImportKind::Import { apply_expr_id } => {
-                    types.insert(*apply_expr_id, root_ty);
-                }
-                ImportKind::CallPackage {
-                    outer_apply_id,
-                    inner_apply_id,
-                    ..
-                } => {
-                    types.insert(*inner_apply_id, root_ty.clone());
-                    types.insert(*outer_apply_id, extract_return_type(&root_ty));
-                }
-            }
-
-            if has_errors {
-                let t_total = t_import.elapsed();
-                log::warn!(
-                    "{indent}  {target_name}: inference errors after {:.1}ms (parse {:.1}ms, sub-imports {:.1}ms, infer {:.1}ms)",
-                    t_total.as_secs_f64() * 1000.0,
-                    t_parse.as_secs_f64() * 1000.0,
-                    t_sub_imports.as_secs_f64() * 1000.0,
-                    t_infer.as_secs_f64() * 1000.0,
-                );
-            } else {
-                let t_total = t_import.elapsed();
-                log::info!(
-                    "{indent}  {target_name}: {:.1}ms (parse {:.1}ms, sub-imports {:.1}ms, infer {:.1}ms)",
-                    t_total.as_secs_f64() * 1000.0,
-                    t_parse.as_secs_f64() * 1000.0,
-                    t_sub_imports.as_secs_f64() * 1000.0,
-                    t_infer.as_secs_f64() * 1000.0,
-                );
+            ImportKind::CallPackage {
+                outer_apply_id,
+                inner_apply_id,
+                ..
+            } => {
+                types.insert(*inner_apply_id, root_ty.clone());
+                types.insert(*outer_apply_id, extract_return_type(&root_ty));
             }
         }
+
+        log::info!(
+            "{indent}  {target_name}: {:.1}ms (salsa memoized)",
+            t_infer.as_secs_f64() * 1000.0,
+        );
     }
 
     ImportResolution {

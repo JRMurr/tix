@@ -322,7 +322,6 @@ fn run_check(
         file,
         &module,
         &name_res,
-        &registry,
         &mut in_progress,
         &mut cache,
         None,
