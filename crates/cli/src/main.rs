@@ -72,6 +72,24 @@ enum Command {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
+
+    /// Verify that a .tix stub matches the inferred type of a Nix file
+    VerifyStubs {
+        /// Path to the Nix file to verify
+        file_path: PathBuf,
+
+        /// Path to the .tix stub file to verify against
+        #[arg(long = "stub")]
+        stub_path: PathBuf,
+
+        /// Additional stub paths or directories for import resolution
+        #[arg(long = "stubs", value_name = "PATH")]
+        extra_stubs: Vec<PathBuf>,
+
+        /// Do not load the built-in nixpkgs stubs
+        #[arg(long)]
+        no_default_stubs: bool,
+    },
 }
 
 /// Shared CLI arguments for all gen-stubs subcommands.
@@ -173,6 +191,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             no_default_stubs,
             output,
         }) => run_gen_stub(file_path, stub_paths, no_default_stubs, output),
+        Some(Command::VerifyStubs {
+            file_path,
+            stub_path,
+            extra_stubs,
+            no_default_stubs,
+        }) => run_verify_stubs(file_path, stub_path, extra_stubs, no_default_stubs),
         None => {
             let file_path = args.file_path.ok_or(
                 "No file path provided. Usage: tix-cli <file.nix> or tix-cli gen-stubs <source>",
@@ -302,6 +326,265 @@ fn run_gen_stub(
     }
 
     Ok(())
+}
+
+// =============================================================================
+// verify-stubs: check that a .tix stub matches the inferred type
+// =============================================================================
+
+fn run_verify_stubs(
+    file_path: PathBuf,
+    stub_path: PathBuf,
+    extra_stubs: Vec<PathBuf>,
+    no_default_stubs: bool,
+) -> Result<(), Box<dyn Error>> {
+    // Load stubs (including the one being verified).
+    let mut registry = if no_default_stubs {
+        TypeAliasRegistry::new()
+    } else {
+        TypeAliasRegistry::with_builtins()
+    };
+
+    if let Ok(dir) = std::env::var("TIX_BUILTIN_STUBS") {
+        registry.set_builtin_stubs_dir(PathBuf::from(dir));
+    }
+
+    for sp in &extra_stubs {
+        load_stubs(&mut registry, sp)?;
+    }
+    load_stubs(&mut registry, &stub_path)?;
+
+    if let Err(cycles) = registry.validate() {
+        eprintln!("Error: cyclic type aliases detected: {:?}", cycles);
+        std::process::exit(1);
+    }
+
+    // Parse the stub file to get declared val types.
+    let stub_source = std::fs::read_to_string(&stub_path)?;
+    let stub_file = comment_parser::parse_tix_file(&stub_source)
+        .map_err(|e| format!("Error parsing {}: {e}", stub_path.display()))?;
+
+    let val_decls: Vec<_> = stub_file
+        .declarations
+        .iter()
+        .filter_map(|d| match d {
+            comment_parser::TixDeclaration::ValDecl { name, ty, .. } => Some((name, ty)),
+            _ => None,
+        })
+        .collect();
+
+    if val_decls.is_empty() {
+        eprintln!(
+            "Warning: {} contains no val declarations to verify",
+            stub_path.display()
+        );
+        return Ok(());
+    }
+
+    // Infer the Nix file.
+    let db: RootDatabase = Default::default();
+    let file = db.read_file(file_path.clone())?;
+
+    let module = lang_ast::module(&db, file);
+    let name_res = lang_ast::name_resolution(&db, file);
+    let base_dir = file_path.parent().unwrap_or(std::path::Path::new("/"));
+
+    let import_resolution =
+        resolve_import_types_from_stubs(&module, &name_res, base_dir, &HashMap::new());
+
+    let result = lang_check::check_file_collecting(
+        &db,
+        file,
+        &registry,
+        import_resolution.types,
+        HashMap::new(),
+    );
+
+    let root_ty = result
+        .inference
+        .as_ref()
+        .and_then(|inf| inf.expr_ty_map.get(module.entry_expr))
+        .cloned()
+        .ok_or("Failed to infer root type for file")?;
+
+    // Compare each declared val against the inferred root type.
+    // For a typical single-file stub with one val, this checks the root type.
+    let mut mismatches = Vec::new();
+
+    for (name, declared_ty) in &val_decls {
+        let declared_output = parsed_ty_to_output_ty_simple(declared_ty, &registry);
+        compare_types(
+            &root_ty,
+            &declared_output,
+            &format!("val {name}"),
+            &mut mismatches,
+        );
+    }
+
+    if mismatches.is_empty() {
+        println!(
+            "OK: {} matches {}",
+            file_path.display(),
+            stub_path.display()
+        );
+    } else {
+        eprintln!(
+            "MISMATCH: {} vs {}\n",
+            file_path.display(),
+            stub_path.display()
+        );
+        for msg in &mismatches {
+            eprintln!("  {msg}");
+        }
+        std::process::exit(1);
+    }
+
+    Ok(())
+}
+
+/// Convert a `ParsedTy` to `OutputTy` for comparison, resolving type aliases.
+fn parsed_ty_to_output_ty_simple(
+    ty: &comment_parser::ParsedTy,
+    registry: &TypeAliasRegistry,
+) -> OutputTy {
+    use comment_parser::{ParsedTy, TypeVarValue};
+    match ty {
+        ParsedTy::Primitive(p) => OutputTy::Primitive(*p),
+        ParsedTy::TyVar(TypeVarValue::Reference(name)) => {
+            if let Some(alias_body) = registry.get(name) {
+                let inner = parsed_ty_to_output_ty_simple(alias_body, registry);
+                OutputTy::Named(name.clone(), lang_ty::TyRef::from(inner))
+            } else {
+                OutputTy::TyVar(0) // unresolved
+            }
+        }
+        ParsedTy::TyVar(TypeVarValue::Generic(_)) => OutputTy::TyVar(0),
+        ParsedTy::List(inner) => OutputTy::List(lang_ty::TyRef::from(
+            parsed_ty_to_output_ty_simple(&inner.0, registry),
+        )),
+        ParsedTy::Lambda { param, body } => OutputTy::Lambda {
+            param: lang_ty::TyRef::from(parsed_ty_to_output_ty_simple(&param.0, registry)),
+            body: lang_ty::TyRef::from(parsed_ty_to_output_ty_simple(&body.0, registry)),
+        },
+        ParsedTy::AttrSet(attr) => {
+            let fields = attr
+                .fields
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        lang_ty::TyRef::from(parsed_ty_to_output_ty_simple(&v.0, registry)),
+                    )
+                })
+                .collect();
+            let dyn_ty = attr
+                .dyn_ty
+                .as_ref()
+                .map(|d| lang_ty::TyRef::from(parsed_ty_to_output_ty_simple(&d.0, registry)));
+            OutputTy::AttrSet(lang_ty::AttrSetTy {
+                fields,
+                dyn_ty,
+                open: attr.open,
+                optional_fields: attr.optional_fields.clone(),
+            })
+        }
+        ParsedTy::Union(members) => OutputTy::Union(
+            members
+                .iter()
+                .map(|m| lang_ty::TyRef::from(parsed_ty_to_output_ty_simple(&m.0, registry)))
+                .collect(),
+        ),
+        ParsedTy::Intersection(members) => OutputTy::Intersection(
+            members
+                .iter()
+                .map(|m| lang_ty::TyRef::from(parsed_ty_to_output_ty_simple(&m.0, registry)))
+                .collect(),
+        ),
+        ParsedTy::Top => OutputTy::Top,
+        ParsedTy::Bottom => OutputTy::Bottom,
+    }
+}
+
+/// Structural comparison of inferred vs declared types. Reports mismatches
+/// as human-readable strings. This is a best-effort check — it catches
+/// missing fields, type kind mismatches, and primitive type mismatches.
+/// Type variables in the stub are treated as wildcards (match anything).
+fn compare_types(
+    inferred: &OutputTy,
+    declared: &OutputTy,
+    path: &str,
+    mismatches: &mut Vec<String>,
+) {
+    // Type variables in the declared type are wildcards — any inferred type matches.
+    if matches!(declared, OutputTy::TyVar(_) | OutputTy::Top) {
+        return;
+    }
+
+    match (inferred, declared) {
+        // Attrset comparison: check that all declared fields exist with compatible types.
+        (OutputTy::AttrSet(inf_attr), OutputTy::AttrSet(decl_attr)) => {
+            for (field_name, decl_field_ty) in &decl_attr.fields {
+                match inf_attr.fields.get(field_name) {
+                    Some(inf_field_ty) => {
+                        compare_types(
+                            &inf_field_ty.0,
+                            &decl_field_ty.0,
+                            &format!("{path}.{field_name}"),
+                            mismatches,
+                        );
+                    }
+                    None => {
+                        mismatches.push(format!(
+                            "{path}: stub declares field `{field_name}` but implementation doesn't export it"
+                        ));
+                    }
+                }
+            }
+        }
+
+        // Lambda comparison: check param and body.
+        (
+            OutputTy::Lambda {
+                param: inf_p,
+                body: inf_b,
+            },
+            OutputTy::Lambda {
+                param: decl_p,
+                body: decl_b,
+            },
+        ) => {
+            compare_types(&inf_p.0, &decl_p.0, &format!("{path} (param)"), mismatches);
+            compare_types(&inf_b.0, &decl_b.0, &format!("{path} (return)"), mismatches);
+        }
+
+        // List comparison.
+        (OutputTy::List(inf_inner), OutputTy::List(decl_inner)) => {
+            compare_types(
+                &inf_inner.0,
+                &decl_inner.0,
+                &format!("{path} (list element)"),
+                mismatches,
+            );
+        }
+
+        // Primitive exact match.
+        (OutputTy::Primitive(a), OutputTy::Primitive(b)) if a == b => {}
+
+        // Named types: unwrap and compare inner.
+        (OutputTy::Named(_, inf_inner), _) => {
+            compare_types(&inf_inner.0, declared, path, mismatches);
+        }
+        (_, OutputTy::Named(_, decl_inner)) => {
+            compare_types(inferred, &decl_inner.0, path, mismatches);
+        }
+
+        // Type kind mismatch.
+        _ => {
+            mismatches.push(format!(
+                "{path}: stub declares `{declared}` but implementation infers `{inferred}`"
+            ));
+        }
+    }
 }
 
 // =============================================================================

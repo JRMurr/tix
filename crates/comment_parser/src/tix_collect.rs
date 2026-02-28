@@ -341,6 +341,7 @@ fn collect_attrset(pairs: Pairs<Rule>, ctx: &mut CollectCtx) -> Result<ParsedTy,
     let mut fields: BTreeMap<SmolStr, ParsedTyRef> = BTreeMap::new();
     let mut dyn_ty: Option<ParsedTyRef> = None;
     let mut open = false;
+    let mut optional_fields = std::collections::BTreeSet::new();
 
     let parent_path = ctx.path().to_vec();
 
@@ -362,6 +363,15 @@ fn collect_attrset(pairs: Pairs<Rule>, ctx: &mut CollectCtx) -> Result<ParsedTy,
                     }
                     _ => name_pair.as_str().into(),
                 };
+
+                // Check for optional_marker (`?` after the field name).
+                if inner
+                    .peek()
+                    .is_some_and(|p| p.as_rule() == Rule::optional_marker)
+                {
+                    inner.next(); // consume the `?`
+                    optional_fields.insert(name.clone());
+                }
 
                 // If this field has a doc comment, record it.
                 if let Some(doc) = field_doc {
@@ -403,7 +413,7 @@ fn collect_attrset(pairs: Pairs<Rule>, ctx: &mut CollectCtx) -> Result<ParsedTy,
         fields,
         dyn_ty,
         open,
-        optional_fields: std::collections::BTreeSet::new(),
+        optional_fields,
     }))
 }
 

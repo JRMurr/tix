@@ -228,6 +228,7 @@ fn collect_attrset(pairs: Pairs<Rule>) -> Result<ParsedTy, CollectError> {
     let mut fields: BTreeMap<SmolStr, ParsedTyRef> = BTreeMap::new();
     let mut dyn_ty: Option<ParsedTyRef> = None;
     let mut open = false;
+    let mut optional_fields = std::collections::BTreeSet::new();
 
     for pair in pairs {
         match pair.as_rule() {
@@ -238,6 +239,14 @@ fn collect_attrset(pairs: Pairs<Rule>) -> Result<ParsedTy, CollectError> {
                     .ok_or_else(|| CollectError::new("named_field missing field name"))?
                     .as_str()
                     .into();
+                // Check for optional_marker (`?`).
+                if inner
+                    .peek()
+                    .is_some_and(|p| p.as_rule() == Rule::optional_marker)
+                {
+                    inner.next(); // consume the `?`
+                    optional_fields.insert(name.clone());
+                }
                 let ty = collect_type_expr(inner)?
                     .ok_or_else(|| CollectError::new(format!("field '{name}' has empty type")))?;
                 fields.insert(name, ty.into());
@@ -266,7 +275,7 @@ fn collect_attrset(pairs: Pairs<Rule>) -> Result<ParsedTy, CollectError> {
         fields,
         dyn_ty,
         open,
-        optional_fields: std::collections::BTreeSet::new(),
+        optional_fields,
     }))
 }
 

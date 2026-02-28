@@ -51,7 +51,8 @@ attrset_inner = _{
   | dyn_field ~ ("," ~ open_marker)? ~ ","?
   | named_field ~ ("," ~ named_field)* ~ ("," ~ (dyn_field ~ ("," ~ open_marker)? | open_marker))? ~ ","?
 }
-named_field = { doc_block? ~ field_name ~ ":" ~ type_expr }
+named_field = { doc_block? ~ field_name ~ optional_marker? ~ ":" ~ type_expr }
+optional_marker = { "?" }
 field_name = _{ quoted_field | identifier }
 // Quoted identifiers for field names containing dots or other special characters
 // (e.g. NixOS sysctl keys like "net.core.rmem_max").

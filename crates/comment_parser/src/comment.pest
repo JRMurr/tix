@@ -67,7 +67,8 @@ attrset_inner = _{
   | dyn_field ~ ("," ~ open_marker)? ~ ","?
   | named_field ~ ("," ~ named_field)* ~ ("," ~ (dyn_field ~ ("," ~ open_marker)? | open_marker))? ~ ","?
 }
-named_field = { identifier ~ ":" ~ type_expr }
+named_field = { identifier ~ optional_marker? ~ ":" ~ type_expr }
+optional_marker = { "?" }
 dyn_field = { "_" ~ ":" ~ type_expr }
 open_marker = { "..." }
 
