@@ -1000,9 +1000,11 @@ mod tests {
 
     #[test]
     fn cyclic_import_degrades_gracefully() {
-        // Create two files that import each other. Salsa's cycle recovery
-        // returns OutputTy::TyVar(0) rather than producing a diagnostic —
-        // the important thing is that inference completes without panicking.
+        // Create two files that import each other. With the stubs-based
+        // import model, neither file has an ephemeral stub for the other,
+        // so both imports resolve to ⊤ (unconstrained type variable).
+        // No Salsa cycle recovery is involved — the stubs-based model
+        // doesn't use Salsa for cross-file inference.
         let project = crate::test_util::TempProject::new(&[
             ("a.nix", "import ./b.nix"),
             ("b.nix", "import ./a.nix"),
@@ -1013,7 +1015,7 @@ mod tests {
         let (analysis, _timing) = state.update_file(a_path.clone(), "import ./b.nix".to_string());
 
         // Inference should complete without panic — cyclic imports degrade
-        // gracefully to type variables via Salsa cycle recovery.
+        // gracefully because neither file has stubs for the other.
         assert!(
             analysis.check_result.inference.is_some(),
             "inference should produce results even with cyclic imports"
@@ -1066,6 +1068,96 @@ mod tests {
         assert!(
             analysis.check_result.timed_out,
             "should be marked as timed out when cancel flag is pre-set"
+        );
+    }
+
+    // =========================================================================
+    // Ephemeral stub and dependency tracking tests
+    // =========================================================================
+
+    #[test]
+    fn record_import_deps_basic() {
+        let mut state = AnalysisState::new(TypeAliasRegistry::default());
+        let a = PathBuf::from("/a.nix");
+        let b = PathBuf::from("/b.nix");
+        let c = PathBuf::from("/c.nix");
+
+        state.record_import_deps(&a, &[b.clone(), c.clone()]);
+
+        let b_deps = state.get_dependents(&b);
+        let c_deps = state.get_dependents(&c);
+        assert!(b_deps.contains(&a), "B's dependents should contain A");
+        assert!(c_deps.contains(&a), "C's dependents should contain A");
+    }
+
+    #[test]
+    fn record_import_deps_replaces_old() {
+        let mut state = AnalysisState::new(TypeAliasRegistry::default());
+        let a = PathBuf::from("/a.nix");
+        let b = PathBuf::from("/b.nix");
+        let c = PathBuf::from("/c.nix");
+
+        // A initially imports B.
+        state.record_import_deps(&a, &[b.clone()]);
+        assert!(
+            state.get_dependents(&b).contains(&a),
+            "B should list A as dependent"
+        );
+
+        // A's imports change to C only.
+        state.record_import_deps(&a, &[c.clone()]);
+        assert!(
+            !state.get_dependents(&b).contains(&a),
+            "B should no longer list A after deps replaced"
+        );
+        assert!(
+            state.get_dependents(&c).contains(&a),
+            "C should now list A as dependent"
+        );
+    }
+
+    #[test]
+    fn update_ephemeral_stub_returns_changed() {
+        let mut state = AnalysisState::new(TypeAliasRegistry::default());
+        let path = PathBuf::from("/test.nix");
+        let ty_int = OutputTy::Primitive(lang_ty::PrimitiveTy::Int);
+        let ty_string = OutputTy::Primitive(lang_ty::PrimitiveTy::String);
+
+        // First insertion: new type, should return true.
+        assert!(
+            state.update_ephemeral_stub(&path, ty_int.clone()),
+            "first insert should report changed"
+        );
+
+        // Same type again: should return false.
+        assert!(
+            !state.update_ephemeral_stub(&path, ty_int.clone()),
+            "same type should report unchanged"
+        );
+
+        // Different type: should return true.
+        assert!(
+            state.update_ephemeral_stub(&path, ty_string),
+            "different type should report changed"
+        );
+    }
+
+    #[test]
+    fn remove_ephemeral_stub_returns_dependents() {
+        let mut state = AnalysisState::new(TypeAliasRegistry::default());
+        let a = PathBuf::from("/a.nix");
+        let b = PathBuf::from("/b.nix");
+        let ty_int = OutputTy::Primitive(lang_ty::PrimitiveTy::Int);
+
+        // A imports B, B has an ephemeral stub.
+        state.record_import_deps(&a, &[b.clone()]);
+        state.update_ephemeral_stub(&b, ty_int);
+
+        // Removing B's stub should return A as a dependent.
+        let dependents = state.remove_ephemeral_stub(&b);
+        assert!(
+            dependents.contains(&a),
+            "removing B's stub should return A as dependent"
         );
     }
 }

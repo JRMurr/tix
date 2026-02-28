@@ -166,7 +166,7 @@ impl TypeAliasRegistry {
                         self.docs.insert_decl_doc(name.clone(), doc.clone());
                     }
                 }
-                TixDeclaration::ValDecl { name, ty, doc } => {
+                TixDeclaration::ValDecl { name, ty, doc, .. } => {
                     match val_target {
                         ValTarget::GlobalVals => {
                             self.global_vals.insert(name.clone(), ty.clone());

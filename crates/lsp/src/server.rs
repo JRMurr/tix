@@ -20,7 +20,7 @@
 // deadline mechanism). This avoids blocking the editor while waiting for a
 // 10-second timeout on a stale version of the file.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -83,6 +83,10 @@ pub struct TixLanguageServer {
     /// InferenceData after type inference completes. Handlers read from
     /// this without ever locking the analysis mutex.
     snapshots: Arc<DashMap<PathBuf, FileSnapshot>>,
+    /// Queue for background analysis files from `[project] analyze` globs.
+    /// Processed one-at-a-time during idle periods (no pending user events),
+    /// ensuring user edits always take priority.
+    background_queue: Arc<Mutex<VecDeque<(PathBuf, String)>>>,
 }
 
 impl TixLanguageServer {
@@ -99,6 +103,7 @@ impl TixLanguageServer {
         let pending_text = Arc::new(Mutex::new(HashMap::new()));
         let cancel_flag = Arc::new(AtomicBool::new(false));
         let snapshots = Arc::new(DashMap::new());
+        let background_queue = Arc::new(Mutex::new(VecDeque::new()));
 
         // Spawn the analysis loop eagerly. diagnostics_enabled defaults to
         // true; if the editor sends a different config via initializationOptions
@@ -111,6 +116,7 @@ impl TixLanguageServer {
             pending_text.clone(),
             cancel_flag.clone(),
             snapshots.clone(),
+            background_queue.clone(),
             true, // diagnostics default on
         );
 
@@ -124,6 +130,7 @@ impl TixLanguageServer {
             cancel_flag,
             pending_text,
             snapshots,
+            background_queue,
         }
     }
 
@@ -234,6 +241,7 @@ fn spawn_analysis_loop(
     pending_text: Arc<Mutex<HashMap<PathBuf, String>>>,
     cancel_flag: Arc<AtomicBool>,
     _snapshots: Arc<DashMap<PathBuf, FileSnapshot>>,
+    background_queue: Arc<Mutex<VecDeque<(PathBuf, String)>>>,
     diagnostics_enabled: bool,
 ) {
     tokio::spawn(async move {
@@ -308,6 +316,8 @@ fn spawn_analysis_loop(
                     };
                     if let Some(text) = text {
                         changes.insert(path, text);
+                    } else {
+                        log::debug!("ReanalyzeFile for {:?}: file not in DB, skipping", path);
                     }
                 }
             }
@@ -331,6 +341,8 @@ fn spawn_analysis_loop(
                         };
                         if let Some(text) = text {
                             changes.insert(path, text);
+                        } else {
+                            log::debug!("ReanalyzeFile for {:?}: file not in DB, skipping", path);
                         }
                     }
                 }
@@ -348,8 +360,16 @@ fn spawn_analysis_loop(
                 }
             }
 
+            // If no user-driven changes are pending, check the background
+            // queue for project analyze files. Process one at a time so user
+            // edits always take priority.
             if changes.is_empty() {
-                continue;
+                if let Some((path, text)) = background_queue.lock().pop_front() {
+                    log::debug!("background analysis: {}", path.display());
+                    changes.insert(path, text);
+                } else {
+                    continue;
+                }
             }
 
             // ── Phase 3: Analyze each changed file ──
@@ -630,21 +650,18 @@ impl LanguageServer for TixLanguageServer {
                             drop(state); // release lock before file I/O
 
                             // Queue background analysis for [project] analyze files.
-                            // These are lower priority than user edits — the event loop
-                            // will process them after any pending changes.
+                            // These go into a separate low-priority queue — the analysis
+                            // loop processes them one-at-a-time only when no user events
+                            // are pending, ensuring user edits always take priority.
                             if !analyze_files.is_empty() {
                                 log::info!(
                                     "Queuing {} project files for background analysis",
                                     analyze_files.len()
                                 );
+                                let mut bg = self.background_queue.lock();
                                 for file_path in analyze_files {
                                     if let Ok(text) = std::fs::read_to_string(&file_path) {
-                                        self.event_tx
-                                            .send(AnalysisEvent::FileChanged {
-                                                path: file_path,
-                                                text,
-                                            })
-                                            .ok();
+                                        bg.push_back((file_path, text));
                                     }
                                 }
                             }

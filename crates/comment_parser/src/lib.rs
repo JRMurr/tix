@@ -181,6 +181,9 @@ pub enum TixDeclaration {
         name: SmolStr,
         ty: ParsedTy,
         doc: Option<SmolStr>,
+        /// Byte span `(start, end)` of the val declaration in the source file.
+        /// Used for source-annotated diagnostics in verify-stubs.
+        span: (usize, usize),
     },
     Module {
         name: SmolStr,

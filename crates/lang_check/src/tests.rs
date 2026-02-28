@@ -1462,15 +1462,19 @@ mod import_tests {
     }
 
     // Cyclic import: A → B → A should degrade gracefully.
-    // Salsa's cycle recovery returns OutputTy::TyVar(0) for cycles, so
-    // no explicit CyclicImport error is produced — the type just degrades
-    // to a free variable.
+    //
+    // With the stubs-based import model, cyclic imports don't trigger Salsa
+    // cycle recovery — neither file has an ephemeral stub for the other, so
+    // both imports resolve to ⊤ (unconstrained type variable). This is the
+    // correct behavior: the import simply gets no type information rather
+    // than causing an error.
     #[test]
     fn import_cyclic() {
         let (ty, _errors) =
             get_multifile_result(&[("/a.nix", "import /b.nix"), ("/b.nix", "import /a.nix")]);
-        // The type degrades to a free variable since the cycle can't be resolved.
-        // As long as inference didn't panic, the test passes.
+        // Both files lack ephemeral stubs for each other, so imports resolve
+        // to unconstrained type variables. The important thing is that
+        // inference completes without panicking.
         assert!(
             matches!(ty, OutputTy::TyVar(_)),
             "cyclic import should degrade to TyVar, got: {ty}"

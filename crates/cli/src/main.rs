@@ -196,7 +196,39 @@ fn main() -> Result<(), Box<dyn Error>> {
             stub_path,
             extra_stubs,
             no_default_stubs,
-        }) => run_verify_stubs(file_path, stub_path, extra_stubs, no_default_stubs),
+        }) => {
+            let mismatches = run_verify_stubs(
+                file_path.clone(),
+                stub_path.clone(),
+                extra_stubs,
+                no_default_stubs,
+            )?;
+            if mismatches.is_empty() {
+                println!(
+                    "OK: {} matches {}",
+                    file_path.display(),
+                    stub_path.display()
+                );
+            } else {
+                for mismatch in &mismatches {
+                    let report = miette::Report::new_boxed(Box::new(
+                        miette::MietteDiagnostic::new(format!(
+                            "type mismatch for `{}`",
+                            mismatch.val_name
+                        ))
+                        .with_labels(vec![miette::LabeledSpan::at(
+                            mismatch.span,
+                            "declared here",
+                        )])
+                        .with_help(format!("inferred type: {}", mismatch.inferred)),
+                    ))
+                    .with_source_code(mismatch.src.clone());
+                    eprintln!("{:?}", report);
+                }
+                std::process::exit(1);
+            }
+            Ok(())
+        }
         None => {
             let file_path = args.file_path.ok_or(
                 "No file path provided. Usage: tix-cli <file.nix> or tix-cli gen-stubs <source>",
@@ -261,7 +293,7 @@ fn run_gen_stub(
     let db: RootDatabase = Default::default();
     let file = db.read_file(file_path.clone())?;
 
-    let module = lang_ast::module(&db, file);
+    let (module, _source_map) = lang_ast::module_and_source_maps(&db, file);
     let name_res = lang_ast::name_resolution(&db, file);
     let base_dir = file_path.parent().unwrap_or(std::path::Path::new("/"));
 
@@ -316,28 +348,66 @@ fn run_gen_stub(
 // verify-stubs: check that a .tix stub matches the inferred type
 // =============================================================================
 
+/// A single type mismatch between a val declaration and inferred type.
+/// Fields are used to build miette diagnostics in the VerifyStubs command handler.
+#[derive(Debug)]
+struct VerifyMismatch {
+    val_name: String,
+    inferred: String,
+    src: NamedSource<String>,
+    span: miette::SourceSpan,
+}
+
+/// Errors from verify-stubs that prevent verification from running.
+#[derive(Debug, thiserror::Error)]
+enum VerifyStubsError {
+    #[error("reading {path}: {source}")]
+    Io {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+
+    #[error("parsing stub {path}: {message}")]
+    StubParse { path: PathBuf, message: String },
+
+    #[error("building registry: {0}")]
+    Registry(String),
+
+    #[error("inference failed: no root type for {path}")]
+    NoRootType { path: PathBuf },
+}
+
 fn run_verify_stubs(
     file_path: PathBuf,
     stub_path: PathBuf,
     extra_stubs: Vec<PathBuf>,
     no_default_stubs: bool,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<Vec<VerifyMismatch>, VerifyStubsError> {
     // Load stubs (including the one being verified). We append stub_path
     // to the extra stubs so build_registry loads everything in one pass.
     let mut all_stubs = extra_stubs;
     all_stubs.push(stub_path.clone());
-    let registry = build_registry(no_default_stubs, &all_stubs)?;
+    let registry = build_registry(no_default_stubs, &all_stubs)
+        .map_err(|e| VerifyStubsError::Registry(e.to_string()))?;
 
     // Parse the stub file to get declared val types.
-    let stub_source = std::fs::read_to_string(&stub_path)?;
-    let stub_file = comment_parser::parse_tix_file(&stub_source)
-        .map_err(|e| format!("Error parsing {}: {e}", stub_path.display()))?;
+    let stub_source = std::fs::read_to_string(&stub_path).map_err(|e| VerifyStubsError::Io {
+        path: stub_path.clone(),
+        source: e,
+    })?;
+    let stub_file =
+        comment_parser::parse_tix_file(&stub_source).map_err(|e| VerifyStubsError::StubParse {
+            path: stub_path.clone(),
+            message: e.to_string(),
+        })?;
 
     let val_decls: Vec<_> = stub_file
         .declarations
         .iter()
         .filter_map(|d| match d {
-            comment_parser::TixDeclaration::ValDecl { name, ty, .. } => Some((name, ty)),
+            comment_parser::TixDeclaration::ValDecl { name, ty, span, .. } => {
+                Some((name, ty, span))
+            }
             _ => None,
         })
         .collect();
@@ -347,14 +417,19 @@ fn run_verify_stubs(
             "Warning: {} contains no val declarations to verify",
             stub_path.display()
         );
-        return Ok(());
+        return Ok(vec![]);
     }
 
     // Infer the Nix file.
     let db: RootDatabase = Default::default();
-    let file = db.read_file(file_path.clone())?;
+    let file = db
+        .read_file(file_path.clone())
+        .map_err(|e| VerifyStubsError::Io {
+            path: file_path.clone(),
+            source: e,
+        })?;
 
-    let module = lang_ast::module(&db, file);
+    let (module, _source_map) = lang_ast::module_and_source_maps(&db, file);
     let name_res = lang_ast::name_resolution(&db, file);
     let base_dir = file_path.parent().unwrap_or(std::path::Path::new("/"));
 
@@ -374,41 +449,35 @@ fn run_verify_stubs(
         .as_ref()
         .and_then(|inf| inf.expr_ty_map.get(module.entry_expr))
         .cloned()
-        .ok_or("Failed to infer root type for file")?;
+        .ok_or(VerifyStubsError::NoRootType {
+            path: file_path.clone(),
+        })?;
 
     // Compare each declared val against the inferred root type.
     // For a typical single-file stub with one val, this checks the root type.
+    let stub_filename = stub_path.display().to_string();
     let mut mismatches = Vec::new();
 
-    for (name, declared_ty) in &val_decls {
+    for (name, declared_ty, &(span_start, span_end)) in &val_decls {
         let declared_output = parsed_ty_to_output_ty(declared_ty, &registry, 0);
+        let mut diffs = Vec::new();
         compare_types(
             &root_ty,
             &declared_output,
             &format!("val {name}"),
-            &mut mismatches,
+            &mut diffs,
         );
-    }
-
-    if mismatches.is_empty() {
-        println!(
-            "OK: {} matches {}",
-            file_path.display(),
-            stub_path.display()
-        );
-    } else {
-        eprintln!(
-            "MISMATCH: {} vs {}\n",
-            file_path.display(),
-            stub_path.display()
-        );
-        for msg in &mismatches {
-            eprintln!("  {msg}");
+        if !diffs.is_empty() {
+            mismatches.push(VerifyMismatch {
+                val_name: name.to_string(),
+                inferred: format!("{root_ty}"),
+                src: NamedSource::new(stub_filename.clone(), stub_source.clone()),
+                span: (span_start, span_end - span_start).into(),
+            });
         }
-        std::process::exit(1);
     }
 
-    Ok(())
+    Ok(mismatches)
 }
 
 use lang_check::aliases::parsed_ty_to_output_ty;
@@ -1029,16 +1098,49 @@ mod tests {
         std::fs::write(&nix_path, "42").expect("write nix file");
         std::fs::write(&stub_path, "val test :: int;\n").expect("write stub file");
 
-        let result = run_verify_stubs(nix_path, stub_path, vec![], false);
+        let mismatches = run_verify_stubs(nix_path, stub_path, vec![], false)
+            .expect("verify-stubs should succeed");
         assert!(
-            result.is_ok(),
-            "verify-stubs should pass for correct stub: {:?}",
-            result.err()
+            mismatches.is_empty(),
+            "correct stub should have no mismatches, got: {:?}",
+            mismatches.iter().map(|m| &m.val_name).collect::<Vec<_>>()
         );
     }
 
-    // NOTE: verify_stubs_detects_mismatch is not tested here because
-    // run_verify_stubs calls std::process::exit(1) on mismatch, which
-    // kills the test runner. Testing mismatch detection would require
-    // either refactoring the exit logic or using a subprocess test.
+    #[test]
+    fn verify_stubs_detects_mismatch() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let nix_path = dir.path().join("test.nix");
+        let stub_path = dir.path().join("test.tix");
+
+        // File produces an int, but stub declares string.
+        std::fs::write(&nix_path, "42").expect("write nix file");
+        std::fs::write(&stub_path, "val test :: string;\n").expect("write stub file");
+
+        let mismatches = run_verify_stubs(nix_path, stub_path, vec![], false)
+            .expect("verify-stubs should succeed (mismatches are in the Ok path)");
+        assert!(
+            !mismatches.is_empty(),
+            "mismatched stub should produce at least one mismatch"
+        );
+        assert_eq!(mismatches[0].val_name, "test");
+    }
+
+    #[test]
+    fn verify_stubs_no_val_decls() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let nix_path = dir.path().join("test.nix");
+        let stub_path = dir.path().join("test.tix");
+
+        // Stub with only a type alias, no val declarations.
+        std::fs::write(&nix_path, "42").expect("write nix file");
+        std::fs::write(&stub_path, "type Foo = int;\n").expect("write stub file");
+
+        let mismatches = run_verify_stubs(nix_path, stub_path, vec![], false)
+            .expect("verify-stubs should succeed with no val decls");
+        assert!(
+            mismatches.is_empty(),
+            "no val decls means no mismatches to report"
+        );
+    }
 }

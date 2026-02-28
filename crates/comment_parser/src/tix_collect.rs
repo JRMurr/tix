@@ -113,6 +113,8 @@ fn collect_tix_file_inner(
                 declarations.push(TixDeclaration::TypeAlias { name, body, doc });
             }
             Rule::val_decl => {
+                let pair_span = pair.as_span();
+                let span = (pair_span.start(), pair_span.end());
                 let mut inner = pair.into_inner();
                 let doc = take_doc_block(&mut inner);
                 let name: SmolStr = inner
@@ -123,7 +125,12 @@ fn collect_tix_file_inner(
                 let ty = collect_type_expr(inner, ctx)?.ok_or_else(|| {
                     CollectError::new(format!("val declaration '{name}' has empty type"))
                 })?;
-                declarations.push(TixDeclaration::ValDecl { name, ty, doc });
+                declarations.push(TixDeclaration::ValDecl {
+                    name,
+                    ty,
+                    doc,
+                    span,
+                });
             }
             Rule::module_decl => {
                 let mut inner = pair.into_inner();
@@ -444,7 +451,7 @@ mod tests {
 
         assert_eq!(file.declarations.len(), 1);
         match &file.declarations[0] {
-            crate::TixDeclaration::ValDecl { name, ty, doc } => {
+            crate::TixDeclaration::ValDecl { name, ty, doc, .. } => {
                 assert_eq!(name.as_str(), "mkDerivation");
                 assert_eq!(
                     *ty,

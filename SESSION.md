@@ -369,29 +369,11 @@ Nix code sizes (hundreds of bindings per file, not millions):
   (`completion.rs:281-283`): `find_name_type_by_text()` returns first match when
   source_map fails, which may be wrong with shadowing.
 
-- **No tests for ephemeral stub propagation and re-analysis triggering**:
-  The dependency tracking (`record_import_deps`, `update_ephemeral_stub`,
-  `remove_ephemeral_stub`, `get_dependents`) and re-analysis scheduling in
-  `server.rs` have no unit tests. Key scenarios: A imports B and B's type
-  changes → A re-analyzed; A imports B and B is closed → A re-analyzed; chain
-  A→B→C, C changes → both A and B re-analyzed. Requires mocking the Salsa DB.
-
-- **Cyclic import test no longer tests cycle detection** (`tests.rs:1461-1474`):
-  `import_cyclic` was changed from asserting a `CyclicImport` error to checking
-  the type is `TyVar`. With stubs-based model, cyclic imports don't go through
-  cycle detection — both files have no ephemeral stubs so they both get ⊤.
-
-- **`ReanalyzeFile` silently drops files with no text** (`server.rs:298-312`):
-  If the Salsa DB entry doesn't exist, re-analyze is silently dropped. Consider
-  logging when a `ReanalyzeFile` finds no text.
-
-- **Background analysis files have no priority mechanism** (`server.rs:618-636`):
-  `[project] analyze` files are queued as `FileChanged` events with no lower
-  priority than user edits. A large analyze set could delay initial responsiveness.
-
-- **verify-stubs calls `process::exit(1)` on mismatch**: This prevents in-process
-  testing of the mismatch case. Refactoring to return a Result with the mismatch
-  list would enable proper test coverage.
+- **No tests for chain re-analysis (A→B→C)**: The dependency tracking
+  methods (`record_import_deps`, `update_ephemeral_stub`, etc.) now have unit
+  tests for the basic scenarios. However, transitive chain re-analysis (C changes
+  → both A and B re-analyzed) isn't tested because it requires the full analysis
+  loop in `server.rs`, which is async and harder to test in isolation.
 
 ### Doc Comment Collection Panics (collect.rs) — RESOLVED
 
