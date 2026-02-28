@@ -29,6 +29,12 @@ globset = { workspace = true }
 indoc = "2.0.5"
 proptest = { workspace = true }
 tempfile = "3"
+futures = "0.3"
+tower = { version = "0.4", features = ["util"] }
+
+[lib]
+name = "tix_lsp"
+path = "src/lib.rs"
 
 [[bin]]
 name = "tix-lsp"

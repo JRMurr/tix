@@ -1,14 +1,6 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
-
-use lang_ast::Expr;
-use rowan::ast::AstNode;
-use tower_lsp::lsp_types::Url;
-
-use crate::project_config::{ContextConfig, ProjectConfig};
-use crate::state::{AnalysisState, FileAnalysis, FileSnapshot};
-use lang_check::aliases::{DocIndex, TypeAliasRegistry};
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -99,6 +91,25 @@ impl TempProject {
     pub fn path(&self, name: &str) -> PathBuf {
         self.dir.join(name).canonicalize().expect("canonicalize")
     }
+
+    /// Canonical root directory path (resolves symlinks).
+    pub fn root_dir(&self) -> PathBuf {
+        self.dir.canonicalize().unwrap_or_else(|_| self.dir.clone())
+    }
+
+    /// Write (or overwrite) a file within the project directory.
+    pub fn write_file(&self, name: &str, contents: &str) {
+        let path = self.dir.join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&path, contents).unwrap();
+    }
+
+    /// Read a file's contents from the project directory.
+    pub fn read_file(&self, name: &str) -> String {
+        std::fs::read_to_string(self.path(name)).expect("read temp file")
+    }
 }
 
 impl Drop for TempProject {
@@ -107,184 +118,209 @@ impl Drop for TempProject {
     }
 }
 
-/// Single-file analysis setup for LSP tests.
-///
-/// Encapsulates the common pattern of creating a temp file, initializing
-/// `AnalysisState`, parsing, and providing access to `FileAnalysis`.
-pub struct TestAnalysis {
-    pub state: AnalysisState,
-    pub path: PathBuf,
-    pub root: rnix::Root,
-}
-
-impl TestAnalysis {
-    pub fn new(src: &str) -> Self {
-        Self::with_registry(src, TypeAliasRegistry::default())
-    }
-
-    pub fn with_registry(src: &str, registry: TypeAliasRegistry) -> Self {
-        let path = temp_path("test.nix");
-        let mut state = AnalysisState::new(registry);
-        state.update_file(path.clone(), src.to_string());
-        let root = state.get_file(&path).unwrap().parsed.tree();
-        Self { state, path, root }
-    }
-
-    pub fn analysis(&self) -> &FileAnalysis {
-        self.state.get_file(&self.path).unwrap()
-    }
-
-    pub fn snapshot(&self) -> FileSnapshot {
-        self.analysis().to_snapshot()
-    }
-
-    pub fn uri(&self) -> Url {
-        Url::from_file_path(&self.path).unwrap()
-    }
-}
-
-/// Test setup with context stubs (`.tix` declarations) injected via ProjectConfig.
-///
-/// Used by both completion and hover tests that need NixOS module context.
-/// Creates a temp directory with the stubs file, configures a ProjectConfig
-/// that matches all `.nix` files, runs analysis, and cleans up on drop.
-pub struct ContextTestSetup {
-    pub state: AnalysisState,
-    pub nix_path: PathBuf,
-    temp_dir: PathBuf,
-}
-
-impl ContextTestSetup {
-    pub fn new(src: &str, context_stubs: &str) -> Self {
-        let temp_dir = temp_path("ctx");
-        std::fs::create_dir_all(&temp_dir).unwrap();
-
-        // Write context stubs to a file in the temp directory.
-        let stubs_path = temp_dir.join("test_context.tix");
-        std::fs::write(&stubs_path, context_stubs).unwrap();
-
-        let nix_path = temp_dir.join("test.nix");
-        let mut state = AnalysisState::new(TypeAliasRegistry::default());
-
-        // Configure project context: all .nix files get our test context stubs.
-        let mut context = std::collections::HashMap::new();
-        context.insert(
-            "test".to_string(),
-            ContextConfig {
-                paths: vec!["*.nix".to_string()],
-                stubs: vec!["test_context.tix".to_string()],
-            },
-        );
-        state.project_config = Some(ProjectConfig {
-            stubs: vec![],
-            context,
-            deadline: None,
-            import_deadline: None,
-            project: None,
-        });
-        state.config_dir = Some(temp_dir.clone());
-
-        state.update_file(nix_path.clone(), src.to_string());
-
-        Self {
-            state,
-            nix_path,
-            temp_dir,
-        }
-    }
-
-    pub fn analysis(&self) -> &FileAnalysis {
-        self.state.get_file(&self.nix_path).unwrap()
-    }
-
-    pub fn snapshot(&self) -> FileSnapshot {
-        self.analysis().to_snapshot()
-    }
-
-    pub fn docs(&self) -> &DocIndex {
-        &self.state.registry.docs
-    }
-
-    pub fn root(&self) -> rnix::Root {
-        self.analysis().parsed.tree()
-    }
-}
-
-impl Drop for ContextTestSetup {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.temp_dir);
-    }
-}
-
 // ==============================================================================
-// Position enumeration for PBT
+// Unit-test-only helpers (depend on #[cfg(test)] APIs in state.rs)
 // ==============================================================================
 
-/// Categories of cursor positions that exercise different LSP code paths.
-#[derive(Debug, Clone)]
-pub enum InterestingPosition {
-    /// On a name binding (let x = ..., { x ? default, ... }: ..., etc.)
-    NameBinding { byte_offset: u32 },
-    /// On a name reference (a variable use site)
-    NameReference { byte_offset: u32 },
-    /// On an expression node (any mapped expression)
-    Expression { byte_offset: u32 },
-}
+// Re-export internal types for unit tests. Placed before the module definition
+// to satisfy clippy::items_after_test_module.
+#[cfg(test)]
+pub use internal::*;
 
-impl InterestingPosition {
-    pub fn byte_offset(&self) -> u32 {
-        match self {
-            Self::NameBinding { byte_offset }
-            | Self::NameReference { byte_offset }
-            | Self::Expression { byte_offset } => *byte_offset,
+#[cfg(test)]
+mod internal {
+    use std::collections::HashSet;
+    use std::path::PathBuf;
+
+    use lang_ast::Expr;
+    use rowan::ast::AstNode;
+    use tower_lsp::lsp_types::Url;
+
+    use crate::project_config::{ContextConfig, ProjectConfig};
+    use crate::state::{AnalysisState, FileAnalysis, FileSnapshot};
+    use lang_check::aliases::{DocIndex, TypeAliasRegistry};
+
+    use super::temp_path;
+
+    /// Single-file analysis setup for LSP tests.
+    ///
+    /// Encapsulates the common pattern of creating a temp file, initializing
+    /// `AnalysisState`, parsing, and providing access to `FileAnalysis`.
+    pub struct TestAnalysis {
+        pub state: AnalysisState,
+        pub path: PathBuf,
+        pub root: rnix::Root,
+    }
+
+    impl TestAnalysis {
+        pub fn new(src: &str) -> Self {
+            Self::with_registry(src, TypeAliasRegistry::default())
+        }
+
+        pub fn with_registry(src: &str, registry: TypeAliasRegistry) -> Self {
+            let path = temp_path("test.nix");
+            let mut state = AnalysisState::new(registry);
+            state.update_file(path.clone(), src.to_string());
+            let root = state.get_file(&path).unwrap().parsed.tree();
+            Self { state, path, root }
+        }
+
+        pub fn analysis(&self) -> &FileAnalysis {
+            self.state.get_file(&self.path).unwrap()
+        }
+
+        pub fn snapshot(&self) -> FileSnapshot {
+            self.analysis().to_snapshot()
+        }
+
+        pub fn uri(&self) -> Url {
+            Url::from_file_path(&self.path).unwrap()
         }
     }
-}
 
-/// Extract all interesting cursor positions from an analyzed file.
-///
-/// Walks the module's names and expressions via the source map to collect
-/// positions that would exercise different LSP code paths (hover, goto-def,
-/// completion, etc.). Deduplicates by byte offset.
-pub fn interesting_positions(
-    analysis: &FileAnalysis,
-    root: &rnix::Root,
-) -> Vec<InterestingPosition> {
-    let mut seen = HashSet::new();
-    let mut positions = Vec::new();
+    /// Test setup with context stubs (`.tix` declarations) injected via ProjectConfig.
+    ///
+    /// Used by both completion and hover tests that need NixOS module context.
+    /// Creates a temp directory with the stubs file, configures a ProjectConfig
+    /// that matches all `.nix` files, runs analysis, and cleans up on drop.
+    pub struct ContextTestSetup {
+        pub state: AnalysisState,
+        pub nix_path: PathBuf,
+        temp_dir: PathBuf,
+    }
 
-    // Name bindings: let-bound names, lambda params, pattern fields, etc.
-    for (name_id, _name) in analysis.module.names() {
-        if let Some(ptr) = analysis.source_map.nodes_for_name(name_id).next() {
-            let offset = ptr.to_node(root.syntax()).text_range().start();
-            let offset = u32::from(offset);
-            if seen.insert(offset) {
-                positions.push(InterestingPosition::NameBinding {
-                    byte_offset: offset,
-                });
+    impl ContextTestSetup {
+        pub fn new(src: &str, context_stubs: &str) -> Self {
+            let temp_dir = temp_path("ctx");
+            std::fs::create_dir_all(&temp_dir).unwrap();
+
+            // Write context stubs to a file in the temp directory.
+            let stubs_path = temp_dir.join("test_context.tix");
+            std::fs::write(&stubs_path, context_stubs).unwrap();
+
+            let nix_path = temp_dir.join("test.nix");
+            let mut state = AnalysisState::new(TypeAliasRegistry::default());
+
+            // Configure project context: all .nix files get our test context stubs.
+            let mut context = std::collections::HashMap::new();
+            context.insert(
+                "test".to_string(),
+                ContextConfig {
+                    paths: vec!["*.nix".to_string()],
+                    stubs: vec!["test_context.tix".to_string()],
+                },
+            );
+            state.project_config = Some(ProjectConfig {
+                stubs: vec![],
+                context,
+                deadline: None,
+                import_deadline: None,
+                project: None,
+            });
+            state.config_dir = Some(temp_dir.clone());
+
+            state.update_file(nix_path.clone(), src.to_string());
+
+            Self {
+                state,
+                nix_path,
+                temp_dir,
+            }
+        }
+
+        pub fn analysis(&self) -> &FileAnalysis {
+            self.state.get_file(&self.nix_path).unwrap()
+        }
+
+        pub fn snapshot(&self) -> FileSnapshot {
+            self.analysis().to_snapshot()
+        }
+
+        pub fn docs(&self) -> &DocIndex {
+            &self.state.registry.docs
+        }
+
+        pub fn root(&self) -> rnix::Root {
+            self.analysis().parsed.tree()
+        }
+    }
+
+    impl Drop for ContextTestSetup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.temp_dir);
+        }
+    }
+
+    // ==============================================================================
+    // Position enumeration for PBT
+    // ==============================================================================
+
+    /// Categories of cursor positions that exercise different LSP code paths.
+    #[derive(Debug, Clone)]
+    pub enum InterestingPosition {
+        /// On a name binding (let x = ..., { x ? default, ... }: ..., etc.)
+        NameBinding { byte_offset: u32 },
+        /// On a name reference (a variable use site)
+        NameReference { byte_offset: u32 },
+        /// On an expression node (any mapped expression)
+        Expression { byte_offset: u32 },
+    }
+
+    impl InterestingPosition {
+        pub fn byte_offset(&self) -> u32 {
+            match self {
+                Self::NameBinding { byte_offset }
+                | Self::NameReference { byte_offset }
+                | Self::Expression { byte_offset } => *byte_offset,
             }
         }
     }
 
-    // Expressions: references go into NameReference, everything else into Expression.
-    for (expr_id, expr) in analysis.module.exprs() {
-        if let Some(ptr) = analysis.source_map.node_for_expr(expr_id) {
-            let offset = ptr.to_node(root.syntax()).text_range().start();
-            let offset = u32::from(offset);
-            if !seen.insert(offset) {
-                continue;
-            }
-            if matches!(expr, Expr::Reference(_)) {
-                positions.push(InterestingPosition::NameReference {
-                    byte_offset: offset,
-                });
-            } else {
-                positions.push(InterestingPosition::Expression {
-                    byte_offset: offset,
-                });
+    /// Extract all interesting cursor positions from an analyzed file.
+    ///
+    /// Walks the module's names and expressions via the source map to collect
+    /// positions that would exercise different LSP code paths (hover, goto-def,
+    /// completion, etc.). Deduplicates by byte offset.
+    pub fn interesting_positions(
+        analysis: &FileAnalysis,
+        root: &rnix::Root,
+    ) -> Vec<InterestingPosition> {
+        let mut seen = HashSet::new();
+        let mut positions = Vec::new();
+
+        // Name bindings: let-bound names, lambda params, pattern fields, etc.
+        for (name_id, _name) in analysis.module.names() {
+            if let Some(ptr) = analysis.source_map.nodes_for_name(name_id).next() {
+                let offset = ptr.to_node(root.syntax()).text_range().start();
+                let offset = u32::from(offset);
+                if seen.insert(offset) {
+                    positions.push(InterestingPosition::NameBinding {
+                        byte_offset: offset,
+                    });
+                }
             }
         }
-    }
 
-    positions
+        // Expressions: references go into NameReference, everything else into Expression.
+        for (expr_id, expr) in analysis.module.exprs() {
+            if let Some(ptr) = analysis.source_map.node_for_expr(expr_id) {
+                let offset = ptr.to_node(root.syntax()).text_range().start();
+                let offset = u32::from(offset);
+                if !seen.insert(offset) {
+                    continue;
+                }
+                if matches!(expr, Expr::Reference(_)) {
+                    positions.push(InterestingPosition::NameReference {
+                        byte_offset: offset,
+                    });
+                } else {
+                    positions.push(InterestingPosition::Expression {
+                        byte_offset: offset,
+                    });
+                }
+            }
+        }
+
+        positions
+    }
 }
