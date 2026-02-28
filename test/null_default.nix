@@ -81,6 +81,8 @@ let
 
     in
     "${main_cmd}";
+
+  # foo = bubblewrap_helper { };
 in
 {
   inherit bubblewrap_helper;

@@ -912,6 +912,7 @@ dependencies = [
  "miette",
  "petgraph",
  "proptest",
+ "rayon",
  "rnix",
  "rustc-hash 2.1.0",
  "salsa",
