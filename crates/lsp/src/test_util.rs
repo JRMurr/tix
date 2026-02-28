@@ -69,9 +69,13 @@ pub fn parse_markers(src: &str) -> BTreeMap<u32, u32> {
 /// A temporary directory with Nix files for multi-file LSP tests.
 ///
 /// Files are written as `(relative_name, contents)` pairs. The directory
-/// and all its contents are cleaned up on drop.
+/// and all its contents are cleaned up on drop — unless `owned` is false
+/// (see [`TempProject::from_existing`]).
 pub struct TempProject {
     dir: PathBuf,
+    /// When false, `Drop` won't delete the directory. Used by `from_existing`
+    /// to wrap directories we don't own (e.g. nixpkgs in the nix store).
+    owned: bool,
 }
 
 impl TempProject {
@@ -85,7 +89,15 @@ impl TempProject {
             }
             std::fs::write(&path, contents).expect("write temp file");
         }
-        TempProject { dir }
+        TempProject { dir, owned: true }
+    }
+
+    /// Wrap an existing directory without taking ownership.
+    ///
+    /// The directory will NOT be deleted on drop — use this for directories
+    /// we don't own (e.g. nixpkgs from the nix store).
+    pub fn from_existing(dir: PathBuf) -> Self {
+        TempProject { dir, owned: false }
     }
 
     pub fn path(&self, name: &str) -> PathBuf {
@@ -114,7 +126,9 @@ impl TempProject {
 
 impl Drop for TempProject {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.dir);
+        if self.owned {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
     }
 }
 

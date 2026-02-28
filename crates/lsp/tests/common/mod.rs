@@ -26,6 +26,8 @@ use tower_lsp::jsonrpc::{Request, Response};
 use tower_lsp::lsp_types::*;
 use tower_lsp::LspService;
 
+use std::path::PathBuf;
+
 use tix_lsp::convert::LineIndex;
 use tix_lsp::server::TixLanguageServer;
 use tix_lsp::test_util::{parse_markers, TempProject};
@@ -105,6 +107,51 @@ impl LspTestHarness {
         harness
     }
 
+    /// Create a harness rooted at an existing directory (e.g. nixpkgs lib/).
+    ///
+    /// Loads built-in stubs so lib type annotations are available. The
+    /// directory is NOT deleted on drop — we don't own it.
+    pub async fn with_root(root: PathBuf) -> Self {
+        let workspace = TempProject::from_existing(root);
+        let root_dir = workspace.root_dir();
+        let root_uri = Url::from_file_path(&root_dir).unwrap();
+
+        let registry = TypeAliasRegistry::with_builtins();
+
+        let (service, client_socket) =
+            LspService::new(|client| TixLanguageServer::new(client, registry, vec![], false));
+
+        let (notif_tx, notif_rx) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            let mut stream = client_socket;
+            while let Some(msg) = stream.next().await {
+                let _ = notif_tx.send(msg);
+            }
+        });
+
+        let mut harness = LspTestHarness {
+            service,
+            notif_rx,
+            next_id: AtomicI64::new(1),
+            workspace,
+        };
+
+        let init_request = Request::build("initialize")
+            .params(json!({
+                "capabilities": {},
+                "rootUri": root_uri.as_str(),
+            }))
+            .id(harness.next_id())
+            .finish();
+
+        harness.send_request(init_request).await;
+
+        let initialized = Request::build("initialized").params(json!({})).finish();
+        harness.send_notification(initialized).await;
+
+        harness
+    }
+
     fn next_id(&self) -> i64 {
         self.next_id.fetch_add(1, Ordering::Relaxed)
     }
@@ -128,6 +175,25 @@ impl LspTestHarness {
     // ==========================================================================
     // Document lifecycle
     // ==========================================================================
+
+    /// Open a file by absolute path (for use with `from_existing` workspaces).
+    pub async fn open_abs(&mut self, abs_path: &std::path::Path) {
+        let uri = Url::from_file_path(abs_path).unwrap();
+        let text = std::fs::read_to_string(abs_path).expect("read file for didOpen");
+
+        let notif = Request::build("textDocument/didOpen")
+            .params(json!({
+                "textDocument": {
+                    "uri": uri.as_str(),
+                    "languageId": "nix",
+                    "version": 1,
+                    "text": text,
+                }
+            }))
+            .finish();
+
+        self.send_notification(notif).await;
+    }
 
     /// Open a file (reads content from the TempProject on disk).
     pub async fn open(&mut self, name: &str) {
@@ -183,6 +249,52 @@ impl LspTestHarness {
     // ==========================================================================
     // LSP requests
     // ==========================================================================
+
+    /// Hover at a position in a file given by absolute path.
+    pub async fn hover_abs(
+        &mut self,
+        abs_path: &std::path::Path,
+        line: u32,
+        character: u32,
+    ) -> Option<Hover> {
+        let uri = Url::from_file_path(abs_path).unwrap();
+
+        let req = Request::build("textDocument/hover")
+            .params(json!({
+                "textDocument": { "uri": uri.as_str() },
+                "position": { "line": line, "character": character }
+            }))
+            .id(self.next_id())
+            .finish();
+
+        let resp = self.send_request(req).await?;
+        let (_id, result) = resp.into_parts();
+        let value = result.ok()?;
+        serde_json::from_value::<Hover>(value).ok()
+    }
+
+    /// Completions at a position in a file given by absolute path.
+    pub async fn complete_abs(
+        &mut self,
+        abs_path: &std::path::Path,
+        line: u32,
+        character: u32,
+    ) -> Option<CompletionResponse> {
+        let uri = Url::from_file_path(abs_path).unwrap();
+
+        let req = Request::build("textDocument/completion")
+            .params(json!({
+                "textDocument": { "uri": uri.as_str() },
+                "position": { "line": line, "character": character }
+            }))
+            .id(self.next_id())
+            .finish();
+
+        let resp = self.send_request(req).await?;
+        let (_id, result) = resp.into_parts();
+        let value = result.ok()?;
+        serde_json::from_value::<CompletionResponse>(value).ok()
+    }
 
     /// Hover at a given line/character position.
     pub async fn hover(&mut self, name: &str, line: u32, character: u32) -> Option<Hover> {
@@ -254,6 +366,37 @@ impl LspTestHarness {
     // ==========================================================================
     // Diagnostics
     // ==========================================================================
+
+    /// Wait for `publishDiagnostics` for a file given by absolute path.
+    pub async fn wait_for_diagnostics_abs(
+        &mut self,
+        abs_path: &std::path::Path,
+        timeout: Duration,
+    ) -> Option<PublishDiagnosticsParams> {
+        let expected_uri = Url::from_file_path(abs_path).unwrap();
+
+        let deadline = tokio::time::Instant::now() + timeout;
+
+        loop {
+            match tokio::time::timeout_at(deadline, self.notif_rx.recv()).await {
+                Ok(Some(msg)) => {
+                    if msg.method() == "textDocument/publishDiagnostics" {
+                        if let Some(params) = msg.params() {
+                            if let Ok(diag_params) =
+                                serde_json::from_value::<PublishDiagnosticsParams>(params.clone())
+                            {
+                                if diag_params.uri == expected_uri {
+                                    return Some(diag_params);
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(None) => return None,
+                Err(_) => return None,
+            }
+        }
+    }
 
     /// Wait for a `publishDiagnostics` notification for the given file.
     /// Skips non-matching notifications (e.g. `window/logMessage`, diagnostics
