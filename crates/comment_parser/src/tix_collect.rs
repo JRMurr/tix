@@ -790,4 +790,128 @@ mod tests {
         let msg = err.to_string();
         assert!(!msg.is_empty(), "error message should not be empty");
     }
+
+    // =========================================================================
+    // any/never keyword tests
+    // =========================================================================
+
+    #[test]
+    fn any_keyword_parses_to_top() {
+        let file = parse_tix_file("val f :: any -> int;").expect("parse error");
+        match &file.declarations[0] {
+            crate::TixDeclaration::ValDecl { ty, .. } => match ty {
+                crate::ParsedTy::Lambda { param, .. } => {
+                    assert_eq!(*param.0, crate::ParsedTy::Top);
+                }
+                other => panic!("expected Lambda, got: {other:?}"),
+            },
+            other => panic!("expected ValDecl, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn never_keyword_parses_to_bottom() {
+        let file = parse_tix_file("val f :: int -> never;").expect("parse error");
+        match &file.declarations[0] {
+            crate::TixDeclaration::ValDecl { ty, .. } => match ty {
+                crate::ParsedTy::Lambda { body, .. } => {
+                    assert_eq!(*body.0, crate::ParsedTy::Bottom);
+                }
+                other => panic!("expected Lambda, got: {other:?}"),
+            },
+            other => panic!("expected ValDecl, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn any_in_union_position() {
+        let file = parse_tix_file("type T = int | any;").expect("parse error");
+        match &file.declarations[0] {
+            crate::TixDeclaration::TypeAlias { body, .. } => match body {
+                crate::ParsedTy::Union(members) => {
+                    assert!(
+                        members.iter().any(|m| *m.0 == crate::ParsedTy::Top),
+                        "union should contain Top (any)"
+                    );
+                }
+                other => panic!("expected Union, got: {other:?}"),
+            },
+            other => panic!("expected TypeAlias, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn any_in_intersection_position() {
+        let file = parse_tix_file("type T = int & any;").expect("parse error");
+        match &file.declarations[0] {
+            crate::TixDeclaration::TypeAlias { body, .. } => match body {
+                crate::ParsedTy::Intersection(members) => {
+                    assert!(
+                        members.iter().any(|m| *m.0 == crate::ParsedTy::Top),
+                        "intersection should contain Top (any)"
+                    );
+                }
+                other => panic!("expected Intersection, got: {other:?}"),
+            },
+            other => panic!("expected TypeAlias, got: {other:?}"),
+        }
+    }
+
+    // =========================================================================
+    // Optional field syntax tests
+    // =========================================================================
+
+    #[test]
+    fn optional_field_basic() {
+        let file = parse_tix_file("type T = { x?: int };").expect("parse error");
+        match &file.declarations[0] {
+            crate::TixDeclaration::TypeAlias { body, .. } => match body {
+                crate::ParsedTy::AttrSet(attr) => {
+                    assert!(attr.fields.contains_key("x"), "should have field 'x'");
+                    assert!(
+                        attr.optional_fields.contains("x"),
+                        "field 'x' should be optional"
+                    );
+                }
+                other => panic!("expected AttrSet, got: {other:?}"),
+            },
+            other => panic!("expected TypeAlias, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mixed_optional_and_required_fields() {
+        let file = parse_tix_file("type T = { x?: int, y: string };").expect("parse error");
+        match &file.declarations[0] {
+            crate::TixDeclaration::TypeAlias { body, .. } => match body {
+                crate::ParsedTy::AttrSet(attr) => {
+                    assert!(attr.fields.contains_key("x"));
+                    assert!(attr.fields.contains_key("y"));
+                    assert!(attr.optional_fields.contains("x"), "x should be optional");
+                    assert!(!attr.optional_fields.contains("y"), "y should be required");
+                }
+                other => panic!("expected AttrSet, got: {other:?}"),
+            },
+            other => panic!("expected TypeAlias, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn optional_field_with_any_type() {
+        let file = parse_tix_file("type T = { x?: any };").expect("parse error");
+        match &file.declarations[0] {
+            crate::TixDeclaration::TypeAlias { body, .. } => match body {
+                crate::ParsedTy::AttrSet(attr) => {
+                    assert!(attr.optional_fields.contains("x"));
+                    assert_eq!(
+                        *attr.fields["x"].0,
+                        crate::ParsedTy::Top,
+                        "optional field 'x' should have type any (Top)"
+                    );
+                }
+                other => panic!("expected AttrSet, got: {other:?}"),
+            },
+            other => panic!("expected TypeAlias, got: {other:?}"),
+        }
+    }
 }

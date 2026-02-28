@@ -876,3 +876,169 @@ fn load_single_stub(
     registry.load_tix_file(&file);
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lang_ty::{AttrSetTy, PrimitiveTy, TyRef};
+
+    fn oty_int() -> OutputTy {
+        OutputTy::Primitive(PrimitiveTy::Int)
+    }
+
+    fn oty_string() -> OutputTy {
+        OutputTy::Primitive(PrimitiveTy::String)
+    }
+
+    // =========================================================================
+    // compare_types tests
+    // =========================================================================
+
+    #[test]
+    fn compare_types_same_primitive_ok() {
+        let mut m = Vec::new();
+        compare_types(&oty_int(), &oty_int(), "root", &mut m);
+        assert!(m.is_empty(), "same primitives should match");
+    }
+
+    #[test]
+    fn compare_types_different_primitive_mismatch() {
+        let mut m = Vec::new();
+        compare_types(&oty_int(), &oty_string(), "root", &mut m);
+        assert_eq!(m.len(), 1, "different primitives should mismatch");
+        assert!(m[0].contains("root"));
+    }
+
+    #[test]
+    fn compare_types_tyvar_declared_is_wildcard() {
+        let mut m = Vec::new();
+        compare_types(&oty_int(), &OutputTy::TyVar(0), "root", &mut m);
+        assert!(m.is_empty(), "TyVar in declared should match anything");
+    }
+
+    #[test]
+    fn compare_types_top_declared_is_wildcard() {
+        let mut m = Vec::new();
+        compare_types(&oty_int(), &OutputTy::Top, "root", &mut m);
+        assert!(m.is_empty(), "Top in declared should match anything");
+    }
+
+    #[test]
+    fn compare_types_attrset_missing_field() {
+        let inf = OutputTy::AttrSet(AttrSetTy {
+            fields: std::collections::BTreeMap::new(),
+            dyn_ty: None,
+            open: false,
+            optional_fields: std::collections::BTreeSet::new(),
+        });
+        let mut decl_fields = std::collections::BTreeMap::new();
+        decl_fields.insert(smol_str::SmolStr::from("x"), TyRef::from(oty_int()));
+        let decl = OutputTy::AttrSet(AttrSetTy {
+            fields: decl_fields,
+            dyn_ty: None,
+            open: false,
+            optional_fields: std::collections::BTreeSet::new(),
+        });
+        let mut m = Vec::new();
+        compare_types(&inf, &decl, "root", &mut m);
+        assert_eq!(m.len(), 1, "missing field should produce mismatch");
+        assert!(m[0].contains("x"));
+    }
+
+    #[test]
+    fn compare_types_union_match() {
+        let inf = OutputTy::Union(vec![TyRef::from(oty_int()), TyRef::from(oty_string())]);
+        let decl = OutputTy::Union(vec![TyRef::from(oty_int()), TyRef::from(oty_string())]);
+        let mut m = Vec::new();
+        compare_types(&inf, &decl, "root", &mut m);
+        assert!(m.is_empty(), "matching unions should be compatible");
+    }
+
+    #[test]
+    fn compare_types_union_mismatch() {
+        let inf = OutputTy::Union(vec![TyRef::from(oty_int())]);
+        let decl = OutputTy::Union(vec![TyRef::from(oty_string())]);
+        let mut m = Vec::new();
+        compare_types(&inf, &decl, "root", &mut m);
+        assert!(!m.is_empty(), "non-matching unions should mismatch");
+    }
+
+    #[test]
+    fn compare_types_intersection_declared() {
+        let inf = oty_int();
+        let decl = OutputTy::Intersection(vec![TyRef::from(oty_int())]);
+        let mut m = Vec::new();
+        compare_types(&inf, &decl, "root", &mut m);
+        assert!(
+            m.is_empty(),
+            "inferred matching all intersection members should pass"
+        );
+    }
+
+    #[test]
+    fn compare_types_lambda_match() {
+        let inf = OutputTy::Lambda {
+            param: TyRef::from(oty_int()),
+            body: TyRef::from(oty_string()),
+        };
+        let decl = OutputTy::Lambda {
+            param: TyRef::from(oty_int()),
+            body: TyRef::from(oty_string()),
+        };
+        let mut m = Vec::new();
+        compare_types(&inf, &decl, "root", &mut m);
+        assert!(m.is_empty(), "matching lambdas should be compatible");
+    }
+
+    // =========================================================================
+    // gen-stub / verify-stubs integration tests
+    // =========================================================================
+
+    #[test]
+    fn gen_stub_produces_valid_tix() {
+        // Type-check a simple file and generate a stub, then verify it parses.
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let nix_path = dir.path().join("test.nix");
+        let stub_path = dir.path().join("test.tix");
+        std::fs::write(&nix_path, "let x = 1; in x").expect("write nix file");
+
+        let result = run_gen_stub(nix_path, vec![], false, Some(stub_path.clone()));
+        assert!(
+            result.is_ok(),
+            "gen-stub should succeed: {:?}",
+            result.err()
+        );
+        assert!(stub_path.exists(), "stub file should be created");
+
+        let contents = std::fs::read_to_string(&stub_path).expect("read stub");
+        let parsed = comment_parser::parse_tix_file(&contents);
+        assert!(
+            parsed.is_ok(),
+            "generated stub should parse: {:?}",
+            parsed.err()
+        );
+    }
+
+    #[test]
+    fn verify_stubs_passes_for_correct_stub() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let nix_path = dir.path().join("test.nix");
+        let stub_path = dir.path().join("test.tix");
+
+        // Simple file that produces an int.
+        std::fs::write(&nix_path, "42").expect("write nix file");
+        std::fs::write(&stub_path, "val test :: int;\n").expect("write stub file");
+
+        let result = run_verify_stubs(nix_path, stub_path, vec![], false);
+        assert!(
+            result.is_ok(),
+            "verify-stubs should pass for correct stub: {:?}",
+            result.err()
+        );
+    }
+
+    // NOTE: verify_stubs_detects_mismatch is not tested here because
+    // run_verify_stubs calls std::process::exit(1) on mismatch, which
+    // kills the test runner. Testing mismatch detection would require
+    // either refactoring the exit logic or using a subprocess test.
+}
