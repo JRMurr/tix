@@ -79,7 +79,23 @@ When used in a `tix.toml` context, `@`-prefixed stub names refer to built-in con
 
 `@callpackage` doesn't require a separate stub file. It extracts the fields of the `Pkgs` type alias (created by `module pkgs { ... }` in the built-in stubs) and provides them as context args. This is the same mechanism that any `module foo { ... }` declaration uses: `@foo` resolves to `Foo`.
 
-## Generating stubs
+## Generating stubs from Nix files
+
+`gen-stub` infers a Nix file's type and emits it as a `.tix` `val` declaration:
+
+```bash
+tix-cli gen-stub lib/utils.nix
+# Output: val utils :: { concatPaths: [path] -> path, ... };
+
+tix-cli gen-stub lib/utils.nix -o stubs/utils.tix
+# Writes the stub to a file
+```
+
+This is useful for creating stubs for project files that other files import. Combined with `[project] analyze` in `tix.toml`, you can choose between automatic ephemeral stubs (LSP-only) and persistent `.tix` stubs (works with CLI too).
+
+Imports without stubs are inferred as `any` (the top type). For more precise cross-file types, either add the imported file to `[project] analyze` or generate a stub with `gen-stub`.
+
+## Generating stubs from NixOS/Home Manager
 
 Tix can generate stubs from NixOS options, Home Manager options, and nixpkgs package sets. This gives you typed access to `config`, `lib`, `pkgs`, and other parameters in your Nix files.
 

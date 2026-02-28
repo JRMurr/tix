@@ -54,6 +54,24 @@ enum Command {
         #[command(subcommand)]
         source: GenStubsSource,
     },
+
+    /// Infer a Nix file's type and emit it as a .tix val declaration
+    GenStub {
+        /// Path to the Nix file to infer
+        file_path: PathBuf,
+
+        /// Paths to .tix stub files or directories (recursive)
+        #[arg(long = "stubs", value_name = "PATH")]
+        stub_paths: Vec<PathBuf>,
+
+        /// Do not load the built-in nixpkgs stubs
+        #[arg(long)]
+        no_default_stubs: bool,
+
+        /// Output file path (default: stdout)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
 }
 
 /// Shared CLI arguments for all gen-stubs subcommands.
@@ -149,6 +167,12 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     match args.command {
         Some(Command::GenStubs { source }) => run_gen_stubs(source),
+        Some(Command::GenStub {
+            file_path,
+            stub_paths,
+            no_default_stubs,
+            output,
+        }) => run_gen_stub(file_path, stub_paths, no_default_stubs, output),
         None => {
             let file_path = args.file_path.ok_or(
                 "No file path provided. Usage: tix-cli <file.nix> or tix-cli gen-stubs <source>",
@@ -196,6 +220,88 @@ fn run_gen_stubs(source: GenStubsSource) -> Result<(), Box<dyn Error>> {
             max_depth,
         }),
     }
+}
+
+// =============================================================================
+// gen-stub: infer a file and emit its type as a .tix declaration
+// =============================================================================
+
+fn run_gen_stub(
+    file_path: PathBuf,
+    stub_paths: Vec<PathBuf>,
+    no_default_stubs: bool,
+    output: Option<PathBuf>,
+) -> Result<(), Box<dyn Error>> {
+    let mut registry = if no_default_stubs {
+        TypeAliasRegistry::new()
+    } else {
+        TypeAliasRegistry::with_builtins()
+    };
+
+    if let Ok(dir) = std::env::var("TIX_BUILTIN_STUBS") {
+        registry.set_builtin_stubs_dir(PathBuf::from(dir));
+    }
+
+    for stub_path in &stub_paths {
+        load_stubs(&mut registry, stub_path)?;
+    }
+
+    if let Err(cycles) = registry.validate() {
+        eprintln!("Error: cyclic type aliases detected: {:?}", cycles);
+        std::process::exit(1);
+    }
+
+    let db: RootDatabase = Default::default();
+    let file = db.read_file(file_path.clone())?;
+
+    let module = lang_ast::module(&db, file);
+    let name_res = lang_ast::name_resolution(&db, file);
+    let base_dir = file_path.parent().unwrap_or(std::path::Path::new("/"));
+
+    // Infer with stubs-only (no ephemeral stubs for gen-stub).
+    let import_resolution =
+        resolve_import_types_from_stubs(&module, &name_res, base_dir, &HashMap::new());
+
+    let result = lang_check::check_file_collecting(
+        &db,
+        file,
+        &registry,
+        import_resolution.types,
+        HashMap::new(),
+    );
+
+    let root_ty = result
+        .inference
+        .as_ref()
+        .and_then(|inf| inf.expr_ty_map.get(module.entry_expr))
+        .cloned()
+        .ok_or("Failed to infer root type for file")?;
+
+    // Format as a .tix val declaration.
+    // Use the file stem as the declaration name, or "_" as a placeholder.
+    let decl_name = file_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("_");
+
+    let tix_output = format!("val {decl_name} :: {root_ty};\n");
+
+    match output {
+        Some(path) => {
+            std::fs::write(&path, &tix_output)?;
+            eprintln!("Wrote stub to {}", path.display());
+        }
+        None => print!("{tix_output}"),
+    }
+
+    // Warn about types that may not round-trip through .tix parsing.
+    if format!("{root_ty}").contains('~') {
+        eprintln!(
+            "Warning: output contains negation types (~) which are not expressible in .tix syntax"
+        );
+    }
+
+    Ok(())
 }
 
 // =============================================================================

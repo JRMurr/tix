@@ -573,7 +573,7 @@ fn collect_references_inner(ty: &ParsedTy, refs: &mut Vec<SmolStr>) {
             refs.push(name.clone());
         }
         ParsedTy::TyVar(comment_parser::TypeVarValue::Generic(_)) => {}
-        ParsedTy::Primitive(_) => {}
+        ParsedTy::Primitive(_) | ParsedTy::Top | ParsedTy::Bottom => {}
         ParsedTy::List(inner) => collect_references_inner(&inner.0, refs),
         ParsedTy::Lambda { param, body } => {
             collect_references_inner(&param.0, refs);

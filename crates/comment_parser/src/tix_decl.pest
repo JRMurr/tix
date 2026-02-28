@@ -62,6 +62,8 @@ open_marker = { "..." }
 // Type references
 type_ref = {
     primitive_ref
+  | any_ref
+  | never_ref
   | user_type
   | generic_ident
 }
@@ -102,3 +104,7 @@ bool_ref   = @{ "bool" }
 float_ref  = @{ "float" }
 path_ref   = @{ "path" }
 null_ref   = @{ "null" }
+
+// Top and bottom types
+any_ref   = @{ "any" }
+never_ref = @{ "never" }

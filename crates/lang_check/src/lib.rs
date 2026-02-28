@@ -1035,6 +1035,10 @@ impl<'db> CheckCtx<'db> {
                 }
                 var
             }
+            // Top/Bottom: fresh unconstrained variable for Top (anything goes),
+            // fresh variable for Bottom (no values inhabit it — the constraint
+            // system naturally keeps it at ⊥ when unused).
+            ParsedTy::Top | ParsedTy::Bottom => self.new_var(),
         }
     }
 

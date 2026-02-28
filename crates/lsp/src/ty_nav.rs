@@ -356,6 +356,9 @@ pub(crate) fn parsed_ty_to_output_ty(
                 .map(|m| TyRef::from(parsed_ty_to_output_ty(&m.0, registry, depth + 1)))
                 .collect(),
         ),
+
+        ParsedTy::Top => OutputTy::Top,
+        ParsedTy::Bottom => OutputTy::Bottom,
     }
 }
 

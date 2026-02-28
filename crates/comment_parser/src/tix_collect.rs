@@ -236,6 +236,8 @@ fn collect_type_expr(
         Rule::float_ref => ParsedTy::Primitive(PrimitiveTy::Float),
         Rule::path_ref => ParsedTy::Primitive(PrimitiveTy::Path),
         Rule::null_ref => ParsedTy::Primitive(PrimitiveTy::Null),
+        Rule::any_ref => ParsedTy::Top,
+        Rule::never_ref => ParsedTy::Bottom,
         Rule::generic_ident => ParsedTy::TyVar(TypeVarValue::Generic(curr.as_str().into())),
         Rule::user_type => ParsedTy::TyVar(TypeVarValue::Reference(curr.as_str().into())),
         Rule::EOI => return Ok(None),
@@ -285,6 +287,8 @@ fn collect_one(
         Rule::float_ref => Ok(ParsedTy::Primitive(PrimitiveTy::Float)),
         Rule::path_ref => Ok(ParsedTy::Primitive(PrimitiveTy::Path)),
         Rule::null_ref => Ok(ParsedTy::Primitive(PrimitiveTy::Null)),
+        Rule::any_ref => Ok(ParsedTy::Top),
+        Rule::never_ref => Ok(ParsedTy::Bottom),
         Rule::generic_ident => Ok(ParsedTy::TyVar(TypeVarValue::Generic(pair.as_str().into()))),
         Rule::user_type => Ok(ParsedTy::TyVar(TypeVarValue::Reference(
             pair.as_str().into(),

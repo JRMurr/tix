@@ -255,6 +255,10 @@ pub enum ParsedTy {
     Union(Vec<ParsedTyRef>),
     #[debug("Intersection({_0:?})")]
     Intersection(Vec<ParsedTyRef>),
+    /// The top type (⊤) — supertype of all types. Written `any` in `.tix` files.
+    Top,
+    /// The bottom type (⊥) — subtype of all types. Written `never` in `.tix` files.
+    Bottom,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -282,7 +286,7 @@ impl ParsedTy {
             ParsedTy::TyVar(var) => {
                 set.insert(var.clone());
             }
-            ParsedTy::Primitive(_) => {}
+            ParsedTy::Primitive(_) | ParsedTy::Top | ParsedTy::Bottom => {}
             ParsedTy::List(inner) => inner.0.collect_free_vars(set),
             ParsedTy::Lambda { param, body } => {
                 param.0.collect_free_vars(set);
@@ -315,7 +319,9 @@ impl ParsedTy {
             ParsedTy::TyVar(TypeVarValue::Generic(name)) => ParsedTy::TyVar(TypeVarValue::Generic(
                 SmolStr::from(format!("{name}${suffix}")),
             )),
-            ParsedTy::TyVar(_) | ParsedTy::Primitive(_) => self.clone(),
+            ParsedTy::TyVar(_) | ParsedTy::Primitive(_) | ParsedTy::Top | ParsedTy::Bottom => {
+                self.clone()
+            }
             ParsedTy::List(inner) => {
                 ParsedTy::List(ParsedTyRef::from(inner.0.rename_generics(suffix)))
             }
@@ -362,7 +368,7 @@ impl ParsedTy {
     pub fn contains_union(&self) -> bool {
         match self {
             ParsedTy::Union(_) => true,
-            ParsedTy::TyVar(_) | ParsedTy::Primitive(_) => false,
+            ParsedTy::TyVar(_) | ParsedTy::Primitive(_) | ParsedTy::Top | ParsedTy::Bottom => false,
             ParsedTy::List(inner) => inner.0.contains_union(),
             ParsedTy::Lambda { param, body } => param.0.contains_union() || body.0.contains_union(),
             ParsedTy::AttrSet(attr) => {
