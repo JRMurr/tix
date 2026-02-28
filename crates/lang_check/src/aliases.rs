@@ -394,6 +394,13 @@ impl TypeAliasRegistry {
             for (field_name, field_ty) in &attr.fields {
                 context_args.insert(field_name.clone(), (*field_ty.0).clone());
             }
+            // Also map the module name itself to the full alias type. In nixpkgs,
+            // `pkgs.pkgs` is a self-reference, so files with `{ pkgs, ... }:`
+            // should get `pkgs :: Pkgs` rather than an untyped `{..}`.
+            let module_name = SmolStr::from(alias_name.to_ascii_lowercase());
+            context_args.entry(module_name).or_insert_with(|| {
+                ParsedTy::TyVar(comment_parser::TypeVarValue::Reference(alias_name.clone()))
+            });
             return Some(Ok(context_args));
         }
 

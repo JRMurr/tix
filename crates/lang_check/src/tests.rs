@@ -2571,6 +2571,64 @@ fn context_args_config_is_open_attrset() {
     }
 }
 
+/// @callpackage context should type `pkgs` as `Pkgs` when the parameter
+/// name matches the module name (nixpkgs exposes `pkgs.pkgs` as a self-reference).
+#[test]
+fn callpackage_context_types_pkgs_parameter_as_alias() {
+    let mut registry = TypeAliasRegistry::with_builtins();
+    let ctx = registry
+        .load_context_by_name("callpackage")
+        .unwrap()
+        .unwrap();
+
+    let nix_src = indoc! { "
+        { pkgs, ... }: pkgs.lib.id 42
+    " };
+    let (db, file) = TestDatabase::single_file(nix_src).unwrap();
+    let module = module(&db, file);
+    let result = crate::check_file_collecting(&db, file, &registry, HashMap::new(), ctx);
+    let inference = result.inference.expect("inference should succeed");
+
+    // `pkgs` should be typed as Named("Pkgs", ...) via alias provenance.
+    let pkgs_name_id = module
+        .names()
+        .find(|(_, n)| n.text == "pkgs")
+        .map(|(id, _)| id)
+        .expect("pkgs name should exist");
+    let pkgs_ty = inference
+        .name_ty_map
+        .get(pkgs_name_id)
+        .expect("pkgs should have an inferred type");
+
+    match pkgs_ty {
+        OutputTy::Named(name, _) => {
+            assert_eq!(
+                name.as_str(),
+                "Pkgs",
+                "pkgs should be Named(\"Pkgs\", ...), got Named(\"{name}\", ...)"
+            );
+        }
+        other => panic!("pkgs should be Named(\"Pkgs\", ...), got: {other}"),
+    }
+
+    // The body should resolve to int: pkgs.lib is Lib, lib.id is a -> a, id 42 is int.
+    let root_ty = inference
+        .expr_ty_map
+        .get(module.entry_expr)
+        .expect("root expr should have a type");
+    match root_ty {
+        OutputTy::Lambda { body, .. } => {
+            assert_eq!(
+                *body.0,
+                arc_ty!(Int),
+                "pkgs.lib.id 42 should infer as int, got: {}",
+                body.0
+            );
+        }
+        _ => panic!("expected lambda type, got: {root_ty}"),
+    }
+}
+
 // =============================================================================
 // Optional fields (pattern defaults)
 // =============================================================================
