@@ -9,6 +9,7 @@
 // Lambda params flip polarity.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::time::Instant;
 
 use la_arena::ArenaMap;
 
@@ -32,11 +33,24 @@ use Polarity::{Negative, Positive};
 // TypeStorage reference. This eliminates the previous duplication between
 // StandaloneCanon and Collector's canonicalize methods.
 
+/// How often (in calls to canonicalize) to check the deadline. Avoids
+/// Instant::now() syscall overhead on every call — 512 is a reasonable
+/// tradeoff between responsiveness and overhead.
+const CANON_DEADLINE_CHECK_INTERVAL: u32 = 512;
+
 struct Canonicalizer<'a> {
     table: &'a TypeStorage,
     alias_provenance: &'a HashMap<TyId, SmolStr>,
     cache: HashMap<(TyId, Polarity), OutputTy>,
     in_progress: HashSet<(TyId, Polarity)>,
+    /// Optional deadline for canonicalization. When exceeded, remaining
+    /// types degrade to TyVar (same as inference deadline_exceeded).
+    deadline: Option<Instant>,
+    /// Operation counter for periodic deadline checks.
+    op_counter: u32,
+    /// Set when a deadline check fires. Once set, canonicalize() returns
+    /// TyVar immediately for all subsequent calls.
+    deadline_exceeded: bool,
 }
 
 impl<'a> Canonicalizer<'a> {
@@ -46,10 +60,37 @@ impl<'a> Canonicalizer<'a> {
             alias_provenance,
             cache: HashMap::new(),
             in_progress: HashSet::new(),
+            deadline: None,
+            op_counter: 0,
+            deadline_exceeded: false,
         }
     }
 
+    fn with_deadline(mut self, deadline: Instant) -> Self {
+        self.deadline = Some(deadline);
+        self
+    }
+
     fn canonicalize(&mut self, ty_id: TyId, polarity: Polarity) -> OutputTy {
+        // Fast path: if deadline already exceeded, return degraded type.
+        if self.deadline_exceeded {
+            return OutputTy::TyVar(ty_id.0);
+        }
+
+        // Periodic deadline check.
+        if self.deadline.is_some() {
+            self.op_counter += 1;
+            if self
+                .op_counter
+                .is_multiple_of(CANON_DEADLINE_CHECK_INTERVAL)
+                && self.deadline.is_some_and(|d| Instant::now() > d)
+            {
+                log::warn!("canonicalization deadline exceeded, degrading remaining types");
+                self.deadline_exceeded = true;
+                return OutputTy::TyVar(ty_id.0);
+            }
+        }
+
         let key = (ty_id, polarity);
 
         if let Some(cached) = self.cache.get(&key) {
@@ -347,7 +388,20 @@ pub fn canonicalize_standalone(
     ty_id: TyId,
     polarity: Polarity,
 ) -> OutputTy {
+    canonicalize_standalone_with_deadline(table, alias_provenance, ty_id, polarity, None)
+}
+
+pub fn canonicalize_standalone_with_deadline(
+    table: &TypeStorage,
+    alias_provenance: &HashMap<TyId, SmolStr>,
+    ty_id: TyId,
+    polarity: Polarity,
+    deadline: Option<Instant>,
+) -> OutputTy {
     let mut canon = Canonicalizer::new(table, alias_provenance);
+    if let Some(d) = deadline {
+        canon = canon.with_deadline(d);
+    }
     canon.canonicalize(ty_id, polarity)
 }
 
@@ -980,7 +1034,19 @@ impl<'db> Collector<'db> {
         let mut expr_ty_map = ArenaMap::with_capacity(expr_cnt);
 
         // Create a Canonicalizer that borrows the type storage for this pass.
+        // Wire the inference deadline into canonicalization: if inference
+        // already exceeded its deadline, give canonicalization a short budget
+        // (500ms) for essential name-level types. Otherwise use the remaining
+        // inference deadline.
+        let canon_deadline = if deadline_exceeded {
+            Some(Instant::now() + std::time::Duration::from_millis(500))
+        } else {
+            self.ctx.deadline
+        };
         let mut canon = Canonicalizer::new(&self.ctx.types.storage, &self.ctx.alias_provenance);
+        if let Some(d) = canon_deadline {
+            canon = canon.with_deadline(d);
+        }
 
         for (name, ty) in name_tys {
             // Prefer the early-canonicalized type (captured before use-site
