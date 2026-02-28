@@ -365,9 +365,9 @@ fn spawn_analysis_loop(
                     .unwrap_or_else(|| path.display().to_string());
 
                 // Phase A: Syntax update (mutex held ~5-50ms).
-                let (syntax_data, inference_inputs, syntax_duration) = {
+                let (syntax_data, intermediate, syntax_duration) = {
                     let mut st = state.lock();
-                    st.update_syntax(path.clone(), text.clone())
+                    st.update_syntax_phase_a(path.clone(), text.clone())
                 };
                 // mutex released here
 
@@ -387,12 +387,32 @@ fn spawn_analysis_loop(
                     );
                 }
 
-                // Phase B: Type inference (NO mutex held).
+                // Check for cancellation between phases. If a new edit arrived
+                // during Phase A, bail out and let the loop re-coalesce.
+                if cancel_flag.load(Ordering::Relaxed) {
+                    continue;
+                }
+
+                // Phase B: Import resolution (mutex re-acquired, bounded by
+                // deadline/cancel/cap). Side-channel limits are set on the DB.
+                let (inference_inputs, import_targets, name_to_import, import_duration) = {
+                    let mut st = state.lock();
+                    st.update_syntax_phase_b(&intermediate, Some(cancel_flag.clone()))
+                };
+                // mutex released here
+
+                // Update DashMap with import data from Phase B.
+                if let Some(mut snap) = _snapshots.get_mut(path) {
+                    snap.syntax.import_targets = import_targets;
+                    snap.syntax.name_to_import = name_to_import;
+                }
+
+                // Phase C: Type inference (NO mutex held).
                 let (check_result, infer_duration) =
                     crate::state::run_inference(&inference_inputs, Some(cancel_flag.clone()));
 
                 let was_cancelled = cancel_flag.load(Ordering::Relaxed);
-                let total = syntax_duration + infer_duration;
+                let total = syntax_duration + import_duration + infer_duration;
                 let timing = crate::state::AnalysisTiming {
                     parse: syntax_duration, // folded for now
                     lower: Duration::ZERO,

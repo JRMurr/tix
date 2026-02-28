@@ -79,8 +79,27 @@ impl FileSnapshot {
     }
 }
 
+/// Intermediate data from Phase A (syntax) needed by Phase B (imports).
+/// All fields are owned values — safe to hold across mutex releases.
+pub struct SyntaxIntermediate {
+    pub nix_file: NixFile,
+    pub path: PathBuf,
+    pub module: Module,
+    pub module_indices: ModuleIndices,
+    pub name_res: NameResolution,
+    pub scopes: ModuleScopes,
+    pub grouped_defs: GroupedDefs,
+    pub source_map: ModuleSourceMap,
+    pub parsed: rnix::Parse<rnix::Root>,
+    pub line_index: LineIndex,
+    pub registry: TypeAliasRegistry,
+    pub context_args: HashMap<SmolStr, comment_parser::ParsedTy>,
+    pub context_arg_types: HashMap<SmolStr, OutputTy>,
+    pub deadline_secs: u64,
+}
+
 /// Everything needed to run type inference after the syntax phase.
-/// Produced by `AnalysisState::update_syntax()`, consumed by `run_inference()`.
+/// Produced by `AnalysisState::update_syntax_phase_b()`, consumed by `run_inference()`.
 /// This bundle is Send + Sync so inference can run outside the mutex.
 pub struct InferenceInputs {
     pub module: Module,
@@ -561,16 +580,17 @@ impl AnalysisState {
         self.files.get(path)
     }
 
-    /// Run only the syntax phases (parse, lower, nameres, imports) under
-    /// the mutex. Returns a `SyntaxData` that can be published to the DashMap
-    /// immediately, plus an `InferenceInputs` bundle for running inference
-    /// without holding the mutex.
-    pub fn update_syntax(
+    /// Phase A: Parse, lower, nameres, SCC grouping. Fast (~5-50ms).
+    ///
+    /// Returns a `SyntaxData` (with empty import fields) for immediate DashMap
+    /// publication, plus a `SyntaxIntermediate` bundle for Phase B. The caller
+    /// should release the mutex after this returns so handlers can serve
+    /// requests with fresh syntax data.
+    pub fn update_syntax_phase_a(
         &mut self,
         path: PathBuf,
         contents: String,
-    ) -> (SyntaxData, InferenceInputs, Duration) {
-        // Path is expected to be pre-canonicalized by uri_to_path() at the LSP boundary.
+    ) -> (SyntaxData, SyntaxIntermediate, Duration) {
         let t0 = Instant::now();
 
         // -- Parse --
@@ -585,24 +605,99 @@ impl AnalysisState {
         let scopes = lang_ast::scopes(&self.db, nix_file);
         let grouped = lang_ast::group_def(&self.db, nix_file);
 
-        // -- Import resolution --
-        let mut in_progress = HashSet::new();
-        self.import_cache.remove(&path);
+        // Resolve context args (fast, depends only on project config).
+        let context_args =
+            if let (Some(ref cfg), Some(ref dir)) = (&self.project_config, &self.config_dir) {
+                crate::project_config::resolve_context_for_file(&path, cfg, dir, &mut self.registry)
+                    .unwrap_or_else(|e| {
+                        log::warn!("Failed to resolve context for {}: {e}", path.display());
+                        HashMap::new()
+                    })
+            } else {
+                HashMap::new()
+            };
 
-        // LSP: 30s aggregate deadline for all imports. No cancel_flag here
-        // since update_syntax is called from the analysis loop which manages
-        // cancellation at a higher level.
+        let context_arg_types: HashMap<SmolStr, OutputTy> = context_args
+            .iter()
+            .map(|(name, parsed_ty)| {
+                let output_ty = crate::ty_nav::parsed_ty_to_output_ty(parsed_ty, &self.registry, 0);
+                (name.clone(), output_ty)
+            })
+            .collect();
+
+        let syntax_duration = t0.elapsed();
+
+        // SyntaxData with empty import fields — handlers get fresh syntax
+        // immediately, import data is filled in after Phase B.
+        let syntax_data = SyntaxData {
+            parsed,
+            line_index,
+            module: module.clone(),
+            module_indices: module_indices.clone(),
+            source_map: source_map.clone(),
+            name_res: name_res.clone(),
+            scopes: scopes.clone(),
+            import_targets: HashMap::new(),
+            name_to_import: HashMap::new(),
+            context_arg_types: context_arg_types.clone(),
+        };
+
+        let intermediate = SyntaxIntermediate {
+            nix_file,
+            path,
+            module,
+            module_indices,
+            name_res,
+            scopes,
+            grouped_defs: grouped,
+            source_map,
+            parsed: syntax_data.parsed.clone(),
+            line_index: syntax_data.line_index.clone(),
+            registry: self.registry.clone(),
+            context_args,
+            context_arg_types,
+            deadline_secs: self.deadline_secs,
+        };
+
+        (syntax_data, intermediate, syntax_duration)
+    }
+
+    /// Phase B: Import resolution. Slower, bounded by deadline/cancel/cap.
+    ///
+    /// Mutex re-acquired for this phase. Sets side-channel limits on the DB
+    /// and runs resolve_imports. Returns InferenceInputs plus import data
+    /// for updating the SyntaxData in the DashMap.
+    pub fn update_syntax_phase_b(
+        &mut self,
+        intermediate: &SyntaxIntermediate,
+        cancel_flag: Option<Arc<AtomicBool>>,
+    ) -> (
+        InferenceInputs,
+        HashMap<ExprId, PathBuf>,
+        HashMap<NameId, PathBuf>,
+        Duration,
+    ) {
+        let t0 = Instant::now();
+
+        // Set side-channel limits on the DB for the Salsa import path.
         let aggregate_deadline = Some(Instant::now() + Duration::from_secs(30));
+        self.db
+            .set_import_limits(aggregate_deadline, cancel_flag.clone(), Some(200));
+
+        // Import resolution.
+        let mut in_progress = HashSet::new();
+        self.import_cache.remove(&intermediate.path);
+
         let import_resolution = resolve_imports(
             &self.db,
-            nix_file,
-            &module,
-            &name_res,
+            intermediate.nix_file,
+            &intermediate.module,
+            &intermediate.name_res,
             &mut in_progress,
             &mut self.import_cache,
             self.import_deadline_secs,
             aggregate_deadline,
-            None,
+            cancel_flag.as_ref().map(|f| f as &Arc<AtomicBool>),
             Some(200), // import cap for LSP responsiveness
         );
 
@@ -634,78 +729,50 @@ impl AnalysisState {
         let import_targets = import_resolution.targets;
 
         // Build name→import mapping.
-        let file_dir = path.parent().map(|p| p.to_path_buf());
+        let file_dir = intermediate.path.parent().map(|p| p.to_path_buf());
         let mut name_to_import = HashMap::new();
-        for group in grouped.iter() {
+        for group in intermediate.grouped_defs.iter() {
             for typedef in group {
                 let target =
-                    chase_import_target(&module, &import_targets, typedef.expr()).or_else(|| {
-                        let dir = file_dir.as_deref()?;
-                        find_path_literal_target(&module, typedef.expr(), dir)
-                    });
+                    chase_import_target(&intermediate.module, &import_targets, typedef.expr())
+                        .or_else(|| {
+                            let dir = file_dir.as_deref()?;
+                            find_path_literal_target(&intermediate.module, typedef.expr(), dir)
+                        });
                 if let Some(path) = target {
                     name_to_import.insert(typedef.name(), path);
                 }
             }
         }
 
-        // Resolve context args.
-        let context_args =
-            if let (Some(ref cfg), Some(ref dir)) = (&self.project_config, &self.config_dir) {
-                crate::project_config::resolve_context_for_file(&path, cfg, dir, &mut self.registry)
-                    .unwrap_or_else(|e| {
-                        log::warn!("Failed to resolve context for {}: {e}", path.display());
-                        HashMap::new()
-                    })
-            } else {
-                HashMap::new()
-            };
-
-        let context_arg_types: HashMap<SmolStr, OutputTy> = context_args
-            .iter()
-            .map(|(name, parsed_ty)| {
-                let output_ty = crate::ty_nav::parsed_ty_to_output_ty(parsed_ty, &self.registry, 0);
-                (name.clone(), output_ty)
-            })
-            .collect();
-
-        let syntax_duration = t0.elapsed();
-
-        let syntax_data = SyntaxData {
-            parsed,
-            line_index,
-            module: module.clone(),
-            module_indices: module_indices.clone(),
-            source_map: source_map.clone(),
-            name_res: name_res.clone(),
-            scopes: scopes.clone(),
-            import_targets: import_targets.clone(),
-            name_to_import: name_to_import.clone(),
-            context_arg_types: context_arg_types.clone(),
-        };
+        let import_duration = t0.elapsed();
 
         let inference_inputs = InferenceInputs {
-            module,
-            module_indices,
-            name_res,
-            grouped_defs: grouped,
-            registry: self.registry.clone(),
+            module: intermediate.module.clone(),
+            module_indices: intermediate.module_indices.clone(),
+            name_res: intermediate.name_res.clone(),
+            grouped_defs: intermediate.grouped_defs.clone(),
+            registry: intermediate.registry.clone(),
             import_types: import_resolution.types,
             import_diagnostics,
-            context_args,
-            deadline_secs: self.deadline_secs,
-            // Data also needed for FileAnalysis (the old path).
-            nix_file,
-            line_index: syntax_data.line_index.clone(),
-            parsed: syntax_data.parsed.clone(),
-            source_map,
-            scopes,
-            import_targets,
-            name_to_import,
-            context_arg_types,
+            context_args: intermediate.context_args.clone(),
+            deadline_secs: intermediate.deadline_secs,
+            nix_file: intermediate.nix_file,
+            line_index: intermediate.line_index.clone(),
+            parsed: intermediate.parsed.clone(),
+            source_map: intermediate.source_map.clone(),
+            scopes: intermediate.scopes.clone(),
+            import_targets: import_targets.clone(),
+            name_to_import: name_to_import.clone(),
+            context_arg_types: intermediate.context_arg_types.clone(),
         };
 
-        (syntax_data, inference_inputs, syntax_duration)
+        (
+            inference_inputs,
+            import_targets,
+            name_to_import,
+            import_duration,
+        )
     }
 
     /// Replace the type alias registry and re-analyze all open files.
