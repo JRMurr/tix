@@ -288,13 +288,25 @@ Nix code sizes (hundreds of bindings per file, not millions):
     input) so previously-inferred imports return instantly on subsequent loads.
     Aggregate deadline (30s) bounds the total import tree wall-clock time.
     Canonicalization respects deadline to prevent 7s→11s overshoot.
+  - Legacy import inference path removed — always uses Salsa `file_root_type`.
+  - `update_syntax` split into Phase A (parse/nameres, ~5-50ms mutex) and
+    Phase B (import resolution, mutex re-acquired). Handlers are responsive
+    between phases.
+  - Side-channel import limits on RootDatabase (aggregate deadline, cancel flag,
+    max imports) allow the Salsa path to respect the same caps without
+    invalidating cached results.
+  - Parallel import inference via rayon for files with 50+ imports: BFS
+    discovery of the import graph, then topological sort + `par_iter` at each
+    level. Bypasses Salsa memoization — results stored in HashMap. Sequential
+    Salsa path remains primary for incremental single-file updates.
+  - Canonicalization deadline (checked every 512 ops) prevents degenerate type
+    graphs from hanging the canonicalization phase.
   - Remaining cleanup:
     - Legacy `pending_text` / `state.files` still exist alongside DashMap snapshots
     - hover/completion still lock state briefly for DocIndex (should store separately)
     - goto_def/rename cross-file still lock state for Salsa DB access
-    - The mutex is still held during `update_syntax()`. On first load this can be
-      slow (bounded by aggregate deadline). True out-of-mutex inference would require
-      Salsa's `Storage` to be `Sync` — a future improvement.
+    - Regression tests for import cap, aggregate deadline, canonicalization
+      deadline, and cancel flag in Salsa path are not yet written.
 
 ### `contains_union()` Doesn't See Through Alias References
 

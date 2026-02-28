@@ -213,6 +213,16 @@ pub fn infer_import_graph_parallel(
         return HashMap::new();
     }
 
+    // Build a custom rayon thread pool with 8MB stacks. The default rayon
+    // stack size (2MB) is too small for deep type inference — constrain()
+    // and canonicalize() recurse deeply on complex type graphs. The stacker
+    // guards in those functions grow the stack on the heap, but they need
+    // a reasonable base to start from.
+    let pool = rayon::ThreadPoolBuilder::new()
+        .stack_size(8 * 1024 * 1024)
+        .build()
+        .expect("failed to build rayon thread pool");
+
     let levels = topological_levels(graph);
     let mut results: HashMap<PathBuf, OutputTy> = HashMap::new();
 
@@ -231,51 +241,54 @@ pub fn infer_import_graph_parallel(
             level.len()
         );
 
-        // Infer all files at this level in parallel.
-        let level_results: Vec<(PathBuf, OutputTy)> = level
-            .par_iter()
-            .filter_map(|path| {
-                let file = graph.get(path)?;
+        // Infer all files at this level in parallel using the custom pool.
+        let level_results: Vec<(PathBuf, OutputTy)> = pool.install(|| {
+            level
+                .par_iter()
+                .filter_map(|path| {
+                    let file = graph.get(path)?;
 
-                // Build import_types for this file from already-resolved
-                // dependencies (previous levels).
-                let mut import_types = HashMap::new();
-                for (expr_id, target_path) in &file.import_edges {
-                    if let Some(ty) = results.get(target_path) {
-                        import_types.insert(*expr_id, ty.clone());
+                    // Build import_types for this file from already-resolved
+                    // dependencies (previous levels).
+                    let mut import_types = HashMap::new();
+                    for (expr_id, target_path) in &file.import_edges {
+                        if let Some(ty) = results.get(target_path) {
+                            import_types.insert(*expr_id, ty.clone());
+                        }
+                        // Missing import → stays unconstrained (generic import :: a -> b)
                     }
-                    // Missing import → stays unconstrained (generic import :: a -> b)
-                }
-                for (outer_id, inner_id, target_path) in &file.callpkg_edges {
-                    if let Some(ty) = results.get(target_path) {
-                        import_types.insert(*inner_id, ty.clone());
-                        import_types.insert(*outer_id, extract_return_type(ty));
+                    for (outer_id, inner_id, target_path) in &file.callpkg_edges {
+                        if let Some(ty) = results.get(target_path) {
+                            import_types.insert(*inner_id, ty.clone());
+                            import_types.insert(*outer_id, extract_return_type(ty));
+                        }
                     }
-                }
 
-                let deadline = Some(Instant::now() + Duration::from_secs(per_file_deadline_secs));
-                let cancel = cancel_flag.clone();
+                    let deadline =
+                        Some(Instant::now() + Duration::from_secs(per_file_deadline_secs));
+                    let cancel = cancel_flag.clone();
 
-                let check_result = crate::check_with_precomputed(
-                    &file.module,
-                    &file.name_res,
-                    &file.indices,
-                    file.grouped_defs.clone(),
-                    &aliases,
-                    import_types,
-                    HashMap::new(), // no context args for imported files
-                    deadline,
-                    cancel,
-                );
+                    let check_result = crate::check_with_precomputed(
+                        &file.module,
+                        &file.name_res,
+                        &file.indices,
+                        file.grouped_defs.clone(),
+                        &aliases,
+                        import_types,
+                        HashMap::new(), // no context args for imported files
+                        deadline,
+                        cancel,
+                    );
 
-                let root_ty = check_result
-                    .inference
-                    .and_then(|inf| inf.expr_ty_map.get(file.module.entry_expr).cloned())
-                    .unwrap_or(OutputTy::TyVar(0));
+                    let root_ty = check_result
+                        .inference
+                        .and_then(|inf| inf.expr_ty_map.get(file.module.entry_expr).cloned())
+                        .unwrap_or(OutputTy::TyVar(0));
 
-                Some((path.clone(), root_ty))
-            })
-            .collect();
+                    Some((path.clone(), root_ty))
+                })
+                .collect()
+        });
 
         // Merge level results into the global results map.
         for (path, ty) in level_results {
