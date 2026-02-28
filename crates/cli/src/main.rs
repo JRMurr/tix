@@ -1,8 +1,7 @@
 mod config;
 mod gen_stubs;
 
-use std::collections::{HashMap, HashSet};
-use std::time::{Duration, Instant};
+use std::collections::HashMap;
 use std::{error::Error, path::PathBuf};
 
 use clap::{Parser, Subcommand};
@@ -10,7 +9,7 @@ use lang_ast::{module_and_source_maps, name_resolution, RootDatabase};
 use lang_check::aliases::TypeAliasRegistry;
 use lang_check::check_file_collecting;
 use lang_check::diagnostic::{TixDiagnostic, TixDiagnosticKind};
-use lang_check::imports::{resolve_imports, ImportErrorKind};
+use lang_check::imports::{resolve_import_types_from_stubs, ImportErrorKind};
 use lang_ty::OutputTy;
 use miette::{LabeledSpan, NamedSource};
 use rowan::ast::AstNode;
@@ -295,43 +294,20 @@ fn run_check(
         HashMap::new()
     };
 
-    let mut db: RootDatabase = Default::default();
-
-    // Set up StubConfig so that file_root_type (Salsa-memoized import
-    // inference) knows how to build the TypeAliasRegistry.
-    let use_builtins = !no_default_stubs;
-    let builtin_stubs_dir = std::env::var("TIX_BUILTIN_STUBS").ok().map(PathBuf::from);
-    // Collect all stub paths: CLI-provided + tix.toml config stubs.
-    let mut all_stub_paths = stub_paths.clone();
-    if let (Some(ref cfg), Some(ref dir)) = (&toml_config, &config_dir) {
-        for stub in &cfg.stubs {
-            all_stub_paths.push(dir.join(stub));
-        }
-    }
-    db.set_stub_config(all_stub_paths, builtin_stubs_dir, use_builtins);
+    let db: RootDatabase = Default::default();
 
     let file = db.read_file(file_path.clone())?;
 
     let (module, source_map) = module_and_source_maps(&db, file);
     let name_res = name_resolution(&db, file);
+    let base_dir = file_path.parent().unwrap_or(std::path::Path::new("/"));
 
-    // Resolve literal imports recursively before type-checking.
-    let mut in_progress = HashSet::new();
-    let mut cache = HashMap::new();
-    // CLI: 120s aggregate deadline for all imports, no import cap.
-    let aggregate_deadline = Some(Instant::now() + Duration::from_secs(120));
-    let import_resolution = resolve_imports(
-        &db,
-        file,
-        &module,
-        &name_res,
-        &mut in_progress,
-        &mut cache,
-        None,
-        aggregate_deadline,
-        None,
-        None, // no import cap for CLI
-    );
+    // CLI uses stubs-only model: no recursive import inference. Imports
+    // without stubs default to ⊤ (generic import :: a -> b). Users add
+    // .tix stubs for more precision.
+    let import_resolution =
+        resolve_import_types_from_stubs(&module, &name_res, base_dir, &HashMap::new());
+
     // Convert import resolution errors into TixDiagnostics so they render
     // with the same miette source-context as type-checking diagnostics.
     let import_diagnostics: Vec<TixDiagnostic> = import_resolution
