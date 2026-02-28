@@ -1,7 +1,4 @@
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
-use std::time::Instant;
 
 use dashmap::DashMap;
 use salsa::{self, Setter};
@@ -11,27 +8,6 @@ pub struct NixFile {
     pub path: PathBuf,
     #[returns(ref)]
     pub contents: String,
-}
-
-/// Stub configuration for type alias loading. Created by the LSP/CLI before
-/// analysis begins. Salsa tracks field access, so changes to stub paths
-/// automatically invalidate downstream results (e.g. the TypeAliasRegistry
-/// and all file_root_type computations).
-///
-/// Lives in `lang_ast` (not `lang_check`) because it only contains paths and
-/// flags — no dependency on check-time types. This avoids circular crate deps.
-#[salsa::input]
-pub struct StubConfig {
-    /// Paths to .tix stub files or directories.
-    #[returns(ref)]
-    pub stub_paths: Vec<PathBuf>,
-
-    /// Override directory for built-in context stubs (e.g. @nixos, @home-manager).
-    #[returns(ref)]
-    pub builtin_stubs_dir: Option<PathBuf>,
-
-    /// Whether to include built-in nixpkgs stubs (TypeAliasRegistry::with_builtins).
-    pub use_builtins: bool,
 }
 
 #[salsa::db]
@@ -47,70 +23,13 @@ pub trait AstDb: salsa::Database {
     /// Load a file from disk by path. Returns None if the file doesn't exist
     /// or can't be read. Used by multi-file import resolution.
     fn load_file(&self, path: &std::path::Path) -> Option<NixFile>;
-
-    /// Retrieve the Salsa-managed stub configuration. Returns `None` until
-    /// the LSP or CLI sets it via `RootDatabase::set_stub_config()`.
-    fn stub_config(&self) -> Option<StubConfig>;
-
-    // ======================================================================
-    // Side-channel fields for import resolution limits
-    // ======================================================================
-    //
-    // These are NOT Salsa inputs — changing them does not invalidate cached
-    // results. They are read by resolve_import_types_salsa and file_root_type
-    // only on cache misses (actual computation), not on cached hits.
-
-    /// Aggregate deadline for import resolution. When exceeded, remaining
-    /// imports are skipped.
-    fn import_aggregate_deadline(&self) -> Option<Instant> {
-        None
-    }
-
-    /// External cancellation flag for import resolution.
-    fn import_cancel_flag(&self) -> Option<Arc<AtomicBool>> {
-        None
-    }
-
-    /// Maximum number of imports to resolve before stopping.
-    fn import_max(&self) -> Option<usize> {
-        None
-    }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 #[salsa::db]
 pub struct RootDatabase {
     storage: salsa::Storage<Self>,
     files: DashMap<PathBuf, NixFile>,
-    /// Salsa input for stub configuration. Created by the LSP/CLI at startup.
-    /// Just a Copy integer ID internally — no cross-crate type dependency.
-    stub_config: Option<StubConfig>,
-
-    // Side-channel fields for import resolution limits. NOT Salsa inputs —
-    // changing them does not invalidate cached results. Set before calling
-    // file_root_type(); read only on cache misses.
-    import_aggregate_deadline: Option<Instant>,
-    import_cancel_flag: Option<Arc<AtomicBool>>,
-    import_max: Option<usize>,
-}
-
-impl Default for RootDatabase {
-    fn default() -> Self {
-        let mut db = Self {
-            storage: Default::default(),
-            files: Default::default(),
-            stub_config: None,
-            import_aggregate_deadline: None,
-            import_cancel_flag: None,
-            import_max: None,
-        };
-        // Always initialize a default StubConfig so the Salsa-memoized import
-        // path (`file_root_type`) is used unconditionally. Without this, test
-        // databases and freshly created databases fall through to the legacy
-        // manual inference path in resolve_imports().
-        db.set_stub_config(vec![], None, true);
-        db
-    }
 }
 
 #[salsa::db]
@@ -129,22 +48,6 @@ impl AstDb for RootDatabase {
 
     fn load_file(&self, path: &std::path::Path) -> Option<NixFile> {
         self.read_file(path.to_path_buf()).ok()
-    }
-
-    fn stub_config(&self) -> Option<StubConfig> {
-        self.stub_config
-    }
-
-    fn import_aggregate_deadline(&self) -> Option<Instant> {
-        self.import_aggregate_deadline
-    }
-
-    fn import_cancel_flag(&self) -> Option<Arc<AtomicBool>> {
-        self.import_cancel_flag.clone()
-    }
-
-    fn import_max(&self) -> Option<usize> {
-        self.import_max
     }
 }
 
@@ -166,41 +69,6 @@ impl RootDatabase {
 }
 
 impl RootDatabase {
-    /// Set the stub configuration. Creates a new StubConfig Salsa input or
-    /// updates the existing one. Salsa automatically invalidates downstream
-    /// queries that depend on stub config fields.
-    pub fn set_stub_config(
-        &mut self,
-        stub_paths: Vec<PathBuf>,
-        builtin_stubs_dir: Option<PathBuf>,
-        use_builtins: bool,
-    ) -> StubConfig {
-        if let Some(existing) = self.stub_config {
-            existing.set_stub_paths(self).to(stub_paths);
-            existing.set_builtin_stubs_dir(self).to(builtin_stubs_dir);
-            existing.set_use_builtins(self).to(use_builtins);
-            existing
-        } else {
-            let config = StubConfig::new(self, stub_paths, builtin_stubs_dir, use_builtins);
-            self.stub_config = Some(config);
-            config
-        }
-    }
-
-    /// Set side-channel import resolution limits. These are NOT Salsa inputs
-    /// — changing them does not invalidate cached results. Set before calling
-    /// file_root_type(); read by resolve_import_types_salsa on cache misses.
-    pub fn set_import_limits(
-        &mut self,
-        deadline: Option<Instant>,
-        cancel_flag: Option<Arc<AtomicBool>>,
-        max_imports: Option<usize>,
-    ) {
-        self.import_aggregate_deadline = deadline;
-        self.import_cancel_flag = cancel_flag;
-        self.import_max = max_imports;
-    }
-
     /// Create or update a NixFile from editor-provided contents (for LSP).
     /// Uses Salsa input mutation to invalidate downstream queries.
     pub fn set_file_contents(&mut self, path: PathBuf, contents: String) -> NixFile {

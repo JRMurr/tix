@@ -1346,48 +1346,22 @@ test_case!(
 
 mod import_tests {
     use lang_ast::tests::MultiFileTestDatabase;
+    use lang_ast::AstDb;
     use lang_ty::{arc_ty, OutputTy};
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
 
     use crate::aliases::TypeAliasRegistry;
     use crate::check_file_with_imports;
-    use crate::imports::resolve_imports;
+    use crate::imports::resolve_import_types_from_stubs;
 
-    /// Infer a multi-file project, returning the root type and any import errors.
+    /// Infer a multi-file project using the stubs-based model.
+    ///
+    /// For each dependency file (not the entry file), we infer it standalone
+    /// and collect its root type into an ephemeral stubs map. Then we infer
+    /// the entry file using those ephemeral stubs.
     fn check_multifile(files: &[(&str, &str)]) -> (OutputTy, Vec<crate::imports::ImportError>) {
-        let (db, entry_file) = MultiFileTestDatabase::new(files);
-
-        let module = lang_ast::module(&db, entry_file);
-        let name_res = lang_ast::name_resolution(&db, entry_file);
-        let aliases = TypeAliasRegistry::default();
-
-        let mut in_progress = HashSet::new();
-        let mut cache = HashMap::new();
-        let resolution = resolve_imports(
-            &db,
-            entry_file,
-            &module,
-            &name_res,
-            &mut in_progress,
-            &mut cache,
-            None,
-            None,
-            None,
-            None, // no import cap in tests
-        );
-
-        let errors = resolution.errors;
-
-        let result = check_file_with_imports(&db, entry_file, &aliases, resolution.types)
-            .expect("inference should succeed");
-
-        let root_ty = result
-            .expr_ty_map
-            .get(module.entry_expr)
-            .expect("root expr should have a type")
-            .clone();
-
-        (root_ty, errors)
+        check_multifile_with_aliases(files, &TypeAliasRegistry::default())
     }
 
     fn get_multifile_root(files: &[(&str, &str)]) -> OutputTy {
@@ -1596,7 +1570,6 @@ mod import_tests {
     #[test]
     fn import_targets_populated() {
         use lang_ast::{Expr, Literal};
-        use std::path::PathBuf;
 
         let (db, entry_file) =
             MultiFileTestDatabase::new(&[("/main.nix", "import /lib.nix"), ("/lib.nix", "42")]);
@@ -1604,20 +1577,8 @@ mod import_tests {
         let module = lang_ast::module(&db, entry_file);
         let name_res = lang_ast::name_resolution(&db, entry_file);
 
-        let mut in_progress = HashSet::new();
-        let mut cache = HashMap::new();
-        let resolution = resolve_imports(
-            &db,
-            entry_file,
-            &module,
-            &name_res,
-            &mut in_progress,
-            &mut cache,
-            None,
-            None,
-            None,
-            None, // no import cap in tests
-        );
+        let resolution =
+            resolve_import_types_from_stubs(&module, &name_res, Path::new("/"), &HashMap::new());
 
         // There should be exactly 3 target entries: Apply, fun (Reference), arg (Literal).
         assert_eq!(
@@ -1654,33 +1615,54 @@ mod import_tests {
     // Helper: check_multifile with a custom TypeAliasRegistry
     // ======================================================================
 
-    /// Like `check_multifile`, but threads a caller-provided `TypeAliasRegistry`
-    /// through both import resolution and file checking so tests can verify
-    /// alias provenance across file boundaries.
+    /// Infer a multi-file project with a custom TypeAliasRegistry.
+    ///
+    /// Pre-infers all dependency files (in order) to build ephemeral stubs,
+    /// then infers the entry file with those stubs. This models the LSP's
+    /// progressive analysis: as files are opened, their types become available
+    /// to other files.
     fn check_multifile_with_aliases(
         files: &[(&str, &str)],
         aliases: &TypeAliasRegistry,
     ) -> (OutputTy, Vec<crate::imports::ImportError>) {
         let (db, entry_file) = MultiFileTestDatabase::new(files);
 
+        // Build ephemeral stubs by inferring all non-entry files first.
+        // Process them in reverse order so transitive deps are available.
+        let mut ephemeral_stubs: HashMap<PathBuf, OutputTy> = HashMap::new();
+        for &(path_str, _) in files.iter().skip(1).rev() {
+            let dep_path = PathBuf::from(path_str);
+            if let Some(dep_file) = db.load_file(&dep_path) {
+                let dep_module = lang_ast::module(&db, dep_file);
+                let dep_name_res = lang_ast::name_resolution(&db, dep_file);
+                let dep_base = dep_path.parent().unwrap_or(Path::new("/"));
+
+                // Use already-built ephemeral stubs for this dep's imports too.
+                let dep_resolution = resolve_import_types_from_stubs(
+                    &dep_module,
+                    &dep_name_res,
+                    dep_base,
+                    &ephemeral_stubs,
+                );
+
+                if let Ok(dep_result) =
+                    check_file_with_imports(&db, dep_file, aliases, dep_resolution.types)
+                {
+                    if let Some(root_ty) = dep_result.expr_ty_map.get(dep_module.entry_expr) {
+                        ephemeral_stubs.insert(dep_path, root_ty.clone());
+                    }
+                }
+            }
+        }
+
+        // Now infer the entry file with ephemeral stubs from all deps.
         let module = lang_ast::module(&db, entry_file);
         let name_res = lang_ast::name_resolution(&db, entry_file);
+        let entry_path = PathBuf::from(files[0].0);
+        let base_dir = entry_path.parent().unwrap_or(Path::new("/"));
 
-        let mut in_progress = HashSet::new();
-        let mut cache = HashMap::new();
-        let resolution = resolve_imports(
-            &db,
-            entry_file,
-            &module,
-            &name_res,
-            &mut in_progress,
-            &mut cache,
-            None,
-            None,
-            None,
-            None, // no import cap in tests
-        );
-
+        let resolution =
+            resolve_import_types_from_stubs(&module, &name_res, base_dir, &ephemeral_stubs);
         let errors = resolution.errors;
 
         let result = check_file_with_imports(&db, entry_file, aliases, resolution.types)
@@ -2078,20 +2060,8 @@ mod import_tests {
         let module = lang_ast::module(&db, entry_file);
         let name_res = lang_ast::name_resolution(&db, entry_file);
 
-        let mut in_progress = HashSet::new();
-        let mut cache = HashMap::new();
-        let resolution = resolve_imports(
-            &db,
-            entry_file,
-            &module,
-            &name_res,
-            &mut in_progress,
-            &mut cache,
-            None,
-            None,
-            None,
-            None, // no import cap in tests
-        );
+        let resolution =
+            resolve_import_types_from_stubs(&module, &name_res, Path::new("/"), &HashMap::new());
 
         // The callPackage pattern should produce target entries for the path
         // literal and the outer Apply.
