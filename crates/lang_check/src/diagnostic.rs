@@ -71,15 +71,6 @@ pub enum TixDiagnosticKind {
     ImportNotFound {
         path: String,
     },
-    /// An import created a dependency cycle (A imports B imports A).
-    ImportCyclic {
-        path: String,
-    },
-    /// Type inference in an imported file produced errors.
-    ImportInferenceError {
-        path: String,
-        message: String,
-    },
     /// A doc comment type annotation could not be parsed.
     AnnotationParseError {
         name: SmolStr,
@@ -159,12 +150,6 @@ impl fmt::Display for TixDiagnosticKind {
             }
             TixDiagnosticKind::ImportNotFound { path } => {
                 write!(f, "import target not found: {path}")
-            }
-            TixDiagnosticKind::ImportCyclic { path } => {
-                write!(f, "cyclic import detected: {path}")
-            }
-            TixDiagnosticKind::ImportInferenceError { path, message } => {
-                write!(f, "error in imported file {path}: {message}")
             }
             TixDiagnosticKind::InferenceTimeout { missing_bindings } => {
                 if missing_bindings.is_empty() {
@@ -601,28 +586,6 @@ mod tests {
         let msg = kind.to_string();
         assert!(msg.contains("import target not found"));
         assert!(msg.contains("/tmp/missing.nix"));
-    }
-
-    #[test]
-    fn import_cyclic_display() {
-        let kind = TixDiagnosticKind::ImportCyclic {
-            path: "/tmp/cycle.nix".to_string(),
-        };
-        let msg = kind.to_string();
-        assert!(msg.contains("cyclic import"));
-        assert!(msg.contains("/tmp/cycle.nix"));
-    }
-
-    #[test]
-    fn import_inference_error_display() {
-        let kind = TixDiagnosticKind::ImportInferenceError {
-            path: "/tmp/bad.nix".to_string(),
-            message: "type mismatch".to_string(),
-        };
-        let msg = kind.to_string();
-        assert!(msg.contains("error in imported file"));
-        assert!(msg.contains("/tmp/bad.nix"));
-        assert!(msg.contains("type mismatch"));
     }
 
     #[test]

@@ -9,7 +9,7 @@ use lang_ast::{module_and_source_maps, name_resolution, RootDatabase};
 use lang_check::aliases::TypeAliasRegistry;
 use lang_check::check_file_collecting;
 use lang_check::diagnostic::{TixDiagnostic, TixDiagnosticKind};
-use lang_check::imports::{resolve_import_types_from_stubs, ImportErrorKind};
+use lang_check::imports::{import_errors_to_diagnostics, resolve_import_types_from_stubs};
 use lang_ty::OutputTy;
 use miette::{LabeledSpan, NamedSource};
 use rowan::ast::AstNode;
@@ -697,32 +697,7 @@ fn run_check(
     let import_resolution =
         resolve_import_types_from_stubs(&module, &name_res, base_dir, &HashMap::new());
 
-    // Convert import resolution errors into TixDiagnostics so they render
-    // with the same miette source-context as type-checking diagnostics.
-    let import_diagnostics: Vec<TixDiagnostic> = import_resolution
-        .errors
-        .iter()
-        .map(|err| {
-            let kind = match &err.kind {
-                ImportErrorKind::FileNotFound(path) => TixDiagnosticKind::ImportNotFound {
-                    path: path.display().to_string(),
-                },
-                ImportErrorKind::CyclicImport(path) => TixDiagnosticKind::ImportCyclic {
-                    path: path.display().to_string(),
-                },
-                ImportErrorKind::InferenceError(path, diag) => {
-                    TixDiagnosticKind::ImportInferenceError {
-                        path: path.display().to_string(),
-                        message: diag.kind.to_string(),
-                    }
-                }
-            };
-            TixDiagnostic {
-                at_expr: err.at_expr,
-                kind,
-            }
-        })
-        .collect();
+    let import_diagnostics = import_errors_to_diagnostics(&import_resolution.errors);
 
     let mut result =
         check_file_collecting(&db, file, &registry, import_resolution.types, context_args);
@@ -771,8 +746,6 @@ fn run_check(
                 | TixDiagnosticKind::AnnotationUnchecked { .. }
                 | TixDiagnosticKind::DuplicateKey { .. }
                 | TixDiagnosticKind::ImportNotFound { .. }
-                | TixDiagnosticKind::ImportCyclic { .. }
-                | TixDiagnosticKind::ImportInferenceError { .. }
                 | TixDiagnosticKind::InferenceTimeout { .. }
         );
         if !is_warning {

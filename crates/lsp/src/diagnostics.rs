@@ -65,8 +65,6 @@ pub fn to_lsp_diagnostics(
                 | TixDiagnosticKind::AnnotationParseError { .. }
                 | TixDiagnosticKind::DuplicateKey { .. }
                 | TixDiagnosticKind::ImportNotFound { .. }
-                | TixDiagnosticKind::ImportCyclic { .. }
-                | TixDiagnosticKind::ImportInferenceError { .. }
                 | TixDiagnosticKind::InferenceTimeout { .. } => DiagnosticSeverity::WARNING,
                 _ => DiagnosticSeverity::ERROR,
             };

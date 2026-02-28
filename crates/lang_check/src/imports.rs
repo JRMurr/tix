@@ -188,20 +188,12 @@ pub(crate) fn resolve_directory_path(path: PathBuf) -> Option<PathBuf> {
 }
 
 // ==============================================================================
-// Import Kinds
-// ==============================================================================
-
-// ==============================================================================
 // Import Errors
 // ==============================================================================
 
 #[derive(Debug, Clone)]
 pub enum ImportErrorKind {
     FileNotFound(PathBuf),
-    /// Cyclic import detected — file A imports B which (transitively) imports A.
-    /// TODO: A future extension could support cross-file SCCs by merging modules.
-    CyclicImport(PathBuf),
-    InferenceError(PathBuf, Box<crate::diagnostic::TixDiagnostic>),
 }
 
 #[derive(Debug, Clone)]
@@ -343,5 +335,26 @@ pub fn resolve_import_types_from_stubs(
     }
 }
 
-// Old resolve_imports() and resolve_imports_parallel() have been deleted.
-// Import types now come from ephemeral stubs (see resolve_import_types_from_stubs).
+/// Convert import resolution errors into `TixDiagnostic`s for rendering in
+/// CLI or LSP. Each `ImportError` becomes a warning-level diagnostic attached
+/// to the expression where the import occurs.
+pub fn import_errors_to_diagnostics(
+    errors: &[ImportError],
+) -> Vec<crate::diagnostic::TixDiagnostic> {
+    errors
+        .iter()
+        .map(|err| {
+            let kind = match &err.kind {
+                ImportErrorKind::FileNotFound(path) => {
+                    crate::diagnostic::TixDiagnosticKind::ImportNotFound {
+                        path: path.display().to_string(),
+                    }
+                }
+            };
+            crate::diagnostic::TixDiagnostic {
+                at_expr: err.at_expr,
+                kind,
+            }
+        })
+        .collect()
+}

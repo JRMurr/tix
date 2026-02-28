@@ -20,7 +20,7 @@ use lang_ast::{
 };
 use lang_check::aliases::TypeAliasRegistry;
 use lang_check::diagnostic::{TixDiagnostic, TixDiagnosticKind};
-use lang_check::imports::{resolve_import_types_from_stubs, ImportErrorKind};
+use lang_check::imports::{import_errors_to_diagnostics, resolve_import_types_from_stubs};
 use lang_check::CheckResult;
 #[cfg(test)]
 use lang_check::InferenceResult;
@@ -378,32 +378,7 @@ impl AnalysisState {
         let import_resolution =
             resolve_import_types_from_stubs(&module, &name_res, base_dir, &self.ephemeral_stubs);
 
-        // Convert import resolution errors into TixDiagnostics so they
-        // surface in the editor alongside type-checking diagnostics.
-        let import_diagnostics: Vec<TixDiagnostic> = import_resolution
-            .errors
-            .iter()
-            .map(|err| {
-                let kind = match &err.kind {
-                    ImportErrorKind::FileNotFound(path) => TixDiagnosticKind::ImportNotFound {
-                        path: path.display().to_string(),
-                    },
-                    ImportErrorKind::CyclicImport(path) => TixDiagnosticKind::ImportCyclic {
-                        path: path.display().to_string(),
-                    },
-                    ImportErrorKind::InferenceError(path, diag) => {
-                        TixDiagnosticKind::ImportInferenceError {
-                            path: path.display().to_string(),
-                            message: diag.kind.to_string(),
-                        }
-                    }
-                };
-                TixDiagnostic {
-                    at_expr: err.at_expr,
-                    kind,
-                }
-            })
-            .collect();
+        let import_diagnostics = import_errors_to_diagnostics(&import_resolution.errors);
 
         let import_targets = import_resolution.targets;
 
@@ -659,30 +634,7 @@ impl AnalysisState {
             &self.ephemeral_stubs,
         );
 
-        let import_diagnostics: Vec<TixDiagnostic> = import_resolution
-            .errors
-            .iter()
-            .map(|err| {
-                let kind = match &err.kind {
-                    ImportErrorKind::FileNotFound(path) => TixDiagnosticKind::ImportNotFound {
-                        path: path.display().to_string(),
-                    },
-                    ImportErrorKind::CyclicImport(path) => TixDiagnosticKind::ImportCyclic {
-                        path: path.display().to_string(),
-                    },
-                    ImportErrorKind::InferenceError(path, diag) => {
-                        TixDiagnosticKind::ImportInferenceError {
-                            path: path.display().to_string(),
-                            message: diag.kind.to_string(),
-                        }
-                    }
-                };
-                TixDiagnostic {
-                    at_expr: err.at_expr,
-                    kind,
-                }
-            })
-            .collect();
+        let import_diagnostics = import_errors_to_diagnostics(&import_resolution.errors);
 
         let import_targets = import_resolution.targets;
 
