@@ -3,7 +3,7 @@
 # The LSP auto-discovers this file by walking up from the file being checked.
 # See docs/src/configuration.md for full reference.
 
-# stubs = ["stubs/"]
+stubs = ["stubs/"]
 
 [context.nixos]
 paths = ["test/nixos_module.nix", "test/nixos_fixture/**/*.nix"]
