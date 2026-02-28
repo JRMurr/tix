@@ -8,10 +8,8 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use comment_parser::{ParsedTy, TypeVarValue};
 use lang_ast::Expr;
-use lang_check::aliases::TypeAliasRegistry;
-use lang_ty::{AttrSetTy, OutputTy, TyRef};
+use lang_ty::{OutputTy, TyRef};
 use rowan::ast::AstNode;
 use smol_str::SmolStr;
 
@@ -274,93 +272,8 @@ pub(crate) fn extract_alias_name(ty: &OutputTy) -> Option<&SmolStr> {
     }
 }
 
-/// Convert a `ParsedTy` (from .tix stub files) to an `OutputTy`, resolving alias
-/// references through the `TypeAliasRegistry`.
-///
-/// This is needed because context args are stored as `ParsedTy` but the LSP
-/// works with `OutputTy` for field lookups and hover display.
-pub(crate) fn parsed_ty_to_output_ty(
-    ty: &ParsedTy,
-    registry: &TypeAliasRegistry,
-    depth: usize,
-) -> OutputTy {
-    // Prevent infinite recursion on self-referential aliases.
-    if depth > 20 {
-        return OutputTy::TyVar(0);
-    }
-
-    match ty {
-        // comment_parser uses lang_ty::PrimitiveTy directly, so clone is safe.
-        ParsedTy::Primitive(p) => OutputTy::Primitive(*p),
-
-        ParsedTy::TyVar(TypeVarValue::Reference(name)) => {
-            // Look up alias in registry and wrap in Named.
-            if let Some(alias_body) = registry.get(name) {
-                let inner = parsed_ty_to_output_ty(alias_body, registry, depth + 1);
-                OutputTy::Named(name.clone(), TyRef::from(inner))
-            } else {
-                // Unresolved reference — treat as opaque type variable.
-                OutputTy::TyVar(0)
-            }
-        }
-
-        ParsedTy::TyVar(TypeVarValue::Generic(_)) => {
-            // Generics don't matter for field lookup — placeholder.
-            OutputTy::TyVar(0)
-        }
-
-        ParsedTy::List(inner) => OutputTy::List(TyRef::from(parsed_ty_to_output_ty(
-            &inner.0,
-            registry,
-            depth + 1,
-        ))),
-
-        ParsedTy::Lambda { param, body } => OutputTy::Lambda {
-            param: TyRef::from(parsed_ty_to_output_ty(&param.0, registry, depth + 1)),
-            body: TyRef::from(parsed_ty_to_output_ty(&body.0, registry, depth + 1)),
-        },
-
-        ParsedTy::AttrSet(attr) => {
-            let fields = attr
-                .fields
-                .iter()
-                .map(|(name, ty_ref)| {
-                    (
-                        name.clone(),
-                        TyRef::from(parsed_ty_to_output_ty(&ty_ref.0, registry, depth + 1)),
-                    )
-                })
-                .collect();
-            let dyn_ty = attr
-                .dyn_ty
-                .as_ref()
-                .map(|d| TyRef::from(parsed_ty_to_output_ty(&d.0, registry, depth + 1)));
-            OutputTy::AttrSet(AttrSetTy {
-                fields,
-                dyn_ty,
-                open: attr.open,
-                optional_fields: attr.optional_fields.clone(),
-            })
-        }
-
-        ParsedTy::Union(members) => OutputTy::Union(
-            members
-                .iter()
-                .map(|m| TyRef::from(parsed_ty_to_output_ty(&m.0, registry, depth + 1)))
-                .collect(),
-        ),
-
-        ParsedTy::Intersection(members) => OutputTy::Intersection(
-            members
-                .iter()
-                .map(|m| TyRef::from(parsed_ty_to_output_ty(&m.0, registry, depth + 1)))
-                .collect(),
-        ),
-
-        ParsedTy::Top => OutputTy::Top,
-        ParsedTy::Bottom => OutputTy::Bottom,
-    }
-}
+// Re-export from lang_check::aliases for backward compatibility within the LSP crate.
+pub(crate) use lang_check::aliases::parsed_ty_to_output_ty;
 
 /// Collect attrpath segments from an Attrpath node, relative to a boundary position.
 ///

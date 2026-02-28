@@ -307,6 +307,11 @@ pub struct AnalysisState {
     /// open files that import it. When a file's ephemeral stub changes,
     /// all its dependents are scheduled for re-analysis.
     import_dependents: HashMap<PathBuf, HashSet<PathBuf>>,
+
+    /// Forward dependency index: maps an importer path to the set of files
+    /// it imports. Used for O(old_import_count) cleanup when an importer's
+    /// dependencies change — avoids scanning all keys in import_dependents.
+    import_forward: HashMap<PathBuf, Vec<PathBuf>>,
 }
 
 impl AnalysisState {
@@ -320,6 +325,7 @@ impl AnalysisState {
             deadline_secs: 10,
             ephemeral_stubs: HashMap::new(),
             import_dependents: HashMap::new(),
+            import_forward: HashMap::new(),
         }
     }
 
@@ -705,13 +711,13 @@ impl AnalysisState {
     /// for this importer, and updates the reverse index so dependents can be
     /// looked up efficiently.
     pub fn record_import_deps(&mut self, importer: &Path, imported: &[PathBuf]) {
-        // Remove old entries for this importer from all reverse-index sets.
-        // (Iterate a snapshot of keys to avoid borrow issues.)
-        let old_keys: Vec<PathBuf> = self.import_dependents.keys().cloned().collect();
-        for key in old_keys {
-            if let Some(set) = self.import_dependents.get_mut(&key) {
-                set.remove(importer);
-                // Don't remove empty sets here — minor leak but avoids churn.
+        // Remove old entries using the forward index — O(old_import_count)
+        // instead of O(total_import_targets).
+        if let Some(old_deps) = self.import_forward.remove(importer) {
+            for dep in &old_deps {
+                if let Some(set) = self.import_dependents.get_mut(dep) {
+                    set.remove(importer);
+                }
             }
         }
 
@@ -722,6 +728,10 @@ impl AnalysisState {
                 .or_default()
                 .insert(importer.to_path_buf());
         }
+
+        // Update forward index.
+        self.import_forward
+            .insert(importer.to_path_buf(), imported.to_vec());
     }
 
     /// Return the set of files that import the given path (its dependents).

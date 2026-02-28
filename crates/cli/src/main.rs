@@ -381,7 +381,7 @@ fn run_verify_stubs(
     let mut mismatches = Vec::new();
 
     for (name, declared_ty) in &val_decls {
-        let declared_output = parsed_ty_to_output_ty_simple(declared_ty, &registry);
+        let declared_output = parsed_ty_to_output_ty(declared_ty, &registry, 0);
         compare_types(
             &root_ty,
             &declared_output,
@@ -411,68 +411,7 @@ fn run_verify_stubs(
     Ok(())
 }
 
-/// Convert a `ParsedTy` to `OutputTy` for comparison, resolving type aliases.
-fn parsed_ty_to_output_ty_simple(
-    ty: &comment_parser::ParsedTy,
-    registry: &TypeAliasRegistry,
-) -> OutputTy {
-    use comment_parser::{ParsedTy, TypeVarValue};
-    match ty {
-        ParsedTy::Primitive(p) => OutputTy::Primitive(*p),
-        ParsedTy::TyVar(TypeVarValue::Reference(name)) => {
-            if let Some(alias_body) = registry.get(name) {
-                let inner = parsed_ty_to_output_ty_simple(alias_body, registry);
-                OutputTy::Named(name.clone(), lang_ty::TyRef::from(inner))
-            } else {
-                OutputTy::TyVar(0) // unresolved
-            }
-        }
-        ParsedTy::TyVar(TypeVarValue::Generic(_)) => OutputTy::TyVar(0),
-        ParsedTy::List(inner) => OutputTy::List(lang_ty::TyRef::from(
-            parsed_ty_to_output_ty_simple(&inner.0, registry),
-        )),
-        ParsedTy::Lambda { param, body } => OutputTy::Lambda {
-            param: lang_ty::TyRef::from(parsed_ty_to_output_ty_simple(&param.0, registry)),
-            body: lang_ty::TyRef::from(parsed_ty_to_output_ty_simple(&body.0, registry)),
-        },
-        ParsedTy::AttrSet(attr) => {
-            let fields = attr
-                .fields
-                .iter()
-                .map(|(k, v)| {
-                    (
-                        k.clone(),
-                        lang_ty::TyRef::from(parsed_ty_to_output_ty_simple(&v.0, registry)),
-                    )
-                })
-                .collect();
-            let dyn_ty = attr
-                .dyn_ty
-                .as_ref()
-                .map(|d| lang_ty::TyRef::from(parsed_ty_to_output_ty_simple(&d.0, registry)));
-            OutputTy::AttrSet(lang_ty::AttrSetTy {
-                fields,
-                dyn_ty,
-                open: attr.open,
-                optional_fields: attr.optional_fields.clone(),
-            })
-        }
-        ParsedTy::Union(members) => OutputTy::Union(
-            members
-                .iter()
-                .map(|m| lang_ty::TyRef::from(parsed_ty_to_output_ty_simple(&m.0, registry)))
-                .collect(),
-        ),
-        ParsedTy::Intersection(members) => OutputTy::Intersection(
-            members
-                .iter()
-                .map(|m| lang_ty::TyRef::from(parsed_ty_to_output_ty_simple(&m.0, registry)))
-                .collect(),
-        ),
-        ParsedTy::Top => OutputTy::Top,
-        ParsedTy::Bottom => OutputTy::Bottom,
-    }
-}
+use lang_check::aliases::parsed_ty_to_output_ty;
 
 /// Structural comparison of inferred vs declared types. Reports mismatches
 /// as human-readable strings. This is a best-effort check — it catches
@@ -538,6 +477,74 @@ fn compare_types(
 
         // Primitive exact match.
         (OutputTy::Primitive(a), OutputTy::Primitive(b)) if a == b => {}
+
+        // Union comparison: each declared member must be compatible with at
+        // least one inferred member (or the whole inferred type if it isn't a union).
+        (OutputTy::Union(inf_members), OutputTy::Union(decl_members)) => {
+            for decl_m in decl_members {
+                let mut member_mismatches = Vec::new();
+                let mut any_match = false;
+                for inf_m in inf_members {
+                    let mut trial = Vec::new();
+                    compare_types(&inf_m.0, &decl_m.0, path, &mut trial);
+                    if trial.is_empty() {
+                        any_match = true;
+                        break;
+                    }
+                    member_mismatches.extend(trial);
+                }
+                if !any_match {
+                    mismatches.push(format!(
+                        "{path}: stub declares union member `{}` but no matching inferred member found",
+                        decl_m.0
+                    ));
+                }
+            }
+        }
+
+        // Intersection comparison: each declared member must be compatible
+        // with the inferred type.
+        (_, OutputTy::Intersection(decl_members)) => {
+            for decl_m in decl_members {
+                compare_types(inferred, &decl_m.0, path, mismatches);
+            }
+        }
+        (OutputTy::Intersection(inf_members), _) => {
+            // If inferred is an intersection, any member matching suffices.
+            let mut any_match = false;
+            for inf_m in inf_members {
+                let mut trial = Vec::new();
+                compare_types(&inf_m.0, declared, path, &mut trial);
+                if trial.is_empty() {
+                    any_match = true;
+                    break;
+                }
+            }
+            if !any_match {
+                mismatches.push(format!(
+                    "{path}: stub declares `{declared}` but implementation infers `{inferred}`"
+                ));
+            }
+        }
+
+        // Single inferred type vs declared union: inferred must match at least
+        // one declared member.
+        (_, OutputTy::Union(decl_members)) => {
+            let mut any_match = false;
+            for decl_m in decl_members {
+                let mut trial = Vec::new();
+                compare_types(inferred, &decl_m.0, path, &mut trial);
+                if trial.is_empty() {
+                    any_match = true;
+                    break;
+                }
+            }
+            if !any_match {
+                mismatches.push(format!(
+                    "{path}: stub declares `{declared}` but implementation infers `{inferred}`"
+                ));
+            }
+        }
 
         // Named types: unwrap and compare inner.
         (OutputTy::Named(_, inf_inner), _) => {

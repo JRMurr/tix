@@ -595,6 +595,86 @@ fn collect_references_inner(ty: &ParsedTy, refs: &mut Vec<SmolStr>) {
     }
 }
 
+// ==============================================================================
+// ParsedTy → OutputTy conversion
+// ==============================================================================
+
+/// Convert a `ParsedTy` to `OutputTy`, resolving type alias references through
+/// a `TypeAliasRegistry`. Shared by CLI and LSP code paths.
+///
+/// `depth` guards against infinite recursion on self-referential aliases.
+/// Generic type variables and unresolved references become `OutputTy::TyVar(0)`.
+pub fn parsed_ty_to_output_ty(
+    ty: &ParsedTy,
+    registry: &TypeAliasRegistry,
+    depth: usize,
+) -> lang_ty::OutputTy {
+    use comment_parser::TypeVarValue;
+    use lang_ty::{OutputTy, TyRef};
+
+    if depth > 20 {
+        return OutputTy::TyVar(0);
+    }
+
+    match ty {
+        ParsedTy::Primitive(p) => OutputTy::Primitive(*p),
+        ParsedTy::TyVar(TypeVarValue::Reference(name)) => {
+            if let Some(alias_body) = registry.get(name) {
+                let inner = parsed_ty_to_output_ty(alias_body, registry, depth + 1);
+                OutputTy::Named(name.clone(), TyRef::from(inner))
+            } else {
+                OutputTy::TyVar(0)
+            }
+        }
+        ParsedTy::TyVar(TypeVarValue::Generic(_)) => OutputTy::TyVar(0),
+        ParsedTy::List(inner) => OutputTy::List(TyRef::from(parsed_ty_to_output_ty(
+            &inner.0,
+            registry,
+            depth + 1,
+        ))),
+        ParsedTy::Lambda { param, body } => OutputTy::Lambda {
+            param: TyRef::from(parsed_ty_to_output_ty(&param.0, registry, depth + 1)),
+            body: TyRef::from(parsed_ty_to_output_ty(&body.0, registry, depth + 1)),
+        },
+        ParsedTy::AttrSet(attr) => {
+            let fields = attr
+                .fields
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        TyRef::from(parsed_ty_to_output_ty(&v.0, registry, depth + 1)),
+                    )
+                })
+                .collect();
+            let dyn_ty = attr
+                .dyn_ty
+                .as_ref()
+                .map(|d| TyRef::from(parsed_ty_to_output_ty(&d.0, registry, depth + 1)));
+            OutputTy::AttrSet(AttrSetTy {
+                fields,
+                dyn_ty,
+                open: attr.open,
+                optional_fields: attr.optional_fields.clone(),
+            })
+        }
+        ParsedTy::Union(members) => OutputTy::Union(
+            members
+                .iter()
+                .map(|m| TyRef::from(parsed_ty_to_output_ty(&m.0, registry, depth + 1)))
+                .collect(),
+        ),
+        ParsedTy::Intersection(members) => OutputTy::Intersection(
+            members
+                .iter()
+                .map(|m| TyRef::from(parsed_ty_to_output_ty(&m.0, registry, depth + 1)))
+                .collect(),
+        ),
+        ParsedTy::Top => OutputTy::Top,
+        ParsedTy::Bottom => OutputTy::Bottom,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
