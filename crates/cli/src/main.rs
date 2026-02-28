@@ -256,24 +256,7 @@ fn run_gen_stub(
     no_default_stubs: bool,
     output: Option<PathBuf>,
 ) -> Result<(), Box<dyn Error>> {
-    let mut registry = if no_default_stubs {
-        TypeAliasRegistry::new()
-    } else {
-        TypeAliasRegistry::with_builtins()
-    };
-
-    if let Ok(dir) = std::env::var("TIX_BUILTIN_STUBS") {
-        registry.set_builtin_stubs_dir(PathBuf::from(dir));
-    }
-
-    for stub_path in &stub_paths {
-        load_stubs(&mut registry, stub_path)?;
-    }
-
-    if let Err(cycles) = registry.validate() {
-        eprintln!("Error: cyclic type aliases detected: {:?}", cycles);
-        std::process::exit(1);
-    }
+    let registry = build_registry(no_default_stubs, &stub_paths)?;
 
     let db: RootDatabase = Default::default();
     let file = db.read_file(file_path.clone())?;
@@ -308,7 +291,8 @@ fn run_gen_stub(
         .and_then(|s| s.to_str())
         .unwrap_or("_");
 
-    let tix_output = format!("val {decl_name} :: {root_ty};\n");
+    let root_ty_str = format!("{root_ty}");
+    let tix_output = format!("val {decl_name} :: {root_ty_str};\n");
 
     match output {
         Some(path) => {
@@ -319,7 +303,7 @@ fn run_gen_stub(
     }
 
     // Warn about types that may not round-trip through .tix parsing.
-    if format!("{root_ty}").contains('~') {
+    if root_ty_str.contains('~') {
         eprintln!(
             "Warning: output contains negation types (~) which are not expressible in .tix syntax"
         );
@@ -338,26 +322,11 @@ fn run_verify_stubs(
     extra_stubs: Vec<PathBuf>,
     no_default_stubs: bool,
 ) -> Result<(), Box<dyn Error>> {
-    // Load stubs (including the one being verified).
-    let mut registry = if no_default_stubs {
-        TypeAliasRegistry::new()
-    } else {
-        TypeAliasRegistry::with_builtins()
-    };
-
-    if let Ok(dir) = std::env::var("TIX_BUILTIN_STUBS") {
-        registry.set_builtin_stubs_dir(PathBuf::from(dir));
-    }
-
-    for sp in &extra_stubs {
-        load_stubs(&mut registry, sp)?;
-    }
-    load_stubs(&mut registry, &stub_path)?;
-
-    if let Err(cycles) = registry.validate() {
-        eprintln!("Error: cyclic type aliases detected: {:?}", cycles);
-        std::process::exit(1);
-    }
+    // Load stubs (including the one being verified). We append stub_path
+    // to the extra stubs so build_registry loads everything in one pass.
+    let mut all_stubs = extra_stubs;
+    all_stubs.push(stub_path.clone());
+    let registry = build_registry(no_default_stubs, &all_stubs)?;
 
     // Parse the stub file to get declared val types.
     let stub_source = std::fs::read_to_string(&stub_path)?;
@@ -597,25 +566,7 @@ fn run_check(
     no_default_stubs: bool,
     config_path: Option<PathBuf>,
 ) -> Result<(), Box<dyn Error>> {
-    // Load .tix stub files into the type alias registry.
-    // Built-in nixpkgs stubs are included by default unless --no-default-stubs is passed.
-    let mut registry = if no_default_stubs {
-        TypeAliasRegistry::new()
-    } else {
-        TypeAliasRegistry::with_builtins()
-    };
-
-    // Allow overriding built-in context stubs (e.g. @nixos, @home-manager) with
-    // generated stubs from a directory. Used by the Nix `with-stubs` wrapper to
-    // provide fully-typed NixosConfig/HomeManagerConfig instead of the minimal
-    // compiled-in stubs.
-    if let Ok(dir) = std::env::var("TIX_BUILTIN_STUBS") {
-        registry.set_builtin_stubs_dir(PathBuf::from(dir));
-    }
-
-    for stub_path in &stub_paths {
-        load_stubs(&mut registry, stub_path)?;
-    }
+    let mut registry = build_registry(no_default_stubs, &stub_paths)?;
 
     // Discover or load tix.toml configuration.
     let canonical_path = std::fs::canonicalize(&file_path).unwrap_or(file_path.clone());
@@ -858,6 +809,35 @@ fn run_check(
     }
 
     Ok(())
+}
+
+/// Build a TypeAliasRegistry from CLI flags, loading stubs and validating.
+/// This consolidates the repeated registry setup across run_check, run_gen_stub,
+/// and run_verify_stubs.
+fn build_registry(
+    no_default_stubs: bool,
+    stub_paths: &[PathBuf],
+) -> Result<TypeAliasRegistry, Box<dyn Error>> {
+    let mut registry = if no_default_stubs {
+        TypeAliasRegistry::new()
+    } else {
+        TypeAliasRegistry::with_builtins()
+    };
+
+    if let Ok(dir) = std::env::var("TIX_BUILTIN_STUBS") {
+        registry.set_builtin_stubs_dir(PathBuf::from(dir));
+    }
+
+    for stub_path in stub_paths {
+        load_stubs(&mut registry, stub_path)?;
+    }
+
+    if let Err(cycles) = registry.validate() {
+        eprintln!("Error: cyclic type aliases detected: {:?}", cycles);
+        std::process::exit(1);
+    }
+
+    Ok(registry)
 }
 
 /// Load .tix files from a path. If the path is a file, load it directly.

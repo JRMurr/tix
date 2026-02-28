@@ -29,8 +29,8 @@ pub struct ProjectConfig {
     #[serde(default)]
     pub deadline: Option<u64>,
 
-    /// No longer used (imports resolve via stubs, not recursive inference).
-    /// Kept for backward compatibility with existing tix.toml files.
+    /// Deprecated: no longer used (imports resolve via stubs, not recursive
+    /// inference). Kept so existing tix.toml files don't fail to parse.
     #[serde(default)]
     #[allow(dead_code)]
     pub import_deadline: Option<u64>,

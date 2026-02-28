@@ -411,7 +411,7 @@ fn spawn_analysis_loop(
                 // deadline/cancel/cap). Side-channel limits are set on the DB.
                 let (inference_inputs, import_targets, name_to_import, import_duration) = {
                     let mut st = state.lock();
-                    st.update_syntax_phase_b(&intermediate, Some(cancel_flag.clone()))
+                    st.update_syntax_phase_b(&intermediate)
                 };
                 // mutex released here
 

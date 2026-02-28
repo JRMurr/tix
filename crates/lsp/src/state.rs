@@ -572,21 +572,9 @@ impl AnalysisState {
 
         let syntax_duration = t0.elapsed();
 
-        // SyntaxData with empty import fields — handlers get fresh syntax
-        // immediately, import data is filled in after Phase B.
-        let syntax_data = SyntaxData {
-            parsed,
-            line_index,
-            module: module.clone(),
-            module_indices: module_indices.clone(),
-            source_map: source_map.clone(),
-            name_res: name_res.clone(),
-            scopes: scopes.clone(),
-            import_targets: HashMap::new(),
-            name_to_import: HashMap::new(),
-            context_arg_types: context_arg_types.clone(),
-        };
-
+        // Build intermediate first (takes ownership of original values),
+        // then clone from it for syntax_data — avoids two extra clones
+        // that the previous order required.
         let intermediate = SyntaxIntermediate {
             nix_file,
             path,
@@ -596,12 +584,27 @@ impl AnalysisState {
             scopes,
             grouped_defs: grouped,
             source_map,
-            parsed: syntax_data.parsed.clone(),
-            line_index: syntax_data.line_index.clone(),
+            parsed,
+            line_index,
             registry: self.registry.clone(),
             context_args,
             context_arg_types,
             deadline_secs: self.deadline_secs,
+        };
+
+        // SyntaxData with empty import fields — handlers get fresh syntax
+        // immediately, import data is filled in after Phase B.
+        let syntax_data = SyntaxData {
+            parsed: intermediate.parsed.clone(),
+            line_index: intermediate.line_index.clone(),
+            module: intermediate.module.clone(),
+            module_indices: intermediate.module_indices.clone(),
+            source_map: intermediate.source_map.clone(),
+            name_res: intermediate.name_res.clone(),
+            scopes: intermediate.scopes.clone(),
+            import_targets: HashMap::new(),
+            name_to_import: HashMap::new(),
+            context_arg_types: intermediate.context_arg_types.clone(),
         };
 
         (syntax_data, intermediate, syntax_duration)
@@ -614,7 +617,6 @@ impl AnalysisState {
     pub fn update_syntax_phase_b(
         &mut self,
         intermediate: &SyntaxIntermediate,
-        _cancel_flag: Option<Arc<AtomicBool>>,
     ) -> (
         InferenceInputs,
         HashMap<ExprId, PathBuf>,

@@ -743,13 +743,12 @@ impl<'db> CheckCtx<'db> {
                 let inner_id = self.intern_output_ty_inner(&inner.0, var_map);
                 self.alloc_concrete(Ty::Neg(inner_id))
             }
-            // Bottom (never): uninhabited type from contradictions. Intern as
-            // a fresh variable with no bounds — it shouldn't appear in
-            // importable type signatures in practice.
+            // Bottom/Top: fresh unconstrained variables. The internal Ty
+            // representation has no ⊤/⊥ variants, but a fresh variable
+            // approximates them correctly: no bounds → unconstrained,
+            // which means "anything goes" (Top) or "nothing produced"
+            // (Bottom) depending on polarity during canonicalization.
             OutputTy::Bottom => self.new_var(),
-            // Top (any): universal type from tautologies. Intern as a fresh
-            // unconstrained variable — equivalent to "any value" during
-            // inference.
             OutputTy::Top => self.new_var(),
         }
     }
@@ -1035,9 +1034,14 @@ impl<'db> CheckCtx<'db> {
                 }
                 var
             }
-            // Top/Bottom: fresh unconstrained variable for Top (anything goes),
-            // fresh variable for Bottom (no values inhabit it — the constraint
-            // system naturally keeps it at ⊥ when unused).
+            // Top/Bottom: a fresh unconstrained variable is the correct
+            // representation in the bounds system. For Top (any), no upper
+            // bounds means "accepts anything" in negative position; for
+            // Bottom (never), no lower bounds means "produces nothing" in
+            // positive position. The variable won't reject constraints from
+            // usage, so `any` effectively behaves like a generic parameter
+            // rather than a true ⊤ — which is the desired behavior for
+            // annotations like `val f :: any -> int`.
             ParsedTy::Top | ParsedTy::Bottom => self.new_var(),
         }
     }
