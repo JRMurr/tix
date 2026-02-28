@@ -115,3 +115,211 @@ async fn tix_toml_context() {
 
     h.shutdown().await;
 }
+
+/// Hovering on a pattern field that has a context-provided type should
+/// show that type, not `?` or `{...}`.
+#[tokio::test]
+async fn context_hover_on_pattern_field() {
+    let mut h = LspTestHarness::new(&[
+        (
+            "tix.toml",
+            indoc! {"
+                [context.test]
+                paths = [\"src/*.nix\"]
+                stubs = [\"ctx.tix\"]
+            "},
+        ),
+        (
+            "ctx.tix",
+            indoc! {"
+                type MyLib = { id: a -> a, const: a -> b -> a, ... };
+                val lib :: MyLib;
+            "},
+        ),
+        (
+            "src/test.nix",
+            indoc! {"
+                { lib, ... }:
+                # ^1
+                lib.id 42
+            "},
+        ),
+    ])
+    .await;
+
+    h.open("src/test.nix").await;
+    let _ = h.wait_for_diagnostics("src/test.nix", TIMEOUT).await;
+
+    let m = h.markers("src/test.nix");
+    let hover = h
+        .hover("src/test.nix", m[&1].line, m[&1].character)
+        .await
+        .expect("hover on `lib` pattern field should return a result");
+
+    let HoverContents::Markup(content) = &hover.contents else {
+        panic!("expected MarkupContent, got {:?}", hover.contents);
+    };
+
+    eprintln!("pattern field hover: {}", content.value);
+
+    // The type should reflect the context annotation, not be bare `?`.
+    assert!(
+        content.value.contains("MyLib") || content.value.contains("id"),
+        "hover on pattern field `lib` should show context type, got: {}",
+        content.value,
+    );
+
+    h.shutdown().await;
+}
+
+/// Hovering on `lib` in a callPackage-style file (`{ lib, ... }:`) should
+/// show the `Lib` type from the built-in stubs, not just `{...}`.
+///
+/// Reproduces the issue seen in real nixpkgs on files like
+/// `pkgs/development/emilua-plugins/beast/default.nix` where hover on `lib`
+/// shows `{...}` instead of `Lib`.
+#[tokio::test]
+async fn callpackage_context_lib_hover() {
+    let mut h = LspTestHarness::with_options(
+        &[
+            (
+                "tix.toml",
+                indoc! {"
+                    [context.callpackage]
+                    paths = [\"pkgs/**/*.nix\"]
+                    stubs = [\"@callpackage\"]
+                "},
+            ),
+            (
+                "pkgs/beast/default.nix",
+                indoc! {"
+                    { lib, stdenv, fetchFromGitLab, ... }:
+                    # ^1
+                    stdenv.mkDerivation {
+                      pname = \"test\";
+                      version = \"1.0\";
+                      meta = {
+                        description = \"test\";
+                        license = lib.licenses.boost;
+                        platforms = lib.platforms.linux;
+                      };
+                    }
+                "},
+            ),
+        ],
+        false, // load built-in stubs (needed for @callpackage -> Pkgs -> Lib)
+    )
+    .await;
+
+    h.open("pkgs/beast/default.nix").await;
+    let _ = h
+        .wait_for_diagnostics("pkgs/beast/default.nix", TIMEOUT)
+        .await;
+
+    let m = h.markers("pkgs/beast/default.nix");
+    let hover = h
+        .hover("pkgs/beast/default.nix", m[&1].line, m[&1].character)
+        .await
+        .expect("hover on `lib` should return a result");
+
+    let HoverContents::Markup(content) = &hover.contents else {
+        panic!("expected MarkupContent, got {:?}", hover.contents);
+    };
+
+    eprintln!("lib hover: {}", content.value);
+
+    // The type should be `Lib` (or at minimum contain structured fields),
+    // NOT just `{...}` or a bare type variable.
+    assert!(
+        content.value.contains("Lib"),
+        "hover on `lib` in callPackage file should show `Lib` type, got: {}",
+        content.value,
+    );
+
+    h.shutdown().await;
+}
+
+/// Same as above but using the exact tix.toml format from the user's nixpkgs
+/// checkout: `stubs = []` (explicit empty), multiple contexts, and a
+/// `[project]` section.
+#[tokio::test]
+async fn callpackage_context_nixpkgs_toml_format() {
+    let mut h = LspTestHarness::with_options(
+        &[
+            (
+                "tix.toml",
+                // Exact format from the user's nixpkgs tix.toml
+                indoc! {"
+                    stubs = []
+
+                    [context.nixos]
+                    paths = [\"nixos/**/*.nix\"]
+                    stubs = [\"@nixos\"]
+
+                    [context.callpackage]
+                    paths = [\"pkgs/**/*.nix\"]
+                    stubs = [\"@callpackage\"]
+
+                    [project]
+                    analyze = [\"lib/*.nix\"]
+                "},
+            ),
+            (
+                "pkgs/beast/default.nix",
+                indoc! {"
+                    { lib, stdenv, fetchFromGitLab, ... }:
+                    # ^1   ^2
+                    stdenv.mkDerivation {
+                      pname = \"test\";
+                      version = \"1.0\";
+                      meta = {
+                        license = lib.licenses.boost;
+                        platforms = lib.platforms.linux;
+                      };
+                    }
+                "},
+            ),
+        ],
+        false, // load built-in stubs
+    )
+    .await;
+
+    h.open("pkgs/beast/default.nix").await;
+    let _ = h
+        .wait_for_diagnostics("pkgs/beast/default.nix", TIMEOUT)
+        .await;
+
+    let m = h.markers("pkgs/beast/default.nix");
+
+    // Hover on `lib`
+    let hover = h
+        .hover("pkgs/beast/default.nix", m[&1].line, m[&1].character)
+        .await
+        .expect("hover on `lib`");
+    let HoverContents::Markup(content) = &hover.contents else {
+        panic!("expected MarkupContent");
+    };
+    eprintln!("lib hover (nixpkgs format): {}", content.value);
+    assert!(
+        content.value.contains("Lib"),
+        "hover on `lib` should show `Lib`, got: {}",
+        content.value,
+    );
+
+    // Hover on `stdenv`
+    let hover = h
+        .hover("pkgs/beast/default.nix", m[&2].line, m[&2].character)
+        .await
+        .expect("hover on `stdenv`");
+    let HoverContents::Markup(content) = &hover.contents else {
+        panic!("expected MarkupContent");
+    };
+    eprintln!("stdenv hover: {}", content.value);
+    assert!(
+        content.value.contains("mkDerivation"),
+        "hover on `stdenv` should show structured type with mkDerivation, got: {}",
+        content.value,
+    );
+
+    h.shutdown().await;
+}
