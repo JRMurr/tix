@@ -349,6 +349,29 @@ pub fn resolve_imports(
         );
     }
 
+    // When there are many imports at the top level (depth 0), use the
+    // parallel rayon path for a significant speedup. Below the threshold,
+    // the sequential Salsa path is fine and preserves incremental memoization.
+    const PARALLEL_THRESHOLD: usize = 50;
+    if depth == 0 && work.len() >= PARALLEL_THRESHOLD {
+        log::info!(
+            "resolve_imports: {} imports exceeds parallel threshold ({}), using rayon",
+            work.len(),
+            PARALLEL_THRESHOLD,
+        );
+        return resolve_imports_parallel(
+            db,
+            file,
+            module,
+            name_res,
+            &work,
+            cache,
+            aggregate_deadline,
+            cancel_flag,
+            max_imports,
+        );
+    }
+
     let mut resolved_count: usize = 0;
 
     for (kind, target_path) in work {
@@ -502,6 +525,121 @@ pub fn resolve_imports(
             "{indent}  {target_name}: {:.1}ms (salsa memoized)",
             t_infer.as_secs_f64() * 1000.0,
         );
+    }
+
+    ImportResolution {
+        types,
+        errors,
+        targets,
+    }
+}
+
+/// Parallel import resolution path. Used when the number of imports exceeds
+/// PARALLEL_THRESHOLD. Delegates to the two-phase parallel_imports module:
+/// Phase 1 discovers the import graph, Phase 2 infers in parallel via rayon.
+#[allow(clippy::too_many_arguments)]
+fn resolve_imports_parallel(
+    db: &dyn AstDb,
+    file: NixFile,
+    module: &Module,
+    name_res: &NameResolution,
+    work: &[(ImportKind, PathBuf)],
+    cache: &mut HashMap<PathBuf, OutputTy>,
+    aggregate_deadline: Instant,
+    cancel_flag: Option<&Arc<AtomicBool>>,
+    max_imports: Option<usize>,
+) -> ImportResolution {
+    use crate::parallel_imports::{discover_import_graph, infer_import_graph_parallel};
+    use crate::salsa_imports::build_type_alias_registry;
+    use std::sync::Arc;
+
+    let file_path = file.path(db);
+
+    let t0 = Instant::now();
+
+    // Phase 1: Discover import graph (sequential, uses Salsa).
+    let (graph, errors) = discover_import_graph(
+        db,
+        module,
+        name_res,
+        &file_path,
+        max_imports,
+        Some(aggregate_deadline),
+        cancel_flag,
+    );
+
+    let t_discover = t0.elapsed();
+    log::info!(
+        "parallel import discovery: {} files in {:.1}ms",
+        graph.len(),
+        t_discover.as_secs_f64() * 1000.0,
+    );
+
+    // Phase 2: Infer in parallel via rayon.
+    let aliases = match db.stub_config() {
+        Some(config) => Arc::new(build_type_alias_registry(db, config)),
+        None => Arc::new(crate::aliases::TypeAliasRegistry::default()),
+    };
+
+    let cancel_arc = cancel_flag.map(Arc::clone);
+    let t0 = Instant::now();
+    let inferred = infer_import_graph_parallel(&graph, aliases, 5, cancel_arc);
+    let t_infer = t0.elapsed();
+    log::info!(
+        "parallel import inference: {} files in {:.1}ms",
+        inferred.len(),
+        t_infer.as_secs_f64() * 1000.0,
+    );
+
+    // Map inferred results back to the work list's ExprIds and build
+    // navigation targets.
+    let mut types = HashMap::new();
+    let mut targets = HashMap::new();
+
+    for (kind, target_path) in work {
+        let target_path = target_path.canonicalize().unwrap_or(target_path.clone());
+        let target_path = match resolve_directory_path(target_path.clone()) {
+            Some(p) => p,
+            None => continue,
+        };
+
+        // Record navigation targets.
+        match kind {
+            ImportKind::Import { apply_expr_id } => {
+                if let Expr::Apply { fun, arg } = &module[*apply_expr_id] {
+                    targets.insert(*fun, target_path.clone());
+                    targets.insert(*arg, target_path.clone());
+                }
+                targets.insert(*apply_expr_id, target_path.clone());
+            }
+            ImportKind::CallPackage {
+                outer_apply_id,
+                inner_apply_id,
+                path_literal_id,
+            } => {
+                targets.insert(*path_literal_id, target_path.clone());
+                targets.insert(*outer_apply_id, target_path.clone());
+                targets.insert(*inner_apply_id, target_path.clone());
+            }
+        }
+
+        // Look up the inferred type.
+        if let Some(root_ty) = inferred.get(&target_path) {
+            cache.insert(target_path.clone(), root_ty.clone());
+            match kind {
+                ImportKind::Import { apply_expr_id } => {
+                    types.insert(*apply_expr_id, root_ty.clone());
+                }
+                ImportKind::CallPackage {
+                    outer_apply_id,
+                    inner_apply_id,
+                    ..
+                } => {
+                    types.insert(*inner_apply_id, root_ty.clone());
+                    types.insert(*outer_apply_id, extract_return_type(root_ty));
+                }
+            }
+        }
     }
 
     ImportResolution {
