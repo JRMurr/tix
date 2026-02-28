@@ -302,17 +302,19 @@ pub fn resolve_import_types_from_stubs(
         let target_path = match resolve_directory_path(target_path.clone()) {
             Some(p) => p,
             None => {
-                // Directory exists but has no default.nix — or path not found on disk.
-                // Only emit FileNotFound if the original path doesn't exist at all.
-                if !target_path.exists() {
-                    errors.push(ImportError {
-                        kind: ImportErrorKind::FileNotFound(target_path),
-                        at_expr: apply_expr_id,
-                    });
-                }
+                // Directory exists but has no default.nix.
                 continue;
             }
         };
+
+        // Check that the resolved file actually exists on disk.
+        if !target_path.exists() {
+            errors.push(ImportError {
+                kind: ImportErrorKind::FileNotFound(target_path),
+                at_expr: apply_expr_id,
+            });
+            continue;
+        }
 
         // Record navigation targets (Apply, fun/Reference, arg/Literal).
         if let Expr::Apply { fun, arg } = &module[apply_expr_id] {
@@ -341,16 +343,16 @@ pub fn resolve_import_types_from_stubs(
 
         let target_path = match resolve_directory_path(target_path.clone()) {
             Some(p) => p,
-            None => {
-                if !target_path.exists() {
-                    errors.push(ImportError {
-                        kind: ImportErrorKind::FileNotFound(target_path),
-                        at_expr: outer_apply_id,
-                    });
-                }
-                continue;
-            }
+            None => continue,
         };
+
+        if !target_path.exists() {
+            errors.push(ImportError {
+                kind: ImportErrorKind::FileNotFound(target_path),
+                at_expr: outer_apply_id,
+            });
+            continue;
+        }
 
         // Record navigation targets.
         targets.insert(path_literal_id, target_path.clone());

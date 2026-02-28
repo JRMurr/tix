@@ -20,7 +20,7 @@ use lang_ast::{
 };
 use lang_check::aliases::TypeAliasRegistry;
 use lang_check::diagnostic::{TixDiagnostic, TixDiagnosticKind};
-use lang_check::imports::{resolve_imports, ImportErrorKind};
+use lang_check::imports::{resolve_import_types_from_stubs, ImportErrorKind};
 use lang_check::CheckResult;
 #[cfg(test)]
 use lang_check::InferenceResult;
@@ -296,15 +296,17 @@ pub struct AnalysisState {
     /// Inference deadline in seconds (per top-level file). Configurable via
     /// `deadline` in `tix.toml`, defaults to 10.
     pub deadline_secs: u64,
-    /// Inference deadline in seconds per imported file. Configurable via
-    /// `import_deadline` in `tix.toml`, defaults to 5. Passed as `None`
-    /// means use the hardcoded 5s default inside `resolve_imports`.
-    pub import_deadline_secs: Option<u64>,
-    /// Cross-file import type cache. Persists across `update_file()` calls so
-    /// files like `bwrap.nix` that are imported by many open files don't get
-    /// re-inferred each time. Invalidated per-path when that path is edited,
-    /// and fully cleared on registry reload.
-    import_cache: HashMap<PathBuf, OutputTy>,
+
+    /// Inferred root types of open/analyzed files. Keyed by canonical path.
+    /// Used as cross-file type source for the stubs-based import model:
+    /// when file A imports file B, and B's ephemeral stub is available,
+    /// A gets B's real type instead of ⊤.
+    ephemeral_stubs: HashMap<PathBuf, OutputTy>,
+
+    /// Reverse dependency index: maps an imported file path to the set of
+    /// open files that import it. When a file's ephemeral stub changes,
+    /// all its dependents are scheduled for re-analysis.
+    import_dependents: HashMap<PathBuf, HashSet<PathBuf>>,
 }
 
 impl AnalysisState {
@@ -316,23 +318,9 @@ impl AnalysisState {
             project_config: None,
             config_dir: None,
             deadline_secs: 10,
-            import_deadline_secs: None,
-            import_cache: HashMap::new(),
+            ephemeral_stubs: HashMap::new(),
+            import_dependents: HashMap::new(),
         }
-    }
-
-    /// Initialize the Salsa StubConfig on the database from the current
-    /// registry's configuration. This enables Salsa-memoized `file_root_type`
-    /// for import resolution (the `resolve_imports` function uses this to
-    /// bypass manual inference when StubConfig is present).
-    pub fn init_stub_config(
-        &mut self,
-        stub_paths: Vec<PathBuf>,
-        builtin_stubs_dir: Option<PathBuf>,
-        use_builtins: bool,
-    ) {
-        self.db
-            .set_stub_config(stub_paths, builtin_stubs_dir, use_builtins);
     }
 
     /// Update file contents and re-run analysis. Returns the cached analysis
@@ -384,29 +372,11 @@ impl AnalysisState {
         let grouped = lang_ast::group_def(&self.db, nix_file);
         let t_lower = t0.elapsed();
 
-        // -- Phase 3: Import resolution --
+        // -- Phase 3: Import resolution (stubs-based, O(1) lookup) --
         let t0 = Instant::now();
-        let mut in_progress = HashSet::new();
-
-        // Invalidate this file's import cache entry since its contents just
-        // changed. Other files' cached types remain valid.
-        self.import_cache.remove(&path);
-
-        // LSP: 30s aggregate deadline for all imports, pass cancel_flag for
-        // early abort when a new edit arrives.
-        let aggregate_deadline = Some(Instant::now() + Duration::from_secs(30));
-        let import_resolution = resolve_imports(
-            &self.db,
-            nix_file,
-            &module,
-            &name_res,
-            &mut in_progress,
-            &mut self.import_cache,
-            self.import_deadline_secs,
-            aggregate_deadline,
-            cancel_flag.as_ref().map(|f| f as &Arc<AtomicBool>),
-            Some(200), // import cap for LSP responsiveness
-        );
+        let base_dir = path.parent().unwrap_or(std::path::Path::new("/"));
+        let import_resolution =
+            resolve_import_types_from_stubs(&module, &name_res, base_dir, &self.ephemeral_stubs);
 
         // Convert import resolution errors into TixDiagnostics so they
         // surface in the editor alongside type-checking diagnostics.
@@ -662,15 +632,14 @@ impl AnalysisState {
         (syntax_data, intermediate, syntax_duration)
     }
 
-    /// Phase B: Import resolution. Slower, bounded by deadline/cancel/cap.
+    /// Phase B: Import resolution (stubs-based, O(1) lookup).
     ///
-    /// Mutex re-acquired for this phase. Sets side-channel limits on the DB
-    /// and runs resolve_imports. Returns InferenceInputs plus import data
-    /// for updating the SyntaxData in the DashMap.
+    /// Uses ephemeral stubs instead of recursive inference. No side-channel
+    /// limits needed — stub lookup is instant.
     pub fn update_syntax_phase_b(
         &mut self,
         intermediate: &SyntaxIntermediate,
-        cancel_flag: Option<Arc<AtomicBool>>,
+        _cancel_flag: Option<Arc<AtomicBool>>,
     ) -> (
         InferenceInputs,
         HashMap<ExprId, PathBuf>,
@@ -679,26 +648,15 @@ impl AnalysisState {
     ) {
         let t0 = Instant::now();
 
-        // Set side-channel limits on the DB for the Salsa import path.
-        let aggregate_deadline = Some(Instant::now() + Duration::from_secs(30));
-        self.db
-            .set_import_limits(aggregate_deadline, cancel_flag.clone(), Some(200));
-
-        // Import resolution.
-        let mut in_progress = HashSet::new();
-        self.import_cache.remove(&intermediate.path);
-
-        let import_resolution = resolve_imports(
-            &self.db,
-            intermediate.nix_file,
+        let base_dir = intermediate
+            .path
+            .parent()
+            .unwrap_or(std::path::Path::new("/"));
+        let import_resolution = resolve_import_types_from_stubs(
             &intermediate.module,
             &intermediate.name_res,
-            &mut in_progress,
-            &mut self.import_cache,
-            self.import_deadline_secs,
-            aggregate_deadline,
-            cancel_flag.as_ref().map(|f| f as &Arc<AtomicBool>),
-            Some(200), // import cap for LSP responsiveness
+            base_dir,
+            &self.ephemeral_stubs,
         );
 
         let import_diagnostics: Vec<TixDiagnostic> = import_resolution
@@ -775,22 +733,63 @@ impl AnalysisState {
         )
     }
 
+    /// Store or update the ephemeral stub for a file. Returns `true` if the
+    /// type actually changed (callers use this to decide whether to trigger
+    /// dependent re-analysis).
+    pub fn update_ephemeral_stub(&mut self, path: &Path, root_ty: OutputTy) -> bool {
+        let changed = self
+            .ephemeral_stubs
+            .get(path)
+            .is_none_or(|existing| *existing != root_ty);
+        if changed {
+            self.ephemeral_stubs.insert(path.to_path_buf(), root_ty);
+        }
+        changed
+    }
+
+    /// Record the import dependencies for a file. Replaces any previous entries
+    /// for this importer, and updates the reverse index so dependents can be
+    /// looked up efficiently.
+    pub fn record_import_deps(&mut self, importer: &Path, imported: &[PathBuf]) {
+        // Remove old entries for this importer from all reverse-index sets.
+        // (Iterate a snapshot of keys to avoid borrow issues.)
+        let old_keys: Vec<PathBuf> = self.import_dependents.keys().cloned().collect();
+        for key in old_keys {
+            if let Some(set) = self.import_dependents.get_mut(&key) {
+                set.remove(importer);
+                // Don't remove empty sets here — minor leak but avoids churn.
+            }
+        }
+
+        // Insert new entries.
+        for dep in imported {
+            self.import_dependents
+                .entry(dep.clone())
+                .or_default()
+                .insert(importer.to_path_buf());
+        }
+    }
+
+    /// Return the set of files that import the given path (its dependents).
+    /// Used to schedule re-analysis when a file's ephemeral stub changes.
+    pub fn get_dependents(&self, path: &Path) -> Vec<PathBuf> {
+        self.import_dependents
+            .get(path)
+            .map(|set| set.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Remove the ephemeral stub for a file (called on `didClose`).
+    /// Returns the paths of files that depended on this stub.
+    pub fn remove_ephemeral_stub(&mut self, path: &Path) -> Vec<PathBuf> {
+        self.ephemeral_stubs.remove(path);
+        self.get_dependents(path)
+    }
+
     /// Replace the type alias registry and re-analyze all open files.
     /// Used when stubs configuration changes at runtime.
-    pub fn reload_registry(
-        &mut self,
-        registry: TypeAliasRegistry,
-        stub_paths: Vec<PathBuf>,
-        builtin_stubs_dir: Option<PathBuf>,
-        use_builtins: bool,
-    ) {
+    pub fn reload_registry(&mut self, registry: TypeAliasRegistry) {
         self.registry = registry;
-        self.import_cache.clear();
-
-        // Update the Salsa StubConfig so file_root_type queries are
-        // invalidated and re-infer with the new stubs.
-        self.db
-            .set_stub_config(stub_paths, builtin_stubs_dir, use_builtins);
 
         // Re-analyze every open file with the new registry.
         let paths: Vec<PathBuf> = self.files.keys().cloned().collect();

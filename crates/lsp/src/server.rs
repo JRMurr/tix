@@ -54,6 +54,8 @@ enum AnalysisEvent {
     FileChanged { path: PathBuf, text: String },
     /// File closed (didClose). Clears pending diagnostics for this file.
     FileClosed { path: PathBuf },
+    /// Re-analyze a file because one of its imports' ephemeral stub changed.
+    ReanalyzeFile { path: PathBuf },
 }
 
 pub struct TixLanguageServer {
@@ -90,15 +92,8 @@ impl TixLanguageServer {
         cli_stub_paths: Vec<PathBuf>,
         no_default_stubs: bool,
     ) -> Self {
-        let use_builtins = !no_default_stubs;
-        let builtin_stubs_dir = std::env::var("TIX_BUILTIN_STUBS").ok().map(PathBuf::from);
-
         let (event_tx, event_rx) = mpsc::unbounded_channel();
-        let mut analysis_state = AnalysisState::new(registry);
-
-        // Initialize the Salsa StubConfig so file_root_type queries use
-        // Salsa memoization for import resolution.
-        analysis_state.init_stub_config(cli_stub_paths.clone(), builtin_stubs_dir, use_builtins);
+        let analysis_state = AnalysisState::new(registry);
 
         let state = Arc::new(Mutex::new(analysis_state));
         let pending_text = Arc::new(Mutex::new(HashMap::new()));
@@ -110,6 +105,7 @@ impl TixLanguageServer {
         // before opening files, it takes effect before any analysis runs.
         spawn_analysis_loop(
             event_rx,
+            event_tx.clone(),
             state.clone(),
             client.clone(),
             pending_text.clone(),
@@ -174,36 +170,24 @@ impl TixLanguageServer {
     }
 
     /// Build a fresh TypeAliasRegistry from CLI stubs and config stubs.
-    /// Also returns the StubConfig parameters (stub_paths, builtin_stubs_dir,
-    /// use_builtins) so they can be passed to `AnalysisState::reload_registry`
-    /// or `init_stub_config` to keep the Salsa StubConfig in sync.
-    fn build_registry(
-        &self,
-        config: &TixConfig,
-    ) -> (TypeAliasRegistry, Vec<PathBuf>, Option<PathBuf>, bool) {
-        let use_builtins = !self.no_default_stubs;
-        let mut registry = if use_builtins {
+    fn build_registry(&self, config: &TixConfig) -> TypeAliasRegistry {
+        let mut registry = if !self.no_default_stubs {
             TypeAliasRegistry::with_builtins()
         } else {
             TypeAliasRegistry::new()
         };
 
         // Allow overriding built-in context stubs via env var.
-        let builtin_stubs_dir = std::env::var("TIX_BUILTIN_STUBS").ok().map(PathBuf::from);
-        if let Some(ref dir) = builtin_stubs_dir {
-            log::info!("TIX_BUILTIN_STUBS override: {}", dir.display());
-            registry.set_builtin_stubs_dir(dir.clone());
+        if let Ok(dir) = std::env::var("TIX_BUILTIN_STUBS") {
+            log::info!("TIX_BUILTIN_STUBS override: {dir}");
+            registry.set_builtin_stubs_dir(PathBuf::from(dir));
         }
-
-        // Collect all stub paths for StubConfig.
-        let mut stub_paths: Vec<PathBuf> = Vec::new();
 
         // CLI stubs are always loaded first.
         for stub_path in &self.cli_stub_paths {
             if let Err(e) = crate::load_stubs(&mut registry, stub_path) {
                 log::warn!("Failed to load CLI stubs from {}: {e}", stub_path.display());
             }
-            stub_paths.push(stub_path.clone());
         }
 
         // Then config-provided stubs.
@@ -214,14 +198,13 @@ impl TixLanguageServer {
                     stub_path.display()
                 );
             }
-            stub_paths.push(stub_path.clone());
         }
 
         if let Err(cycles) = registry.validate() {
             log::warn!("Cyclic type aliases detected: {:?}", cycles);
         }
 
-        (registry, stub_paths, builtin_stubs_dir, use_builtins)
+        registry
     }
 }
 
@@ -245,6 +228,7 @@ impl TixLanguageServer {
 #[allow(clippy::too_many_arguments)]
 fn spawn_analysis_loop(
     mut rx: mpsc::UnboundedReceiver<AnalysisEvent>,
+    event_tx: mpsc::UnboundedSender<AnalysisEvent>,
     state: Arc<Mutex<AnalysisState>>,
     client: Client,
     pending_text: Arc<Mutex<HashMap<PathBuf, String>>>,
@@ -314,6 +298,18 @@ fn spawn_analysis_loop(
                 AnalysisEvent::FileClosed { path } => {
                     closed.push(path);
                 }
+                AnalysisEvent::ReanalyzeFile { path } => {
+                    // Re-analysis: read the file's current text from the Salsa DB.
+                    let text = {
+                        let st = state.lock();
+                        st.files
+                            .get(&path)
+                            .map(|a| a.nix_file.contents(&st.db).to_owned())
+                    };
+                    if let Some(text) = text {
+                        changes.insert(path, text);
+                    }
+                }
             }
 
             // Drain remaining (like RA's coalesce loop).
@@ -326,12 +322,30 @@ fn spawn_analysis_loop(
                         changes.remove(&path);
                         closed.push(path);
                     }
+                    AnalysisEvent::ReanalyzeFile { path } => {
+                        let text = {
+                            let st = state.lock();
+                            st.files
+                                .get(&path)
+                                .map(|a| a.nix_file.contents(&st.db).to_owned())
+                        };
+                        if let Some(text) = text {
+                            changes.insert(path, text);
+                        }
+                    }
                 }
             }
 
-            // Handle closed files: remove from pending diagnostics.
+            // Handle closed files: remove from pending diagnostics and ephemeral stubs.
             for path in &closed {
                 pending_diags.remove(path);
+                let dependents = state.lock().remove_ephemeral_stub(path);
+                // Schedule re-analysis for files that depended on the closed file's type.
+                for dep_path in dependents {
+                    event_tx
+                        .send(AnalysisEvent::ReanalyzeFile { path: dep_path })
+                        .ok();
+                }
             }
 
             if changes.is_empty() {
@@ -436,9 +450,46 @@ fn spawn_analysis_loop(
                 }
 
                 // Also store in legacy state.files for backward compat.
+                // Extract import paths for dependency tracking.
+                let import_paths: Vec<PathBuf> = inference_inputs
+                    .import_targets
+                    .values()
+                    .cloned()
+                    .collect::<std::collections::HashSet<_>>()
+                    .into_iter()
+                    .collect();
                 let file_analysis =
                     crate::state::build_file_analysis(inference_inputs, check_result.clone());
-                state.lock().files.insert(path.clone(), file_analysis);
+
+                // Extract root type and update ephemeral stub. If the stub
+                // changed, schedule re-analysis for all dependents.
+                let root_ty = file_analysis
+                    .check_result
+                    .inference
+                    .as_ref()
+                    .and_then(|inf| inf.expr_ty_map.get(file_analysis.module.entry_expr))
+                    .cloned();
+
+                let mut reanalyze_paths = Vec::new();
+                {
+                    let mut st = state.lock();
+                    st.files.insert(path.clone(), file_analysis);
+                    st.record_import_deps(path, &import_paths);
+                    if let Some(ty) = root_ty {
+                        if st.update_ephemeral_stub(path, ty) {
+                            reanalyze_paths = st.get_dependents(path);
+                        }
+                    }
+                }
+
+                // Queue re-analysis for dependents (outside the lock).
+                for dep_path in reanalyze_paths {
+                    if dep_path != *path {
+                        event_tx
+                            .send(AnalysisEvent::ReanalyzeFile { path: dep_path })
+                            .ok();
+                    }
+                }
 
                 let diags = if diagnostics_enabled && !was_cancelled {
                     if let Some(snap) = _snapshots.get(path) {
@@ -512,14 +563,8 @@ impl LanguageServer for TixLanguageServer {
                         log::info!("Editor provided {} stub path(s)", init_config.stubs.len(),);
                         // Rebuild the registry to include both CLI and
                         // editor-configured stubs.
-                        let (registry, stub_paths, builtin_stubs_dir, use_builtins) =
-                            self.build_registry(&init_config);
-                        self.state.lock().reload_registry(
-                            registry,
-                            stub_paths,
-                            builtin_stubs_dir,
-                            use_builtins,
-                        );
+                        let registry = self.build_registry(&init_config);
+                        self.state.lock().reload_registry(registry);
                     }
                     *self.config.lock() = init_config;
                 }
@@ -572,10 +617,6 @@ impl LanguageServer for TixLanguageServer {
                             if let Some(secs) = project_cfg.deadline {
                                 log::info!("Inference deadline: {secs}s (from tix.toml)");
                                 state.deadline_secs = secs;
-                            }
-                            if let Some(secs) = project_cfg.import_deadline {
-                                log::info!("Import deadline: {secs}s (from tix.toml)");
-                                state.import_deadline_secs = Some(secs);
                             }
 
                             state.project_config = Some(project_cfg);
@@ -706,10 +747,9 @@ impl LanguageServer for TixLanguageServer {
         // Collect diagnostics to publish while holding the lock, then
         // release the lock before awaiting the publish calls.
         let file_diagnostics = if stubs_changed {
-            let (registry, stub_paths, builtin_stubs_dir, use_builtins) =
-                self.build_registry(&new_config);
+            let registry = self.build_registry(&new_config);
             let mut state = self.state.lock();
-            state.reload_registry(registry, stub_paths, builtin_stubs_dir, use_builtins);
+            state.reload_registry(registry);
 
             let diagnostics_enabled = new_config.diagnostics.enable;
             state

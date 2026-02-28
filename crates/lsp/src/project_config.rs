@@ -29,9 +29,10 @@ pub struct ProjectConfig {
     #[serde(default)]
     pub deadline: Option<u64>,
 
-    /// Maximum seconds for type inference per imported file. Defaults to 5
-    /// when omitted.
+    /// No longer used (imports resolve via stubs, not recursive inference).
+    /// Kept for backward compatibility with existing tix.toml files.
     #[serde(default)]
+    #[allow(dead_code)]
     pub import_deadline: Option<u64>,
 }
 
