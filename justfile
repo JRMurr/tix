@@ -69,3 +69,11 @@ _ensure-stubs-dir:
 # Build and launch VS Code with tix-lsp (debug build) on a directory
 code dir="test/nixos_fixture": build
     nix run .#tix-code-dev  -- {{ dir }}
+
+# Build all crates (release)
+build-release:
+    cargo build --release
+
+# Build and launch VS Code with tix-lsp (release build) on a directory
+code-release dir="test/nixos_fixture": build-release
+    nix run .#tix-code-release  -- {{ dir }}

@@ -38,7 +38,8 @@
           */
           pkgs = import nixpkgs { inherit system overlays; };
           rustAttrs = import ./nix/rust.nix { inherit pkgs crane; };
-          tix-lsp-dev = import ./nix/lsp-dev.nix { inherit pkgs; };
+          tix-lsp-dev = import ./nix/lsp-local.nix { inherit pkgs; name = "tix-lsp-dev"; };
+          tix-lsp-release = import ./nix/lsp-local.nix { inherit pkgs; profile = "release"; };
           tix-code = import ./nix/vscode.nix {
             inherit pkgs;
             serverPath = "${tix-with-stubs}/bin/tix-lsp";
@@ -47,6 +48,11 @@
             inherit pkgs;
             serverPath = "${tix-lsp-dev}/bin/tix-lsp-dev";
             name = "tix-code-dev";
+          };
+          tix-code-release = import ./nix/vscode.nix {
+            inherit pkgs;
+            serverPath = "${tix-lsp-release}/bin/tix-lsp-release";
+            name = "tix-code-release";
           };
 
           tix-stubs = import ./nix/stubs.nix {
@@ -91,7 +97,7 @@
             rust-bin = rustAttrs.binary;
             stubs = tix-stubs;
             with-stubs = tix-with-stubs;
-            inherit tix-code tix-code-dev;
+            inherit tix-code tix-code-dev tix-code-release;
             docs = pkgs.stdenv.mkDerivation {
               name = "tix-docs";
               src = ./docs;
