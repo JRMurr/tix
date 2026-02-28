@@ -282,9 +282,10 @@ pub fn resolve_imports(
     name_res: &NameResolution,
     in_progress: &mut HashSet<PathBuf>,
     cache: &mut HashMap<PathBuf, OutputTy>,
-    import_deadline_secs: Option<u64>,
+    _import_deadline_secs: Option<u64>,
     aggregate_deadline: Option<Instant>,
     cancel_flag: Option<&Arc<AtomicBool>>,
+    max_imports: Option<usize>,
 ) -> ImportResolution {
     // Initialize the aggregate deadline on the first call (depth 0). Recursive
     // calls pass the same deadline through, so the entire import tree shares a
@@ -348,6 +349,8 @@ pub fn resolve_imports(
         );
     }
 
+    let mut resolved_count: usize = 0;
+
     for (kind, target_path) in work {
         // Check aggregate deadline and cancel flag before each import. This
         // bounds the total wall-clock time for the entire import tree,
@@ -358,6 +361,13 @@ pub fn resolve_imports(
         }
         if cancel_flag.is_some_and(|f| f.load(Ordering::Relaxed)) {
             log::info!("{indent}  import resolution cancelled");
+            break;
+        }
+        if max_imports.is_some_and(|cap| resolved_count >= cap) {
+            log::warn!(
+                "{indent}  import cap ({}) reached, remaining imports will use generic import type",
+                max_imports.unwrap(),
+            );
             break;
         }
 
@@ -485,6 +495,8 @@ pub fn resolve_imports(
                 types.insert(*outer_apply_id, extract_return_type(&root_ty));
             }
         }
+
+        resolved_count += 1;
 
         log::info!(
             "{indent}  {target_name}: {:.1}ms (salsa memoized)",

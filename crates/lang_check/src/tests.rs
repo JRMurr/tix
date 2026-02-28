@@ -1373,6 +1373,7 @@ mod import_tests {
             None,
             None,
             None,
+            None, // no import cap in tests
         );
 
         let errors = resolution.errors;
@@ -1615,6 +1616,7 @@ mod import_tests {
             None,
             None,
             None,
+            None, // no import cap in tests
         );
 
         // There should be exactly 3 target entries: Apply, fun (Reference), arg (Literal).
@@ -1676,6 +1678,7 @@ mod import_tests {
             None,
             None,
             None,
+            None, // no import cap in tests
         );
 
         let errors = resolution.errors;
@@ -2087,6 +2090,7 @@ mod import_tests {
             None,
             None,
             None,
+            None, // no import cap in tests
         );
 
         // The callPackage pattern should produce target entries for the path

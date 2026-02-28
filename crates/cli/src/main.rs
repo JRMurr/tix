@@ -2,6 +2,7 @@ mod config;
 mod gen_stubs;
 
 use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 use std::{error::Error, path::PathBuf};
 
 use clap::{Parser, Subcommand};
@@ -317,6 +318,8 @@ fn run_check(
     // Resolve literal imports recursively before type-checking.
     let mut in_progress = HashSet::new();
     let mut cache = HashMap::new();
+    // CLI: 120s aggregate deadline for all imports, no import cap.
+    let aggregate_deadline = Some(Instant::now() + Duration::from_secs(120));
     let import_resolution = resolve_imports(
         &db,
         file,
@@ -325,8 +328,9 @@ fn run_check(
         &mut in_progress,
         &mut cache,
         None,
+        aggregate_deadline,
         None,
-        None,
+        None, // no import cap for CLI
     );
     // Convert import resolution errors into TixDiagnostics so they render
     // with the same miette source-context as type-checking diagnostics.

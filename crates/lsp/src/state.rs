@@ -373,6 +373,9 @@ impl AnalysisState {
         // changed. Other files' cached types remain valid.
         self.import_cache.remove(&path);
 
+        // LSP: 30s aggregate deadline for all imports, pass cancel_flag for
+        // early abort when a new edit arrives.
+        let aggregate_deadline = Some(Instant::now() + Duration::from_secs(30));
         let import_resolution = resolve_imports(
             &self.db,
             nix_file,
@@ -381,8 +384,9 @@ impl AnalysisState {
             &mut in_progress,
             &mut self.import_cache,
             self.import_deadline_secs,
-            None,
-            None,
+            aggregate_deadline,
+            cancel_flag.as_ref().map(|f| f as &Arc<AtomicBool>),
+            Some(200), // import cap for LSP responsiveness
         );
 
         // Convert import resolution errors into TixDiagnostics so they
@@ -585,6 +589,10 @@ impl AnalysisState {
         let mut in_progress = HashSet::new();
         self.import_cache.remove(&path);
 
+        // LSP: 30s aggregate deadline for all imports. No cancel_flag here
+        // since update_syntax is called from the analysis loop which manages
+        // cancellation at a higher level.
+        let aggregate_deadline = Some(Instant::now() + Duration::from_secs(30));
         let import_resolution = resolve_imports(
             &self.db,
             nix_file,
@@ -593,8 +601,9 @@ impl AnalysisState {
             &mut in_progress,
             &mut self.import_cache,
             self.import_deadline_secs,
+            aggregate_deadline,
             None,
-            None,
+            Some(200), // import cap for LSP responsiveness
         );
 
         let import_diagnostics: Vec<TixDiagnostic> = import_resolution
