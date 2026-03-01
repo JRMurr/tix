@@ -13,30 +13,7 @@ Remaining tasks to address before wider adoption.
 
 ---
 
-## 1. Convert `tix_collect.rs` panics to Result-based errors
-
-**Effort**: Medium | **Impact**: Critical
-
-`comment_parser/src/tix_collect.rs` has 21+ `panic!()` calls in parser tree
-match arms (e.g. `other => panic!("expected TypeAlias, got: {other:?}")`).
-A typo in a `.tix` stub file crashes the CLI or LSP with no useful message.
-
-Note: `collect.rs` was already converted to `Result<_, CollectError>`.
-
-**What to do**:
-
-1. Extend `CollectError` to cover `tix_collect.rs` failure modes.
-2. Replace `panic!("expected X, got: ...")` calls with `Result::Err(...)`.
-3. Propagate errors up through `parse_tix_file` and callers.
-4. Surface stub parse errors as CLI stderr messages and LSP diagnostics.
-5. Add tests for malformed `.tix` input.
-
-**Files touched**: `comment_parser/src/tix_collect.rs`,
-`lang_check/src/aliases.rs`, `cli/src/main.rs`, `lsp/src/state.rs`
-
----
-
-## 2. Union constraint snapshot/rollback
+## 1. Union constraint snapshot/rollback
 
 **Effort**: High | **Impact**: Medium
 
@@ -58,7 +35,7 @@ each union branch independently.
 
 ---
 
-## 3. Make narrowing guard list extensible via stubs
+## 2. Make narrowing guard list extensible via stubs
 
 **Effort**: Medium | **Impact**: Medium
 
@@ -79,7 +56,7 @@ describing the approach.
 
 ---
 
-## 4. Improve nixpkgs lib stub coverage
+## 3. Improve nixpkgs lib stub coverage
 
 **Effort**: Medium | **Impact**: Medium
 

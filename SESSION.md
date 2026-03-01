@@ -263,6 +263,6 @@ split Phase A/B mutex, cancel flag, parallel rayon imports). Remaining cleanup:
   `find_name_type_by_text()` returns first match when source_map fails.
 - **No tests for chain re-analysis (A→B→C)**: transitive import chain re-analysis
   isn't tested because it requires the full async analysis loop.
-- **`tix_collect.rs` still has 21+ `panic!()` calls** in parser tree match arms.
-  `collect.rs` was converted to `Result<_, CollectError>` but `tix_collect.rs`
-  was not. A malformed `.tix` file will panic the CLI/LSP.
+- **`tix_collect.rs` test panics**: all 29 `panic!()` calls are inside
+  `#[cfg(test)]` — production code already uses `Result<_, CollectError>`.
+  The `.expect()` calls at lines 320/340 are safe (length-checked `.pop()`).
