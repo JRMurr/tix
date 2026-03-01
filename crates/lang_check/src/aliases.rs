@@ -7,7 +7,7 @@
 // so that `TypeVarValue::Reference` names resolve against loaded aliases, and
 // unresolved names can fall back to global val declarations.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use comment_parser::{ParsedTy, ParsedTyRef, TixDeclFile, TixDeclaration};
@@ -109,6 +109,11 @@ pub struct TypeAliasRegistry {
     /// falling back to the compiled-in minimal stubs. Set via the
     /// `TIX_BUILTIN_STUBS` environment variable.
     builtin_stubs_dir: Option<PathBuf>,
+
+    /// Module stubs already loaded from `builtin_stubs_dir` (by alias name).
+    /// Prevents re-reading and re-parsing large stubs (e.g. pkgs.tix) on
+    /// every call to `load_context_by_name`.
+    loaded_module_stubs: HashSet<SmolStr>,
 }
 
 /// Controls where val declarations are routed during `load_declarations`.
@@ -393,17 +398,29 @@ impl TypeAliasRegistry {
         // If builtin_stubs_dir has a matching module stub, load it first
         // to ensure the alias is fully populated before extracting fields.
         // e.g. @callpackage → Pkgs → module pkgs → pkgs.tix
-        if let Some(ref dir) = self.builtin_stubs_dir {
-            let module_name = alias_name.to_ascii_lowercase();
-            let module_path = dir.join(format!("{module_name}.tix"));
-            if module_path.is_file() {
-                if let Ok(source) = std::fs::read_to_string(&module_path) {
-                    match comment_parser::parse_tix_file(&source) {
-                        Ok(file) => self.load_tix_file(&file),
+        //
+        // This is best-effort: if the file can't be read or parsed, we log a
+        // warning and fall through to whatever the alias already contains.
+        // Unlike the override check above (which is *the* context source and
+        // must propagate errors), this is a pre-loading side-effect.
+        if !self.loaded_module_stubs.contains(&alias_name) {
+            if let Some(ref dir) = self.builtin_stubs_dir {
+                let module_name = alias_name.to_ascii_lowercase();
+                let module_path = dir.join(format!("{module_name}.tix"));
+                match std::fs::read_to_string(&module_path) {
+                    Ok(source) => match comment_parser::parse_tix_file(&source) {
+                        Ok(file) => {
+                            self.load_tix_file(&file);
+                            self.loaded_module_stubs.insert(alias_name.clone());
+                        }
                         Err(e) => {
                             log::warn!("Failed to parse {}: {e}", module_path.display())
                         }
+                    },
+                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                        log::warn!("Failed to read {}: {e}", module_path.display())
                     }
+                    Err(_) => {} // File doesn't exist — not an error.
                 }
             }
         }
@@ -1268,7 +1285,8 @@ mod tests {
     fn callpackage_context_loads_module_stub_from_builtin_stubs_dir() {
         // When builtin_stubs_dir contains pkgs.tix, @callpackage should
         // pick up packages defined there (not just the hand-curated builtins).
-        let tmp = std::env::temp_dir().join("tix_test_callpackage_stubs");
+        let tmp =
+            std::env::temp_dir().join(format!("tix_test_callpackage_stubs_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&tmp);
         std::fs::write(
             tmp.join("pkgs.tix"),

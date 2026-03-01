@@ -2635,7 +2635,10 @@ fn callpackage_context_types_pkgs_parameter_as_alias() {
 /// of `Derivation`.
 #[test]
 fn callpackage_context_loads_pkgs_from_builtin_stubs_dir() {
-    let tmp = std::env::temp_dir().join("tix_test_callpackage_pipeline");
+    let tmp = std::env::temp_dir().join(format!(
+        "tix_test_callpackage_pipeline_{}",
+        std::process::id()
+    ));
     let _ = std::fs::create_dir_all(&tmp);
     std::fs::write(
         tmp.join("pkgs.tix"),
