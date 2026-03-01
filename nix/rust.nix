@@ -60,16 +60,19 @@ let
     cargoClippyExtraArgs = "-- -D warnings";
   });
 
-  rustTests = craneLib.cargoTest (commonArgs // {
+  rustTests = craneLib.cargoNextest (commonArgs // {
     inherit cargoArtifacts;
+    nativeBuildInputs = [ pkgs.cargo-nextest ];
+    cargoNextestExtraArgs = "--failure-output immediate --success-output never";
   });
 
   # PBT runs two groups with different case counts (mirroring scripts/pbt.sh).
   # Lightweight tests get 10k cases, stub composition tests get 2k.
-  rustPbt = craneLib.cargoTest (commonArgs // {
+  rustPbt = craneLib.cargoNextest (commonArgs // {
     inherit cargoArtifacts;
+    nativeBuildInputs = [ pkgs.cargo-nextest ];
     pname = "tix-pbt";
-    cargoTestExtraArgs = "--package lang_check --lib -- pbt";
+    cargoNextestExtraArgs = "-p lang_check -E 'test(pbt)' --failure-output immediate --success-output never";
     PROPTEST_CASES = "10000";
   });
 in
