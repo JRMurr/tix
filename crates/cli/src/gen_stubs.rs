@@ -668,6 +668,16 @@ struct PkgClassification {
     /// + matching `builtins.attrNames`.
     #[serde(default)]
     alias_of: Option<String>,
+    /// Callable attrset (has `__functor` attribute). Examples: `fetchurl`,
+    /// `buildGoModule`, `mkShell`. `builtins.typeOf` returns `"set"` for these,
+    /// but they behave as functions.
+    #[serde(default)]
+    has_functor: bool,
+    /// For lambdas: parameter names and whether each has a default value.
+    /// Extracted via `builtins.functionArgs`. `None` for non-lambdas or
+    /// positional (non-attrset-pattern) lambdas.
+    #[serde(default)]
+    function_args: Option<std::collections::BTreeMap<String, bool>>,
 }
 
 /// Recursive tree of classified nixpkgs attributes.
@@ -704,9 +714,16 @@ fn build_pkgs_classify_expr(nixpkgs: &Option<PathBuf>, max_depth: u32) -> String
         shouldRecurse = !isDrv && ty == "set" && depth > 0
           && ((builtins.tryEval (v.value.recurseForDerivations or false)).value or false);
         children = if shouldRecurse then classifySet (depth - 1) v.value else null;
+        hasFunctor = !isDrv && ty == "set"
+          && (builtins.tryEval (v.value ? __functor)).value or false;
+        funcArgs = if ty == "lambda"
+          then (builtins.tryEval (builtins.functionArgs v.value)).value or null
+          else null;
       in [{{
         inherit name;
         value = {{ type = ty; is_derivation = isDrv; }}
+          // (if hasFunctor then {{ has_functor = true; }} else {{}})
+          // (if funcArgs != null then {{ function_args = funcArgs; }} else {{}})
           // (if children != null then {{ inherit children; }} else {{}});
       }}]
     ) (builtins.attrNames attrset));
@@ -771,8 +788,11 @@ struct PkgsStats {
     derivations: usize,
     attrsets: usize,
     functions: usize,
+    functors: usize,
     sub_package_sets: usize,
     aliases: usize,
+    noise_skipped: usize,
+    curated_skipped: usize,
 }
 
 /// Capitalize a name for use as a type alias reference (first char uppercase,
@@ -814,18 +834,59 @@ fn generate_pkgs_tix(tree: &PkgTree) -> String {
     lines.push("}".to_string());
 
     eprintln!(
-        "Classified {} attributes: {} derivations, {} attrsets, {} functions, {} sub-package-sets, {} aliases",
-        stats.derivations + stats.attrsets + stats.functions + stats.sub_package_sets + stats.aliases,
+        "Classified {} attributes: {} derivations, {} attrsets, {} functors, {} functions, {} sub-package-sets, {} aliases ({} noise skipped, {} curated skipped)",
+        stats.derivations + stats.attrsets + stats.functors + stats.functions + stats.sub_package_sets + stats.aliases,
         stats.derivations,
         stats.attrsets,
+        stats.functors,
         stats.functions,
         stats.sub_package_sets,
         stats.aliases,
+        stats.noise_skipped,
+        stats.curated_skipped,
     );
 
     lines.push(String::new()); // trailing newline
     lines.join("\n")
 }
+
+/// Infrastructure noise attrs that appear on many packages but provide no
+/// useful type information. Skipped during emission.
+const NOISE_ATTRS: &[&str] = &[
+    "override",
+    "overrideDerivation",
+    "overrideScope",
+    "overrideScope'",
+    "newScope",
+    "recurseForDerivations",
+];
+
+/// Top-level names that have hand-curated types in `stubs/lib.tix` (inside
+/// `module pkgs { ... }`). We skip these in generated output so the curated
+/// types aren't shadowed by less accurate generated ones.
+const CURATED_TOP_LEVEL: &[&str] = &[
+    "stdenv",
+    "mkDerivation",
+    "mkShell",
+    "mkShellNoCC",
+    "fetchurl",
+    "fetchFromGitHub",
+    "fetchFromGitLab",
+    "fetchgit",
+    "fetchzip",
+    "fetchpatch",
+    "fetchpatch2",
+    "callPackage",
+    "callPackages",
+    "writeShellScriptBin",
+    "writeText",
+    "writeShellApplication",
+    "symlinkJoin",
+    "runCommand",
+    "runCommandCC",
+    "runCommandLocal",
+    "lib",
+];
 
 /// Recursively emit val/module declarations for a package tree at the given
 /// indentation level. Names that cannot be valid bare identifiers are emitted
@@ -838,6 +899,19 @@ fn emit_pkg_tree(tree: &PkgTree, indent: usize, lines: &mut Vec<String>, stats: 
         // doesn't support quoted names in val/module position. Skip names
         // that contain characters like `+`, `.`, etc.
         if needs_quoting(name) {
+            continue;
+        }
+
+        // Skip infrastructure noise attrs that add no type information.
+        if NOISE_ATTRS.contains(&name.as_str()) {
+            stats.noise_skipped += 1;
+            continue;
+        }
+
+        // At the top level of `module pkgs` (indent == 1), skip names that
+        // have hand-curated types in stubs/lib.tix to avoid shadowing them.
+        if indent == 1 && CURATED_TOP_LEVEL.contains(&name.as_str()) {
+            stats.curated_skipped += 1;
             continue;
         }
 
@@ -866,16 +940,63 @@ fn emit_pkg_tree(tree: &PkgTree, indent: usize, lines: &mut Vec<String>, stats: 
                         continue;
                     }
                 }
+
+                // Callable attrsets with __functor: emit the functor signature
+                // so the type checker recognizes these as callable.
+                if pkg.has_functor {
+                    stats.functors += 1;
+                    lines.push(format!(
+                        "{pad}val {name} :: {{ __functor: a -> b -> c, ... }};"
+                    ));
+                    continue;
+                }
+
                 stats.attrsets += 1;
                 lines.push(format!("{pad}val {name} :: {{ ... }};"));
             }
             ("lambda", _) => {
                 stats.functions += 1;
+                // When functionArgs is available (attrset-pattern lambda), emit
+                // a typed parameter set instead of the generic `a -> b`.
+                if let Some(ref args) = pkg.function_args {
+                    if !args.is_empty() {
+                        let params = emit_function_args(args);
+                        lines.push(format!("{pad}val {name} :: {{ {params}, ... }} -> a;"));
+                        continue;
+                    }
+                }
                 lines.push(format!("{pad}val {name} :: a -> b;"));
             }
             _ => continue,
         }
     }
+}
+
+/// Format function parameter names from `builtins.functionArgs` into a .tix
+/// attrset pattern. Each param gets a unique generic type variable. Params
+/// with defaults get the `?` optional marker (e.g. `src?: b`).
+fn emit_function_args(args: &std::collections::BTreeMap<String, bool>) -> String {
+    // Generate fresh type variable names: a, b, c, ... z, a1, b1, ...
+    let var_names = (0..).map(|i| {
+        let letter = (b'a' + (i % 26) as u8) as char;
+        if i < 26 {
+            letter.to_string()
+        } else {
+            format!("{}{}", letter, i / 26)
+        }
+    });
+
+    args.iter()
+        .zip(var_names)
+        .map(|((param, &has_default), var)| {
+            if has_default {
+                format!("{param}?: {var}")
+            } else {
+                format!("{param}: {var}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Run the `gen-stubs pkgs` subcommand.
@@ -1833,6 +1954,8 @@ mod tests {
             is_derivation,
             children: None,
             alias_of: None,
+            has_functor: false,
+            function_args: None,
         }
     }
 
@@ -1843,6 +1966,8 @@ mod tests {
             is_derivation: false,
             children: Some(children),
             alias_of: None,
+            has_functor: false,
+            function_args: None,
         }
     }
 
@@ -1853,6 +1978,34 @@ mod tests {
             is_derivation: false,
             children: None,
             alias_of: Some(target.to_string()),
+            has_functor: false,
+            function_args: None,
+        }
+    }
+
+    /// Helper to build a callable attrset (has __functor).
+    fn pkg_functor() -> PkgClassification {
+        PkgClassification {
+            nix_type: "set".to_string(),
+            is_derivation: false,
+            children: None,
+            alias_of: None,
+            has_functor: true,
+            function_args: None,
+        }
+    }
+
+    /// Helper to build a lambda with known parameter names.
+    fn pkg_lambda_with_args(args: Vec<(&str, bool)>) -> PkgClassification {
+        let function_args: std::collections::BTreeMap<String, bool> =
+            args.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+        PkgClassification {
+            nix_type: "lambda".to_string(),
+            is_derivation: false,
+            children: None,
+            alias_of: None,
+            has_functor: false,
+            function_args: Some(function_args),
         }
     }
 
@@ -1870,10 +2023,10 @@ mod tests {
     fn generate_pkgs_tix_attrsets_and_functions() {
         let mut tree = PkgTree::new();
         tree.insert("xorg".to_string(), pkg("set", false));
-        tree.insert("callPackage".to_string(), pkg("lambda", false));
+        tree.insert("someFunc".to_string(), pkg("lambda", false));
         let tix = generate_pkgs_tix(&tree);
         assert!(tix.contains("val xorg :: { ... };"));
-        assert!(tix.contains("val callPackage :: a -> b;"));
+        assert!(tix.contains("val someFunc :: a -> b;"));
     }
 
     #[test]
@@ -1933,7 +2086,7 @@ mod tests {
         let mut tree = PkgTree::new();
         tree.insert("hello".to_string(), pkg("set", true));
         tree.insert("pythonPackages".to_string(), pkg("set", false));
-        tree.insert("writeText".to_string(), pkg("lambda", false));
+        tree.insert("buildSomething".to_string(), pkg("lambda", false));
         let tix = generate_pkgs_tix(&tree);
         comment_parser::parse_tix_file(&tix).unwrap_or_else(|e| {
             panic!(
@@ -2000,7 +2153,7 @@ mod tests {
         let mut tree = PkgTree::new();
         tree.insert("hello".to_string(), pkg("set", true));
         tree.insert("llvmPackages".to_string(), pkg_with_children(children));
-        tree.insert("writeText".to_string(), pkg("lambda", false));
+        tree.insert("buildSomething".to_string(), pkg("lambda", false));
 
         let tix = generate_pkgs_tix(&tree);
         comment_parser::parse_tix_file(&tix).unwrap_or_else(|e| {
@@ -2212,5 +2365,204 @@ mod tests {
         assert_eq!(capitalize("llvmPackages"), "LlvmPackages");
         assert_eq!(capitalize(""), "");
         assert_eq!(capitalize("a"), "A");
+    }
+
+    // -------------------------------------------------------------------------
+    // gen-stubs pkgs: __functor detection
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn deserialize_has_functor() {
+        let json = r#"{
+            "fetchurl": { "type": "set", "is_derivation": false, "has_functor": true },
+            "hello": { "type": "set", "is_derivation": true }
+        }"#;
+        let tree: PkgTree = serde_json::from_str(json).unwrap();
+        assert!(tree["fetchurl"].has_functor);
+        assert!(!tree["hello"].has_functor);
+    }
+
+    #[test]
+    fn generate_pkgs_tix_functor_emits_callable_attrset() {
+        let mut tree = PkgTree::new();
+        tree.insert("buildGoModule".to_string(), pkg_functor());
+        tree.insert("hello".to_string(), pkg("set", true));
+        let tix = generate_pkgs_tix(&tree);
+        assert!(
+            tix.contains("val buildGoModule :: { __functor: a -> b -> c, ... };"),
+            "functor should emit __functor field: {tix}"
+        );
+        assert!(tix.contains("val hello :: Derivation;"));
+    }
+
+    #[test]
+    fn generate_pkgs_tix_functor_round_trip_parses() {
+        let mut tree = PkgTree::new();
+        tree.insert("buildGoModule".to_string(), pkg_functor());
+        tree.insert("hello".to_string(), pkg("set", true));
+        let tix = generate_pkgs_tix(&tree);
+        comment_parser::parse_tix_file(&tix).unwrap_or_else(|e| {
+            panic!("Functor pkgs .tix failed to parse:\n{tix}\n\nError: {e}");
+        });
+    }
+
+    // -------------------------------------------------------------------------
+    // gen-stubs pkgs: functionArgs extraction
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn deserialize_function_args() {
+        let json = r#"{
+            "mkDerivation": {
+                "type": "lambda", "is_derivation": false,
+                "function_args": { "name": false, "src": true, "buildInputs": true }
+            }
+        }"#;
+        let tree: PkgTree = serde_json::from_str(json).unwrap();
+        let args = tree["mkDerivation"].function_args.as_ref().unwrap();
+        assert_eq!(args["name"], false); // required
+        assert_eq!(args["src"], true); // has default
+        assert_eq!(args["buildInputs"], true); // has default
+    }
+
+    #[test]
+    fn generate_pkgs_tix_lambda_with_args() {
+        let mut tree = PkgTree::new();
+        tree.insert(
+            "myBuilder".to_string(),
+            pkg_lambda_with_args(vec![("name", false), ("src", true)]),
+        );
+        let tix = generate_pkgs_tix(&tree);
+        // BTreeMap sorts alphabetically: name, src
+        assert!(
+            tix.contains("val myBuilder :: { name: a, src?: b, ... } -> a;"),
+            "should emit typed params with optional marker: {tix}"
+        );
+    }
+
+    #[test]
+    fn generate_pkgs_tix_lambda_empty_args_falls_back() {
+        // A positional lambda (builtins.functionArgs returns {}) should still
+        // get the generic `a -> b` signature.
+        let mut tree = PkgTree::new();
+        tree.insert("myFunc".to_string(), pkg_lambda_with_args(vec![]));
+        let tix = generate_pkgs_tix(&tree);
+        assert!(
+            tix.contains("val myFunc :: a -> b;"),
+            "empty functionArgs should fall back to a -> b: {tix}"
+        );
+    }
+
+    #[test]
+    fn generate_pkgs_tix_lambda_with_args_round_trip_parses() {
+        let mut tree = PkgTree::new();
+        tree.insert(
+            "myBuilder".to_string(),
+            pkg_lambda_with_args(vec![("name", false), ("src", true), ("buildInputs", true)]),
+        );
+        tree.insert("hello".to_string(), pkg("set", true));
+        let tix = generate_pkgs_tix(&tree);
+        comment_parser::parse_tix_file(&tix).unwrap_or_else(|e| {
+            panic!("FunctionArgs pkgs .tix failed to parse:\n{tix}\n\nError: {e}");
+        });
+    }
+
+    // -------------------------------------------------------------------------
+    // gen-stubs pkgs: noise filtering
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn generate_pkgs_tix_filters_noise_attrs() {
+        let mut tree = PkgTree::new();
+        tree.insert("hello".to_string(), pkg("set", true));
+        tree.insert("override".to_string(), pkg("lambda", false));
+        tree.insert("overrideDerivation".to_string(), pkg("lambda", false));
+        tree.insert("overrideScope".to_string(), pkg("lambda", false));
+        tree.insert("overrideScope'".to_string(), pkg("lambda", false));
+        tree.insert("newScope".to_string(), pkg("lambda", false));
+        tree.insert("recurseForDerivations".to_string(), pkg("set", false));
+        let tix = generate_pkgs_tix(&tree);
+        assert!(tix.contains("val hello :: Derivation;"));
+        assert!(
+            !tix.contains("override"),
+            "noise attrs should be filtered: {tix}"
+        );
+        assert!(
+            !tix.contains("newScope"),
+            "noise attrs should be filtered: {tix}"
+        );
+        assert!(
+            !tix.contains("recurseForDerivations"),
+            "noise attrs should be filtered: {tix}"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // gen-stubs pkgs: curated skip-list
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn generate_pkgs_tix_skips_curated_top_level() {
+        let mut tree = PkgTree::new();
+        tree.insert("hello".to_string(), pkg("set", true));
+        tree.insert("stdenv".to_string(), pkg("set", true));
+        tree.insert("fetchurl".to_string(), pkg_functor());
+        tree.insert("callPackage".to_string(), pkg("lambda", false));
+        tree.insert("lib".to_string(), pkg("set", false));
+        let tix = generate_pkgs_tix(&tree);
+        assert!(tix.contains("val hello :: Derivation;"));
+        assert!(
+            !tix.contains("val stdenv"),
+            "curated names should be skipped at top level: {tix}"
+        );
+        assert!(
+            !tix.contains("val fetchurl"),
+            "curated names should be skipped at top level: {tix}"
+        );
+        assert!(
+            !tix.contains("val callPackage"),
+            "curated names should be skipped at top level: {tix}"
+        );
+        assert!(
+            !tix.contains("val lib"),
+            "curated names should be skipped at top level: {tix}"
+        );
+    }
+
+    #[test]
+    fn generate_pkgs_tix_curated_names_allowed_in_nested_modules() {
+        // Curated skip-list only applies at indent == 1 (top-level of module pkgs).
+        // Inside nested modules (e.g. python3Packages.stdenv), these names should
+        // still appear.
+        let mut children = PkgTree::new();
+        children.insert("stdenv".to_string(), pkg("set", true));
+        children.insert("callPackage".to_string(), pkg("lambda", false));
+
+        let mut tree = PkgTree::new();
+        tree.insert("llvmPackages".to_string(), pkg_with_children(children));
+        let tix = generate_pkgs_tix(&tree);
+        assert!(
+            tix.contains("val stdenv :: Derivation;"),
+            "curated names should appear inside nested modules: {tix}"
+        );
+        assert!(
+            tix.contains("val callPackage :: a -> b;"),
+            "curated names should appear inside nested modules: {tix}"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // gen-stubs pkgs: emit_function_args helper
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn emit_function_args_formats_params() {
+        let mut args = std::collections::BTreeMap::new();
+        args.insert("buildInputs".to_string(), true);
+        args.insert("name".to_string(), false);
+        args.insert("src".to_string(), true);
+        let result = emit_function_args(&args);
+        // BTreeMap iterates alphabetically: buildInputs, name, src
+        assert_eq!(result, "buildInputs?: a, name: b, src?: c");
     }
 }

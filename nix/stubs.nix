@@ -115,9 +115,18 @@ let
         shouldRecurse = !isDrv && ty == "set" && depth > 0
           && ((builtins.tryEval (v.value.recurseForDerivations or false)).value or false);
         children = if shouldRecurse then classifySet (depth - 1) v.value else null;
+        # Detect callable attrsets (e.g. fetchurl, mkShell) that have a __functor attribute.
+        hasFunctor = !isDrv && ty == "set"
+          && (builtins.tryEval (v.value ? __functor)).value or false;
+        # Extract parameter names and default-presence for lambdas.
+        funcArgs = if ty == "lambda"
+          then (builtins.tryEval (builtins.functionArgs v.value)).value or null
+          else null;
       in [{
         inherit name;
         value = { type = ty; is_derivation = isDrv; }
+          // (if hasFunctor then { has_functor = true; } else {})
+          // (if funcArgs != null then { function_args = funcArgs; } else {})
           // (if children != null then { inherit children; } else {});
       }]
     ) (builtins.attrNames attrset));
