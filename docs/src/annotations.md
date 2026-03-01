@@ -119,13 +119,13 @@ Inline aliases are file-scoped (visible everywhere in the file regardless of pla
 
 ## Annotation safety
 
-Tix applies annotations as bidirectional constraints — the inferred type must be compatible with the annotation and vice versa. Two situations cause annotations to be skipped with a warning instead of producing false errors:
+Tix checks that annotations are compatible with the inferred types. In a few cases, annotations are accepted without full verification — a warning is emitted so you know the annotation is trusted rather than checked:
 
-**Arity mismatch.** If the annotation has fewer arrows than the function's visible lambda parameters (e.g. `foo :: string -> string` on a two-argument function `x: y: ...`), the annotation is skipped. An annotation with *more* arrows than visible lambdas is fine — the body may return a function (eta-reduction).
+**Arity mismatch.** If the annotation has fewer arrows than the function's visible lambda parameters (e.g. `foo :: string -> string` on a two-argument function `x: y: ...`), the annotation is skipped. An annotation with *more* arrows than visible lambdas is fine — the body may return a function.
 
-**Union types.** Annotations containing union types (e.g. `f :: string -> (string | [string]) -> string`) are currently skipped. Verifying union-typed parameters requires type narrowing for guards like `builtins.isList`, which is not yet fully implemented. The function is still type-checked based on its body alone.
+**Union types.** Annotations containing union types (e.g. `f :: string -> (string | [string]) -> string`) are currently trusted without verification. The function is still type-checked based on its body alone.
 
-**Intersection types (overloaded functions).** Annotations with intersection function types (e.g. `(int -> int) & (string -> string)`) are accepted as declared types for callers. The function body is type-checked based on inference alone — each component of the intersection is not individually verified against the body. This is useful for declaring overloaded APIs where the implementation uses type guards (`builtins.isInt`, etc.) to dispatch. An `AnnotationUnchecked` warning is emitted to indicate the annotation is trusted rather than verified.
+**Intersection types (overloaded functions).** Annotations with intersection function types (e.g. `(int -> int) & (string -> string)`) are accepted as declared types for callers but the individual overloads aren't verified against the body. This is useful for declaring overloaded APIs where the implementation dispatches with type guards (`builtins.isInt`, etc.).
 
 ## Named alias display in functions
 

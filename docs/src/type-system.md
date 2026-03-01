@@ -1,6 +1,6 @@
 # Type System
 
-**TLDR:** Tix uses MLsub/SimpleSub — Hindley-Milner with subtyping. You get principal type inference with union and intersection types. Most code needs zero annotations.
+Tix infers types from your code — most Nix code needs zero annotations. This page covers what types Tix understands and how they work in practice.
 
 ## Primitives
 
@@ -43,7 +43,7 @@ let
 in counter 5  # 15
 ```
 
-Tix understands this calling convention. When an attrset with `__functor` flows into a function position, tix constrains `__functor` as `self -> (param -> result)` where `self` is the attrset itself. This means callable attrsets can be passed to higher-order functions that expect functions:
+Tix understands this calling convention. Callable attrsets can be passed to higher-order functions that expect functions:
 
 ```nix
 let
@@ -70,7 +70,7 @@ Unlike Rust enums or Haskell sum types, unions don't need to be declared upfront
 
 ## Type narrowing
 
-When a condition checks whether a variable is `null` or has a specific field, tix narrows the variable's type in each branch. This prevents false errors from idiomatic guard patterns.
+When a condition checks whether a variable is `null`, has a specific field, or is a particular type, tix narrows the variable's type in each branch. This prevents false errors from idiomatic guard patterns.
 
 ### Null guards
 
@@ -92,11 +92,11 @@ getField = arg:
 # each branch narrows arg to have the checked field
 ```
 
-In the then-branch, tix creates a fresh variable constrained to have the checked field. This prevents field access errors from cross-branch constraint contamination. Only single-key attrpaths are supported (`x ? field`, not `x ? a.b.c`).
+Only single-key attrpaths are supported (`x ? field`, not `x ? a.b.c`).
 
 ### Type predicate guards
 
-All `is*` builtins are recognized as narrowing guards, whether called directly (`isString x`), qualified (`builtins.isString x`), or through a select chain (`lib.types.isString x`, `lib.isAttrs x`). In the then-branch, the variable is narrowed to the corresponding primitive type. In the else-branch, a negation type (`~T`) is added to exclude the checked type:
+All `is*` builtins are recognized as narrowing guards, whether called directly (`isString x`), qualified (`builtins.isString x`), or through a select chain (`lib.isString x`). In the then-branch, the variable is narrowed to the corresponding type. In the else-branch, the checked type is excluded:
 
 ```nix
 dispatch = x:
@@ -104,26 +104,21 @@ dispatch = x:
   else if isInt x then x + 1
   else if isBool x then !x
   else null;
-# in the else-branch of isString, x has type a & ~string
+# each branch sees x as the appropriate type
 ```
+
+Structural predicates (`isAttrs`, `isList`, `isFunction`) narrow in the then-branch only — `isAttrs x` narrows `x` to an attrset, etc. Else-branch narrowing for these is not yet supported.
 
 ### Supported narrowing conditions
 
 - `x == null` / `null == x` / `x != null` / `null != x`
 - `isNull x` / `builtins.isNull x`
-- `isString x` / `builtins.isString x` / `lib.types.isString x`
-- `isInt x` / `builtins.isInt x` / `lib.isInt x`
-- `isFloat x` / `builtins.isFloat x` / `lib.isFloat x`
-- `isBool x` / `builtins.isBool x` / `lib.isBool x`
-- `isPath x` / `builtins.isPath x` / `lib.isPath x`
-- `isAttrs x` / `builtins.isAttrs x` / `lib.isAttrs x` (then-branch only)
-- `isList x` / `builtins.isList x` / `lib.isList x` (then-branch only)
-- `isFunction x` / `builtins.isFunction x` / `lib.isFunction x` (then-branch only)
-- `x ? field` / `builtins.hasAttr "field" x` (then-branch narrows x to have the field; else-branch narrows x to not have the field)
-- `!cond` (flips the narrowing)
-- `assert cond; body` (narrows in the body)
-- `cond1 && cond2` (both narrowings apply in the then-branch)
-- `cond1 || cond2` (both narrowings apply in the else-branch)
+- `isString x` / `builtins.isString x` / `lib.isString x` (and similarly for all `is*` builtins)
+- `x ? field` / `builtins.hasAttr "field" x` — narrows x to have the field in then-branch, not have it in else-branch
+- `!cond` — flips the narrowing
+- `assert cond; body` — narrows in the body
+- `cond1 && cond2` — both narrowings apply in the then-branch
+- `cond1 || cond2` — both narrowings apply in the else-branch
 
 ### Boolean combinators
 
@@ -140,12 +135,10 @@ safeGet = x:
 dispatch = x:
   if isString x || isInt x then doSomething x
   else x;
-# else-branch: x is neither string nor int (has ~string & ~int)
+# else-branch: x is neither string nor int
 ```
 
-For `&&`, only the then-branch gets combined narrowings (we can't determine which guard failed in the else-branch). For `||`, only the else-branch gets combined narrowings (we can't determine which guard holds in the then-branch).
-
-Additionally, `&&` and `||` apply **short-circuit narrowing** to sub-expressions: since `a && b` only evaluates `b` when `a` is true, `b` is inferred under `a`'s then-branch narrowing. Similarly, `a || b` infers `b` under `a`'s else-branch narrowing:
+`&&` and `||` also apply **short-circuit narrowing** to sub-expressions. Since `a && b` only evaluates `b` when `a` is true, `b` is inferred under `a`'s then-branch narrowing:
 
 ```nix
 # ||: x is non-null in the RHS (runs when x == null is false)
@@ -157,7 +150,7 @@ safe = x: x != null && isString x.name;
 
 ### Conditional library functions
 
-Several nixpkgs `lib` functions take a boolean guard as their first argument and only evaluate the second argument when the guard is true. Tix recognizes these by name and applies then-branch narrowing to the guarded argument:
+Several nixpkgs `lib` functions take a boolean guard as their first argument and only evaluate the second argument when the guard is true. Tix recognizes these and applies narrowing to the guarded argument:
 
 ```nix
 { x }:
@@ -173,39 +166,7 @@ Recognized functions:
 - `lib.optional` / `lib.lists.optional`
 - `lib.mkIf`
 
-These work with any narrowing guard — null checks, `isString`, `? field`, etc. The detection is name-based (the leaf segment of the attribute path), so `lib.strings.optionalString`, `lib.optionalString`, and a bare `optionalString` from `with lib;` are all recognized.
-
-### Negation normalization
-
-Negation types are normalized during canonicalization using standard Boolean algebra rules:
-
-- **Double negation**: `~~T` simplifies to `T`
-- **De Morgan (union)**: `~(A | B)` becomes `~A & ~B`
-- **De Morgan (intersection)**: `~(A & B)` becomes `~A | ~B`
-- **Contradiction**: `T & ~T` or `string & int` in an intersection is detected as uninhabited and displayed as `never`
-- **Tautology**: `T | ~T` in a union is detected as universal and simplifies to `any` (the top type — every value inhabits it)
-- **Redundant negation**: `{name: string} & ~null` simplifies to `{name: string}` (attrsets are inherently non-null)
-- **Union absorption**: `{...} | {x: int, ...}` simplifies to `{...}` — an open attrset with fewer required fields subsumes more specific open attrsets in a union
-- **Intersection factoring**: `(A | C) & (B | C)` simplifies to `C | (A & B)` — shared members across all union terms in an intersection are factored out using the distributive law
-
-These rules keep inferred types readable and prevent redundant negations from accumulating through nested guards.
-
-### How narrowing works internally
-
-Narrowing uses first-class intersection types during inference (following the MLstruct approach from OOPSLA 2022). When `isString x` is the condition:
-
-- **Then-branch**: x gets type `α ∧ string` (an intersection of the original type variable with string)
-- **Else-branch**: x gets type `α ∧ ~string` (intersection with negation)
-
-These intersection types are structural — they flow through constraints, extrusion, and generalization like any other type. This means narrowing information survives let-polymorphism:
-
-```nix
-let f = x: if isNull x then 0 else x; in f
-# f :: a -> int | ~null
-# The ~null constraint on the else-branch's x is preserved
-```
-
-When a narrowed type like `α ∧ ~null` flows into a function that expects `string`, the solver applies variable isolation (the "annoying" constraint decomposition from MLstruct): `α ∧ ~null <: string` becomes `α <: string | null`, correctly constraining α without losing the negation information.
+The detection is name-based, so `lib.strings.optionalString`, `lib.optionalString`, and a bare `optionalString` from `with lib;` are all recognized.
 
 ## Row polymorphism (open attrsets)
 
@@ -275,7 +236,7 @@ merged = base // override;
 
 Other arithmetic operators (`-`, `*`, `/`) work on `int` and `float`.
 
-When tix can see the concrete types of the operands, it resolves the overload immediately. When the types are still variables (e.g. in a polymorphic function), resolution is deferred until more information is available.
+When tix can see the concrete types of the operands, it resolves the overload immediately. When the types are still polymorphic (e.g. in a generic function), resolution is deferred until more information is available.
 
 ## Let polymorphism
 
@@ -290,11 +251,11 @@ in {
 }
 ```
 
-Each use of `id` gets a fresh copy of the type via extrusion (SimpleSub's replacement for traditional instantiate/generalize).
+Each use of `id` gets a fresh copy of the type, so `id` can be applied to both `int` and `string` without conflict.
 
 ## Recursive bindings
 
-Tix handles recursive and mutually recursive definitions by grouping them into SCCs (strongly connected components) and inferring each group together.
+Tix handles recursive and mutually recursive definitions by analyzing dependency structure and inferring each group together.
 
 ```nix
 let
@@ -320,7 +281,7 @@ Unknown builtins get a fresh type variable — they won't cause errors, but they
 
 ## Unknown types (`?`)
 
-When a binding's entire type is a bare type variable, it means "unconstrained / unknown" rather than "polymorphic". The LSP displays these as `?` instead of a letter:
+When a binding's entire type is unconstrained, tix displays it as `?` instead of a letter:
 
 ```
 craneLib :: ?              # unconstrained — entire type is unknown
@@ -328,4 +289,4 @@ id :: a -> a               # compound type — letters preserved
 const :: a -> b -> a       # compound type — all params get letters
 ```
 
-Lambda parameters and pattern fields always keep letter names since their type variables represent genuine polymorphism. Other bindings (let, attrset fields) show `?` when their entire inferred type is a single unconstrained variable.
+Lambda parameters always keep letter names since they represent genuine polymorphism. Other bindings (let, attrset fields) show `?` when their entire inferred type is a single unconstrained variable.

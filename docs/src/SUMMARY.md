@@ -8,3 +8,7 @@
 - [Configuration](./configuration.md)
 - [LSP](./lsp.md)
 - [Limitations](./limitations.md)
+
+---
+
+- [Internals](./internals.md)
