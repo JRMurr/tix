@@ -5746,3 +5746,41 @@ fn duplicate_key_display_message() {
         .expect("expected a DuplicateKey diagnostic");
     assert_eq!(dup.kind.to_string(), "duplicate key `foo` in binding set");
 }
+
+// mkDerivation should accept `pname` + `version` as an alternative to `name`.
+// Real nixpkgs code almost always uses this pattern — nixpkgs derives `name`
+// from `pname` and `version` automatically.
+//
+// Note: the function variant must be parenthesized `({...} -> {...})` because
+// `|` has higher precedence than `->` in the tix grammar, so without parens
+// `A | B -> C` parses as `(A | B) -> C` (a single function) instead of
+// `A | (B -> C)` (a union of attrset and function).
+#[test]
+fn mkderivation_pname_version() {
+    let tix = indoc! { r#"
+        type Derivation = { name: string, system: string, ... };
+
+        val mkDerivation :: ({ name: string, ... } | { pname: string, version: string, ... } | ({ ... } -> ({ name: string, ... } | { pname: string, version: string, ... }))) -> Derivation;
+    "# };
+    let registry = registry_from_tix(tix);
+
+    // Direct attrset with pname + version (no `name` field)
+    let nix_src = indoc! { r#"
+        mkDerivation { pname = "test"; version = "1.0"; src = ./.; }
+    "# };
+    let ty = get_inferred_root_with_aliases(nix_src, &registry);
+    assert!(
+        matches!(&ty, lang_ty::OutputTy::Named(name, _) if name == "Derivation"),
+        "direct pname+version should produce Derivation, got: {ty}"
+    );
+
+    // finalAttrs function pattern with pname + version
+    let nix_src2 = indoc! { r#"
+        mkDerivation (finalAttrs: { pname = "test"; version = "1.0"; src = finalAttrs.version; })
+    "# };
+    let ty2 = get_inferred_root_with_aliases(nix_src2, &registry);
+    assert!(
+        matches!(&ty2, lang_ty::OutputTy::Named(name, _) if name == "Derivation"),
+        "finalAttrs pname+version should produce Derivation, got: {ty2}"
+    );
+}

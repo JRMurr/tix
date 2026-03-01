@@ -43,13 +43,13 @@ type OptionType = { ... };
 module pkgs {
 
   # mkDerivation accepts either an attrset or a function (finalAttrs: { ... })
-  val mkDerivation :: ({ name: string, ... } | { ... } -> { name: string, ... }) -> Derivation;
+  val mkDerivation :: ({ name: string, ... } | { pname: string, version: string, ... } | ({ ... } -> ({ name: string, ... } | { pname: string, version: string, ... }))) -> Derivation;
 
   val lib :: Lib;
 
   module stdenv {
     # mkDerivation accepts either an attrset or a function (finalAttrs: { ... })
-    val mkDerivation :: ({ name: string, ... } | { ... } -> { name: string, ... }) -> Derivation;
+    val mkDerivation :: ({ name: string, ... } | { pname: string, version: string, ... } | ({ ... } -> ({ name: string, ... } | { pname: string, version: string, ... }))) -> Derivation;
     val cc :: Derivation;
     val shell :: path;
     val isLinux :: bool;
