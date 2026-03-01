@@ -100,9 +100,9 @@ fn type_to_tix_prec(ty: &NixosTypeInfo, ctx: Prec) -> String {
     match ty {
         NixosTypeInfo::Primitive { value } => value.clone(),
 
-        // Packages are derivations — use the Derivation type alias if available,
-        // otherwise fall back to an open attrset.
-        NixosTypeInfo::Package => "{ ... }".to_string(),
+        // Packages are derivations — the Derivation type alias is always
+        // available from the built-in lib.tix stubs.
+        NixosTypeInfo::Package => "Derivation".to_string(),
 
         NixosTypeInfo::List { elem } => {
             format!("[{}]", type_to_tix_prec(elem, Prec::Arrow))
@@ -332,18 +332,22 @@ impl StubKind {
     fn context_vals(&self) -> &'static str {
         match self {
             // NixOS module arguments: { config, lib, pkgs, options, modulesPath, ... }
+            // `options` is the option *declaration* tree, not the evaluated config.
+            // Each leaf is an option descriptor, not the final value — use `{ ... }`
+            // rather than NixosConfig to avoid false type errors on `options.*.default`.
             StubKind::Nixos => {
                 "val config :: NixosConfig;\n\
                  val lib :: Lib;\n\
                  val pkgs :: Pkgs;\n\
-                 val options :: NixosConfig;\n\
+                 val options :: { ... };\n\
                  val modulesPath :: path;\n"
             }
-            // Home Manager module arguments: { config, lib, pkgs, osConfig, ... }
+            // Home Manager module arguments: { config, lib, pkgs, options, osConfig, ... }
             StubKind::HomeManager => {
                 "val config :: HomeManagerConfig;\n\
                  val lib :: Lib;\n\
                  val pkgs :: Pkgs;\n\
+                 val options :: { ... };\n\
                  val osConfig :: { ... };\n"
             }
         }
@@ -1181,7 +1185,7 @@ mod tests {
 
     #[test]
     fn tix_package() {
-        assert_eq!(type_to_tix(&NixosTypeInfo::Package), "{ ... }");
+        assert_eq!(type_to_tix(&NixosTypeInfo::Package), "Derivation");
     }
 
     #[test]

@@ -17,10 +17,16 @@
 
 type Derivation = {
   name: string,
+  pname: string,
+  version: string,
+  type: string,
+  outPath: string,
+  drvPath: string,
   system: string,
   builder: path | string,
   args: [string],
   outputs: [string],
+  meta: { ... },
   ...
 };
 
@@ -36,31 +42,43 @@ type OptionType = { ... };
 
 module pkgs {
 
-  val mkDerivation :: { name: string, ... } -> Derivation;
+  # mkDerivation accepts either an attrset or a function (finalAttrs: { ... })
+  val mkDerivation :: ({ name: string, ... } | { ... } -> { name: string, ... }) -> Derivation;
 
   val lib :: Lib;
 
   module stdenv {
-    val mkDerivation :: { name: string, ... } -> Derivation;
+    # mkDerivation accepts either an attrset or a function (finalAttrs: { ... })
+    val mkDerivation :: ({ name: string, ... } | { ... } -> { name: string, ... }) -> Derivation;
     val cc :: Derivation;
     val shell :: path;
     val isLinux :: bool;
     val isDarwin :: bool;
     val hostPlatform :: { system: string, isLinux: bool, isDarwin: bool, isx86_64: bool, isAarch64: bool, ... };
+    val buildPlatform :: { system: string, isLinux: bool, isDarwin: bool, ... };
+    val targetPlatform :: { system: string, isLinux: bool, isDarwin: bool, ... };
   }
 
-  # Fetchers
-  val fetchurl :: { url: string, sha256: string, ... } -> Derivation;
-  val fetchFromGitHub :: { owner: string, repo: string, rev: string, sha256: string, ... } -> Derivation;
-  val fetchgit :: { url: string, rev: string, sha256: string, ... } -> Derivation;
+  # Fetchers — use open attrsets so both `hash` and `sha256` work
+  val fetchurl :: { url: string, ... } -> Derivation;
+  val fetchFromGitHub :: { owner: string, repo: string, rev: string, ... } -> Derivation;
+  val fetchFromGitLab :: { owner: string, repo: string, rev: string, ... } -> Derivation;
+  val fetchgit :: { url: string, rev: string, ... } -> Derivation;
+  val fetchzip :: { url: string, ... } -> Derivation;
+  val fetchpatch :: { url: string, ... } -> Derivation;
 
   # Common build tools available in scope
   val runCommand :: string -> { ... } -> string -> Derivation;
   val writeText :: string -> string -> Derivation;
   val writeShellScript :: string -> string -> Derivation;
   val writeShellScriptBin :: string -> string -> Derivation;
-  val symlinkJoin :: { name: string, paths: [Derivation], ... } -> Derivation;
-  val callPackage :: (a -> Derivation) -> { ... } -> Derivation;
+  val writeShellApplication :: { name: string, text: string, ... } -> Derivation;
+  val symlinkJoin :: { name: string, paths: [Derivation | string], ... } -> Derivation;
+  val mkShell :: { ... } -> Derivation;
+  val mkShellNoCC :: { ... } -> Derivation;
+
+  # callPackage accepts a function or a path, and can return any type
+  val callPackage :: (({ ... } -> a) | path) -> { ... } -> a;
 }
 
 # ---------------------------------------------------------------------------

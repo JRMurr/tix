@@ -23570,5 +23570,5 @@ type NixosConfig = {
 val config :: NixosConfig;
 val lib :: Lib;
 val pkgs :: Pkgs;
-val options :: NixosConfig;
+val options :: { ... };
 val modulesPath :: path;

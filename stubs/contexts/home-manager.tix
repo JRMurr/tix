@@ -5361,4 +5361,5 @@ type HomeManagerConfig = {
 val config :: HomeManagerConfig;
 val lib :: Lib;
 val pkgs :: Pkgs;
+val options :: { ... };
 val osConfig :: { ... };
