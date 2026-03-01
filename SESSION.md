@@ -146,21 +146,9 @@ extrusion.
   investigated to ensure NameKind classification is correct for let bindings
   inside top-level lambda bodies.
 
-### Stub Audit: Remaining Generator Issues (pkgs.tix / nixos.tix)
+### Stub Audit: Remaining Generator Issues (nixos.tix / home-manager.tix)
 
 The following issues were identified in an audit but not yet fixed:
-
-**pkgs.tix generator (`nix/stubs.nix` + `gen_stubs.rs`):**
-- `__functor` blindspot: callable attrsets (all fetchers, `buildGoModule`,
-  `buildPythonPackage`, `mkShell`, etc.) are classified as `{ ... }` instead
-  of functions. Fix: check `v.value ? __functor` in classifier.
-- `stdenv :: Derivation` (20+ locations): stdenv passes `isDrv` check because
-  it has `.type == "derivation"`. Generated stub may shadow hand-curated module.
-  Fix: special-case or exclude stdenv from the generated file.
-- All 878 functions typed as `a -> b` (zero useful info). Would need
-  `builtins.functionArgs` to get parameter names.
-- Infrastructure noise: `override`/`newScope`/`overrideScope` in every module
-  (~400 entries). Could filter these out.
 
 **nixos.tix / home-manager.tix generator (`tools/extract-options.nix`):**
 - `tryEval` failures silently degrade types to `{ ... }` — affects common
