@@ -8,10 +8,14 @@ Tix is a type checker for the Nix language, implementing MLsub/SimpleSub — an 
 
 ## Build & Test Commands
 
+Tests use `cargo nextest` (available in the nix devShell). Use `--failure-output immediate --success-output never` for clean CI-friendly output.
+
 ```bash
 cargo build                          # Build all crates
-cargo test                           # Run all unit tests
-cargo test --package lang_check      # Test a specific crate
+cargo nextest run                    # Run all unit tests
+cargo nextest run -p lang_check      # Test a specific crate
+cargo nextest run -E 'test(test_name)'  # Run a single test by name
+cargo nextest run -p cli --run-ignored only -E 'test(nixpkgs_lib)'  # Run ignored integration test
 cargo run --bin tix-cli test/basic.nix  # Type-check a Nix file
 cargo fmt                            # Format (uses .rustfmt.toml)
 cargo clippy                         # Lint
@@ -23,12 +27,6 @@ nix build .#                         # Build with nix
 ./scripts/tixc.sh test/basic.nix             # Type-check a local .nix file
 ./scripts/tixc.sh nixpkgs:lib/strings.nix    # Type-check a nixpkgs file (requires nix)
 ./scripts/nixpkgs-lib-test.sh               # Run tix-cli on nixpkgs lib/ (requires nix)
-cargo test --package cli -- --ignored nixpkgs_lib  # Same, as a cargo integration test
-```
-
-Run a single test:
-```bash
-cargo test --package lang_check -- test_name
 ```
 
 
@@ -58,7 +56,7 @@ Six crates under `crates/`, listed in pipeline order:
 | `lang_ty` | Type representation: `Ty<R, VarType>` for inference, `OutputTy` with Union/Intersection for output |
 | `comment_parser` | Parse type annotations from doc comments (pest grammar) |
 | `lang_check` | SimpleSub type inference engine — the core of the project |
-| `lsp` | LSP server: hover, completions, go-to-definition, rename, inlay hints, diagnostics |
+| `lsp` | LSP server: hover, completions, go-to-definition, references, rename, signature help, inlay hints, diagnostics, code actions, document symbols, workspace symbols, semantic tokens, selection range, document highlight, document links, formatting |
 | `cli` | Thin binary entry point |
 
 ## Architecture & Pipeline
@@ -206,6 +204,7 @@ mkDerivation { name = "my-package"; src = ./.; }
 
 - **Unit tests**: inline in each crate (`tests.rs`, `#[cfg(test)]` modules)
 - **Property-based tests**: `lang_check/src/pbt/mod.rs` — generates arbitrary ASTs and types via proptest
+- **LSP e2e tests**: `lsp/tests/e2e_*.rs` — protocol-level tests using in-process duplex transport via `LspTestHarness` (in `lsp/tests/common/mod.rs`). Tests cover diagnostics, hover, completion, config reload, multi-file, and lifecycle.
 - **Test fixtures**: Nix files in `test/` directory (e.g., `test/basic.nix`)
 
 ### LSP test conventions
