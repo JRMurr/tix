@@ -389,6 +389,25 @@ impl TypeAliasRegistry {
             "callpackage" => SmolStr::from("Pkgs"),
             other => capitalize(other),
         };
+
+        // If builtin_stubs_dir has a matching module stub, load it first
+        // to ensure the alias is fully populated before extracting fields.
+        // e.g. @callpackage → Pkgs → module pkgs → pkgs.tix
+        if let Some(ref dir) = self.builtin_stubs_dir {
+            let module_name = alias_name.to_ascii_lowercase();
+            let module_path = dir.join(format!("{module_name}.tix"));
+            if module_path.is_file() {
+                if let Ok(source) = std::fs::read_to_string(&module_path) {
+                    match comment_parser::parse_tix_file(&source) {
+                        Ok(file) => self.load_tix_file(&file),
+                        Err(e) => {
+                            log::warn!("Failed to parse {}: {e}", module_path.display())
+                        }
+                    }
+                }
+            }
+        }
+
         if let Some(ParsedTy::AttrSet(attr)) = self.aliases.get(&alias_name).cloned() {
             let mut context_args = HashMap::new();
             for (field_name, field_ty) in &attr.fields {
@@ -1243,5 +1262,51 @@ mod tests {
             registry.load_context_by_name("foo").is_none(),
             "non-attrset alias should not be used as context"
         );
+    }
+
+    #[test]
+    fn callpackage_context_loads_module_stub_from_builtin_stubs_dir() {
+        // When builtin_stubs_dir contains pkgs.tix, @callpackage should
+        // pick up packages defined there (not just the hand-curated builtins).
+        let tmp = std::env::temp_dir().join("tix_test_callpackage_stubs");
+        let _ = std::fs::create_dir_all(&tmp);
+        std::fs::write(
+            tmp.join("pkgs.tix"),
+            r#"
+            type Derivation = { name: string, system: string, ... };
+            module pkgs {
+                val emilua :: Derivation;
+                val gperf :: Derivation;
+            }
+            "#,
+        )
+        .expect("write pkgs.tix");
+
+        let mut registry = TypeAliasRegistry::with_builtins();
+        registry.set_builtin_stubs_dir(tmp.clone());
+
+        let result = registry.load_context_by_name("callpackage");
+        assert!(result.is_some(), "@callpackage should resolve via pkgs.tix");
+        let context_args = result.unwrap().expect("should parse");
+
+        assert!(
+            context_args.contains_key("emilua"),
+            "emilua should be in callpackage context"
+        );
+        assert!(
+            context_args.contains_key("gperf"),
+            "gperf should be in callpackage context"
+        );
+
+        // Verify the types are Derivation references, not bare type vars.
+        match &context_args["emilua"] {
+            ParsedTy::TyVar(comment_parser::TypeVarValue::Reference(name)) => {
+                assert_eq!(name.as_str(), "Derivation");
+            }
+            other => panic!("expected Derivation reference, got: {other:?}"),
+        }
+
+        // Clean up.
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

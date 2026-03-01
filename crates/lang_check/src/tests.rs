@@ -2629,6 +2629,67 @@ fn callpackage_context_types_pkgs_parameter_as_alias() {
     }
 }
 
+/// Regression: @callpackage context should pick up packages from pkgs.tix in
+/// builtin_stubs_dir, not just the hand-curated fields in the compiled-in stubs.
+/// Without the fix, parameters like `emilua` get typed as generic `a` instead
+/// of `Derivation`.
+#[test]
+fn callpackage_context_loads_pkgs_from_builtin_stubs_dir() {
+    let tmp = std::env::temp_dir().join("tix_test_callpackage_pipeline");
+    let _ = std::fs::create_dir_all(&tmp);
+    std::fs::write(
+        tmp.join("pkgs.tix"),
+        r#"
+        type Derivation = { name: string, system: string, ... };
+        module pkgs {
+            val emilua :: Derivation;
+            val ninja :: Derivation;
+        }
+        "#,
+    )
+    .expect("write pkgs.tix");
+
+    let mut registry = TypeAliasRegistry::with_builtins();
+    registry.set_builtin_stubs_dir(tmp.clone());
+    let ctx = registry
+        .load_context_by_name("callpackage")
+        .unwrap()
+        .unwrap();
+
+    // A callPackage-style file: `{ emilua, ninja, ... }: emilua`
+    // `emilua` should be typed as Derivation (from pkgs.tix), not generic `a`.
+    let nix_src = indoc! { "
+        { emilua, ninja, ... }: emilua
+    " };
+    let (db, file) = TestDatabase::single_file(nix_src).unwrap();
+    let module = module(&db, file);
+    let result = crate::check_file_collecting(&db, file, &registry, HashMap::new(), ctx);
+    let inference = result.inference.expect("inference should succeed");
+
+    let root_ty = inference
+        .expr_ty_map
+        .get(module.entry_expr)
+        .expect("root expr should have a type");
+    match root_ty {
+        OutputTy::Lambda { body, .. } => {
+            // The body is just `emilua`, which should be Derivation.
+            match body.0.as_ref() {
+                OutputTy::Named(name, _) => {
+                    assert_eq!(
+                        name.as_str(),
+                        "Derivation",
+                        "emilua should be Named(\"Derivation\", ...), got Named(\"{name}\", ...)"
+                    );
+                }
+                other => panic!("emilua should be Named(\"Derivation\", ...), got: {other}"),
+            }
+        }
+        _ => panic!("expected lambda type, got: {root_ty}"),
+    }
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
 // =============================================================================
 // Optional fields (pattern defaults)
 // =============================================================================
