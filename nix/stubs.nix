@@ -19,6 +19,23 @@
 let
   lib = pkgs.lib;
 
+  # Suppress the avalanche of deprecation/rename warnings that the NixOS and
+  # Home Manager module systems emit during option tree evaluation. These
+  # warnings are harmless (we only inspect the option *types*, not values) but
+  # they clutter stderr and confuse users who see them during `nix build`.
+  # We override lib.warn and friends with no-ops so builtins.trace is never
+  # called for warning-level messages.
+  quietLib = lib.extend (_self: _super: {
+    warn = _msg: x: x;
+    warnIf = _cond: _msg: x: x;
+    warnIfNot = _cond: _msg: x: x;
+    trivial = _super.trivial // {
+      warn = _msg: x: x;
+      warnIf = _cond: _msg: x: x;
+      warnIfNot = _cond: _msg: x: x;
+    };
+  });
+
   # ============================================================================
   # NixOS option tree extraction (evaluated at Nix eval time)
   # ============================================================================
@@ -26,6 +43,7 @@ let
   # eval-config.nix defaults to builtins.currentSystem which isn't available
   # in pure flake evaluation, so we pass system explicitly from pkgs.
   nixosOptions = (import (pkgs.path + "/nixos/lib/eval-config.nix") {
+    lib = quietLib;
     system = pkgs.stdenv.hostPlatform.system;
     modules = [{ _module.check = false; }];
   }).options;
@@ -43,8 +61,8 @@ let
 
   hmSrc = home-manager;
 
-  hmLib = import (hmSrc + "/modules/lib") { inherit (pkgs) lib; };
-  extendedLib = pkgs.lib.extend (_self: _super: { hm = hmLib; });
+  hmLib = import (hmSrc + "/modules/lib") { lib = quietLib; };
+  extendedLib = quietLib.extend (_self: _super: { hm = hmLib; });
 
   hmModuleList = import (hmSrc + "/modules/modules.nix") {
     inherit pkgs;
@@ -77,6 +95,15 @@ let
   # function. Non-derivation attrsets with `recurseForDerivations = true` are
   # recursed into (same mechanism as `nix search` and Hydra). Broken or
   # unevaluable packages are skipped via tryEval.
+  #
+  # We import nixpkgs with allowAliases = false specifically for classification
+  # to avoid the flood of "was renamed to" warnings that fire when traversing
+  # deprecated alias attributes. The classification only cares about attribute
+  # types (derivation/attrset/function), not alias behavior.
+  classifyPkgs = import pkgs.path {
+    inherit (pkgs.stdenv.hostPlatform) system;
+    config = { allowAliases = false; };
+  };
 
   classifySet = depth: attrset:
     builtins.listToAttrs (builtins.concatMap (name:
@@ -123,7 +150,7 @@ let
          else entry // { alias_of = builtins.head match; }
     ) tree;
 
-  pkgsClassificationJson = builtins.toJSON (detectAliases (classifySet 1 pkgs) pkgs);
+  pkgsClassificationJson = builtins.toJSON (detectAliases (classifySet 1 classifyPkgs) classifyPkgs);
 
   # ============================================================================
   # Convert JSON → .tix using tix-cli --from-json
