@@ -60,16 +60,22 @@ You can also set context per-file with a doc comment at the top:
 }
 ```
 
-### Project analysis
+### Project settings
 
-The `[project]` section configures background analysis of project files. When the LSP starts, files matching the `analyze` globs are inferred and their types become available as ephemeral stubs to all open files. This gives you cross-file type information without writing `.tix` stub files.
+The `[project]` section configures project-level behavior for both the LSP and `tix check`.
 
 ```toml
 [project]
 analyze = ["lib/*.nix", "pkgs/**/*.nix"]
+exclude = ["result", ".direnv", "vendor/**"]
 ```
 
-Files are analyzed in the background after initialization. As each file's type is inferred, any open files that import it are automatically re-analyzed with the updated type information.
+- **analyze** — glob patterns for files to analyze in the background when the LSP starts. Their inferred types become ephemeral stubs available to all open files.
+- **exclude** — glob patterns for files/directories to skip during `tix check`. Hardcoded ignores (`.git`, `node_modules`, `result`, `.direnv`, `target`) are always applied.
+
+`tix init` generates a `[project]` section with sensible defaults.
+
+Files matching `analyze` are processed in the background after LSP initialization. As each file's type is inferred, any open files that import it are automatically re-analyzed with the updated type information.
 
 ### Inference deadline
 
@@ -78,6 +84,19 @@ By default the LSP aborts type inference after 10 seconds per file and returns p
 ```toml
 deadline = 30          # seconds per top-level file (default: 10)
 ```
+
+### Generating tix.toml
+
+Run `tix init` to automatically generate a `tix.toml` for your project:
+
+```bash
+tix-cli init              # Generate tix.toml in current project
+tix-cli init --dry-run    # Preview without writing
+tix-cli init --yes        # Overwrite existing tix.toml
+tix-cli init /path/to/project  # Specify project directory
+```
+
+The command scans all `.nix` files, classifies each by its structural signals (parameter names, body references, attrset keys), and generates context sections mapping file paths to the appropriate stubs.
 
 ### No-module escape hatch
 

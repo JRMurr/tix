@@ -131,6 +131,37 @@ tix-cli my-file.nix --stubs ./my-stubs/
 
 `--stubs` accepts file paths or directories (recursively finds `.tix` files). Can be passed multiple times. The built-in nixpkgs stubs are loaded by default — use `--no-default-stubs` to disable.
 
+### Initialize a project
+
+Scaffold a `tix.toml` by scanning your project for `.nix` files:
+
+```bash
+tix-cli init
+```
+
+This classifies each file (NixOS module, Home Manager module, callPackage, overlay, etc.) and generates context sections automatically. Use `--dry-run` to preview without writing:
+
+```bash
+tix-cli init --dry-run
+```
+
+### Check a project
+
+Type-check all files in a project using the `tix.toml` configuration:
+
+```bash
+tix-cli check
+```
+
+This discovers all `.nix` files, applies context from `tix.toml`, type-checks each file, and prints a summary. It also validates that file classifications match their configured contexts (e.g., warns if a NixOS module isn't in any `[context.nixos]` section).
+
+```bash
+tix-cli check --verbose    # Show file classifications
+tix-cli check --config path/to/tix.toml  # Explicit config path
+```
+
+Exit code is 1 if any type errors are found, 0 otherwise (config warnings don't affect the exit code).
+
 ### Generate stubs
 
 Generate typed stubs from your NixOS or Home Manager configuration:
