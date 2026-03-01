@@ -1,5 +1,7 @@
+mod check;
 mod config;
 mod gen_stubs;
+mod init;
 
 use std::collections::HashMap;
 use std::{error::Error, path::PathBuf};
@@ -71,6 +73,36 @@ enum Command {
         /// Output file path (default: stdout)
         #[arg(short, long)]
         output: Option<PathBuf>,
+    },
+
+    /// Scaffold a tix.toml by scanning and classifying project files
+    Init {
+        /// Project directory (default: current directory)
+        #[arg(default_value = ".")]
+        path: PathBuf,
+
+        /// Write without asking for confirmation
+        #[arg(long)]
+        yes: bool,
+
+        /// Print what would be generated without writing
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Type-check all files in a project using tix.toml configuration
+    Check {
+        /// Path to tix.toml config file (auto-discovered if not specified)
+        #[arg(long = "config", value_name = "PATH")]
+        config_path: Option<PathBuf>,
+
+        /// Do not load the built-in nixpkgs stubs
+        #[arg(long)]
+        no_default_stubs: bool,
+
+        /// Print file classifications
+        #[arg(long)]
+        verbose: bool,
     },
 
     /// Verify that a .tix stub matches the inferred type of a Nix file
@@ -184,6 +216,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     let args = Cli::parse();
 
     match args.command {
+        Some(Command::Init { path, yes, dry_run }) => init::run_init(path, yes, dry_run),
+        Some(Command::Check {
+            config_path,
+            no_default_stubs,
+            verbose,
+        }) => check::run_check_project(config_path, no_default_stubs, verbose),
         Some(Command::GenStubs { source }) => run_gen_stubs(source),
         Some(Command::GenStub {
             file_path,
@@ -761,78 +799,10 @@ fn run_check(
 
     // Render diagnostics with miette for source context.
     let source_text = std::fs::read_to_string(&file_path)?;
-    let filename = file_path.display().to_string();
-    let root = rnix::Root::parse(&source_text).tree();
-    let mut has_errors = false;
+    let (error_count, _warning_count) =
+        render_diagnostics(&file_path, &source_text, &result.diagnostics, &source_map);
 
-    for diag in &result.diagnostics {
-        let is_warning = matches!(
-            diag.kind,
-            TixDiagnosticKind::UnresolvedName { .. }
-                | TixDiagnosticKind::AnnotationArityMismatch { .. }
-                | TixDiagnosticKind::AnnotationUnchecked { .. }
-                | TixDiagnosticKind::DuplicateKey { .. }
-                | TixDiagnosticKind::ImportNotFound { .. }
-                | TixDiagnosticKind::InferenceTimeout { .. }
-        );
-        if !is_warning {
-            has_errors = true;
-        }
-
-        // DuplicateKey carries its own AstPtr spans; other diagnostics
-        // resolve ExprId → source span via the ModuleSourceMap.
-        let labels = if let TixDiagnosticKind::DuplicateKey { first, second, .. } = &diag.kind {
-            let to_span = |ptr: &lang_ast::AstPtr| {
-                let node = ptr.to_node(root.syntax());
-                let range = node.text_range();
-                let start: usize = range.start().into();
-                let len: usize = range.len().into();
-                (start, len)
-            };
-            let (s1, l1) = to_span(first);
-            let (s2, l2) = to_span(second);
-            vec![
-                LabeledSpan::at(s1..s1 + l1, "first defined here"),
-                LabeledSpan::at(s2..s2 + l2, "duplicate defined here"),
-            ]
-        } else {
-            let span = source_map.node_for_expr(diag.at_expr).map(|ptr| {
-                let node = ptr.to_node(root.syntax());
-                let range = node.text_range();
-                let start: usize = range.start().into();
-                let len: usize = range.len().into();
-                (start, len)
-            });
-            span.map(|(offset, len)| vec![LabeledSpan::at(offset..offset + len, "here")])
-                .unwrap_or_default()
-        };
-
-        // Build help text for MissingField suggestions.
-        let help = match &diag.kind {
-            TixDiagnosticKind::MissingField {
-                suggestion: Some(s),
-                ..
-            } => Some(format!("did you mean `{s}`?")),
-            _ => None,
-        };
-
-        let mut builder = miette::MietteDiagnostic::new(diag.kind.to_string());
-        if !labels.is_empty() {
-            builder = builder.with_labels(labels);
-        }
-        if let Some(help_text) = help {
-            builder = builder.with_help(help_text);
-        }
-        if is_warning {
-            builder = builder.with_severity(miette::Severity::Warning);
-        }
-
-        let report = miette::Report::new(builder)
-            .with_source_code(NamedSource::new(filename.clone(), source_text.clone()));
-        eprintln!("{:?}", report);
-    }
-
-    if has_errors {
+    if error_count > 0 {
         std::process::exit(1);
     }
 
@@ -885,6 +855,94 @@ fn run_check(
     }
 
     Ok(())
+}
+
+// =============================================================================
+// Shared diagnostic rendering
+// =============================================================================
+
+/// Render diagnostics for a single file. Returns `(error_count, warning_count)`.
+fn render_diagnostics(
+    file_path: &std::path::Path,
+    source_text: &str,
+    diagnostics: &[TixDiagnostic],
+    source_map: &lang_ast::ModuleSourceMap,
+) -> (usize, usize) {
+    let filename = file_path.display().to_string();
+    let root = rnix::Root::parse(source_text).tree();
+    let mut error_count = 0;
+    let mut warning_count = 0;
+
+    for diag in diagnostics {
+        let is_warning = matches!(
+            diag.kind,
+            TixDiagnosticKind::UnresolvedName { .. }
+                | TixDiagnosticKind::AnnotationArityMismatch { .. }
+                | TixDiagnosticKind::AnnotationUnchecked { .. }
+                | TixDiagnosticKind::DuplicateKey { .. }
+                | TixDiagnosticKind::ImportNotFound { .. }
+                | TixDiagnosticKind::InferenceTimeout { .. }
+        );
+        if is_warning {
+            warning_count += 1;
+        } else {
+            error_count += 1;
+        }
+
+        // DuplicateKey carries its own AstPtr spans; other diagnostics
+        // resolve ExprId → source span via the ModuleSourceMap.
+        let labels = if let TixDiagnosticKind::DuplicateKey { first, second, .. } = &diag.kind {
+            let to_span = |ptr: &lang_ast::AstPtr| {
+                let node = ptr.to_node(root.syntax());
+                let range = node.text_range();
+                let start: usize = range.start().into();
+                let len: usize = range.len().into();
+                (start, len)
+            };
+            let (s1, l1) = to_span(first);
+            let (s2, l2) = to_span(second);
+            vec![
+                LabeledSpan::at(s1..s1 + l1, "first defined here"),
+                LabeledSpan::at(s2..s2 + l2, "duplicate defined here"),
+            ]
+        } else {
+            let span = source_map.node_for_expr(diag.at_expr).map(|ptr| {
+                let node = ptr.to_node(root.syntax());
+                let range = node.text_range();
+                let start: usize = range.start().into();
+                let len: usize = range.len().into();
+                (start, len)
+            });
+            span.map(|(offset, len)| vec![LabeledSpan::at(offset..offset + len, "here")])
+                .unwrap_or_default()
+        };
+
+        // Build help text for MissingField suggestions.
+        let help = match &diag.kind {
+            TixDiagnosticKind::MissingField {
+                suggestion: Some(s),
+                ..
+            } => Some(format!("did you mean `{s}`?")),
+            _ => None,
+        };
+
+        let mut builder = miette::MietteDiagnostic::new(diag.kind.to_string());
+        if !labels.is_empty() {
+            builder = builder.with_labels(labels);
+        }
+        if let Some(help_text) = help {
+            builder = builder.with_help(help_text);
+        }
+        if is_warning {
+            builder = builder.with_severity(miette::Severity::Warning);
+        }
+
+        let report = miette::Report::new(builder)
+            .with_source_code(NamedSource::new(filename.clone(), source_text.to_string()));
+        eprintln!("{:?}", report);
+    }
+
+    (error_count, warning_count)
 }
 
 /// Build a TypeAliasRegistry from CLI flags, loading stubs and validating.
