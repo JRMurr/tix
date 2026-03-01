@@ -6,3 +6,6 @@ title = "Tix Documentation"
 
 [build]
 build-dir = "book"
+
+[output.html]
+git-repository-url = "https://github.com/JRMurr/tix"
