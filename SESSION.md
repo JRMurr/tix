@@ -146,6 +146,37 @@ extrusion.
   investigated to ensure NameKind classification is correct for let bindings
   inside top-level lambda bodies.
 
+### Stub Audit: Remaining Generator Issues (pkgs.tix / nixos.tix)
+
+The following issues were identified in an audit but not yet fixed:
+
+**pkgs.tix generator (`nix/stubs.nix` + `gen_stubs.rs`):**
+- `__functor` blindspot: callable attrsets (all fetchers, `buildGoModule`,
+  `buildPythonPackage`, `mkShell`, etc.) are classified as `{ ... }` instead
+  of functions. Fix: check `v.value ? __functor` in classifier.
+- `stdenv :: Derivation` (20+ locations): stdenv passes `isDrv` check because
+  it has `.type == "derivation"`. Generated stub may shadow hand-curated module.
+  Fix: special-case or exclude stdenv from the generated file.
+- All 878 functions typed as `a -> b` (zero useful info). Would need
+  `builtins.functionArgs` to get parameter names.
+- Infrastructure noise: `override`/`newScope`/`overrideScope` in every module
+  (~400 entries). Could filter these out.
+
+**nixos.tix / home-manager.tix generator (`tools/extract-options.nix`):**
+- `tryEval` failures silently degrade types to `{ ... }` — affects common
+  options like `networking.firewall.allowedTCPPorts` (should be `[int]`),
+  `boot.kernelParams` (should be `[string]`), and 593 `enable` fields.
+- 92 redundant `{ ... } | { ... }` unions should be deduplicated.
+- `specialisation` embeds ~90k lines of recursive NixOS config inline instead
+  of referencing `NixosConfig`.
+- Submodule indent resets to 0 inside `AttrsOf` (cosmetic).
+
+**Parameterized type aliases (future feature):**
+- `type Overridable<T> = T | T -> T` would reduce duplication in stubs.
+  Requires grammar changes, `TypeApplication` ParsedTy variant, substitution
+  engine, and arity checking. The current implicit generic system works but
+  doesn't support applying aliases to specific type arguments.
+
 ### Automatic Type Extraction from Nix Ecosystem
 
 - **Lib stubs are now generated from noogle data**: `scripts/gen_lib_stubs.py` pulls

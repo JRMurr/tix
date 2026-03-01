@@ -84,6 +84,7 @@
               buildInputs = [
                 rustAttrs.rust-shell
                 (pkgs.cargo-tarpaulin.override ({ rustPlatform = rustAttrs.rustPlatform; }))
+                pkgs.cargo-nextest
                 tix-lsp-dev
 
                 # common
