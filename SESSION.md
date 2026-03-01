@@ -56,17 +56,6 @@ overloads) and re-instantiating them during extrusion.
   `nameFromURL :: String -> String` (line 2101): wrong arity (1 arg, function
   takes 2). Detected and skipped with a warning.
 
-### Missing Features
-
-- `true`, `false`, `null` keywords inside `with` bodies are resolved as
-  `WithExprs(...)` instead of falling through to the special-case handler in
-  `infer_reference`. Name resolution doesn't treat them as builtins, so they
-  enter the `with` lookup path. Single `with` works because the env attrset
-  typically doesn't have a `true` field and the open constraint passes, but
-  nested `with` with a closed outer env can produce spurious MissingField errors.
-  Fix: either add `true`/`false`/`null` to `GLOBAL_BUILTIN_NAMES` in nameres, or
-  check for them before the `WithExprs` path in `infer_reference`.
-
 ### Multi-File Imports
 
 - Angle bracket search paths (`<nixpkgs>`) are silently skipped during import
@@ -231,14 +220,6 @@ split Phase A/B mutex, cancel flag, parallel rayon imports). Remaining cleanup:
 - goto_def/rename cross-file still lock state for Salsa DB access
 - Regression tests for import cap, aggregate deadline, canonicalization deadline,
   and cancel flag in Salsa path are not yet written.
-
-### `contains_union()` Doesn't See Through Alias References
-
-- When a type annotation references a type alias containing a union (e.g.
-  `Nullable = int | null`), the `contains_union()` safety check operates on
-  the raw `ParsedTy` reference, not the expanded alias body. This can produce
-  false type errors. Fix: expand alias references before checking, or check
-  after interning.
 
 ### `resolve_to_concrete_id` Picks Arbitrary Lower Bound
 

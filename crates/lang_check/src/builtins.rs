@@ -238,6 +238,10 @@ impl CheckCtx<'_> {
             "nixVersion" | "currentSystem" | "storeDir" => Ok(self.alloc_prim(PrimitiveTy::String)),
             "storePath" => synth_ty!(self; => Path -> Path),
 
+            // Language keywords — resolved as builtins so they bypass `with` scopes.
+            "true" | "false" => Ok(self.alloc_prim(PrimitiveTy::Bool)),
+            "null" => Ok(self.alloc_prim(PrimitiveTy::Null)),
+
             // Unknown builtins get a fresh type variable — graceful degradation.
             _ => Ok(self.new_var()),
         }

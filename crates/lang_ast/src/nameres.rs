@@ -67,6 +67,7 @@ pub const GLOBAL_BUILTIN_NAMES: &[&str] = &[
     "baseNameOf",
     "derivation",
     "dirOf",
+    "false",
     "fetchGit",
     "fetchMercurial",
     "fetchTarball",
@@ -76,11 +77,13 @@ pub const GLOBAL_BUILTIN_NAMES: &[&str] = &[
     "import",
     "isNull",
     "map",
+    "null",
     "placeholder",
     "removeAttrs",
     "scopedImport",
     "throw",
     "toString",
+    "true",
 ];
 
 /// Returns the static name string if `name` is a known global builtin
@@ -91,6 +94,7 @@ pub fn lookup_global_builtin(name: &str) -> Option<&'static str> {
         "baseNameOf" => Some("baseNameOf"),
         "derivation" => Some("derivation"),
         "dirOf" => Some("dirOf"),
+        "false" => Some("false"),
         "fetchGit" => Some("fetchGit"),
         "fetchMercurial" => Some("fetchMercurial"),
         "fetchTarball" => Some("fetchTarball"),
@@ -100,11 +104,13 @@ pub fn lookup_global_builtin(name: &str) -> Option<&'static str> {
         "import" => Some("import"),
         "isNull" => Some("isNull"),
         "map" => Some("map"),
+        "null" => Some("null"),
         "placeholder" => Some("placeholder"),
         "removeAttrs" => Some("removeAttrs"),
         "scopedImport" => Some("scopedImport"),
         "throw" => Some("throw"),
         "toString" => Some("toString"),
+        "true" => Some("true"),
         _ => None,
     }
 }

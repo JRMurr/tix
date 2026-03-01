@@ -947,6 +947,36 @@ fn with_nested_let_bound_envs() {
 }
 
 // ==============================================================================
+// Keywords (true/false/null) in `with` bodies
+// ==============================================================================
+
+// These are language keywords, not attrset fields. They should resolve as
+// builtins regardless of surrounding `with` scopes.
+
+test_case!(
+    true_in_nested_with,
+    "let f = env: with env; with { x = 1; }; true; in f { y = 2; }",
+    Bool
+);
+test_case!(
+    false_in_nested_with,
+    "let f = env: with env; with { x = 1; }; false; in f { y = 2; }",
+    Bool
+);
+test_case!(
+    null_in_nested_with,
+    "let f = env: with env; with { x = 1; }; null; in f { y = 2; }",
+    Null
+);
+
+// Also verify they work in simpler contexts (these may already pass).
+test_case!(true_simple, "true", Bool);
+test_case!(false_simple, "false", Bool);
+test_case!(null_simple, "null", Null);
+test_case!(true_in_single_with, "with { x = 1; }; true", Bool);
+test_case!(null_in_single_with, "with { x = 1; }; null", Null);
+
+// ==============================================================================
 // Recursive / self-referential types
 // ==============================================================================
 
@@ -1293,6 +1323,117 @@ alias_test_case!(
     "#,
     Int
 );
+
+// Alias containing a union in a parameter position: `contains_union()` must see
+// through alias references. Before the fix, `StringOrList` was an opaque
+// TyVar(Reference("StringOrList")) and `contains_union()` returned false,
+// causing bidirectional constraints to push all union members as lower bounds,
+// producing false type errors (same as `annotation_with_union_skipped` but via alias).
+#[test]
+fn alias_with_union_in_param_skips_bidirectional_constraints() {
+    let registry = registry_from_tix("type StringOrList = string | [string];");
+
+    let nix_src = indoc! { r#"
+        let
+            /**
+                type: f :: string -> StringOrList -> string
+            */
+            f = name: value:
+                if builtins.isList value then "list"
+                else value;
+        in
+        f "x" "hello"
+    "# };
+
+    let (db, file) = TestDatabase::single_file(nix_src).unwrap();
+    let result = crate::check_file_collecting(&db, file, &registry, HashMap::new(), HashMap::new());
+
+    // Inference should succeed — the union annotation (via alias) is skipped.
+    let inference = result
+        .inference
+        .expect("inference should succeed with union-alias annotation");
+
+    let mod_ = module(&db, file);
+    let root_ty = inference
+        .expr_ty_map
+        .get(mod_.entry_expr)
+        .expect("root should have a type");
+    assert_eq!(
+        *root_ty,
+        arc_ty!(String),
+        "root should be string, got: {root_ty}"
+    );
+
+    // No type errors should be present (warnings are ok).
+    let errors: Vec<_> = result
+        .diagnostics
+        .iter()
+        .filter(|d| {
+            !matches!(
+                d.kind,
+                TixDiagnosticKind::UnresolvedName { .. }
+                    | TixDiagnosticKind::AnnotationArityMismatch { .. }
+            )
+        })
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "should have no type errors with union-alias annotation, got: {errors:?}"
+    );
+}
+
+// Nested alias: alias references another alias that contains a union.
+#[test]
+fn nested_alias_with_union_in_param_skips_bidirectional_constraints() {
+    let registry =
+        registry_from_tix("type StringOrList = string | [string];\ntype StrOrLst = StringOrList;");
+
+    let nix_src = indoc! { r#"
+        let
+            /**
+                type: f :: string -> StrOrLst -> string
+            */
+            f = name: value:
+                if builtins.isList value then "list"
+                else value;
+        in
+        f "x" "hello"
+    "# };
+
+    let (db, file) = TestDatabase::single_file(nix_src).unwrap();
+    let result = crate::check_file_collecting(&db, file, &registry, HashMap::new(), HashMap::new());
+
+    let inference = result
+        .inference
+        .expect("inference should succeed with nested union-alias annotation");
+
+    let mod_ = module(&db, file);
+    let root_ty = inference
+        .expr_ty_map
+        .get(mod_.entry_expr)
+        .expect("root should have a type");
+    assert_eq!(
+        *root_ty,
+        arc_ty!(String),
+        "root should be string, got: {root_ty}"
+    );
+
+    let errors: Vec<_> = result
+        .diagnostics
+        .iter()
+        .filter(|d| {
+            !matches!(
+                d.kind,
+                TixDiagnosticKind::UnresolvedName { .. }
+                    | TixDiagnosticKind::AnnotationArityMismatch { .. }
+            )
+        })
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "should have no type errors with nested union-alias annotation, got: {errors:?}"
+    );
+}
 
 // ==============================================================================
 // Nested attribute paths (implicit attrset desugaring)

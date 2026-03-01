@@ -839,7 +839,11 @@ impl<'db> CheckCtx<'db> {
             // branching). Applying bidirectional constraints on such annotations
             // pushes all union members as lower bounds into the inferred param,
             // causing false type errors. Skip these with a warning.
-            if known_ty.contains_union() {
+            //
+            // Expand alias references to detect unions hidden behind type aliases
+            // (e.g. `Nullable = int | null`).
+            let has_union = known_ty.contains_union_resolving(&|name| self.type_aliases.get(name));
+            if has_union {
                 // Still intern and record provenance for display purposes,
                 // but don't apply constraints.
                 let annotation_ty = self.intern_fresh_ty(known_ty);

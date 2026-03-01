@@ -382,6 +382,51 @@ impl ParsedTy {
         }
     }
 
+    /// Like `contains_union`, but expands alias references via a lookup closure.
+    /// This catches unions hidden behind type aliases (e.g. `Nullable = int | null`).
+    /// Depth-guarded to 20 to prevent infinite recursion on cyclic aliases.
+    pub fn contains_union_resolving<'a, F>(&self, lookup: &F) -> bool
+    where
+        F: Fn(&str) -> Option<&'a ParsedTy>,
+    {
+        self.contains_union_resolving_inner(lookup, 0)
+    }
+
+    fn contains_union_resolving_inner<'a, F>(&self, lookup: &F, depth: usize) -> bool
+    where
+        F: Fn(&str) -> Option<&'a ParsedTy>,
+    {
+        if depth > 20 {
+            return false;
+        }
+        match self {
+            ParsedTy::Union(_) => true,
+            ParsedTy::TyVar(TypeVarValue::Reference(name)) => lookup(name)
+                .is_some_and(|body| body.contains_union_resolving_inner(lookup, depth + 1)),
+            ParsedTy::TyVar(TypeVarValue::Generic(_))
+            | ParsedTy::Primitive(_)
+            | ParsedTy::Top
+            | ParsedTy::Bottom => false,
+            ParsedTy::List(inner) => inner.0.contains_union_resolving_inner(lookup, depth),
+            ParsedTy::Lambda { param, body } => {
+                param.0.contains_union_resolving_inner(lookup, depth)
+                    || body.0.contains_union_resolving_inner(lookup, depth)
+            }
+            ParsedTy::AttrSet(attr) => {
+                attr.fields
+                    .values()
+                    .any(|v| v.0.contains_union_resolving_inner(lookup, depth))
+                    || attr
+                        .dyn_ty
+                        .as_ref()
+                        .is_some_and(|d| d.0.contains_union_resolving_inner(lookup, depth))
+            }
+            ParsedTy::Intersection(members) => members
+                .iter()
+                .any(|m| m.0.contains_union_resolving_inner(lookup, depth)),
+        }
+    }
+
     /// Returns true if this type is an intersection where every member is a
     /// lambda. Such annotations declare overloaded function types that can't
     /// be verified against a single lambda body with bidirectional constraints.

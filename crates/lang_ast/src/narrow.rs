@@ -425,12 +425,13 @@ fn try_null_comparison(
 /// Check whether an expression is a reference to `null`.
 ///
 /// In the Nix AST, `null` is represented as `Reference("null")` — there's
-/// no separate Literal::Null variant. An unshadowed `null` has no entry in
-/// name resolution (it's handled as a keyword-like fallback in infer_reference).
+/// no separate Literal::Null variant. It resolves as `Builtin("null")` in
+/// name resolution (a global keyword).
 fn expr_is_null(module: &Mod, name_res: &NameRes, expr: ExprId) -> bool {
     matches!(
         &module[expr],
-        Expr::Reference(name) if name == "null" && name_res.get(expr).is_none()
+        Expr::Reference(name) if name == "null"
+            && matches!(name_res.get(expr), None | Some(ResolveResult::Builtin("null")))
     )
 }
 
