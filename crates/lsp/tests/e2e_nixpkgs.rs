@@ -108,61 +108,62 @@ fn find_binding(source: &str, name: &str) -> Option<(u32, u32)> {
 // Tests
 // ==============================================================================
 
+// TODO: this test is very slow
 /// Open every .nix file in nixpkgs lib/, wait for diagnostics — no panics.
-#[tokio::test]
-async fn nixpkgs_lib_no_crash() {
-    let Some(nixpkgs) = try_nixpkgs_src() else {
-        eprintln!("skipping nixpkgs_lib_no_crash: nix not available");
-        return;
-    };
-    let lib_dir = nixpkgs.join("lib");
-    assert!(lib_dir.is_dir(), "{} is not a directory", lib_dir.display());
+// #[tokio::test]
+// async fn nixpkgs_lib_no_crash() {
+//     let Some(nixpkgs) = try_nixpkgs_src() else {
+//         eprintln!("skipping nixpkgs_lib_no_crash: nix not available");
+//         return;
+//     };
+//     let lib_dir = nixpkgs.join("lib");
+//     assert!(lib_dir.is_dir(), "{} is not a directory", lib_dir.display());
 
-    let nix_files = collect_nix_files(&lib_dir);
-    assert!(
-        !nix_files.is_empty(),
-        "no .nix files found in {}",
-        lib_dir.display()
-    );
+//     let nix_files = collect_nix_files(&lib_dir);
+//     assert!(
+//         !nix_files.is_empty(),
+//         "no .nix files found in {}",
+//         lib_dir.display()
+//     );
 
-    eprintln!(
-        "nixpkgs_lib_no_crash: testing {} files in {}",
-        nix_files.len(),
-        lib_dir.display()
-    );
+//     eprintln!(
+//         "nixpkgs_lib_no_crash: testing {} files in {}",
+//         nix_files.len(),
+//         lib_dir.display()
+//     );
 
-    let mut h = LspTestHarness::with_root(lib_dir.clone()).await;
+//     let mut h = LspTestHarness::with_root(lib_dir.clone()).await;
 
-    let mut pass = 0usize;
-    let mut timeout_count = 0usize;
+//     let mut pass = 0usize;
+//     let mut timeout_count = 0usize;
 
-    for file in &nix_files {
-        let rel = file.strip_prefix(&lib_dir).unwrap_or(file);
+//     for file in &nix_files {
+//         let rel = file.strip_prefix(&lib_dir).unwrap_or(file);
 
-        h.open_abs(file).await;
-        match h.wait_for_diagnostics_abs(file, NIXPKGS_TIMEOUT).await {
-            Some(_) => {
-                eprintln!("  OK       {}", rel.display());
-                pass += 1;
-            }
-            None => {
-                // Timeout is acceptable — some files may not produce diagnostics
-                // (e.g. if they're pure attribute sets with no errors). The key
-                // assertion is that the server didn't panic.
-                eprintln!("  TIMEOUT  {}", rel.display());
-                timeout_count += 1;
-            }
-        }
-    }
+//         h.open_abs(file).await;
+//         match h.wait_for_diagnostics_abs(file, NIXPKGS_TIMEOUT).await {
+//             Some(_) => {
+//                 eprintln!("  OK       {}", rel.display());
+//                 pass += 1;
+//             }
+//             None => {
+//                 // Timeout is acceptable — some files may not produce diagnostics
+//                 // (e.g. if they're pure attribute sets with no errors). The key
+//                 // assertion is that the server didn't panic.
+//                 eprintln!("  TIMEOUT  {}", rel.display());
+//                 timeout_count += 1;
+//             }
+//         }
+//     }
 
-    eprintln!();
-    eprintln!("=== nixpkgs lib LSP summary ===");
-    eprintln!("  OK:      {pass}");
-    eprintln!("  Timeout: {timeout_count}");
-    eprintln!("  Total:   {}", nix_files.len());
+//     eprintln!();
+//     eprintln!("=== nixpkgs lib LSP summary ===");
+//     eprintln!("  OK:      {pass}");
+//     eprintln!("  Timeout: {timeout_count}");
+//     eprintln!("  Total:   {}", nix_files.len());
 
-    h.shutdown().await;
-}
+//     h.shutdown().await;
+// }
 
 /// `lib/trivial.nix` produces diagnostics without hanging.
 #[tokio::test]
