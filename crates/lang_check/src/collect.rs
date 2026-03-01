@@ -234,6 +234,21 @@ impl<'a> Canonicalizer<'a> {
     /// - **Negative**: return a bare TyVar.
     fn expand_bounds_empty_fallback(&mut self, var_id: TyId, polarity: Polarity) -> OutputTy {
         if polarity == Negative {
+            // When a variable in negative position (e.g. a function parameter) has
+            // no upper bounds but does have lower bounds, those lower bounds
+            // represent the declared type flowing in (typically from a stub like
+            // `(int | string) -> bool` or `({name: string, ...} | ...) -> Derivation`).
+            // Expand them at positive polarity to produce the declared union.
+            //
+            // This only fires when upper bounds are empty (no body usage constraints),
+            // so genuinely generic params (like `x` in `x -> x`) still return TyVar
+            // since both bounds are empty.
+            if let Some(v) = self.table.get_var(var_id) {
+                let lower = v.lower_bounds.clone();
+                if !lower.is_empty() {
+                    return self.expand_bounds(&lower, var_id, Positive);
+                }
+            }
             return OutputTy::TyVar(var_id.0);
         }
 

@@ -5848,3 +5848,44 @@ fn mkderivation_pname_version() {
         "finalAttrs pname+version should produce Derivation, got: {ty2}"
     );
 }
+
+// ==============================================================================
+// Union types in function arguments from stubs
+// ==============================================================================
+
+/// When a stub declares a union in argument position (e.g. `(int | string) -> bool`),
+/// the binding's canonical type should preserve the union — not collapse it to a
+/// bare type variable `a`.
+#[test]
+fn stub_union_in_function_arg_preserved() {
+    let registry = registry_from_tix("val f :: (int | string) -> bool;");
+
+    // Just reference f so we get its full function type as the root expression.
+    let ty = get_inferred_root_with_aliases("f", &registry);
+
+    let formatted = format!("{ty}");
+    assert!(
+        formatted.contains("int") && formatted.contains("string"),
+        "stub union arg should be preserved as (int | string), got: {formatted}"
+    );
+}
+
+/// Attrset union in function arg from a stub (like mkDerivation) should also
+/// be preserved, not collapsed to a bare type variable.
+#[test]
+fn stub_attrset_union_in_function_arg_preserved() {
+    let registry = registry_from_tix(
+        r#"
+        type Derivation = { name: string, ... };
+        val mkDerivation :: ({ name: string, ... } | { pname: string, version: string, ... }) -> Derivation;
+    "#,
+    );
+
+    let ty = get_inferred_root_with_aliases("mkDerivation", &registry);
+
+    let formatted = format!("{ty}");
+    assert!(
+        formatted.contains("name") && formatted.contains("pname"),
+        "stub attrset union arg should show both alternatives, got: {formatted}"
+    );
+}
