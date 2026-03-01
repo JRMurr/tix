@@ -3,6 +3,7 @@
 
 // pub mod expr_table;
 mod ast_utils;
+pub mod classify;
 mod comment;
 mod db;
 mod lower;
