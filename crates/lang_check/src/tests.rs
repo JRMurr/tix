@@ -5889,3 +5889,18 @@ fn stub_attrset_union_in_function_arg_preserved() {
         "stub attrset union arg should show both alternatives, got: {formatted}"
     );
 }
+
+/// Genuinely generic params (both bounds empty) must still produce a bare
+/// type variable, not accidentally expand empty lower bounds.
+#[test]
+fn stub_generic_param_stays_tyvar() {
+    let registry = registry_from_tix("val id :: a -> a;");
+
+    let ty = get_inferred_root_with_aliases("id", &registry);
+
+    let formatted = format!("{ty}");
+    assert!(
+        !formatted.contains("int") && !formatted.contains("string"),
+        "generic param should remain a type variable, got: {formatted}"
+    );
+}

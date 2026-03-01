@@ -231,7 +231,10 @@ impl<'a> Canonicalizer<'a> {
     /// - **Positive**: check for atom-only upper bounds (primitives, negations of
     ///   primitives) as a display heuristic. `ret <: Number` becomes `number`
     ///   rather than a bare type variable. If no atom uppers, return TyVar.
-    /// - **Negative**: return a bare TyVar.
+    /// - **Negative**: if lower bounds exist (e.g. from a stub-declared union),
+    ///   expand them at positive polarity. Unlike positive, all lower bounds are
+    ///   used (not just atoms) because they represent explicitly declared types.
+    ///   If no lower bounds, return a bare TyVar.
     fn expand_bounds_empty_fallback(&mut self, var_id: TyId, polarity: Polarity) -> OutputTy {
         if polarity == Negative {
             // When a variable in negative position (e.g. a function parameter) has
@@ -244,8 +247,8 @@ impl<'a> Canonicalizer<'a> {
             // so genuinely generic params (like `x` in `x -> x`) still return TyVar
             // since both bounds are empty.
             if let Some(v) = self.table.get_var(var_id) {
-                let lower = v.lower_bounds.clone();
-                if !lower.is_empty() {
+                if !v.lower_bounds.is_empty() {
+                    let lower = v.lower_bounds.clone();
                     return self.expand_bounds(&lower, var_id, Positive);
                 }
             }
