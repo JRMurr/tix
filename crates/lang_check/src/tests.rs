@@ -3381,6 +3381,173 @@ fn narrow_field_access_then_arithmetic() {
     }
 }
 
+// ==============================================================================
+// Type narrowing — literal equality guards (true, false, int, string, etc.)
+// ==============================================================================
+
+/// Regression test for https://github.com/JRMurr/tix/issues/1:
+/// `sep == true` in an if-condition should narrow `sep` to include bool.
+/// Previously only `== null` was recognized, so `sep` was inferred as
+/// `int | null` and passing `true` was a type error.
+#[test]
+fn narrow_eq_true_accepts_bool_arg() {
+    let nix = indoc! {r#"
+        let
+          block =
+            fg: bg: sep:
+            "(fg bg)"
+            + (
+              if sep == null then
+                ""
+              else if sep == true then
+                "SEP"
+              else
+                sep + 1
+            );
+        in
+          block 2 3 true
+    "#};
+    let ty = get_inferred_root(nix);
+    assert!(
+        matches!(&ty, OutputTy::Primitive(PrimitiveTy::String)),
+        "block 2 3 true should type-check and return string, got: {ty}"
+    );
+}
+
+/// `x == true` narrows x to bool in the then-branch.
+/// `x: if x == true then x else 0` → body is bool | int.
+#[test]
+fn narrow_eq_true_then_is_bool() {
+    let nix = "x: if x == true then x else 0";
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    match body {
+        OutputTy::Union(members) => {
+            assert!(
+                members
+                    .iter()
+                    .any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::Bool))),
+                "body should contain bool from then-branch, got: {body}"
+            );
+            assert!(
+                members
+                    .iter()
+                    .any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::Int))),
+                "body should contain int from else-branch, got: {body}"
+            );
+        }
+        _ => panic!("expected union (bool | int), got: {body}"),
+    }
+}
+
+/// `x == false` also narrows to bool.
+#[test]
+fn narrow_eq_false_then_is_bool() {
+    let nix = "x: if x == false then x else 0";
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    match body {
+        OutputTy::Union(members) => {
+            assert!(
+                members
+                    .iter()
+                    .any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::Bool))),
+                "body should contain bool, got: {body}"
+            );
+        }
+        _ => panic!("expected union containing bool, got: {body}"),
+    }
+}
+
+/// `x != true` narrows the else-branch to bool.
+/// `x: if x != true then 0 else x` → body is int | bool.
+#[test]
+fn narrow_neq_true_else_is_bool() {
+    let nix = "x: if x != true then 0 else x";
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    match body {
+        OutputTy::Union(members) => {
+            assert!(
+                members
+                    .iter()
+                    .any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::Bool))),
+                "else-branch should be bool, got: {body}"
+            );
+        }
+        _ => panic!("expected union containing bool, got: {body}"),
+    }
+}
+
+/// `true == x` — literal on the left side should also narrow.
+#[test]
+fn narrow_true_on_lhs() {
+    let nix = "x: if true == x then x else 0";
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    match body {
+        OutputTy::Union(members) => {
+            assert!(
+                members
+                    .iter()
+                    .any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::Bool))),
+                "body should contain bool, got: {body}"
+            );
+        }
+        _ => panic!("expected union containing bool, got: {body}"),
+    }
+}
+
+/// `x == 42` narrows x to int in the then-branch.
+#[test]
+fn narrow_eq_int_literal() {
+    let nix = r#"x: if x == 42 then x else "fallback""#;
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    match body {
+        OutputTy::Union(members) => {
+            assert!(
+                members
+                    .iter()
+                    .any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::Int))),
+                "then-branch should be int, got: {body}"
+            );
+            assert!(
+                members
+                    .iter()
+                    .any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::String))),
+                "else-branch should be string, got: {body}"
+            );
+        }
+        _ => panic!("expected union (int | string), got: {body}"),
+    }
+}
+
+/// `x == "hello"` narrows x to string in the then-branch.
+#[test]
+fn narrow_eq_string_literal() {
+    let nix = r#"x: if x == "hello" then x else 0"#;
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    match body {
+        OutputTy::Union(members) => {
+            assert!(
+                members
+                    .iter()
+                    .any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::String))),
+                "then-branch should be string, got: {body}"
+            );
+            assert!(
+                members
+                    .iter()
+                    .any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::Int))),
+                "else-branch should be int, got: {body}"
+            );
+        }
+        _ => panic!("expected union (string | int), got: {body}"),
+    }
+}
+
 // ==========================================================================
 // Regression: polymorphic builtin wrappers
 // ==========================================================================

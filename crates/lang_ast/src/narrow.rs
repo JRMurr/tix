@@ -140,29 +140,34 @@ pub fn analyze_condition(
 ) -> NarrowInfo {
     let expr = &module[cond];
     match expr {
-        // ── x == null / null == x / x != null / null != x ───────────
+        // ── x == literal / literal == x / x != literal / literal != x ─
+        //
+        // Recognizes equality comparisons against null, true, false, and
+        // other literal values. Narrows the variable to the literal's
+        // primitive type in the matching branch and its negation in the
+        // other branch.
         Expr::BinOp {
             lhs,
             rhs,
             op: BinOP::Normal(NormalBinOp::Expr(op)),
         } if matches!(op, ExprBinOp::Equal | ExprBinOp::NotEqual) => {
             let is_eq = matches!(op, ExprBinOp::Equal);
-            // Try both orientations: x == null and null == x.
-            let Some(binding) = try_null_comparison(module, name_res, *lhs, *rhs)
-                .or_else(|| try_null_comparison(module, name_res, *rhs, *lhs))
+            // Try both orientations: x == literal and literal == x.
+            let Some((binding, prim)) = try_literal_comparison(module, name_res, *lhs, *rhs)
+                .or_else(|| try_literal_comparison(module, name_res, *rhs, *lhs))
             else {
                 return NarrowInfo::default();
             };
 
             let (then_pred, else_pred) = if is_eq {
                 (
-                    NarrowPredicate::IsType(NarrowPrimitive::Null),
-                    NarrowPredicate::IsNotType(NarrowPrimitive::Null),
+                    NarrowPredicate::IsType(prim),
+                    NarrowPredicate::IsNotType(prim),
                 )
             } else {
                 (
-                    NarrowPredicate::IsNotType(NarrowPrimitive::Null),
-                    NarrowPredicate::IsType(NarrowPrimitive::Null),
+                    NarrowPredicate::IsNotType(prim),
+                    NarrowPredicate::IsType(prim),
                 )
             };
 
@@ -406,33 +411,53 @@ pub fn detect_conditional_apply_narrowing(
 // Internal helpers
 // ==============================================================================
 
-/// Check if `var_expr` is a reference to a local name and `null_expr` is
-/// the null literal (or a reference to unresolved "null"). Returns the
-/// NameId of the variable if the pattern matches.
-fn try_null_comparison(
+/// Check if `var_expr` is a reference to a local name and `literal_expr`
+/// is a recognized literal (null, true, false, int, float, string, path).
+/// Returns the NameId of the variable and the primitive type of the literal.
+fn try_literal_comparison(
     module: &Mod,
     name_res: &NameRes,
     var_expr: ExprId,
-    null_expr: ExprId,
-) -> Option<NameId> {
-    // Check the null side first — cheaper.
-    if !expr_is_null(module, name_res, null_expr) {
-        return None;
-    }
-    expr_as_local_name(module, name_res, var_expr)
+    literal_expr: ExprId,
+) -> Option<(NameId, NarrowPrimitive)> {
+    let prim = expr_literal_primitive(module, name_res, literal_expr)?;
+    let name = expr_as_local_name(module, name_res, var_expr)?;
+    Some((name, prim))
 }
 
-/// Check whether an expression is a reference to `null`.
-///
-/// In the Nix AST, `null` is represented as `Reference("null")` — there's
-/// no separate Literal::Null variant. It resolves as `Builtin("null")` in
-/// name resolution (a global keyword).
-fn expr_is_null(module: &Mod, name_res: &NameRes, expr: ExprId) -> bool {
-    matches!(
-        &module[expr],
-        Expr::Reference(name) if name == "null"
-            && matches!(name_res.get(expr), None | Some(ResolveResult::Builtin("null")))
-    )
+/// If the expression is a literal (or a keyword like null/true/false that
+/// is represented as a Reference in the AST), return the corresponding
+/// NarrowPrimitive.
+fn expr_literal_primitive(
+    module: &Mod,
+    name_res: &NameRes,
+    expr: ExprId,
+) -> Option<NarrowPrimitive> {
+    match &module[expr] {
+        // null, true, false are References in the Nix AST (no Literal variant).
+        Expr::Reference(name) => {
+            let is_keyword = |kw: &str| match name_res.get(expr) {
+                None => true,
+                Some(ResolveResult::Builtin(b)) => *b == kw,
+                _ => false,
+            };
+            match name.as_str() {
+                "null" if is_keyword("null") => Some(NarrowPrimitive::Null),
+                "true" if is_keyword("true") => Some(NarrowPrimitive::Bool),
+                "false" if is_keyword("false") => Some(NarrowPrimitive::Bool),
+                _ => None,
+            }
+        }
+        // Actual Literal nodes in the AST.
+        Expr::Literal(lit) => match lit {
+            Literal::Integer(_) => Some(NarrowPrimitive::Int),
+            Literal::Float(_) => Some(NarrowPrimitive::Float),
+            Literal::String(_) => Some(NarrowPrimitive::String),
+            Literal::Path(_) => Some(NarrowPrimitive::Path),
+            Literal::Uri => None,
+        },
+        _ => None,
+    }
 }
 
 /// If the expression is a Reference that resolves to a local Definition,
