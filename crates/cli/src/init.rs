@@ -156,8 +156,9 @@ fn collect_unique_dirs(files: &[(PathBuf, Classification)]) -> Vec<String> {
 }
 
 /// Derive glob patterns from a list of files grouped by kind.
-/// If all files in a directory share the same kind, use `dir/**/*.nix`.
-/// Otherwise, list individual paths.
+/// If 2+ files share an immediate parent directory, emit `dir/**/*.nix`.
+/// Then remove any patterns (individual paths or child globs) that are already
+/// covered by a parent `**/*.nix` glob.
 fn derive_glob_patterns(files: &[(PathBuf, Classification)]) -> Vec<String> {
     // Group by parent directory.
     let mut by_dir: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
@@ -169,15 +170,12 @@ fn derive_glob_patterns(files: &[(PathBuf, Classification)]) -> Vec<String> {
     let mut patterns = Vec::new();
     for (dir, dir_files) in &by_dir {
         if dir.as_os_str().is_empty() || dir == Path::new(".") {
-            // Root-level files: list individually.
             for f in dir_files {
                 patterns.push(f.display().to_string());
             }
         } else if dir_files.len() >= 2 {
-            // Multiple files in same dir: use glob.
             patterns.push(format!("{}/**/*.nix", dir.display()));
         } else {
-            // Single file in dir: list it.
             for f in dir_files {
                 patterns.push(f.display().to_string());
             }
@@ -186,6 +184,33 @@ fn derive_glob_patterns(files: &[(PathBuf, Classification)]) -> Vec<String> {
 
     patterns.sort();
     patterns.dedup();
+
+    // Collect the directory prefixes that have recursive globs.
+    let glob_dirs: Vec<String> = patterns
+        .iter()
+        .filter_map(|p| p.strip_suffix("/**/*.nix").map(|d| d.to_string()))
+        .collect();
+
+    // Remove any pattern whose path falls under an existing recursive glob.
+    // This handles both individual files (e.g. `dir/sub/foo.nix` under `dir/**/*.nix`)
+    // and child globs (e.g. `dir/sub/**/*.nix` under `dir/**/*.nix`).
+    patterns.retain(|pattern| {
+        // Extract the directory this pattern refers to.
+        let pattern_dir = if let Some(dir) = pattern.strip_suffix("/**/*.nix") {
+            dir
+        } else if let Some(parent) = Path::new(pattern).parent() {
+            // Individual file — check if its parent directory is under a glob.
+            parent.to_str().unwrap_or("")
+        } else {
+            return true;
+        };
+
+        // Keep if no *ancestor* glob covers this pattern.
+        !glob_dirs.iter().any(|glob_dir| {
+            pattern_dir != glob_dir.as_str() && pattern_dir.starts_with(&format!("{glob_dir}/"))
+        })
+    });
+
     patterns
 }
 
@@ -347,6 +372,59 @@ mod tests {
         let result = run_init(root.to_path_buf(), false, false);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("already exists"));
+    }
+
+    #[test]
+    fn derive_globs_removes_paths_subsumed_by_recursive_glob() {
+        // Simulates a layout like:
+        //   common/homemanager/a.nix        (triggers common/homemanager/**/*.nix)
+        //   common/homemanager/b.nix
+        //   common/homemanager/claude/default.nix   (subsumed by the glob above)
+        //   common/homemanager/fish/default.nix     (subsumed)
+        //   common/homemanager/git/default.nix      (subsumed)
+        let files = vec![
+            (
+                PathBuf::from("common/homemanager/a.nix"),
+                dummy_classification(),
+            ),
+            (
+                PathBuf::from("common/homemanager/b.nix"),
+                dummy_classification(),
+            ),
+            (
+                PathBuf::from("common/homemanager/claude/default.nix"),
+                dummy_classification(),
+            ),
+            (
+                PathBuf::from("common/homemanager/fish/default.nix"),
+                dummy_classification(),
+            ),
+            (
+                PathBuf::from("common/homemanager/git/default.nix"),
+                dummy_classification(),
+            ),
+        ];
+        let patterns = derive_glob_patterns(&files);
+        assert_eq!(patterns, vec!["common/homemanager/**/*.nix"]);
+    }
+
+    #[test]
+    fn derive_globs_removes_child_globs_subsumed_by_parent() {
+        // If common/**/*.nix exists, common/homemanager/**/*.nix is redundant.
+        let files = vec![
+            (PathBuf::from("common/a.nix"), dummy_classification()),
+            (PathBuf::from("common/b.nix"), dummy_classification()),
+            (
+                PathBuf::from("common/homemanager/a.nix"),
+                dummy_classification(),
+            ),
+            (
+                PathBuf::from("common/homemanager/b.nix"),
+                dummy_classification(),
+            ),
+        ];
+        let patterns = derive_glob_patterns(&files);
+        assert_eq!(patterns, vec!["common/**/*.nix"]);
     }
 
     fn dummy_classification() -> Classification {
