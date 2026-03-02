@@ -63,6 +63,10 @@ pub struct ContextConfig {
     /// Glob patterns for files this context applies to.
     pub paths: Vec<String>,
 
+    /// Glob patterns for files to exclude even if `paths` matches.
+    #[serde(default)]
+    pub exclude: Vec<String>,
+
     /// Stub entries: `@nixos` for built-in, `./path.tix` for user files.
     #[serde(default)]
     pub stubs: Vec<String>,
@@ -125,7 +129,17 @@ pub fn resolve_context_for_file(
                 .is_some()
         });
 
-        if matched {
+        let excluded = matched
+            && ctx.exclude.iter().any(|pattern| {
+                globset::GlobBuilder::new(pattern)
+                    .literal_separator(true)
+                    .build()
+                    .ok()
+                    .and_then(|g| g.compile_matcher().is_match(relative).then_some(()))
+                    .is_some()
+            });
+
+        if matched && !excluded {
             let mut merged = HashMap::new();
             for stub_entry in &ctx.stubs {
                 match load_stub_entry(stub_entry, config_dir, registry) {
@@ -291,6 +305,69 @@ mod tests {
         assert!(
             result.is_empty(),
             "invalid pattern should not match anything"
+        );
+    }
+
+    #[test]
+    fn context_exclude_defaults_to_empty() {
+        let toml_str = r#"
+            [context.nixos]
+            paths = ["modules/**/*.nix"]
+            stubs = ["@nixos"]
+        "#;
+        let config: ProjectConfig = toml::from_str(toml_str).expect("parse error");
+        assert!(config.context["nixos"].exclude.is_empty());
+    }
+
+    #[test]
+    fn context_exclude_parses_when_present() {
+        let toml_str = r#"
+            [context.nixos]
+            paths = ["common/**/*.nix", "hosts/**/*.nix"]
+            exclude = ["common/homemanager/**/*.nix", "common/default.nix"]
+            stubs = ["@nixos"]
+        "#;
+        let config: ProjectConfig = toml::from_str(toml_str).expect("parse error");
+        assert_eq!(
+            config.context["nixos"].exclude,
+            vec!["common/homemanager/**/*.nix", "common/default.nix"]
+        );
+    }
+
+    #[test]
+    fn resolve_context_respects_exclude() {
+        let toml_str = r#"
+            [context.nixos]
+            paths = ["common/**/*.nix"]
+            exclude = ["common/homemanager/**/*.nix"]
+            stubs = ["@nixos"]
+
+            [context.home]
+            paths = ["common/homemanager/**/*.nix"]
+            stubs = ["@home-manager"]
+        "#;
+        let config: ProjectConfig = toml::from_str(toml_str).expect("parse error");
+        let mut registry = lang_check::aliases::TypeAliasRegistry::with_builtins();
+
+        // A file in common/ should match nixos context.
+        let direct = Path::new("common/programs.nix");
+        let args = resolve_context_for_file(direct, &config, Path::new("."), &mut registry)
+            .expect("resolve error");
+        assert!(
+            args.contains_key("modulesPath"),
+            "common/programs.nix should match nixos context, got keys: {:?}",
+            args.keys().collect::<Vec<_>>()
+        );
+
+        // A file in common/homemanager/ should NOT match nixos (excluded),
+        // but should fall through to the home-manager context.
+        let nested = Path::new("common/homemanager/default.nix");
+        let args = resolve_context_for_file(nested, &config, Path::new("."), &mut registry)
+            .expect("resolve error");
+        assert!(
+            args.contains_key("osConfig"),
+            "common/homemanager/default.nix should match home-manager context (has osConfig), got keys: {:?}",
+            args.keys().collect::<Vec<_>>()
         );
     }
 }

@@ -221,6 +221,7 @@ mod internal {
                 "test".to_string(),
                 ContextConfig {
                     paths: vec!["*.nix".to_string()],
+                    exclude: vec![],
                     stubs: vec!["test_context.tix".to_string()],
                 },
             );

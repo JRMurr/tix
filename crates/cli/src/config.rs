@@ -134,7 +134,18 @@ pub fn find_matching_context<'a>(
                 .and_then(|g| g.compile_matcher().is_match(relative).then_some(()))
                 .is_some()
         });
-        if matched {
+
+        let excluded = matched
+            && ctx.exclude.iter().any(|pattern| {
+                globset::GlobBuilder::new(pattern)
+                    .literal_separator(true)
+                    .build()
+                    .ok()
+                    .and_then(|g| g.compile_matcher().is_match(relative).then_some(()))
+                    .is_some()
+            });
+
+        if matched && !excluded {
             return Some(name.as_str());
         }
     }
@@ -255,6 +266,36 @@ mod tests {
         let files = discover_all_nix_files(root, &config);
         assert_eq!(files.len(), 1);
         assert!(files[0].ends_with("top.nix"));
+    }
+
+    #[test]
+    fn find_matching_context_respects_exclude() {
+        let config: TixConfig = toml::from_str(
+            r#"
+            [context.nixos]
+            paths = ["common/**/*.nix"]
+            exclude = ["common/homemanager/**/*.nix"]
+            stubs = ["@nixos"]
+
+            [context.home]
+            paths = ["common/homemanager/**/*.nix"]
+            stubs = ["@home-manager"]
+            "#,
+        )
+        .expect("parse error");
+
+        // A file in common/ matches nixos context (not excluded).
+        let result =
+            find_matching_context(Path::new("common/programs.nix"), &config, Path::new("."));
+        assert_eq!(result, Some("nixos"));
+
+        // A file in common/homemanager/ is excluded from nixos, falls through to home.
+        let result = find_matching_context(
+            Path::new("common/homemanager/default.nix"),
+            &config,
+            Path::new("."),
+        );
+        assert_eq!(result, Some("home"));
     }
 
     // Regression: `common/*.nix` was matching `common/homemanager/default.nix`

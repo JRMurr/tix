@@ -155,6 +155,13 @@ fn collect_unique_dirs(files: &[(PathBuf, Classification)]) -> Vec<String> {
     dirs
 }
 
+/// Result of `derive_glob_patterns`: inclusion patterns + exclusion patterns.
+#[derive(Debug, PartialEq, Eq)]
+struct GlobResult {
+    paths: Vec<String>,
+    excludes: Vec<String>,
+}
+
 /// Derive glob patterns from a list of files of one kind.
 ///
 /// `all_files` contains every classified file across all kinds — used to detect
@@ -164,11 +171,13 @@ fn collect_unique_dirs(files: &[(PathBuf, Classification)]) -> Vec<String> {
 /// Rules:
 /// - Only emit `dir/**/*.nix` when 2+ files share a parent AND no file from
 ///   another kind exists anywhere under `dir/`.
+/// - For mixed directories, try glob + exclude patterns if that's more concise
+///   than listing every this-kind file individually.
 /// - After generating patterns, remove any subsumed by a parent glob.
 fn derive_glob_patterns(
     files: &[(PathBuf, Classification)],
     all_files: &[(PathBuf, Classification)],
-) -> Vec<String> {
+) -> GlobResult {
     let this_kind = files.first().map(|(_, c)| c.kind);
 
     // Paths from other kinds, used for conflict detection.
@@ -178,6 +187,10 @@ fn derive_glob_patterns(
         .map(|(p, _)| p.as_path())
         .collect();
 
+    // This-kind paths as a set, for checking subdir purity in compress_excludes.
+    let this_kind_set: std::collections::HashSet<&Path> =
+        files.iter().map(|(p, _)| p.as_path()).collect();
+
     // Group by parent directory.
     let mut by_dir: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
     for (path, _) in files {
@@ -186,6 +199,8 @@ fn derive_glob_patterns(
     }
 
     let mut patterns = Vec::new();
+    let mut excludes = Vec::new();
+
     for (dir, dir_files) in &by_dir {
         if dir.as_os_str().is_empty() || dir == Path::new(".") {
             for f in dir_files {
@@ -193,18 +208,31 @@ fn derive_glob_patterns(
             }
         } else if dir_files.len() >= 2 {
             // Check whether any file from another kind lives under this directory.
-            // If so, a recursive glob would be too broad — list files individually.
             let dir_prefix = format!("{}/", dir.display());
-            let has_conflict = other_kind_paths
+            let other_files_under_dir: Vec<&Path> = other_kind_paths
                 .iter()
-                .any(|p| p.to_str().is_some_and(|s| s.starts_with(&dir_prefix)));
+                .filter(|p| p.to_str().is_some_and(|s| s.starts_with(&dir_prefix)))
+                .copied()
+                .collect();
 
-            if has_conflict {
-                for f in dir_files {
-                    patterns.push(f.display().to_string());
-                }
-            } else {
+            if other_files_under_dir.is_empty() {
+                // Pure directory — safe to use recursive glob.
                 patterns.push(format!("{}/**/*.nix", dir.display()));
+            } else {
+                // Mixed directory: try glob + exclude if more concise.
+                let dir_excludes = compress_excludes(&other_files_under_dir, &this_kind_set, dir);
+                let this_kind_count = dir_files.len();
+
+                // Conciseness heuristic: glob + excludes wins when
+                // 1 (the glob) + |excludes| < |this_kind_files|.
+                if 1 + dir_excludes.len() < this_kind_count {
+                    patterns.push(format!("{}/**/*.nix", dir.display()));
+                    excludes.extend(dir_excludes);
+                } else {
+                    for f in dir_files {
+                        patterns.push(f.display().to_string());
+                    }
+                }
             }
         } else {
             for f in dir_files {
@@ -215,6 +243,8 @@ fn derive_glob_patterns(
 
     patterns.sort();
     patterns.dedup();
+    excludes.sort();
+    excludes.dedup();
 
     // Collect the directory prefixes that have recursive globs.
     let glob_dirs: Vec<String> = patterns
@@ -239,7 +269,77 @@ fn derive_glob_patterns(
         })
     });
 
-    patterns
+    GlobResult {
+        paths: patterns,
+        excludes,
+    }
+}
+
+/// Compress a set of other-kind files into exclude patterns.
+///
+/// Groups files by their parent directory. When 2+ other-kind files share a
+/// subdirectory AND no this-kind files exist under that subdirectory, emit a
+/// single `subdir/**/*.nix` exclude glob. Otherwise, list individual files.
+fn compress_excludes(
+    other_files: &[&Path],
+    this_kind_set: &std::collections::HashSet<&Path>,
+    parent_dir: &Path,
+) -> Vec<String> {
+    // Group other-kind files by their immediate parent directory.
+    let mut by_subdir: HashMap<PathBuf, Vec<&Path>> = HashMap::new();
+    for &file in other_files {
+        let file_parent = file.parent().unwrap_or(Path::new(".")).to_path_buf();
+        by_subdir.entry(file_parent).or_default().push(file);
+    }
+
+    let mut excludes = Vec::new();
+    let mut subsumed: std::collections::HashSet<&Path> = std::collections::HashSet::new();
+
+    // First pass: identify subdirectories that can be glob-excluded.
+    for (subdir, subdir_files) in &by_subdir {
+        // Only compress to a subdir glob if it's a proper subdirectory (not parent_dir itself)
+        // and has 2+ files.
+        if subdir == parent_dir || subdir_files.len() < 2 {
+            continue;
+        }
+
+        // Check that no this-kind files exist under this subdirectory.
+        let subdir_prefix = format!("{}/", subdir.display());
+        let has_this_kind_in_subdir = this_kind_set.iter().any(|p| {
+            p.to_str()
+                .is_some_and(|s| s.starts_with(&subdir_prefix) || *p == subdir.as_path())
+        });
+
+        if !has_this_kind_in_subdir {
+            excludes.push(format!("{}/**/*.nix", subdir.display()));
+            // Mark these files as subsumed so we don't list them individually.
+            for &f in subdir_files {
+                subsumed.insert(f);
+            }
+        }
+    }
+
+    // Second pass: list remaining files individually.
+    for &file in other_files {
+        if subsumed.contains(file) {
+            continue;
+        }
+        // Also skip files whose parent is subsumed by a subdir glob.
+        let file_parent = file.parent().unwrap_or(Path::new("."));
+        let parent_subsumed = excludes.iter().any(|exc| {
+            exc.strip_suffix("/**/*.nix").is_some_and(|exc_dir| {
+                let exc_prefix = format!("{exc_dir}/");
+                file_parent
+                    .to_str()
+                    .is_some_and(|s| s.starts_with(&exc_prefix))
+            })
+        });
+        if !parent_subsumed {
+            excludes.push(file.display().to_string());
+        }
+    }
+
+    excludes
 }
 
 /// Generate the tix.toml content from classified files.
@@ -273,13 +373,21 @@ fn generate_toml(
     ];
     for (kind, name, stub) in &context_kinds {
         if let Some(files) = by_kind.get(kind) {
-            let patterns = derive_glob_patterns(files, &all_files);
-            if !patterns.is_empty() {
-                used_patterns.extend(patterns.iter().cloned());
-                sections.push(format!(
-                    "[context.{name}]\npaths = [{}]\nstubs = [\"{stub}\"]\n",
-                    format_string_array(&patterns),
-                ));
+            let result = derive_glob_patterns(files, &all_files);
+            if !result.paths.is_empty() {
+                used_patterns.extend(result.paths.iter().cloned());
+                let mut section = format!(
+                    "[context.{name}]\npaths = [{}]\n",
+                    format_string_array(&result.paths),
+                );
+                if !result.excludes.is_empty() {
+                    section.push_str(&format!(
+                        "exclude = [{}]\n",
+                        format_string_array(&result.excludes),
+                    ));
+                }
+                section.push_str(&format!("stubs = [\"{stub}\"]\n"));
+                sections.push(section);
             }
         }
     }
@@ -292,8 +400,9 @@ fn generate_toml(
         (NixFileKind::Flake, "flake"),
     ] {
         if let Some(files) = by_kind.get(&kind) {
-            let patterns = derive_glob_patterns(files, &all_files);
-            let unique: Vec<_> = patterns
+            let result = derive_glob_patterns(files, &all_files);
+            let unique: Vec<_> = result
+                .paths
                 .into_iter()
                 .filter(|p| !used_patterns.contains(p))
                 .collect();
@@ -357,15 +466,17 @@ mod tests {
             (PathBuf::from("modules/a.nix"), dummy_classification()),
             (PathBuf::from("modules/b.nix"), dummy_classification()),
         ];
-        let patterns = derive_glob_patterns(&files, &files);
-        assert_eq!(patterns, vec!["modules/**/*.nix"]);
+        let result = derive_glob_patterns(&files, &files);
+        assert_eq!(result.paths, vec!["modules/**/*.nix"]);
+        assert!(result.excludes.is_empty());
     }
 
     #[test]
     fn derive_globs_single_file_listed() {
         let files = vec![(PathBuf::from("pkgs/foo.nix"), dummy_classification())];
-        let patterns = derive_glob_patterns(&files, &files);
-        assert_eq!(patterns, vec!["pkgs/foo.nix"]);
+        let result = derive_glob_patterns(&files, &files);
+        assert_eq!(result.paths, vec!["pkgs/foo.nix"]);
+        assert!(result.excludes.is_empty());
     }
 
     #[test]
@@ -436,8 +547,9 @@ mod tests {
                 dummy_classification(),
             ),
         ];
-        let patterns = derive_glob_patterns(&files, &files);
-        assert_eq!(patterns, vec!["common/homemanager/**/*.nix"]);
+        let result = derive_glob_patterns(&files, &files);
+        assert_eq!(result.paths, vec!["common/homemanager/**/*.nix"]);
+        assert!(result.excludes.is_empty());
     }
 
     #[test]
@@ -455,8 +567,9 @@ mod tests {
                 dummy_classification(),
             ),
         ];
-        let patterns = derive_glob_patterns(&files, &files);
-        assert_eq!(patterns, vec!["common/**/*.nix"]);
+        let result = derive_glob_patterns(&files, &files);
+        assert_eq!(result.paths, vec!["common/**/*.nix"]);
+        assert!(result.excludes.is_empty());
     }
 
     #[test]
@@ -477,12 +590,13 @@ mod tests {
             .cloned()
             .collect();
 
-        let nixos_patterns = derive_glob_patterns(&nixos_files, &all_files);
+        let result = derive_glob_patterns(&nixos_files, &all_files);
         assert_eq!(
-            nixos_patterns,
+            result.paths,
             vec!["common/a.nix", "common/b.nix"],
             "mixed dir should list individual files, not a recursive glob"
         );
+        assert!(result.excludes.is_empty());
     }
 
     #[test]
@@ -509,11 +623,12 @@ mod tests {
             .cloned()
             .collect();
 
-        let nixos_patterns = derive_glob_patterns(&nixos_files, &all_files);
+        let result = derive_glob_patterns(&nixos_files, &all_files);
         assert_eq!(
-            nixos_patterns,
+            result.paths,
             vec!["common/a.nix", "common/homemanager/**/*.nix"],
         );
+        assert!(result.excludes.is_empty());
     }
 
     #[test]
@@ -547,6 +662,135 @@ mod tests {
         assert!(
             !toml.contains("# library files (no context needed): pkgs/**/*.nix"),
             "library comment should not duplicate callpackage glob.\nGot:\n{toml}"
+        );
+    }
+
+    // When a directory has many this-kind files and few other-kind files,
+    // using a dir glob + exclude patterns is more concise than listing
+    // every this-kind file individually.
+    #[test]
+    fn derive_globs_mixed_dir_uses_exclude_when_concise() {
+        // 10 nixos files + 2 library files in the same dir → dir/**/*.nix + 2 excludes
+        let mut nixos_files: Vec<(PathBuf, Classification)> = (0..10)
+            .map(|i| {
+                (
+                    PathBuf::from(format!("common/nixos{i}.nix")),
+                    dummy_classification(),
+                )
+            })
+            .collect();
+        // Also add files in a subdirectory to trigger recursive glob.
+        nixos_files.push((
+            PathBuf::from("common/sub/extra.nix"),
+            dummy_classification(),
+        ));
+
+        let library_files = vec![
+            (
+                PathBuf::from("common/lib1.nix"),
+                classification(NixFileKind::Library),
+            ),
+            (
+                PathBuf::from("common/lib2.nix"),
+                classification(NixFileKind::Library),
+            ),
+        ];
+
+        let all_files: Vec<_> = nixos_files
+            .iter()
+            .chain(library_files.iter())
+            .cloned()
+            .collect();
+
+        let result = derive_glob_patterns(&nixos_files, &all_files);
+        // Should use a glob + excludes instead of listing 11 individual files.
+        assert!(
+            result.paths.iter().any(|p| p.contains("**/*.nix")),
+            "should use recursive glob, got: {:?}",
+            result.paths
+        );
+        assert!(
+            !result.excludes.is_empty(),
+            "should have exclude patterns for the library files"
+        );
+    }
+
+    // When there are few this-kind files relative to excludes, individual
+    // listing is more concise.
+    #[test]
+    fn derive_globs_mixed_dir_lists_individually_when_not_concise() {
+        let nixos_files = vec![
+            (PathBuf::from("common/a.nix"), dummy_classification()),
+            (PathBuf::from("common/b.nix"), dummy_classification()),
+        ];
+        let library_files = vec![
+            (
+                PathBuf::from("common/c.nix"),
+                classification(NixFileKind::Library),
+            ),
+            (
+                PathBuf::from("common/d.nix"),
+                classification(NixFileKind::Library),
+            ),
+        ];
+        let all_files: Vec<_> = nixos_files
+            .iter()
+            .chain(library_files.iter())
+            .cloned()
+            .collect();
+
+        let result = derive_glob_patterns(&nixos_files, &all_files);
+        // 2 this-kind, 2 other-kind → individual listing (1 + 2 excludes = 3 > 2 files)
+        assert!(
+            result.excludes.is_empty(),
+            "should not have excludes when individual listing is more concise, got: {:?}",
+            result.excludes
+        );
+        assert_eq!(
+            result.paths,
+            vec!["common/a.nix", "common/b.nix"],
+            "should list files individually"
+        );
+    }
+
+    // When all other-kind files are in a subdirectory, compress them into a
+    // single subdir/**/*.nix exclude pattern.
+    #[test]
+    fn derive_globs_compresses_subdir_excludes() {
+        let mut nixos_files: Vec<(PathBuf, Classification)> = (0..5)
+            .map(|i| {
+                (
+                    PathBuf::from(format!("common/nixos{i}.nix")),
+                    dummy_classification(),
+                )
+            })
+            .collect();
+        nixos_files.push((
+            PathBuf::from("common/sub/extra.nix"),
+            dummy_classification(),
+        ));
+
+        // 3 library files all in common/hm/ subdirectory.
+        let library_files: Vec<(PathBuf, Classification)> = (0..3)
+            .map(|i| {
+                (
+                    PathBuf::from(format!("common/hm/lib{i}.nix")),
+                    classification(NixFileKind::Library),
+                )
+            })
+            .collect();
+
+        let all_files: Vec<_> = nixos_files
+            .iter()
+            .chain(library_files.iter())
+            .cloned()
+            .collect();
+
+        let result = derive_glob_patterns(&nixos_files, &all_files);
+        assert!(
+            result.excludes.iter().any(|e| e == "common/hm/**/*.nix"),
+            "should compress subdir into glob exclude, got excludes: {:?}",
+            result.excludes
         );
     }
 

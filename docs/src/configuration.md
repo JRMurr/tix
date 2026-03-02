@@ -21,7 +21,23 @@ stubs = ["@home-manager"]
 ```
 
 - **paths** — glob patterns matching files in this context
+- **exclude** — glob patterns for files to exclude even when `paths` matches. Useful when a broad glob like `dir/**/*.nix` covers a directory with a few files that belong to a different context.
 - **stubs** — which stub sets to load. `@nixos` and `@home-manager` are built-in references to the generated NixOS/Home Manager stubs (requires the `with-stubs` package or `TIX_BUILTIN_STUBS` env var)
+
+For example, if most files under `common/` are NixOS modules but `common/homemanager/` contains Home Manager modules:
+
+```toml
+[context.nixos]
+paths = ["common/**/*.nix", "hosts/**/*.nix"]
+exclude = ["common/homemanager/**/*.nix"]
+stubs = ["@nixos"]
+
+[context.home-manager]
+paths = ["common/homemanager/**/*.nix"]
+stubs = ["@home-manager"]
+```
+
+`tix init` generates `exclude` patterns automatically when it detects mixed-kind directories.
 
 ### What contexts do
 
