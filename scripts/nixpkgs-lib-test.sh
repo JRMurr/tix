@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Run tix-cli on all .nix files in nixpkgs lib/, classifying each result
+# Run tix on all .nix files in nixpkgs lib/, classifying each result
 # as pass / type-error / timeout / crash. Exits non-zero only on crashes.
 #
 # Usage:
@@ -27,10 +27,10 @@ done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# Build tix-cli first so timing is clean.
-echo "Building tix-cli..."
-cargo build --bin tix-cli --manifest-path "$REPO_ROOT/Cargo.toml" 2>&1
-TIX_CLI="$REPO_ROOT/target/debug/tix-cli"
+# Build tix first so timing is clean.
+echo "Building tix..."
+cargo build --bin tix --manifest-path "$REPO_ROOT/Cargo.toml" 2>&1
+TIX_CLI="$REPO_ROOT/target/debug/tix"
 
 # Resolve pinned nixpkgs path from flake.
 echo "Resolving nixpkgs path..."
@@ -63,7 +63,7 @@ crash_files=()
 for f in "${NIX_FILES[@]}"; do
     rel="${f#"$NIXPKGS_SRC/"}"
 
-    # Run tix-cli with timeout; capture exit code.
+    # Run tix with timeout; capture exit code.
     set +e
     timeout "${TIMEOUT}s" "$TIX_CLI" "$f" >/dev/null 2>&1
     rc=$?

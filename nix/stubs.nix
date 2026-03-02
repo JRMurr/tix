@@ -3,7 +3,7 @@
 # ==============================================================================
 #
 # Evaluates NixOS and Home Manager option trees and classifies nixpkgs
-# top-level attributes in pure Nix, then uses tix-cli --from-json to convert
+# top-level attributes in pure Nix, then uses tix --from-json to convert
 # the JSON into .tix stub files. This avoids needing `nix eval --impure`
 # inside the build sandbox.
 #
@@ -13,7 +13,7 @@
 {
   pkgs,
   home-manager,
-  tix-cli,
+  tix,
 }:
 
 let
@@ -162,7 +162,7 @@ let
   pkgsClassificationJson = builtins.toJSON (detectAliases (classifySet 1 classifyPkgs) classifyPkgs);
 
   # ============================================================================
-  # Convert JSON → .tix using tix-cli --from-json
+  # Convert JSON → .tix using tix --from-json
   # ============================================================================
 
   nixosJsonFile = pkgs.writeText "nixos-options.json" nixosOptionsJson;
@@ -170,10 +170,10 @@ let
   pkgsJsonFile = pkgs.writeText "pkgs-classification.json" pkgsClassificationJson;
 
 in pkgs.runCommand "tix-stubs" {
-  nativeBuildInputs = [ tix-cli ];
+  nativeBuildInputs = [ tix ];
 } ''
   mkdir -p $out
-  tix-cli gen-stubs nixos --from-json ${nixosJsonFile} --descriptions -o $out/nixos.tix
-  tix-cli gen-stubs home-manager --from-json ${hmJsonFile} --descriptions -o $out/home-manager.tix
-  tix-cli gen-stubs pkgs --from-json ${pkgsJsonFile} -o $out/pkgs.tix
+  tix gen-stubs nixos --from-json ${nixosJsonFile} --descriptions -o $out/nixos.tix
+  tix gen-stubs home-manager --from-json ${hmJsonFile} --descriptions -o $out/home-manager.tix
+  tix gen-stubs pkgs --from-json ${pkgsJsonFile} -o $out/pkgs.tix
 ''

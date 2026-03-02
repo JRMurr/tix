@@ -21,10 +21,10 @@ use rowan::ast::AstNode;
 // =============================================================================
 //
 // The CLI supports two modes:
-//   1. Type-check mode (default): `tix-cli file.nix [--stubs ...]`
-//   2. Subcommand mode: `tix-cli gen-stubs nixos [...]`
+//   1. Type-check mode (default): `tix file.nix [--stubs ...]`
+//   2. Subcommand mode: `tix gen-stubs nixos [...]`, `tix lsp`, etc.
 //
-// Backward compatibility: bare `tix-cli file.nix` works because `file_path`
+// Backward compatibility: bare `tix file.nix` works because `file_path`
 // is parsed when no subcommand matches.
 
 #[derive(Parser, Debug)]
@@ -122,6 +122,9 @@ enum Command {
         #[arg(long)]
         no_default_stubs: bool,
     },
+
+    /// Start the Language Server (LSP) on stdin/stdout
+    Lsp,
 }
 
 /// Shared CLI arguments for all gen-stubs subcommands.
@@ -267,10 +270,14 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
             Ok(())
         }
+        Some(Command::Lsp) => {
+            tix_lsp::run_lsp();
+            Ok(())
+        }
         None => {
-            let file_path = args.file_path.ok_or(
-                "No file path provided. Usage: tix-cli <file.nix> or tix-cli gen-stubs <source>",
-            )?;
+            let file_path = args
+                .file_path
+                .ok_or("No file path provided. Usage: tix <file.nix> or tix gen-stubs <source>")?;
             run_check(
                 file_path,
                 args.stub_paths,

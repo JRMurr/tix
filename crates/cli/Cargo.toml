@@ -13,6 +13,7 @@ lang_ast = { path = "../lang_ast" }
 lang_check = { path = "../lang_check" }
 lang_ty = { path = "../lang_ty" }
 comment_parser = { path = "../comment_parser" }
+tix-lsp = { path = "../lsp" }
 rnix = { workspace = true }
 rowan = { workspace = true }
 toml = { workspace = true }
@@ -27,5 +28,5 @@ indoc = "2.0.5"
 tempfile = "3"
 
 [[bin]]
-name = "tix-cli"
+name = "tix"
 path = "src/main.rs"

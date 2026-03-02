@@ -1,14 +1,14 @@
 # LSP
 
-**TLDR:** `tix-lsp` provides IDE features over the Language Server Protocol. Run it, point your editor at it.
+**TLDR:** `tix lsp` provides IDE features over the Language Server Protocol. Run it, point your editor at it.
 
 ## Running
 
 ```bash
-tix-lsp [--stubs path/to/stubs/] [--no-default-stubs]
+tix lsp
 ```
 
-Communicates over stdin/stdout. Same stub flags as `tix-cli`.
+Communicates over stdin/stdout. Stubs are loaded from `tix.toml` (auto-discovered from the workspace root) and editor settings.
 
 ## Features
 
@@ -41,7 +41,7 @@ When diagnostics are enabled (`"diagnostics": { "enable": true }`), tix reports:
 - **Import errors** (WARNING): `import ./missing.nix` where the target file doesn't exist, cyclic imports, or errors in the imported file
 - **Inference timeout** (WARNING): when type inference exceeds the 10-second deadline, partial results are still available for bindings inferred before the timeout
 
-Import errors appear at the `import` expression so you can see which import failed and why. The CLI (`tix-cli`) shows the same diagnostics with source context.
+Import errors appear at the `import` expression so you can see which import failed and why. The CLI (`tix`) shows the same diagnostics with source context.
 
 ## Code Actions
 
@@ -57,14 +57,14 @@ Code actions (quick fixes / refactorings) are offered based on diagnostics and c
 
 ### VS Code
 
-Install the [Nix IDE](https://marketplace.visualstudio.com/items?itemName=jnoortheen.nix-ide) extension, then configure it to use `tix-lsp`.
+Install the [Nix IDE](https://marketplace.visualstudio.com/items?itemName=jnoortheen.nix-ide) extension, then configure it to use `tix lsp`.
 
 **Minimal setup** — add to your `.vscode/settings.json` (workspace) or user settings:
 
 ```json
 {
   "nix.enableLanguageServer": true,
-  "nix.serverPath": "tix-lsp"
+  "nix.serverPath": ["tix", "lsp"]
 }
 ```
 
@@ -73,7 +73,7 @@ Install the [Nix IDE](https://marketplace.visualstudio.com/items?itemName=jnoort
 ```json
 {
   "nix.enableLanguageServer": true,
-  "nix.serverPath": "tix-lsp",
+  "nix.serverPath": ["tix", "lsp"],
   "nix.serverSettings": {
     "stubs": ["./my-stubs"],
     "inlayHints": { "enable": true },
@@ -90,7 +90,7 @@ vim.api.nvim_create_autocmd("FileType", {
   callback = function()
     vim.lsp.start({
       name = "tix",
-      cmd = { "tix-lsp" },
+      cmd = { "tix", "lsp" },
     })
   end,
 })

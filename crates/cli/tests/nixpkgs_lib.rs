@@ -1,9 +1,9 @@
-//! Integration test: run tix-cli on every .nix file in nixpkgs `lib/`.
+//! Integration test: run tix on every .nix file in nixpkgs `lib/`.
 //!
 //! Ignored by default because it requires `nix` and a nixpkgs checkout.
 //! Run with: `cargo test --package cli -- --ignored nixpkgs_lib`
 //!
-//! The test asserts that tix-cli never *crashes* (signal, panic, segfault).
+//! The test asserts that tix never *crashes* (signal, panic, segfault).
 //! Type errors (exit 1) are expected and fine — we're testing robustness,
 //! not correctness against nixpkgs.
 
@@ -21,7 +21,7 @@ fn repo_root() -> PathBuf {
 }
 
 fn tix_cli() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_tix-cli"))
+    PathBuf::from(env!("CARGO_BIN_EXE_tix"))
 }
 
 /// Resolve the pinned nixpkgs path via `nix eval --raw .#nixpkgs-src`.
@@ -73,7 +73,7 @@ fn collect_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
 /// Run a command with a manual timeout (spawn + poll loop) since
 /// std::process::Command doesn't have a built-in timeout.
 fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> Option<std::process::ExitStatus> {
-    let mut child = cmd.spawn().expect("failed to spawn tix-cli");
+    let mut child = cmd.spawn().expect("failed to spawn tix");
 
     let start = std::time::Instant::now();
     loop {
@@ -87,7 +87,7 @@ fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> Option<std::process
                 }
                 std::thread::sleep(Duration::from_millis(100));
             }
-            Err(e) => panic!("error waiting for tix-cli: {e}"),
+            Err(e) => panic!("error waiting for tix: {e}"),
         }
     }
 }
@@ -183,7 +183,7 @@ fn nixpkgs_lib() {
 
     assert_eq!(
         summary.crash, 0,
-        "{} file(s) caused tix-cli to crash",
+        "{} file(s) caused tix to crash",
         summary.crash
     );
 }

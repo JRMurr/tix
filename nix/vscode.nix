@@ -3,6 +3,8 @@
   # String path to the LSP server binary. Allows callers to provide either a
   # nix store path (release) or a dev wrapper script (debug build).
   serverPath,
+  # Extra arguments inserted before $@ (e.g. ["lsp"] for the unified tix binary).
+  serverArgs ? [],
   name ? "tix-code",
 }:
 
@@ -36,7 +38,7 @@ pkgs.writeShellScriptBin name ''
   cat > "$data_dir/tix-lsp-wrapper" <<WRAPPER
   #!/bin/sh
   export TIX_ROOT="''${TIX_ROOT:-$PWD}"
-  exec ${serverPath} "\$@"
+  exec ${serverPath} ${builtins.concatStringsSep " " serverArgs} "\$@"
   WRAPPER
   chmod +x "$data_dir/tix-lsp-wrapper"
 

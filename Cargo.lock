@@ -296,6 +296,7 @@ dependencies = [
  "smol_str",
  "tempfile",
  "thiserror 2.0.9",
+ "tix-lsp",
  "toml",
 ]
 
@@ -1820,7 +1821,6 @@ dependencies = [
 name = "tix-lsp"
 version = "0.1.0"
 dependencies = [
- "clap",
  "comment_parser",
  "dashmap 6.1.0",
  "env_logger",

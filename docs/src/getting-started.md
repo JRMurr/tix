@@ -104,7 +104,7 @@ nix-env -f https://github.com/JRMurr/tix/archive/main.tar.gz -iA packages.x86_64
 git clone https://github.com/JRMurr/tix
 cd tix
 cargo build --release
-# Binaries at target/release/tix-cli and target/release/tix-lsp
+# Binary at target/release/tix
 ```
 
 Or with nix:
@@ -118,7 +118,7 @@ nix build .#
 ### Type-check a file
 
 ```bash
-tix-cli my-file.nix
+tix my-file.nix
 ```
 
 This prints the inferred type of each top-level binding and the root expression.
@@ -126,7 +126,7 @@ This prints the inferred type of each top-level binding and the root expression.
 ### With stubs
 
 ```bash
-tix-cli my-file.nix --stubs ./my-stubs/
+tix my-file.nix --stubs ./my-stubs/
 ```
 
 `--stubs` accepts file paths or directories (recursively finds `.tix` files). Can be passed multiple times. The built-in nixpkgs stubs are loaded by default — use `--no-default-stubs` to disable.
@@ -136,13 +136,13 @@ tix-cli my-file.nix --stubs ./my-stubs/
 Scaffold a `tix.toml` by scanning your project for `.nix` files:
 
 ```bash
-tix-cli init
+tix init
 ```
 
 This classifies each file (NixOS module, Home Manager module, callPackage, overlay, etc.) and generates context sections automatically. Use `--dry-run` to preview without writing:
 
 ```bash
-tix-cli init --dry-run
+tix init --dry-run
 ```
 
 ### Check a project
@@ -150,14 +150,14 @@ tix-cli init --dry-run
 Type-check all files in a project using the `tix.toml` configuration:
 
 ```bash
-tix-cli check
+tix check
 ```
 
 This discovers all `.nix` files, applies context from `tix.toml`, type-checks each file, and prints a summary. It also validates that file classifications match their configured contexts (e.g., warns if a NixOS module isn't in any `[context.nixos]` section).
 
 ```bash
-tix-cli check --verbose    # Show file classifications
-tix-cli check --config path/to/tix.toml  # Explicit config path
+tix check --verbose    # Show file classifications
+tix check --config path/to/tix.toml  # Explicit config path
 ```
 
 Exit code is 1 if any type errors are found, 0 otherwise (config warnings don't affect the exit code).
@@ -168,11 +168,11 @@ Generate typed stubs from your NixOS or Home Manager configuration:
 
 ```bash
 # From a flake
-tix-cli gen-stubs nixos --flake . --hostname myhost -o nixos.tix
-tix-cli gen-stubs home-manager --flake . --username jr -o hm.tix
+tix gen-stubs nixos --flake . --hostname myhost -o nixos.tix
+tix gen-stubs home-manager --flake . --username jr -o hm.tix
 
 # From nixpkgs directly
-tix-cli gen-stubs nixos --nixpkgs /path/to/nixpkgs -o nixos.tix
+tix gen-stubs nixos --nixpkgs /path/to/nixpkgs -o nixos.tix
 ```
 
 See the [Stubs](./stubs.md) chapter for details.
@@ -180,9 +180,9 @@ See the [Stubs](./stubs.md) chapter for details.
 ### LSP
 
 ```bash
-tix-lsp
+tix lsp
 ```
 
-Communicates over stdin/stdout. Works with any LSP-compatible editor. Supports the same `--stubs` and `--no-default-stubs` flags.
+Communicates over stdin/stdout. Works with any LSP-compatible editor. Stubs are loaded from `tix.toml` and editor settings.
 
 Features: hover types, completions (dot access, function args, identifiers), go-to-definition, find references, rename, inlay hints, document symbols, semantic tokens, formatting (via `nixfmt`).

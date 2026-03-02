@@ -42,7 +42,8 @@
           tix-lsp-release = import ./nix/lsp-local.nix { inherit pkgs; profile = "release"; };
           tix-code = import ./nix/vscode.nix {
             inherit pkgs;
-            serverPath = "${tix-with-stubs}/bin/tix-lsp";
+            serverPath = "${tix-with-stubs}/bin/tix";
+            serverArgs = [ "lsp" ];
           };
           tix-code-dev = import ./nix/vscode.nix {
             inherit pkgs;
@@ -58,10 +59,10 @@
           tix-stubs = import ./nix/stubs.nix {
             inherit pkgs;
             home-manager = home-manager;
-            tix-cli = rustAttrs.binary;
+            tix = rustAttrs.binary;
           };
 
-          # Wraps the tix-cli binary so that @nixos and @home-manager context
+          # Wraps the tix binary so that @nixos and @home-manager context
           # references in tix.toml resolve to the fully-typed generated stubs
           # instead of the minimal compiled-in ones.
           tix-with-stubs = pkgs.symlinkJoin {
@@ -69,9 +70,7 @@
             paths = [ rustAttrs.binary ];
             nativeBuildInputs = [ pkgs.makeWrapper ];
             postBuild = ''
-              wrapProgram $out/bin/tix-cli \
-                --set TIX_BUILTIN_STUBS "${tix-stubs}"
-              wrapProgram $out/bin/tix-lsp \
+              wrapProgram $out/bin/tix \
                 --set TIX_BUILTIN_STUBS "${tix-stubs}"
             '';
           };
@@ -123,10 +122,10 @@
                   chmod -R u+w test_files
 
                   # Test @nixos context: test/tix.toml maps nixos_module.nix to @nixos
-                  tix-cli test_files/nixos_module.nix --config test_files/tix.toml
+                  tix test_files/nixos_module.nix --config test_files/tix.toml
 
                   # Test @home-manager context: nixos_fixture/tix.toml maps home/*.nix to @home-manager
-                  tix-cli test_files/nixos_fixture/home/shell.nix \
+                  tix test_files/nixos_fixture/home/shell.nix \
                     --config test_files/nixos_fixture/tix.toml
 
                   touch $out

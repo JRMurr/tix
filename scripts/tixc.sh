@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Type-check Nix source with tix-cli (debug build).
+# Type-check Nix source with tix (debug build).
 #
 # Usage:
 #   ./scripts/tixc.sh <<'EOF'          # Read from stdin
@@ -13,7 +13,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# Separate tixc flags from tix-cli passthrough args.
+# Separate tixc flags from tix passthrough args.
 # First non-flag argument is the input source (file path, nixpkgs: ref, or omitted for stdin).
 INPUT=""
 TIX_ARGS=()
@@ -52,4 +52,4 @@ else
     fi
 fi
 
-cargo run --bin tix-cli -- "$FILE" "${TIX_ARGS[@]}"
+cargo run --bin tix -- "$FILE" "${TIX_ARGS[@]}"

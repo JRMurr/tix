@@ -7,7 +7,7 @@
 Nix's `import` system makes full-program inference impractical. You're not going to infer all of nixpkgs. Stubs let you declare types for code that lives outside your project.
 
 ```bash
-tix-cli my-file.nix --stubs ./my-stubs/
+tix my-file.nix --stubs ./my-stubs/
 ```
 
 `--stubs` takes a file or directory (recursively finds `.tix` files). Can be passed multiple times. Built-in stubs load by default (`--no-default-stubs` to disable).
@@ -84,10 +84,10 @@ When used in a `tix.toml` context, `@`-prefixed stub names refer to built-in con
 `gen-stub` infers a Nix file's type and emits it as a `.tix` `val` declaration:
 
 ```bash
-tix-cli gen-stub lib/utils.nix
+tix gen-stub lib/utils.nix
 # Output: val utils :: { concatPaths: [path] -> path, ... };
 
-tix-cli gen-stub lib/utils.nix -o stubs/utils.tix
+tix gen-stub lib/utils.nix -o stubs/utils.tix
 # Writes the stub to a file
 ```
 
@@ -103,16 +103,16 @@ Tix can generate stubs from NixOS options, Home Manager options, and nixpkgs pac
 
 ```bash
 # NixOS options
-tix-cli gen-stubs nixos --flake . --hostname myhost -o nixos.tix
+tix gen-stubs nixos --flake . --hostname myhost -o nixos.tix
 
 # Home Manager options
-tix-cli gen-stubs home-manager --flake . --username jr -o hm.tix
+tix gen-stubs home-manager --flake . --username jr -o hm.tix
 ```
 
 ### From nixpkgs directly
 
 ```bash
-tix-cli gen-stubs nixos --nixpkgs /path/to/nixpkgs -o nixos.tix
+tix gen-stubs nixos --nixpkgs /path/to/nixpkgs -o nixos.tix
 ```
 
 ### Options
@@ -133,7 +133,7 @@ tix-cli gen-stubs nixos --nixpkgs /path/to/nixpkgs -o nixos.tix
 For `callPackage`-style files, you can auto-generate `val` declarations for all of nixpkgs:
 
 ```bash
-tix-cli gen-stubs pkgs -o generated-pkgs.tix
+tix gen-stubs pkgs -o generated-pkgs.tix
 ```
 
 This evaluates nixpkgs and classifies each attribute:
@@ -164,16 +164,16 @@ The output is a `module pkgs { ... }` block that merges with the hand-curated `m
 
 ```bash
 # Generate from specific nixpkgs
-tix-cli gen-stubs pkgs --nixpkgs /path/to/nixpkgs -o generated-pkgs.tix
+tix gen-stubs pkgs --nixpkgs /path/to/nixpkgs -o generated-pkgs.tix
 
 # Recurse deeper into sub-package-sets
-tix-cli gen-stubs pkgs --max-depth 2 -o generated-pkgs.tix
+tix gen-stubs pkgs --max-depth 2 -o generated-pkgs.tix
 
 # Flat output (no sub-package-set recursion, like pre-v0.x behavior)
-tix-cli gen-stubs pkgs --max-depth 0 -o generated-pkgs.tix
+tix gen-stubs pkgs --max-depth 0 -o generated-pkgs.tix
 
 # From pre-computed JSON (for reproducibility or CI)
-tix-cli gen-stubs pkgs --from-json classified.json -o generated-pkgs.tix
+tix gen-stubs pkgs --from-json classified.json -o generated-pkgs.tix
 ```
 
 Load the generated file via `--stubs` or the `stubs` config key:

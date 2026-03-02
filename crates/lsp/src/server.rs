@@ -62,11 +62,6 @@ pub struct TixLanguageServer {
     client: Client,
     state: Arc<Mutex<AnalysisState>>,
     config: Mutex<TixConfig>,
-    /// CLI-provided stub paths, kept so they can be re-loaded when
-    /// the config changes at runtime.
-    cli_stub_paths: Vec<PathBuf>,
-    /// When true, skip loading built-in nixpkgs stubs.
-    no_default_stubs: bool,
     /// Channel to the single analysis loop (like RA's VFS channel).
     event_tx: mpsc::UnboundedSender<AnalysisEvent>,
     /// Shared cancel flag. `schedule_analysis()` / `did_close()` set this to
@@ -90,12 +85,7 @@ pub struct TixLanguageServer {
 }
 
 impl TixLanguageServer {
-    pub fn new(
-        client: Client,
-        registry: TypeAliasRegistry,
-        cli_stub_paths: Vec<PathBuf>,
-        no_default_stubs: bool,
-    ) -> Self {
+    pub fn new(client: Client, registry: TypeAliasRegistry) -> Self {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let analysis_state = AnalysisState::new(registry);
 
@@ -124,8 +114,6 @@ impl TixLanguageServer {
             client,
             state,
             config: Mutex::new(TixConfig::default()),
-            cli_stub_paths,
-            no_default_stubs,
             event_tx,
             cancel_flag,
             pending_text,
@@ -176,13 +164,14 @@ impl TixLanguageServer {
         Ok(f(&snap_ref, &root))
     }
 
-    /// Build a fresh TypeAliasRegistry from CLI stubs and config stubs.
+    /// Build a fresh TypeAliasRegistry from editor-provided stubs.
+    ///
+    /// Built-in nixpkgs stubs are always loaded. Additional stubs from
+    /// editor settings (`nix.serverSettings.stubs`) are layered on top.
+    /// Project-level stubs from `tix.toml` are loaded separately during
+    /// `initialize()`.
     fn build_registry(&self, config: &TixConfig) -> TypeAliasRegistry {
-        let mut registry = if !self.no_default_stubs {
-            TypeAliasRegistry::with_builtins()
-        } else {
-            TypeAliasRegistry::new()
-        };
+        let mut registry = TypeAliasRegistry::with_builtins();
 
         // Allow overriding built-in context stubs via env var.
         if let Ok(dir) = std::env::var("TIX_BUILTIN_STUBS") {
@@ -190,14 +179,7 @@ impl TixLanguageServer {
             registry.set_builtin_stubs_dir(PathBuf::from(dir));
         }
 
-        // CLI stubs are always loaded first.
-        for stub_path in &self.cli_stub_paths {
-            if let Err(e) = crate::load_stubs(&mut registry, stub_path) {
-                log::warn!("Failed to load CLI stubs from {}: {e}", stub_path.display());
-            }
-        }
-
-        // Then config-provided stubs.
+        // Editor-provided stubs (from nix.serverSettings.stubs).
         for stub_path in &config.stubs {
             if let Err(e) = crate::load_stubs(&mut registry, stub_path) {
                 log::warn!(
@@ -733,7 +715,7 @@ impl LanguageServer for TixLanguageServer {
                 let state = self.state.lock();
                 let config = self.config.lock();
                 format!(
-                "tix-lsp ready — {} type aliases, {} global vals, diagnostics {}, inlay hints {}",
+                "tix lsp ready — {} type aliases, {} global vals, diagnostics {}, inlay hints {}",
                 state.registry.alias_count(),
                 state.registry.global_vals().len(),
                 if config.diagnostics.enable { "on" } else { "off" },

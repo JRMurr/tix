@@ -3,12 +3,12 @@
 # ==============================================================================
 #
 # Walks the NixOS option tree and produces a JSON-serializable structure that
-# tix-cli can consume to generate `.tix` type stubs.
+# tix can consume to generate `.tix` type stubs.
 #
 # Usage (standalone):
 #   nix eval --json --expr 'import ./extract-options.nix { options = (import <nixpkgs/nixos> {}).options; }'
 #
-# Called by tix-cli gen-stubs nixos — not intended for direct use.
+# Called by tix gen-stubs nixos — not intended for direct use.
 
 { options, maxDepth ? 8 }:
 

@@ -1,6 +1,6 @@
 //! Integration tests for the `TIX_BUILTIN_STUBS` environment variable override.
 //!
-//! These run `tix-cli` as a subprocess so each test gets an isolated environment —
+//! These run `tix` as a subprocess so each test gets an isolated environment —
 //! no risk of env var pollution between parallel test threads.
 
 use indoc::indoc;
@@ -18,7 +18,7 @@ fn repo_root() -> PathBuf {
 }
 
 fn tix_cli() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_tix-cli"))
+    PathBuf::from(env!("CARGO_BIN_EXE_tix"))
 }
 
 /// Assert that `stdout` contains a binding line matching `name :: ty_fragment`.
@@ -45,7 +45,7 @@ fn assert_binding(stdout: &str, name: &str, ty_fragment: &str) {
 }
 
 /// Write minimal NixOS context stubs to a temp directory and verify that
-/// `tix-cli` picks them up via `TIX_BUILTIN_STUBS` when processing a file
+/// `tix` picks them up via `TIX_BUILTIN_STUBS` when processing a file
 /// matched by `stubs = ["@nixos"]` in tix.toml.
 ///
 /// Checks that the stubs actually affect type inference — `config` gets the
@@ -82,14 +82,14 @@ fn builtin_stubs_env_override_nixos() {
         .arg(root.join("test/tix.toml"))
         .env("TIX_BUILTIN_STUBS", tmp.path())
         .output()
-        .expect("failed to run tix-cli");
+        .expect("failed to run tix");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     assert!(
         output.status.success(),
-        "tix-cli failed with override nixos stubs.\nstdout: {stdout}\nstderr: {stderr}"
+        "tix failed with override nixos stubs.\nstdout: {stdout}\nstderr: {stderr}"
     );
 
     // Verify that stubs actually fed types into inference.
@@ -139,14 +139,14 @@ fn builtin_stubs_env_override_home_manager() {
         .arg(root.join("test/nixos_fixture/tix.toml"))
         .env("TIX_BUILTIN_STUBS", tmp.path())
         .output()
-        .expect("failed to run tix-cli");
+        .expect("failed to run tix");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     assert!(
         output.status.success(),
-        "tix-cli failed with override home-manager stubs.\nstdout: {stdout}\nstderr: {stderr}"
+        "tix failed with override home-manager stubs.\nstdout: {stdout}\nstderr: {stderr}"
     );
 
     // Verify stub types propagated through field access.
@@ -172,14 +172,14 @@ fn builtin_stubs_fallback_without_env() {
         .arg(root.join("test/tix.toml"))
         .env_remove("TIX_BUILTIN_STUBS")
         .output()
-        .expect("failed to run tix-cli");
+        .expect("failed to run tix");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     assert!(
         output.status.success(),
-        "tix-cli failed without TIX_BUILTIN_STUBS (compiled-in fallback).\nstdout: {stdout}\nstderr: {stderr}"
+        "tix failed without TIX_BUILTIN_STUBS (compiled-in fallback).\nstdout: {stdout}\nstderr: {stderr}"
     );
 
     // Same type assertions as the override test — compiled-in stubs should
@@ -261,14 +261,14 @@ fn module_merge_builtins_and_local_stubs() {
         .arg(&config_path)
         .env("TIX_BUILTIN_STUBS", &stubs_dir)
         .output()
-        .expect("failed to run tix-cli");
+        .expect("failed to run tix");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     assert!(
         output.status.success(),
-        "tix-cli failed with merged stubs.\nstdout: {stdout}\nstderr: {stderr}"
+        "tix failed with merged stubs.\nstdout: {stdout}\nstderr: {stderr}"
     );
 
     // lib.id "hello" should resolve to string (from builtin stubs/lib.tix).
@@ -302,11 +302,11 @@ fn wrong_stubs_cause_type_error() {
         .arg(root.join("test/tix.toml"))
         .env("TIX_BUILTIN_STUBS", tmp.path())
         .output()
-        .expect("failed to run tix-cli");
+        .expect("failed to run tix");
 
     assert!(
         !output.status.success(),
-        "tix-cli should have failed with wrong stubs but succeeded.\nstdout: {}",
+        "tix should have failed with wrong stubs but succeeded.\nstdout: {}",
         String::from_utf8_lossy(&output.stdout)
     );
 }

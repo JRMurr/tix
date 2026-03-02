@@ -50,6 +50,11 @@ pub struct ProjectSection {
     /// Example: `analyze = ["lib/*.nix", "pkgs/**/*.nix"]`
     #[serde(default)]
     pub analyze: Vec<String>,
+
+    /// Glob patterns for files/directories to exclude from `tix check`.
+    /// Example: `exclude = ["result", "vendor/**"]`
+    #[serde(default)]
+    pub exclude: Vec<String>,
 }
 
 /// A single context definition within `tix.toml`.
@@ -215,6 +220,7 @@ mod tests {
         ProjectConfig {
             project: Some(ProjectSection {
                 analyze: patterns.into_iter().map(String::from).collect(),
+                ..Default::default()
             }),
             ..Default::default()
         }

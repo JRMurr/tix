@@ -99,13 +99,13 @@ nix-env -f https://github.com/JRMurr/tix/archive/main.tar.gz -iA packages.x86_64
 ### Type-check a file
 
 ```bash
-tix-cli my-file.nix
+tix my-file.nix
 ```
 
 ### Use the LSP
 
 ```bash
-tix-lsp
+tix lsp
 ```
 
 Works with any editor that supports LSP. Provides hover types, completions, go-to-definition, rename, inlay hints, and more.
@@ -113,9 +113,9 @@ Works with any editor that supports LSP. Provides hover types, completions, go-t
 ### CLI flags
 
 ```
-tix-cli <file.nix> [--stubs path/to/stubs/] [--no-default-stubs] [--config tix.toml]
-tix-cli gen-stubs nixos [--flake .] [--hostname myhost] [-o nixos.tix]
-tix-cli gen-stubs home-manager [--flake .] [--username jr] [-o hm.tix]
+tix <file.nix> [--stubs path/to/stubs/] [--no-default-stubs] [--config tix.toml]
+tix gen-stubs nixos [--flake .] [--hostname myhost] [-o nixos.tix]
+tix gen-stubs home-manager [--flake .] [--username jr] [-o hm.tix]
 ```
 
 ## What does it do?

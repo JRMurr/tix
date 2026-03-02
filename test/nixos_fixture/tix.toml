@@ -1,7 +1,7 @@
 # Fixture tix.toml for testing NixOS/Home Manager context completion.
 #
 # Usage:
-#   cargo run --bin tix-cli -- test/nixos_fixture/hosts/desktop/gaming.nix \
+#   cargo run --bin tix -- test/nixos_fixture/hosts/desktop/gaming.nix \
 #       --stubs test/nixos_fixture/stubs/nixos.tix
 
 [context.nixos]

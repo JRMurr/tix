@@ -90,10 +90,10 @@ deadline = 30          # seconds per top-level file (default: 10)
 Run `tix init` to automatically generate a `tix.toml` for your project:
 
 ```bash
-tix-cli init              # Generate tix.toml in current project
-tix-cli init --dry-run    # Preview without writing
-tix-cli init --yes        # Overwrite existing tix.toml
-tix-cli init /path/to/project  # Specify project directory
+tix init              # Generate tix.toml in current project
+tix init --dry-run    # Preview without writing
+tix init --yes        # Overwrite existing tix.toml
+tix init /path/to/project  # Specify project directory
 ```
 
 The command scans all `.nix` files, classifies each by its structural signals (parameter names, body references, attrset keys), and generates context sections mapping file paths to the appropriate stubs.

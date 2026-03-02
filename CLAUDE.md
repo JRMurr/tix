@@ -16,7 +16,7 @@ cargo nextest run                    # Run all unit tests
 cargo nextest run -p lang_check      # Test a specific crate
 cargo nextest run -E 'test(test_name)'  # Run a single test by name
 cargo nextest run -p cli --run-ignored only -E 'test(nixpkgs_lib)'  # Run ignored integration test
-cargo run --bin tix-cli test/basic.nix  # Type-check a Nix file
+cargo run --bin tix test/basic.nix  # Type-check a Nix file
 cargo fmt                            # Format (uses .rustfmt.toml)
 cargo clippy                         # Lint
 ./scripts/pbt.sh                     # Property-based tests (50k cases default)
@@ -26,7 +26,7 @@ nix build .#                         # Build with nix
 ./scripts/tixc.sh <<< 'let x = 1; in x'     # Type-check Nix from stdin (debug build)
 ./scripts/tixc.sh test/basic.nix             # Type-check a local .nix file
 ./scripts/tixc.sh nixpkgs:lib/strings.nix    # Type-check a nixpkgs file (requires nix)
-./scripts/nixpkgs-lib-test.sh               # Run tix-cli on nixpkgs lib/ (requires nix)
+./scripts/nixpkgs-lib-test.sh               # Run tix on nixpkgs lib/ (requires nix)
 ```
 
 
@@ -132,7 +132,7 @@ Tix extends SimpleSub with BAS (Boolean-Algebraic Subtyping): negation types (`N
 ### Usage
 
 ```bash
-cargo run --bin tix-cli -- test/stubs_test.nix --stubs stubs/
+cargo run --bin tix -- test/stubs_test.nix --stubs stubs/
 ```
 
 `--stubs` accepts file paths or directories (recursive `.tix` glob for dirs). Multiple `--stubs` flags can be passed.
