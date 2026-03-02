@@ -22,7 +22,7 @@ pub fn run_init(path: PathBuf, yes: bool, dry_run: bool) -> Result<(), Box<dyn E
     let toml_path = project_root.join("tix.toml");
 
     // Step 2: Check if tix.toml already exists.
-    if toml_path.exists() && !yes {
+    if toml_path.exists() && !yes && !dry_run {
         return Err(format!(
             "{} already exists. Use --yes to overwrite.",
             toml_path.display()
@@ -515,6 +515,26 @@ mod tests {
         let result = run_init(root.to_path_buf(), false, false);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("already exists"));
+    }
+
+    #[test]
+    fn init_dry_run_allows_existing_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join("tix.toml"), "# existing").unwrap();
+        std::fs::write(
+            root.join("foo.nix"),
+            "{ config, lib, pkgs, ... }: { options.x = lib.mkOption {}; }",
+        )
+        .unwrap();
+
+        let result = run_init(root.to_path_buf(), false, true);
+        assert!(
+            result.is_ok(),
+            "init --dry-run should ignore existing tix.toml: {:?}",
+            result.err()
+        );
     }
 
     #[test]
