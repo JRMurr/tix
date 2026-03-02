@@ -247,3 +247,141 @@ split Phase A/B mutex, cancel flag, parallel rayon imports). Remaining cleanup:
 - **`tix_collect.rs` test panics**: all 29 `panic!()` calls are inside
   `#[cfg(test)]` — production code already uses `Result<_, CollectError>`.
   The `.expect()` calls at lines 320/340 are safe (length-checked `.pop()`).
+
+---
+
+## DX Audit: Per-Persona Findings
+
+Audit from five realistic user perspectives. Findings organized by theme, tagged
+with which personas are affected.
+
+### Cross-File / Import Boundary (All Personas — Highest Impact)
+
+Every persona hits "my import is `?`" within minutes of real use. The stubs-only
+model is architecturally sound but the bridge tooling (`gen-stub`,
+`[project] analyze`) requires manual effort most users won't invest upfront.
+
+- **External flake inputs are completely untyped.** No stubs for third-party flake
+  outputs. A NixOS config user has 30-50% of their config (community modules,
+  hyprland, sops-nix, etc.) as `?`. A monorepo with external flake deps hits the
+  same wall. There's no convention for flake authors to publish `.tix` stubs.
+  [TS dev, NixOS config user, monorepo]
+
+- **`<nixpkgs>` angle-bracket imports can't be resolved.** (TODO in
+  `imports.rs:69,148`). Users get silent `?` with no guidance on what to do
+  instead. Common in older-style Nix code (`pkgs ? import <nixpkgs> {}`).
+  [TS dev, NixOS config user]
+
+- **Overloaded operators don't survive file boundaries.** A shared
+  `add = a: b: a + b` becomes `? -> ? -> ?` when imported. The overload context
+  is lost in the OutputTy serialization. Erodes trust in the type system fast.
+  [FP programmer, monorepo]
+
+- **No ecosystem for shared type declarations.** No DefinitelyTyped equivalent,
+  no convention for publishing `.tix` with flakes, no `tix install-stubs`. Each
+  user generates stubs from scratch. Chicken-and-egg problem.
+  [All]
+
+### Overlays Are Invisible (FP Programmer, NixOS Config User, Monorepo)
+
+Overlays are the primary composition mechanism in real Nix codebases. Tix has no
+model for them.
+
+- `final`/`prev` parameters are `?`. Overlay-injected packages don't appear in
+  `Pkgs` type.
+- No `@overlay` context equivalent to `@nixos`/`@callpackage`.
+- `gen-stubs pkgs` only captures the base nixpkgs set, not overlay additions.
+- For the FP programmer whose entire architecture is overlay stacking, Tix types
+  individual files but can't follow the overlay chain.
+
+### Project-Level CLI Gaps (Monorepo, CI Users)
+
+`tix check` provides project-level type checking with summary and exit codes.
+Remaining gaps:
+
+- No incremental/cached CLI mode. Salsa is only used by the LSP.
+- No machine-readable output (`--format json`, SARIF). Can't integrate with
+  GitHub PR annotations or code review tools without parsing miette output.
+
+### Onboarding / Adoption Gaps (TS Dev, NixOS Config User)
+
+- **No adoption guide.** Docs explain each feature but there's no "Adding Tix to
+  an existing project" walkthrough. No "Common patterns and how to annotate them."
+- **No FAQ.** "Why is my type `?`?" is the most common question every persona
+  will ask. No troubleshooting section.
+- **No error catalog.** What does each diagnostic mean, what causes it, how to
+  fix it.
+- **No CONTRIBUTING.md** for potential contributors (the FP programmer who sees
+  the potential and wants to help).
+
+### NixOS Module System Not Modeled (Nixpkgs Maintainer, NixOS Config User)
+
+- `mkOption`, `mkEnableOption`, `types.submodule`, `types.attrsOf` etc. not
+  modeled as first-class constructs. The stubs approximate it, but the
+  `options.foo.enable` → `config.foo.enable` duality isn't captured.
+- Enum option types degrade to `string` (no literal/singleton types).
+- This is arguably the most important typing relationship in NixOS — the one
+  between option declarations and option definitions.
+
+### Literal / Singleton Types Missing (All Personas)
+
+`"circle"` is `string`, not `"circle"`. No TypeScript-style discriminated unions.
+
+- NixOS enum options become `string`.
+- String-keyed dispatch (`if name == "gcc"`) can't narrow.
+- Tagged union idioms common in nixpkgs can't be expressed.
+- Documented in limitations.md but high-impact across multiple personas.
+
+### Stub Maintenance at Scale (Monorepo, FP Programmer)
+
+- In fast-moving monorepos, `.tix` stubs drift from implementation.
+- `verify-stubs` exists but isn't automatic. No built-in "check stubs freshness"
+  CI step.
+- Type alias names are global across all loaded stubs. Two teams creating
+  `type Config = {...}` will collide silently (presumably last-wins).
+- No namespace/scoping mechanism for stub type aliases.
+
+### Custom Builder Abstractions (Monorepo)
+
+- Teams with internal `mkService`, `mkTool` builder functions need manual stubs
+  or annotations per-file. No way to auto-derive a `@context` from an internal
+  library.
+- Workarounds: write custom `.tix`, annotate every file with
+  `/** type: builders :: Builders */`, or add to `[project] analyze` (LSP-only).
+  None scale well.
+
+### Minor / Polish Items
+
+- No watch mode in CLI (requires external `watchexec` or similar).
+- `gen-stubs nixos` is slow (full `nix eval`). No incremental update — any
+  config change means full regeneration.
+- Timeout diagnostic tells you what's missing but not how to fix it (split file?
+  increase deadline? add stubs?).
+- No workspace/multi-root LSP support for monorepos with multiple roots.
+- Intersection-type annotations trusted but not verified per-branch.
+- No recursive type aliases in `.tix` files.
+
+---
+
+## DX Audit: What Works Well
+
+Recording strengths to preserve during future work:
+
+- **Core type inference is genuinely good.** Row polymorphism, union types,
+  narrowing, let-polymorphism — more sophisticated than most gradual typing tools.
+- **Stubs are well-designed.** Clean `.tix` syntax, module→type-alias system,
+  substantial built-in coverage (~500+ lib declarations). `gen-stub` and
+  `gen-stubs` are practical.
+- **LSP is comprehensive.** 14 features including code actions, semantic tokens,
+  signature help, workspace symbols. Production-quality.
+- **Error messages are good.** Miette formatting, "did you mean?" suggestions,
+  source context, dual-span for duplicate keys.
+- **Narrowing is a standout.** No other Nix tool narrows types through
+  `builtins.isString`, `x ? field`, `x == null`, `assert`, and boolean
+  combinators. Catches a class of bugs nothing else can.
+- **`tix.toml` context system maps well to project structure.** Glob-based
+  context assignment is the right abstraction.
+- **`gen-stubs nixos --descriptions` is excellent UX.** Option descriptions
+  showing up in LSP hover is transformative for NixOS configuration.
+- **`@callpackage` context is purpose-built for nixpkgs maintainers.** The most
+  common package pattern gets types with zero annotation effort.
