@@ -591,6 +591,27 @@ proptest! {
 /// The type predicates available for narrowing, paired with their builtin names.
 const NARROWING_PREDICATES: &[&str] = &["isNull", "isString", "isInt", "isFloat", "isBool"];
 
+/// All primitive type predicates (extends NARROWING_PREDICATES with isPath).
+const ALL_PRIMITIVE_PREDICATES: &[&str] =
+    &["isNull", "isString", "isInt", "isFloat", "isBool", "isPath"];
+
+/// Compound predicates (then-branch only narrowing, no negation support).
+const COMPOUND_PREDICATES: &[&str] = &["isAttrs", "isList", "isFunction"];
+
+/// Predicate + operation that's valid after narrowing to that type.
+const NARROWED_OPERATIONS: &[(&str, &str)] = &[
+    ("isString", r#"__narr_x + "!""#),
+    ("isInt", "__narr_x + 1"),
+    ("isFloat", "__narr_x + 1.0"),
+    ("isBool", "__narr_x && true"),
+    ("isAttrs", "__narr_x.name"),
+    ("isList", "builtins.head __narr_x"),
+    ("isFunction", "__narr_x 42"),
+];
+
+/// Literals for equality-guard narrowing.
+const EQUALITY_LITERALS: &[&str] = &["null", "true", "false", "42", r#""hello""#, "1.5"];
+
 /// Generate a primitive value as Nix text, for use in narrowed branches.
 fn arb_narr_value() -> impl Strategy<Value = (PrimitiveTy, NixTextStr)> {
     prop_oneof![
@@ -707,5 +728,251 @@ proptest! {
             "Binding `{}` with use sites changed type:\n  base: {}\n  with uses: {}",
             binding_body, base_ty, actual_ty
         );
+    }
+}
+
+// ==============================================================================
+// Complex Narrowing PBT
+// ==============================================================================
+//
+// Extends narrowing coverage to literal equality guards, logical combinators
+// (&&, ||, !), nested narrowing, hasField, assert, compound predicates, and
+// multi-variable narrowing.
+
+/// Recursive generator for guard conditions on `__narr_x`.
+///
+/// Leaves: type predicates, compound predicates, literal equality, hasField.
+/// Recursion (depth 2): negation, and, or.
+fn arb_guard_condition() -> BoxedStrategy<NixTextStr> {
+    let prim_pred = (0..ALL_PRIMITIVE_PREDICATES.len())
+        .prop_map(|i| format!("builtins.{} __narr_x", ALL_PRIMITIVE_PREDICATES[i]));
+
+    let compound_pred = (0..COMPOUND_PREDICATES.len())
+        .prop_map(|i| format!("builtins.{} __narr_x", COMPOUND_PREDICATES[i]));
+
+    // Literal equality: `__narr_x == lit` or `lit == __narr_x`
+    let literal_eq = (0..EQUALITY_LITERALS.len(), any::<bool>()).prop_map(|(i, flip)| {
+        let lit = EQUALITY_LITERALS[i];
+        if flip {
+            format!("{lit} == __narr_x")
+        } else {
+            format!("__narr_x == {lit}")
+        }
+    });
+
+    // hasField: `__narr_x ? name` or `builtins.hasAttr "name" __narr_x`
+    let has_field = (arb_smol_str_ident(), any::<bool>()).prop_map(|(field, use_question)| {
+        if use_question {
+            format!("__narr_x ? {field}")
+        } else {
+            format!("builtins.hasAttr \"{field}\" __narr_x")
+        }
+    });
+
+    let leaf: BoxedStrategy<NixTextStr> =
+        prop_oneof![prim_pred, compound_pred, literal_eq, has_field].boxed();
+
+    leaf.prop_recursive(2, 8, 2, |inner| {
+        let negated = inner.clone().prop_map(|c| format!("(!({}))  ", c));
+        let and_comb =
+            (inner.clone(), inner.clone()).prop_map(|(l, r)| format!("(({l}) && ({r}))"));
+        let or_comb = (inner.clone(), inner).prop_map(|(l, r)| format!("(({l}) || ({r}))"));
+        prop_oneof![negated, and_comb, or_comb]
+    })
+    .boxed()
+}
+
+/// Crash-freedom: arbitrary guard combinator tree with random branch values.
+fn arb_narrowing_crash_freedom() -> impl Strategy<Value = NixTextStr> {
+    (arb_guard_condition(), arb_narr_value(), arb_narr_value()).prop_map(
+        |(guard, (_ty1, val1), (_ty2, val2))| {
+            format!("__narr_x: if {guard} then {val1} else {val2}")
+        },
+    )
+}
+
+/// Nested narrowing: two levels of predicates on same variable.
+/// Tests contradictory narrowing (e.g., isString then isInt).
+fn arb_narrowing_nested() -> impl Strategy<Value = NixTextStr> {
+    let pred1_idx = 0..ALL_PRIMITIVE_PREDICATES.len();
+    let pred2_idx = 0..ALL_PRIMITIVE_PREDICATES.len();
+    (
+        pred1_idx,
+        pred2_idx,
+        arb_narr_value(),
+        arb_narr_value(),
+        arb_narr_value(),
+    )
+        .prop_map(|(p1, p2, (_, v1), (_, v2), (_, v3))| {
+            let pred1 = ALL_PRIMITIVE_PREDICATES[p1];
+            let pred2 = ALL_PRIMITIVE_PREDICATES[p2];
+            format!(
+                "__narr_x: if builtins.{pred1} __narr_x \
+                 then (if builtins.{pred2} __narr_x then {v1} else {v2}) \
+                 else {v3}"
+            )
+        })
+}
+
+/// Multi-variable narrowing: two variables combined with `&&`.
+fn arb_narrowing_multi_var() -> impl Strategy<Value = NixTextStr> {
+    let pred1_idx = 0..ALL_PRIMITIVE_PREDICATES.len();
+    let pred2_idx = 0..ALL_PRIMITIVE_PREDICATES.len();
+    (pred1_idx, pred2_idx, arb_narr_value(), arb_narr_value()).prop_map(
+        |(p1, p2, (_, v1), (_, v2))| {
+            let pred1 = ALL_PRIMITIVE_PREDICATES[p1];
+            let pred2 = ALL_PRIMITIVE_PREDICATES[p2];
+            format!(
+                "__narr_x: __narr_y: \
+                 if builtins.{pred1} __narr_x && builtins.{pred2} __narr_y \
+                 then {v1} else {v2}"
+            )
+        },
+    )
+}
+
+/// Literal equality with random orientation and op (==, !=).
+fn arb_narrowing_literal_eq() -> impl Strategy<Value = NixTextStr> {
+    let lit_idx = 0..EQUALITY_LITERALS.len();
+    (
+        lit_idx,
+        any::<bool>(),
+        any::<bool>(),
+        arb_narr_value(),
+        arb_narr_value(),
+    )
+        .prop_map(|(lit_idx, flip, use_neq, (_, v1), (_, v2))| {
+            let lit = EQUALITY_LITERALS[lit_idx];
+            let op = if use_neq { "!=" } else { "==" };
+            let cond = if flip {
+                format!("{lit} {op} __narr_x")
+            } else {
+                format!("__narr_x {op} {lit}")
+            };
+            format!("__narr_x: if {cond} then {v1} else {v2}")
+        })
+}
+
+/// `||` combining two predicates on same variable.
+fn arb_narrowing_or_combinator() -> impl Strategy<Value = NixTextStr> {
+    let pred1_idx = 0..ALL_PRIMITIVE_PREDICATES.len();
+    let pred2_idx = 0..ALL_PRIMITIVE_PREDICATES.len();
+    (pred1_idx, pred2_idx, arb_narr_value(), arb_narr_value()).prop_map(
+        |(p1, p2, (_, v1), (_, v2))| {
+            let pred1 = ALL_PRIMITIVE_PREDICATES[p1];
+            let pred2 = ALL_PRIMITIVE_PREDICATES[p2];
+            format!(
+                "__narr_x: \
+                 if builtins.{pred1} __narr_x || builtins.{pred2} __narr_x \
+                 then {v1} else {v2}"
+            )
+        },
+    )
+}
+
+/// Correctness: after narrowing to a type via a predicate, a type-specific
+/// operation should succeed without errors.
+fn arb_narrowing_enables_operation() -> impl Strategy<Value = NixTextStr> {
+    let op_idx = 0..NARROWED_OPERATIONS.len();
+    op_idx.prop_map(|i| {
+        let (pred, operation) = NARROWED_OPERATIONS[i];
+        format!("__narr_x: if builtins.{pred} __narr_x then ({operation}) else 0")
+    })
+}
+
+/// Correctness: after `x ? name` or `builtins.hasAttr`, field access succeeds.
+fn arb_narrowing_hasfield_operation() -> impl Strategy<Value = NixTextStr> {
+    (arb_smol_str_ident(), any::<bool>()).prop_map(|(field, use_question)| {
+        let cond = if use_question {
+            format!("__narr_x ? {field}")
+        } else {
+            format!("builtins.hasAttr \"{field}\" __narr_x")
+        };
+        format!("__narr_x: if {cond} then __narr_x.{field} else \"default\"")
+    })
+}
+
+/// Correctness: `!pred` flips narrowing to else-branch. The operation
+/// should succeed in the else-branch when the predicate is negated.
+fn arb_narrowing_negated_operation() -> impl Strategy<Value = NixTextStr> {
+    let op_idx = 0..NARROWED_OPERATIONS.len();
+    op_idx.prop_map(|i| {
+        let (pred, operation) = NARROWED_OPERATIONS[i];
+        format!("__narr_x: if !(builtins.{pred} __narr_x) then 0 else ({operation})")
+    })
+}
+
+/// Correctness: `assert pred; operation` narrows the variable for the
+/// continuation, so the type-specific operation should succeed.
+fn arb_narrowing_assert() -> impl Strategy<Value = NixTextStr> {
+    let op_idx = 0..NARROWED_OPERATIONS.len();
+    op_idx.prop_map(|i| {
+        let (pred, operation) = NARROWED_OPERATIONS[i];
+        format!("__narr_x: assert builtins.{pred} __narr_x; ({operation})")
+    })
+}
+
+// -- Crash-freedom tests: inference must not panic, type errors are OK --------
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: 256, .. ProptestConfig::default()
+    })]
+
+    #[test]
+    fn test_narrowing_complex_crash_freedom(text in arb_narrowing_crash_freedom()) {
+        let _ = check_str(&text);
+    }
+
+    #[test]
+    fn test_narrowing_nested_crash_freedom(text in arb_narrowing_nested()) {
+        let _ = check_str(&text);
+    }
+
+    #[test]
+    fn test_narrowing_multi_var_crash_freedom(text in arb_narrowing_multi_var()) {
+        let _ = check_str(&text);
+    }
+
+    #[test]
+    fn test_narrowing_literal_eq_crash_freedom(text in arb_narrowing_literal_eq()) {
+        let _ = check_str(&text);
+    }
+
+    #[test]
+    fn test_narrowing_or_crash_freedom(text in arb_narrowing_or_combinator()) {
+        let _ = check_str(&text);
+    }
+}
+
+// -- Correctness tests: inference must succeed without type errors -------------
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: 256, .. ProptestConfig::default()
+    })]
+
+    /// After narrowing to type T via a predicate, T-specific operations succeed.
+    #[test]
+    fn test_narrowing_enables_operation(text in arb_narrowing_enables_operation()) {
+        let _ = get_inferred_root(&text);
+    }
+
+    /// After `x ? name`, `x.name` access succeeds.
+    #[test]
+    fn test_narrowing_hasfield_enables_access(text in arb_narrowing_hasfield_operation()) {
+        let _ = get_inferred_root(&text);
+    }
+
+    /// `!pred` puts narrowing in else-branch correctly.
+    #[test]
+    fn test_narrowing_negated_enables_operation(text in arb_narrowing_negated_operation()) {
+        let _ = get_inferred_root(&text);
+    }
+
+    /// `assert pred; op` narrows and makes the operation succeed.
+    #[test]
+    fn test_narrowing_assert_enables_operation(text in arb_narrowing_assert()) {
+        let _ = get_inferred_root(&text);
     }
 }
