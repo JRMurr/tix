@@ -730,4 +730,28 @@ mod conformance_tests {
         assert_conformance("(int -> int) | (string -> string)");
         assert_conformance("{ _: int | null }");
     }
+
+    /// Type variables whose names start with a keyword prefix must parse as
+    /// generic variables, not be consumed by keyword rules.
+    #[test]
+    fn keyword_prefix_vars_are_generic() {
+        // Each of these starts with a keyword but is a longer identifier.
+        // They must all parse as generic type variables, not fail or
+        // partially match.
+        let keyword_prefix_vars = [
+            "intersperse",
+            "nullable",
+            "strings",
+            "floating",
+            "booleans",
+            "pathlib",
+            "anyways",
+            "neverland",
+            "numberline",
+        ];
+
+        for var in &keyword_prefix_vars {
+            assert_conformance(var);
+        }
+    }
 }
