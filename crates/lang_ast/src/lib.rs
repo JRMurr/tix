@@ -1,7 +1,6 @@
 // A lot of the code in this module is based on
 // https://github.com/oxalica/nil/tree/main/crates/ide/src/def
 
-// pub mod expr_table;
 mod ast_utils;
 pub mod classify;
 mod comment;
@@ -19,7 +18,6 @@ use std::{collections::HashMap, fmt, ops};
 
 use comment::gather_doc_comments;
 pub use db::{AstDb, NixFile, RootDatabase};
-// use derive_more::Debug;
 use derive_more::From;
 use la_arena::{Arena, ArenaMap, Idx as Id};
 use lower::lower;
@@ -243,11 +241,7 @@ impl ModuleSourceMap {
     }
 
     pub fn nodes_for_name(&self, name_id: NameId) -> impl Iterator<Item = AstPtr> + '_ {
-        self.name_map_rev
-            .get(name_id)
-            .into_iter()
-            // .flatten()
-            .cloned()
+        self.name_map_rev.get(name_id).into_iter().cloned()
     }
 
     pub fn insert_expr(&mut self, expr: ExprId, ptr: AstPtr) {
