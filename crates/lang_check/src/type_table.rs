@@ -7,7 +7,9 @@
 // constrain() and its recursive helpers stay on CheckCtx because they
 // interleave storage operations with current_expr tracking.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
+
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::TyId;
 use crate::storage::{TypeEntry, TypeStorage, TypeVariable};
@@ -44,38 +46,38 @@ pub(crate) struct TypeTable {
     /// would cause infinite loops across extrusion boundaries. The cache is
     /// scoped to the lifetime of the owning CheckCtx (one per file), so it
     /// doesn't grow across files.
-    pub(crate) constrain_cache: HashSet<(TyId, TyId)>,
+    pub(crate) constrain_cache: FxHashSet<(TyId, TyId)>,
 
     /// Negation type cache for deduplication. Maps inner TyId → Neg(inner) TyId.
     /// Ensures that `alloc_concrete(Neg(x))` returns the same TyId for the same
     /// `x`, which is critical for union absorption in constrain_lhs_inter:
     /// the absorption check uses TyId equality, so identical Neg types must share
     /// a TyId.
-    pub(crate) neg_cache: HashMap<TyId, TyId>,
+    pub(crate) neg_cache: FxHashMap<TyId, TyId>,
 
     /// Primitive type cache for deduplication.
-    pub(crate) prim_cache: HashMap<PrimitiveTy, TyId>,
+    pub(crate) prim_cache: FxHashMap<PrimitiveTy, TyId>,
 
     /// Cache for `inter_contains_var`: maps TyId → whether it contains a
     /// variable (directly or through nested Inter). Valid for the lifetime
     /// of the inference run since type entries are append-only.
-    pub(crate) inter_var_cache: HashMap<TyId, bool>,
+    pub(crate) inter_var_cache: FxHashMap<TyId, bool>,
 
     /// Cache for `union_contains_member`: stores (union_id, target_id) pairs
     /// that returned true. Valid for the lifetime of the inference run since
     /// Union structure is immutable once allocated.
-    pub(crate) union_member_cache: HashSet<(TyId, TyId)>,
+    pub(crate) union_member_cache: FxHashSet<(TyId, TyId)>,
 }
 
 impl TypeTable {
     pub fn new() -> Self {
         Self {
             storage: TypeStorage::new(),
-            constrain_cache: HashSet::new(),
-            neg_cache: HashMap::new(),
-            prim_cache: HashMap::new(),
-            inter_var_cache: HashMap::new(),
-            union_member_cache: HashSet::new(),
+            constrain_cache: FxHashSet::default(),
+            neg_cache: FxHashMap::default(),
+            prim_cache: FxHashMap::default(),
+            inter_var_cache: FxHashMap::default(),
+            union_member_cache: FxHashSet::default(),
         }
     }
 

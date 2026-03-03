@@ -6,8 +6,10 @@
 // inferring each definition, resolving pending constraints, and generalizing
 // type variables via SimpleSub's level-based approach (extrude).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::time::Instant;
+
+use rustc_hash::FxHashMap;
 
 use super::{CheckCtx, InferenceError, InferenceResult, LocatedError, Polarity, TyId};
 use crate::collect::{canonicalize_standalone, Collector};
@@ -357,7 +359,7 @@ impl CheckCtx<'_> {
     // negative = input/contravariant.
 
     pub fn extrude(&mut self, ty_id: TyId, polarity: Polarity) -> TyId {
-        let mut cache = HashMap::new();
+        let mut cache = FxHashMap::default();
         let result = self.extrude_inner(ty_id, polarity, &mut cache);
 
         // Re-instantiate deferred overloads for any vars that were extruded.
@@ -406,7 +408,7 @@ impl CheckCtx<'_> {
                     // For each operand, use the cached fresh var if available,
                     // otherwise extrude it now in positive polarity.
                     let get_or_extrude =
-                        |id: TyId, this: &mut Self, cache: &mut HashMap<TyId, TyId>| -> TyId {
+                        |id: TyId, this: &mut Self, cache: &mut FxHashMap<TyId, TyId>| -> TyId {
                             if let Some(&fresh) = cache.get(&id) {
                                 fresh
                             } else {
@@ -447,7 +449,7 @@ impl CheckCtx<'_> {
         &mut self,
         ty_id: TyId,
         polarity: Polarity,
-        cache: &mut HashMap<TyId, TyId>,
+        cache: &mut FxHashMap<TyId, TyId>,
     ) -> TyId {
         if let Some(&cached) = cache.get(&ty_id) {
             return cached;
@@ -592,7 +594,7 @@ impl CheckCtx<'_> {
         fresh: TyId,
         polarity: Polarity,
         var: crate::storage::TypeVariable,
-        cache: &mut HashMap<TyId, TyId>,
+        cache: &mut FxHashMap<TyId, TyId>,
     ) {
         // In positive position, `original <: fresh`: the original flows into
         // the fresh var. We install the link as an upper bound on original and

@@ -8,11 +8,11 @@
 // - Negative position (input): variable → intersection of upper bounds
 // Lambda params flip polarity.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::time::Instant;
 
 use la_arena::ArenaMap;
-
+use rustc_hash::{FxHashMap, FxHashSet};
 use smol_str::SmolStr;
 
 use super::{CheckCtx, InferenceResult, Polarity, TyId};
@@ -40,9 +40,9 @@ const CANON_DEADLINE_CHECK_INTERVAL: u32 = 512;
 
 struct Canonicalizer<'a> {
     table: &'a TypeStorage,
-    alias_provenance: &'a HashMap<TyId, SmolStr>,
-    cache: HashMap<(TyId, Polarity), OutputTy>,
-    in_progress: HashSet<(TyId, Polarity)>,
+    alias_provenance: &'a FxHashMap<TyId, SmolStr>,
+    cache: FxHashMap<(TyId, Polarity), OutputTy>,
+    in_progress: FxHashSet<(TyId, Polarity)>,
     /// Optional deadline for canonicalization. When exceeded, remaining
     /// types degrade to TyVar (same as inference deadline_exceeded).
     deadline: Option<Instant>,
@@ -54,12 +54,12 @@ struct Canonicalizer<'a> {
 }
 
 impl<'a> Canonicalizer<'a> {
-    fn new(table: &'a TypeStorage, alias_provenance: &'a HashMap<TyId, SmolStr>) -> Self {
+    fn new(table: &'a TypeStorage, alias_provenance: &'a FxHashMap<TyId, SmolStr>) -> Self {
         Self {
             table,
             alias_provenance,
-            cache: HashMap::new(),
-            in_progress: HashSet::new(),
+            cache: FxHashMap::default(),
+            in_progress: FxHashSet::default(),
             deadline: None,
             op_counter: 0,
             deadline_exceeded: false,
@@ -402,7 +402,7 @@ impl<'a> Canonicalizer<'a> {
 /// use-site extrusions add concrete bounds back onto polymorphic variables.
 pub fn canonicalize_standalone(
     table: &TypeStorage,
-    alias_provenance: &HashMap<TyId, SmolStr>,
+    alias_provenance: &FxHashMap<TyId, SmolStr>,
     ty_id: TyId,
     polarity: Polarity,
 ) -> OutputTy {
@@ -411,7 +411,7 @@ pub fn canonicalize_standalone(
 
 pub fn canonicalize_standalone_with_deadline(
     table: &TypeStorage,
-    alias_provenance: &HashMap<TyId, SmolStr>,
+    alias_provenance: &FxHashMap<TyId, SmolStr>,
     ty_id: TyId,
     polarity: Polarity,
     deadline: Option<Instant>,
@@ -1289,7 +1289,7 @@ mod tests {
         table.add_upper_bound(var_id, int_ty);
         table.add_upper_bound(var_id, neg_int);
 
-        let provenance = std::collections::HashMap::new();
+        let provenance = FxHashMap::default();
         let result = canonicalize_standalone(&table, &provenance, var_id, Negative);
         assert_eq!(
             result,
@@ -1315,7 +1315,7 @@ mod tests {
         table.add_upper_bound(var_id, string_ty);
         table.add_upper_bound(var_id, neg_null);
 
-        let provenance = std::collections::HashMap::new();
+        let provenance = FxHashMap::default();
         let result = canonicalize_standalone(&table, &provenance, var_id, Negative);
         // ~null is redundant alongside string (disjoint constructors), so
         // it gets removed, leaving just string.
@@ -1682,7 +1682,7 @@ mod tests {
         table.add_lower_bound(var_id, int_ty);
         table.add_lower_bound(var_id, neg_int);
 
-        let provenance = std::collections::HashMap::new();
+        let provenance = FxHashMap::default();
         let result = canonicalize_standalone(&table, &provenance, var_id, Positive);
         assert_eq!(
             result,

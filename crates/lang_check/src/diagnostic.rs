@@ -7,11 +7,11 @@
 // the internal InferenceError happens at the boundary between inference and
 // output, while we still have access to TypeStorage for canonicalization.
 
-use std::collections::HashMap;
 use std::fmt;
 
 use lang_ast::{AstPtr, ExprId, OverloadBinOp};
 use lang_ty::OutputTy;
+use rustc_hash::FxHashMap;
 use smol_str::SmolStr;
 
 use crate::collect::canonicalize_standalone;
@@ -258,7 +258,7 @@ pub fn suggest_similar<'a>(
 fn canonicalize_error_ty(
     ty: &lang_ty::Ty<TyId>,
     table: &TypeStorage,
-    provenance: &HashMap<TyId, SmolStr>,
+    provenance: &FxHashMap<TyId, SmolStr>,
 ) -> OutputTy {
     // If the Ty is concrete, we need to find its TyId in the table to
     // canonicalize it. For simple cases (primitives), we can convert directly.
@@ -276,7 +276,7 @@ fn canonicalize_error_ty(
 fn canonicalize_ty_structural(
     ty: &lang_ty::Ty<TyId>,
     table: &TypeStorage,
-    provenance: &HashMap<TyId, SmolStr>,
+    provenance: &FxHashMap<TyId, SmolStr>,
 ) -> OutputTy {
     match ty {
         lang_ty::Ty::Primitive(p) => OutputTy::Primitive(*p),
@@ -338,7 +338,7 @@ fn canonicalize_ty_structural(
 fn error_to_diagnostic(
     error: &LocatedError,
     table: &TypeStorage,
-    provenance: &HashMap<TyId, SmolStr>,
+    provenance: &FxHashMap<TyId, SmolStr>,
 ) -> TixDiagnostic {
     let kind = match &error.payload {
         InferenceError::TypeMismatch(pair) => {
@@ -409,7 +409,7 @@ fn warning_to_diagnostic(warning: &LocatedWarning) -> TixDiagnostic {
 pub fn errors_to_diagnostics(
     errors: &[LocatedError],
     table: &TypeStorage,
-    provenance: &HashMap<TyId, SmolStr>,
+    provenance: &FxHashMap<TyId, SmolStr>,
 ) -> Vec<TixDiagnostic> {
     errors
         .iter()

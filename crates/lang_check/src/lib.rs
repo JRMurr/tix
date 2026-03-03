@@ -25,7 +25,8 @@ use infer_expr::{PendingHasField, PendingMerge, PendingOverload, PendingWithFall
 use la_arena::ArenaMap;
 use lang_ast::{AstDb, Expr, ExprId, Module, NameId, NameResolution, NixFile, OverloadBinOp};
 use lang_ty::{OutputTy, PrimitiveTy, Ty};
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -468,7 +469,7 @@ pub struct CheckCtx<'db> {
     /// with the alias name. Used during canonicalization to wrap the result in
     /// OutputTy::Named so hover display shows the alias name instead of the
     /// fully expanded structural type.
-    alias_provenance: HashMap<TyId, smol_str::SmolStr>,
+    alias_provenance: FxHashMap<TyId, smol_str::SmolStr>,
 
     /// Context argument types for the root lambda (from `tix.toml` context
     /// configuration). Maps parameter names (e.g. "config", "lib", "pkgs") to
@@ -482,13 +483,13 @@ pub struct CheckCtx<'db> {
     /// variable's type (e.g. `if x == null`), this maps the variable's NameId
     /// to a branch-local TyId. Consulted in `infer_reference` before the
     /// normal name resolution path. Pushed/popped around branch inference.
-    narrow_overrides: HashMap<NameId, TyId>,
+    narrow_overrides: FxHashMap<NameId, TyId>,
 
     /// Names whose type annotations and context args were pre-applied before
     /// SCC groups (in `pre_apply_entry_lambda_annotations`). These names
     /// should be skipped during Lambda inference in `infer_root` to avoid
     /// double-applying the annotation.
-    pre_annotated_params: HashSet<NameId>,
+    pre_annotated_params: FxHashSet<NameId>,
 
     /// Optional deadline for inference. Checked after each SCC group and
     /// periodically during expression inference; if exceeded, remaining work
@@ -561,10 +562,10 @@ impl<'db> CheckCtx<'db> {
             early_canonical: ArenaMap::new(),
             type_aliases,
             import_types,
-            alias_provenance: HashMap::new(),
+            alias_provenance: FxHashMap::default(),
             context_args,
-            narrow_overrides: HashMap::new(),
-            pre_annotated_params: HashSet::new(),
+            narrow_overrides: FxHashMap::default(),
+            pre_annotated_params: FxHashSet::default(),
             deadline: None,
             op_counter: 0,
             deadline_exceeded: false,
