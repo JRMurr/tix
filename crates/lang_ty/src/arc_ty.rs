@@ -445,10 +445,7 @@ impl fmt::Display for PrimitiveTy {
             PrimitiveTy::String => write!(f, "string"),
             PrimitiveTy::Path => write!(f, "path"),
             PrimitiveTy::Uri => write!(f, "uri"),
-            // Number displays as "int | float" to match user expectations. This is
-            // distinct from OutputTy::Union([Int, Float]) which would be structurally
-            // different but semantically equivalent in display.
-            PrimitiveTy::Number => write!(f, "int | float"),
+            PrimitiveTy::Number => write!(f, "number"),
         }
     }
 }
@@ -553,5 +550,22 @@ mod tests {
         };
         let result = ty.normalize_replacing_unknown();
         assert_eq!(format!("{result}"), "int -> string");
+    }
+
+    #[test]
+    fn number_displays_as_number() {
+        // Number in lambda position must not produce "int | float -> int | float"
+        // (which looks like a 3-member union). It should display as "number -> number".
+        let ty = OutputTy::Lambda {
+            param: OutputTy::Primitive(PrimitiveTy::Number).into(),
+            body: OutputTy::Primitive(PrimitiveTy::Number).into(),
+        };
+        assert_eq!(format!("{ty}"), "number -> number");
+    }
+
+    #[test]
+    fn number_displays_standalone() {
+        let ty = OutputTy::Primitive(PrimitiveTy::Number);
+        assert_eq!(format!("{ty}"), "number");
     }
 }
