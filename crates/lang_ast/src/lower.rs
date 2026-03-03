@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use la_arena::Arena;
 use rnix::ast::{self, HasEntry};
@@ -336,7 +336,7 @@ impl LowerCtx {
 struct MergingSet {
     ptr: AstPtr,
     name_kind: NameKind,
-    statics: HashMap<SmolStr, MergingEntry>,
+    statics: BTreeMap<SmolStr, MergingEntry>,
     inherit_froms: Vec<ExprId>,
     dynamics: Vec<(ExprId, ExprId)>,
 }
@@ -368,7 +368,7 @@ impl MergingSet {
         Self {
             ptr,
             name_kind,
-            statics: HashMap::new(),
+            statics: BTreeMap::new(),
             inherit_froms: Vec::new(),
             dynamics: Vec::new(),
         }
@@ -534,7 +534,7 @@ impl MergingSet {
         value: BindingValue,
         doc_comments: Option<DocComments>,
     ) {
-        use std::collections::hash_map::Entry;
+        use std::collections::btree_map::Entry;
         match self.statics.entry(key.clone()) {
             Entry::Occupied(mut ent) => {
                 // The same key appears twice in this attrset/let-block. Nix allows
@@ -622,6 +622,9 @@ impl MergingSet {
 
     fn finish(self, ctx: &mut LowerCtx) -> Bindings {
         Bindings {
+            // BTreeMap iteration is sorted by key (SmolStr), giving deterministic
+            // binding order regardless of insertion order. This prevents spurious
+            // Salsa cache invalidation on identical re-parses.
             statics: self
                 .statics
                 .into_values()
@@ -682,6 +685,21 @@ mod tests {
             matches!(entry, Expr::Missing),
             "expected Expr::Missing for overflowed integer, got {entry:?}"
         );
+    }
+
+    #[test]
+    fn bindings_order_is_deterministic() {
+        // Lower the same source multiple times. Because HashMap iteration is
+        // non-deterministic, without sorting the statics the resulting Modules
+        // could differ. With sorting they must be identical.
+        let src = "{ z = 1; a = 2; m = 3; b = 4; y = 5; }";
+        let modules: Vec<_> = (0..20).map(|_| lower_src(src)).collect();
+        for (i, m) in modules.iter().enumerate().skip(1) {
+            assert_eq!(
+                modules[0], *m,
+                "Module {i} differs from Module 0 — non-deterministic binding order"
+            );
+        }
     }
 
     #[test]
