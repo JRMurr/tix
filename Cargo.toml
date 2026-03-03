@@ -32,7 +32,7 @@ globset = "0.4"
 dashmap = "6"
 parking_lot = "0.12"
 tower-lsp = "0.20"
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-std"] }
 
 # Optimize all dependencies in test profile. PBT tests run 450k+ iterations
 # through parsing → lowering → inference, so unoptimized code is a major
