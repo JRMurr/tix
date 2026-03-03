@@ -155,15 +155,15 @@ impl LowerCtx {
                 Expr::Literal(Literal::Path(path.syntax().to_string()))
             }
             ast::Expr::Literal(literal) => {
-                // TODO: no expect...., should do missing if its sad..
                 let lit = match literal.kind() {
-                    ast::LiteralKind::Float(float) => {
-                        let val = float.value().expect("should be valid float");
-                        Literal::Float(ordered_float::OrderedFloat(val))
-                    }
-                    ast::LiteralKind::Integer(integer) => {
-                        Literal::Integer(integer.value().expect("should be valid integer"))
-                    }
+                    ast::LiteralKind::Float(float) => match float.value() {
+                        Ok(val) => Literal::Float(ordered_float::OrderedFloat(val)),
+                        Err(_) => return self.exprs.alloc(Expr::Missing),
+                    },
+                    ast::LiteralKind::Integer(integer) => match integer.value() {
+                        Ok(val) => Literal::Integer(val),
+                        Err(_) => return self.exprs.alloc(Expr::Missing),
+                    },
                     ast::LiteralKind::Uri(_uri) => Literal::Uri,
                 };
 
@@ -183,8 +183,10 @@ impl LowerCtx {
             ast::Expr::BinOp(bin_op) => {
                 let lhs = self.lower_expr_opt(bin_op.lhs());
 
-                // TODO: handle this better, maybe keep the option in the expr type?
-                let op = bin_op.operator().expect("Should have operator").into();
+                let op = match bin_op.operator() {
+                    Some(op) => op.into(),
+                    None => return self.exprs.alloc(Expr::Missing),
+                };
 
                 let rhs = self.lower_expr_opt(bin_op.rhs());
 
@@ -201,15 +203,19 @@ impl LowerCtx {
                 }
             }
             ast::Expr::UnaryOp(unary_op) => {
-                let op = unary_op.operator().expect("Should have operator");
+                let op = match unary_op.operator() {
+                    Some(op) => op,
+                    None => return self.exprs.alloc(Expr::Missing),
+                };
 
                 let expr = self.lower_expr_opt(unary_op.expr());
 
                 Expr::UnaryOp { op, expr }
             }
-            ast::Expr::Ident(ident) => {
-                Expr::Reference(name_of_ident(ident).expect("Should have name"))
-            }
+            ast::Expr::Ident(ident) => match name_of_ident(ident) {
+                Some(name) => Expr::Reference(name),
+                None => Expr::Missing,
+            },
             ast::Expr::Assert(assert) => {
                 let cond = self.lower_expr_opt(assert.condition());
                 let body = self.lower_expr_opt(assert.body());
@@ -235,9 +241,11 @@ impl LowerCtx {
             .map(|attr| match attr {
                 ast::Attr::Dynamic(d) => self.lower_expr_opt(d.expr()),
                 ast::Attr::Ident(ident) => {
-                    let name = name_of_ident(&ident).expect("Should have a name");
                     let ptr = AstPtr::new(ident.syntax());
-                    self.alloc_expr(Expr::Literal(Literal::String(name)), ptr)
+                    match name_of_ident(&ident) {
+                        Some(name) => self.alloc_expr(Expr::Literal(Literal::String(name)), ptr),
+                        None => self.exprs.alloc(Expr::Missing),
+                    }
                 }
                 ast::Attr::Str(s) => self.lower_string(&s),
             })
@@ -275,7 +283,7 @@ impl LowerCtx {
         // let mut param_locs = HashMap::new();
         let lower_name = |this: &mut Self, node: ast::Ident, kind: NameKind| -> NameId {
             let ptr = AstPtr::new(node.syntax());
-            let text = name_of_ident(&node).expect("Should have name");
+            let text = name_of_ident(&node).unwrap_or_default();
             this.alloc_name(text, kind, ptr, None) // TODO: doc comments?
         };
 
@@ -301,7 +309,7 @@ impl LowerCtx {
                             .cloned();
                         let name = entry.ident().map(|i| {
                             let ptr = AstPtr::new(i.syntax());
-                            let text = name_of_ident(&i).expect("Should have name");
+                            let text = name_of_ident(&i).unwrap_or_default();
                             self.alloc_name(text, NameKind::PatField, ptr, docs)
                         });
                         let default_expr = entry.default().map(|e| self.lower_expr(e));
@@ -648,5 +656,42 @@ impl MergingSet {
             bindings,
         };
         ctx.alloc_expr(expr, ptr)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper: parse Nix source and lower to Module.
+    fn lower_src(src: &str) -> Module {
+        let parse = rnix::Root::parse(src);
+        let root = parse.tree();
+        let doc_comments = crate::comment::gather_doc_comments(&root);
+        let (module, _source_map) = lower(root, doc_comments);
+        module
+    }
+
+    #[test]
+    fn integer_overflow_produces_missing() {
+        // 99999999999999999999 overflows i64; should lower to Expr::Missing
+        // instead of panicking.
+        let module = lower_src("99999999999999999999");
+        let entry = &module.exprs[module.entry_expr];
+        assert!(
+            matches!(entry, Expr::Missing),
+            "expected Expr::Missing for overflowed integer, got {entry:?}"
+        );
+    }
+
+    #[test]
+    fn valid_integer_lowered() {
+        // Sanity check: valid integers still work.
+        let module = lower_src("42");
+        let entry = &module.exprs[module.entry_expr];
+        assert!(
+            matches!(entry, Expr::Literal(Literal::Integer(42))),
+            "expected Literal::Integer(42), got {entry:?}"
+        );
     }
 }
