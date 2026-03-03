@@ -65,6 +65,7 @@ pub enum ResolveResult {
 pub const GLOBAL_BUILTIN_NAMES: &[&str] = &[
     "abort",
     "baseNameOf",
+    "builtins",
     "derivation",
     "dirOf",
     "false",
@@ -92,6 +93,7 @@ pub fn lookup_global_builtin(name: &str) -> Option<&'static str> {
     match name {
         "abort" => Some("abort"),
         "baseNameOf" => Some("baseNameOf"),
+        "builtins" => Some("builtins"),
         "derivation" => Some("derivation"),
         "dirOf" => Some("dirOf"),
         "false" => Some("false"),
@@ -837,6 +839,24 @@ mod tests {
             *resolved,
             ResolveResult::Builtin("toString"),
             "toString should resolve as a builtin"
+        );
+    }
+
+    #[test]
+    fn builtins_resolves_as_builtin() {
+        // Bare `builtins` reference should resolve as a builtin so LSP
+        // hover/goto-def works. See code review issue #14.
+        let (db, file, module) = setup("builtins.isNull null");
+        let name_res = name_resolution(&db, file);
+
+        let ref_expr = find_ref_expr(&module, "builtins");
+        let resolved = name_res
+            .get(ref_expr)
+            .expect("builtins reference should resolve");
+        assert_eq!(
+            *resolved,
+            ResolveResult::Builtin("builtins"),
+            "builtins should resolve as a builtin"
         );
     }
 

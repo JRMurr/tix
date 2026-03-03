@@ -24,11 +24,11 @@ pub(super) fn get_str_literal(s: &ast::Str) -> Option<String> {
 
     let parts = s.normalized_parts();
 
+    // Indented strings (''...'') can produce multiple literal parts after
+    // normalization in some edge cases. Return None to let the caller fall
+    // back to StringInterpolation, matching the duplicate in lsp/ty_nav.rs.
     if parts.len() > 1 {
-        panic!(
-            "There should only be at most one string part if there is no interpolation\n{s}\n parts:{}",
-            parts.len()
-        );
+        return None;
     }
 
     let lit = match parts.first() {

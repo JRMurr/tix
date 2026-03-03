@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use la_arena::Arena;
-use rnix::ast::{self, HasEntry};
+use rnix::ast::{self, AstToken, HasEntry};
 use rowan::ast::AstNode;
 use smol_str::SmolStr;
 
@@ -150,10 +150,7 @@ impl LowerCtx {
                 Expr::HasAttr { set, attrpath }
             }
             ast::Expr::Str(s) => return self.lower_string(s),
-            ast::Expr::Path(path) => {
-                // TODO: real handling
-                Expr::Literal(Literal::Path(path.syntax().to_string()))
-            }
+            ast::Expr::Path(path) => return self.lower_path(path),
             ast::Expr::Literal(literal) => {
                 let lit = match literal.kind() {
                     ast::LiteralKind::Float(float) => match float.value() {
@@ -279,6 +276,38 @@ impl LowerCtx {
             .collect()
     }
 
+    fn lower_path(&mut self, path: &ast::Path) -> ExprId {
+        let ptr = AstPtr::new(path.syntax());
+
+        // Check if the path has any interpolation parts. rnix's Path::parts()
+        // returns InterpolPart<PathContent> where literal segments are PathContent
+        // tokens (via .syntax().text() → &str) and interpolations are Interpol nodes.
+        let has_interpolation = path
+            .parts()
+            .any(|p| matches!(p, ast::InterpolPart::Interpolation(_)));
+
+        if !has_interpolation {
+            let expr = Expr::Literal(Literal::Path(path.syntax().to_string()));
+            return self.alloc_expr(expr, ptr);
+        }
+
+        // Lower each part: literal path segments become Literal, interpolations
+        // get their sub-expressions lowered so they participate in type checking.
+        let parts: Box<[InterpolPart<SmolStr>]> = path
+            .parts()
+            .map(|p| match p {
+                ast::InterpolPart::Literal(content) => {
+                    InterpolPart::Literal(content.syntax().text().into())
+                }
+                ast::InterpolPart::Interpolation(interpol) => {
+                    InterpolPart::Interpol(self.lower_expr_opt(interpol.expr()))
+                }
+            })
+            .collect();
+
+        self.alloc_expr(Expr::PathInterpolation(parts), ptr)
+    }
+
     fn lower_lambda(&mut self, lam: &ast::Lambda, ptr: AstPtr) -> ExprId {
         // let mut param_locs = HashMap::new();
         let lower_name = |this: &mut Self, node: ast::Ident, kind: NameKind| -> NameId {
@@ -356,11 +385,8 @@ struct MergingEntry {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub enum BindingValueKind {
     Expr(Option<ast::Expr>),
-    ImplicitSet, // TODO: handle this for real
-    ExplicitSet(ast::AttrSet),
 }
 
 impl MergingSet {
@@ -574,30 +600,22 @@ impl MergingSet {
         match AttrKind::of(attr) {
             AttrKind::Static(key) => {
                 let key = key.unwrap_or_default();
-                // ImplicitSet/ExplicitSet are never constructed (all call sites
-                // use BindingValueKind::Expr), so only the Expr arm matters.
-                if let BindingValueKind::Expr(e) = value {
-                    // If the key already has an implicit nested set (from `a.b = 1`)
-                    // and the expression is an explicit attrset (`a = { c = 2; }`),
-                    // merge the explicit set's bindings into the implicit one.
-                    if let Some(ast::Expr::AttrSet(attr_set)) = &e {
-                        if let Some(entry) = self.statics.get_mut(&key) {
-                            if let Some(nested) = &mut entry.set {
-                                nested.merge_bindings(ctx, attr_set);
-                                return;
-                            }
+                let BindingValueKind::Expr(e) = value;
+
+                // If the key already has an implicit nested set (from `a.b = 1`)
+                // and the expression is an explicit attrset (`a = { c = 2; }`),
+                // merge the explicit set's bindings into the implicit one.
+                if let Some(ast::Expr::AttrSet(attr_set)) = &e {
+                    if let Some(entry) = self.statics.get_mut(&key) {
+                        if let Some(nested) = &mut entry.set {
+                            nested.merge_bindings(ctx, attr_set);
+                            return;
                         }
                     }
-
-                    let e = ctx.lower_expr_opt(e);
-                    self.merge_static_value(
-                        ctx,
-                        key,
-                        attr_ptr,
-                        BindingValue::Expr(e),
-                        doc_comments,
-                    );
                 }
+
+                let e = ctx.lower_expr_opt(e);
+                self.merge_static_value(ctx, key, attr_ptr, BindingValue::Expr(e), doc_comments);
             }
             AttrKind::Dynamic(key_expr) => {
                 self.push_dynamic(ctx, key_expr, value);
@@ -612,11 +630,8 @@ impl MergingSet {
         value: BindingValueKind,
     ) {
         let key_expr = ctx.lower_expr_opt(key_expr);
-        let value_expr = match value {
-            BindingValueKind::Expr(e) => ctx.lower_expr_opt(e),
-            // ImplicitSet/ExplicitSet are never constructed; degrade gracefully.
-            _ => ctx.lower_expr_opt(None),
-        };
+        let BindingValueKind::Expr(e) = value;
+        let value_expr = ctx.lower_expr_opt(e);
         self.dynamics.push((key_expr, value_expr));
     }
 
@@ -710,6 +725,32 @@ mod tests {
         assert!(
             matches!(entry, Expr::Literal(Literal::Integer(42))),
             "expected Literal::Integer(42), got {entry:?}"
+        );
+    }
+
+    #[test]
+    fn path_without_interpolation_is_literal() {
+        let module = lower_src("./some/path.nix");
+        let entry = &module.exprs[module.entry_expr];
+        assert!(
+            matches!(entry, Expr::Literal(Literal::Path(_))),
+            "plain path should lower to Literal::Path, got {entry:?}"
+        );
+    }
+
+    #[test]
+    fn path_with_interpolation_is_path_interpolation() {
+        // Regression: path interpolation `./dir/${name}/file` should produce
+        // Expr::PathInterpolation so sub-expressions get type-checked.
+        // See code review issue #3.
+        let module = lower_src(r#"let name = "foo"; in ./dir/${name}/file.nix"#);
+        // Find the PathInterpolation expression in the module.
+        let has_path_interp = module
+            .exprs()
+            .any(|(_, e)| matches!(e, Expr::PathInterpolation(_)));
+        assert!(
+            has_path_interp,
+            "path with interpolation should produce Expr::PathInterpolation"
         );
     }
 }

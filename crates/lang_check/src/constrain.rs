@@ -515,9 +515,14 @@ impl CheckCtx<'_> {
             match sub_attr.fields.get(key) {
                 Some(sub_field) => self.constrain(*sub_field, *sup_field)?,
                 None => {
-                    // Skip the error if the field is optional in the supertype
-                    // (it has a default value in the lambda pattern).
-                    if !sub_attr.open && !sup_attr.optional_fields.contains(key) {
+                    // If the sub has a dyn_ty, use it to satisfy the missing
+                    // named field: dyn_ty represents the type of any field not
+                    // explicitly listed, so sub.dyn_ty <: sup_field must hold.
+                    if let Some(sub_dyn) = sub_attr.dyn_ty {
+                        self.constrain(sub_dyn, *sup_field)?;
+                    } else if !sub_attr.open && !sup_attr.optional_fields.contains(key) {
+                        // Skip the error if the field is optional in the supertype
+                        // (it has a default value in the lambda pattern).
                         return Err(InferenceError::MissingField {
                             field: key.clone(),
                             available: sub_attr.fields.keys().cloned().collect(),
@@ -535,6 +540,13 @@ impl CheckCtx<'_> {
                 }
             }
         }
+
+        // Propagate dyn_ty constraints: if both attrsets have a dynamic field
+        // type, the sub's dyn_ty must be a subtype of the sup's dyn_ty.
+        if let (Some(sub_dyn), Some(sup_dyn)) = (sub_attr.dyn_ty, sup_attr.dyn_ty) {
+            self.constrain(sub_dyn, sup_dyn)?;
+        }
+
         Ok(())
     }
 }

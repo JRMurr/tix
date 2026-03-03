@@ -862,6 +862,26 @@ test_case!(
     String
 );
 
+// Regression: path interpolation should type-check sub-expressions and infer
+// as path. Previously, all paths were lowered as opaque literals, losing
+// interpolated sub-expressions. See code review issue #3.
+test_case!(
+    path_interpolation_infers_path,
+    r#"let name = "foo"; in ./dir/${name}/file.nix"#,
+    Path
+);
+
+// Regression: indented multi-line strings without interpolation should infer
+// as string (not panic in get_str_literal). See code review issue #13.
+test_case!(
+    indented_multiline_string_no_panic,
+    "''
+      hello
+      world
+    ''",
+    String
+);
+
 // ==============================================================================
 // `with` expression
 // ==============================================================================
@@ -1158,6 +1178,43 @@ fn dynamic_intermediate_attr_key() {
         matches!(ty, OutputTy::AttrSet(_)),
         "dynamic intermediate key should produce attrset, got: {ty}"
     );
+}
+
+// Regression: constrain_attrsets should propagate dyn_ty constraints.
+// When both sub and sup attrsets have dyn_ty, sub.dyn_ty <: sup.dyn_ty
+// should be enforced. See code review issue #9.
+#[test]
+fn dyn_ty_constraint_both_attrsets() {
+    // Declare a function that accepts {_: string, ...} and a value of {_: int, ...}.
+    // Passing the int-valued map to the string-accepting function should error.
+    let registry = registry_from_tix(indoc! {"
+        val intMap :: { _: int, ... } -> int;
+        val strMap :: { _: string, ... };
+    "});
+    let nix_src = "intMap strMap";
+    let (_module, result) = check_str_with_aliases(nix_src, &registry);
+    assert!(
+        result.is_err(),
+        "dyn_ty int should not satisfy dyn_ty string in function argument"
+    );
+}
+
+// When sub has dyn_ty and sup has a named field that sub lacks,
+// sub.dyn_ty should be constrained to the sup field type.
+#[test]
+fn dyn_ty_constrains_missing_named_field() {
+    let registry = registry_from_tix("val dynSet :: { _: int, ... };");
+    // dynSet has {_: int, ...}; accessing .name should yield int (via dyn_ty).
+    // If we pass it to a function expecting {name: string, ...}, it should error
+    // because dyn_ty (int) doesn't match the required field type (string).
+    let nix_src = indoc! {r#"
+        let f = { name, ... }: name;
+        in f dynSet
+    "#};
+    let ty = get_inferred_root_with_aliases(nix_src, &registry);
+    // After the fix, dyn_ty (int) should flow through to `name`, giving it
+    // int type (instead of an unconstrained type variable).
+    assert_eq!(ty, OutputTy::Primitive(PrimitiveTy::Int));
 }
 
 // ==============================================================================

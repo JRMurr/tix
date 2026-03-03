@@ -242,6 +242,9 @@ impl CheckCtx<'_> {
             "true" | "false" => Ok(self.alloc_prim(PrimitiveTy::Bool)),
             "null" => Ok(self.alloc_prim(PrimitiveTy::Null)),
 
+            // The `builtins` attrset itself — synthesize the full attrset.
+            "builtins" => self.synth_builtins_attrset(),
+
             // Unknown builtins get a fresh type variable — graceful degradation.
             _ => Ok(self.new_var()),
         }
