@@ -4,10 +4,12 @@ title: Union constraint snapshot/rollback for correct union subtyping
 status: To Do
 assignee: []
 created_date: '2026-03-03 02:43'
+updated_date: '2026-03-03 03:00'
 labels:
   - bug
   - type-inference
   - correctness
+milestone: m-0
 dependencies: []
 references:
   - 'crates/lang_check/src/constrain.rs:474'

@@ -4,10 +4,11 @@ title: Reduce allocations in hot-path constraint propagation
 status: To Do
 assignee: []
 created_date: '2026-03-03 02:44'
-updated_date: '2026-03-03 02:58'
+updated_date: '2026-03-03 03:04'
 labels:
   - performance
   - type-inference
+milestone: m-0
 dependencies:
   - TASK-001
   - TASK-002

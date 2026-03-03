@@ -4,10 +4,12 @@ title: 'LSP: Nested arg autocomplete doesn''t work'
 status: To Do
 assignee: []
 created_date: '2026-03-03 02:43'
+updated_date: '2026-03-03 03:01'
 labels:
   - bug
   - lsp
   - completion
+milestone: m-0
 dependencies: []
 references:
   - TODO/Tasks.md

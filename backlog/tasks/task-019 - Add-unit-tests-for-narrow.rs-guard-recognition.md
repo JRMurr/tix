@@ -4,9 +4,11 @@ title: Add unit tests for narrow.rs guard recognition
 status: To Do
 assignee: []
 created_date: '2026-03-03 02:45'
+updated_date: '2026-03-03 03:07'
 labels:
   - test-coverage
   - narrowing
+milestone: m-0
 dependencies: []
 references:
   - crates/lang_ast/src/narrow.rs
@@ -20,6 +22,9 @@ priority: medium
 `crates/lang_ast/src/narrow.rs` (645 lines) has zero unit tests. Complex condition analysis is only tested indirectly through integration tests. Guard recognition, alias tracing, and the `MAX_ALIAS_TRACE_DEPTH` mechanism are untested in isolation.
 
 Additionally, several existing narrowing tests have weak assertions — they only verify "doesn't crash" rather than checking inferred types (`narrow_hasfield_preserves_original_constraints`, `narrow_let_generalization_preserved`, `e2e_multi_file::multiple_files_independent`).
+
+**human notes**
+There is a fair amount of narrow tests spread around. Do an audit before implementing
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

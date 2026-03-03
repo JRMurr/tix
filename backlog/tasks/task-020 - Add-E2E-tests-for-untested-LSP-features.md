@@ -4,15 +4,17 @@ title: Add E2E tests for untested LSP features
 status: To Do
 assignee: []
 created_date: '2026-03-03 02:45'
+updated_date: '2026-03-03 03:08'
 labels:
   - test-coverage
   - lsp
+milestone: m-0
 dependencies: []
 references:
   - crates/lsp/tests/common/mod.rs
   - crates/lsp/tests/e2e_*.rs
   - 'TODO/code_review.md (item #28)'
-priority: medium
+priority: high
 ---
 
 ## Description

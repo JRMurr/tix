@@ -4,10 +4,12 @@ title: 'Stub generator: fix tryEval failures and namespace doc comments'
 status: To Do
 assignee: []
 created_date: '2026-03-03 02:45'
+updated_date: '2026-03-03 03:05'
 labels:
   - feature
   - stubs
   - dx
+milestone: m-0
 dependencies: []
 references:
   - SESSION.md

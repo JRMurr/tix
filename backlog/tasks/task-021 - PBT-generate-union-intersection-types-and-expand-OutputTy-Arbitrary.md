@@ -4,18 +4,19 @@ title: 'PBT: generate union/intersection types and expand OutputTy Arbitrary'
 status: To Do
 assignee: []
 created_date: '2026-03-03 02:45'
-updated_date: '2026-03-03 02:58'
+updated_date: '2026-03-03 03:08'
 labels:
   - test-coverage
   - pbt
   - type-inference
+milestone: m-0
 dependencies:
   - TASK-001
 references:
   - 'crates/lang_check/src/pbt/mod.rs:219'
   - 'crates/lang_ty/src/arbitrary.rs:15-38'
   - 'TODO/code_review.md (items #29, #30)'
-priority: medium
+priority: high
 ---
 
 ## Description

@@ -4,10 +4,11 @@ title: Deduplicate shared code across crates
 status: To Do
 assignee: []
 created_date: '2026-03-03 02:45'
-updated_date: '2026-03-03 02:58'
+updated_date: '2026-03-03 03:06'
 labels:
   - tech-debt
   - code-quality
+milestone: m-0
 dependencies:
   - TASK-001
 references:

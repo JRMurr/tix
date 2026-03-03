@@ -4,14 +4,15 @@ title: 'LSP: did_change_configuration bypasses DashMap snapshots'
 status: To Do
 assignee: []
 created_date: '2026-03-03 02:43'
+updated_date: '2026-03-03 03:03'
 labels:
   - bug
   - lsp
   - concurrency
+milestone: m-0
 dependencies: []
 references:
   - 'crates/lsp/src/server.rs:758-810'
-  - 'TODO/code_review.md (item #11)'
 priority: medium
 ---
 

@@ -4,14 +4,16 @@ title: Add machine-readable CLI output (JSON/SARIF)
 status: To Do
 assignee: []
 created_date: '2026-03-03 02:46'
+updated_date: '2026-03-03 03:08'
 labels:
   - feature
   - cli
   - dx
+milestone: m-0
 dependencies: []
 references:
   - SESSION.md
-priority: low
+priority: medium
 ---
 
 ## Description

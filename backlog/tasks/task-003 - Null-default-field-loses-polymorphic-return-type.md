@@ -4,10 +4,11 @@ title: Null-default field loses polymorphic return type
 status: To Do
 assignee: []
 created_date: '2026-03-03 02:43'
-updated_date: '2026-03-03 02:58'
+updated_date: '2026-03-03 03:00'
 labels:
   - bug
   - type-inference
+milestone: m-0
 dependencies:
   - TASK-002
 references:

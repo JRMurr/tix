@@ -4,10 +4,12 @@ title: 'LSP: Hover on multi-element attrpaths shows wrong type'
 status: To Do
 assignee: []
 created_date: '2026-03-03 02:44'
+updated_date: '2026-03-03 03:03'
 labels:
   - bug
   - lsp
   - hover
+milestone: m-0
 dependencies: []
 references:
   - SESSION.md
