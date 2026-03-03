@@ -88,6 +88,47 @@ async fn close_clears_diagnostics() {
     h.shutdown().await;
 }
 
+/// Editing one file must not discard pending diagnostics for another file.
+///
+/// Regression: `pending_diags.clear()` used to wipe diagnostics for ALL files
+/// whenever ANY file event arrived during the quiescence window. Now only the
+/// affected file's pending diagnostics are removed.
+#[tokio::test]
+async fn edit_one_file_preserves_other_files_diagnostics() {
+    let mut h =
+        LspTestHarness::new(&[("a.nix", "let x = undefined_a; in x"), ("b.nix", "42")]).await;
+
+    // Open the error file and get its diagnostics.
+    h.open("a.nix").await;
+    let diags_a = h.wait_for_diagnostics("a.nix", TIMEOUT).await.unwrap();
+    assert!(
+        !diags_a.diagnostics.is_empty(),
+        "a.nix should have diagnostics"
+    );
+
+    // Open and edit the clean file — this sends events that must not
+    // clear a.nix's pending diagnostics if they haven't been published yet.
+    h.open("b.nix").await;
+    h.edit("b.nix", "let y = undefined_b; in y").await;
+
+    // b.nix should get its own diagnostics.
+    let diags_b = h.wait_for_diagnostics("b.nix", TIMEOUT).await.unwrap();
+    assert!(
+        !diags_b.diagnostics.is_empty(),
+        "b.nix should have diagnostics for undefined_b"
+    );
+
+    // Now edit a.nix (re-trigger analysis) and verify diagnostics still arrive.
+    h.edit("a.nix", "let x = still_undefined; in x").await;
+    let diags_a2 = h.wait_for_diagnostics("a.nix", TIMEOUT).await.unwrap();
+    assert!(
+        !diags_a2.diagnostics.is_empty(),
+        "a.nix diagnostics should not be lost after editing b.nix"
+    );
+
+    h.shutdown().await;
+}
+
 /// Duplicate key diagnostic should have related information pointing to
 /// the first definition.
 #[tokio::test]

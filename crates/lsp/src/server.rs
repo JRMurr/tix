@@ -256,9 +256,17 @@ fn spawn_analysis_loop(
                     }
                     result = rx.recv() => match result {
                         Some(ev) => {
-                            // New event arrived — stale diagnostics discarded,
-                            // timer reset after next analysis completes.
-                            pending_diags.clear();
+                            // New event arrived — only discard diagnostics for the
+                            // affected file, not all files. Clearing everything would
+                            // lose diagnostics for unrelated files that completed
+                            // analysis during the quiescence window.
+                            match &ev {
+                                AnalysisEvent::FileChanged { path, .. }
+                                | AnalysisEvent::ReanalyzeFile { path } => {
+                                    pending_diags.remove(path);
+                                }
+                                AnalysisEvent::FileClosed { .. } => {}
+                            }
                             diag_timer = None;
                             ev
                         }

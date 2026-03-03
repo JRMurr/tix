@@ -356,6 +356,13 @@ mod tests {
         );
     }
 
+    // TODO: resolve_to_concrete_id returns the first concrete bound when
+    // multiple exist, which can lose information (e.g. picking `null` from
+    // `null | int`). A fix to return None for multiple bounds regresses
+    // extrusion-dependent tests (wrapper_foldl_int_and_list). The fix needs
+    // to account for the poly_type_env / extrusion flow that depends on
+    // seeing through variables to find Lambda structure.
+
     #[test]
     fn find_pinned_concrete_returns_none_for_unpinned() {
         let mut tt = TypeTable::new();
