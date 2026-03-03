@@ -4,11 +4,13 @@ title: Improve nixpkgs lib stub coverage
 status: To Do
 assignee: []
 created_date: '2026-03-03 02:44'
+updated_date: '2026-03-03 02:58'
 labels:
   - feature
   - stubs
   - dx
-dependencies: []
+dependencies:
+  - TASK-016
 references:
   - scripts/gen_lib_stubs.py
   - stubs/lib.tix

@@ -4,10 +4,12 @@ title: Fix chained || null guard narrowing error
 status: To Do
 assignee: []
 created_date: '2026-03-03 02:43'
+updated_date: '2026-03-03 02:58'
 labels:
   - bug
   - narrowing
-dependencies: []
+dependencies:
+  - TASK-019
 references:
   - SESSION.md
 priority: medium

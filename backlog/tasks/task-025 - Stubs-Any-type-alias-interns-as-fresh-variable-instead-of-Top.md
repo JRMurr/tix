@@ -4,11 +4,13 @@ title: 'Stubs: Any type alias interns as fresh variable instead of Top'
 status: To Do
 assignee: []
 created_date: '2026-03-03 02:46'
+updated_date: '2026-03-03 02:58'
 labels:
   - bug
   - stubs
   - display
-dependencies: []
+dependencies:
+  - TASK-001
 references:
   - SESSION.md
 priority: low

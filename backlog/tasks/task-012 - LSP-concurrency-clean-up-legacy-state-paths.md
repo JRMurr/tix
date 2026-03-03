@@ -4,11 +4,13 @@ title: 'LSP concurrency: clean up legacy state paths'
 status: To Do
 assignee: []
 created_date: '2026-03-03 02:44'
+updated_date: '2026-03-03 02:58'
 labels:
   - tech-debt
   - lsp
   - concurrency
-dependencies: []
+dependencies:
+  - TASK-009
 references:
   - SESSION.md
   - crates/lsp/src/state.rs

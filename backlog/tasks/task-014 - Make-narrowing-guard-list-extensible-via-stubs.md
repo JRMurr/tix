@@ -4,11 +4,14 @@ title: Make narrowing guard list extensible via stubs
 status: To Do
 assignee: []
 created_date: '2026-03-03 02:44'
+updated_date: '2026-03-03 02:58'
 labels:
   - feature
   - narrowing
   - stubs
-dependencies: []
+dependencies:
+  - TASK-005
+  - TASK-019
 references:
   - 'crates/lang_ast/src/narrow.rs:89'
   - comment_parser/src/tix_decl.pest

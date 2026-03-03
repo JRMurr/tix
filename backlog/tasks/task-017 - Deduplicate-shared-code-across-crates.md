@@ -4,10 +4,12 @@ title: Deduplicate shared code across crates
 status: To Do
 assignee: []
 created_date: '2026-03-03 02:45'
+updated_date: '2026-03-03 02:58'
 labels:
   - tech-debt
   - code-quality
-dependencies: []
+dependencies:
+  - TASK-001
 references:
   - crates/comment_parser/src/collect.rs
   - crates/comment_parser/src/tix_collect.rs

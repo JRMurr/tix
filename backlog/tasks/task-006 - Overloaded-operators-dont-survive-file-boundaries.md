@@ -4,11 +4,13 @@ title: Overloaded operators don't survive file boundaries
 status: To Do
 assignee: []
 created_date: '2026-03-03 02:43'
+updated_date: '2026-03-03 02:58'
 labels:
   - bug
   - type-inference
   - multi-file
-dependencies: []
+dependencies:
+  - TASK-004
 references:
   - SESSION.md
 priority: medium

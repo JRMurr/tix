@@ -4,10 +4,13 @@ title: 'Write onboarding guide, FAQ, and error catalog'
 status: To Do
 assignee: []
 created_date: '2026-03-03 02:46'
+updated_date: '2026-03-03 02:58'
 labels:
   - docs
   - dx
-dependencies: []
+dependencies:
+  - TASK-001
+  - TASK-002
 references:
   - SESSION.md
   - docs/src/SUMMARY.md
