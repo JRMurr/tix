@@ -62,7 +62,7 @@ let
 
   rustTests = craneLib.cargoNextest (commonArgs // {
     inherit cargoArtifacts;
-    nativeBuildInputs = [ pkgs.cargo-nextest ];
+    nativeBuildInputs = [ pkgs.cargo-nextest pkgs.nixfmt ];
     cargoNextestExtraArgs = "--failure-output immediate --success-output never";
   });
 
