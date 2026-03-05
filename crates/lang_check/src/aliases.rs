@@ -129,9 +129,11 @@ pub struct TypeAliasRegistry {
     loaded_module_stubs: HashSet<SmolStr>,
 
     /// Source locations for type aliases loaded from disk-based `.tix` files.
+    /// Multiple locations per alias when the same name appears in several
+    /// stub files (e.g. `module pkgs` in both `lib.tix` and `generated/pkgs.tix`).
     /// Populated by `load_tix_file_with_path` — compiled-in stubs (via
     /// `load_tix_file`) intentionally have no locations.
-    alias_locations: HashMap<SmolStr, AliasLocation>,
+    alias_locations: HashMap<SmolStr, Vec<AliasLocation>>,
 }
 
 /// Controls where val declarations are routed during `load_declarations`.
@@ -183,17 +185,19 @@ impl TypeAliasRegistry {
 
     /// Walk declarations and record `AliasLocation` entries for each
     /// `TypeAlias` and `Module` (using the capitalized alias name for modules).
+    /// Pushes to existing entries so aliases spread across multiple files
+    /// accumulate all their locations.
     fn record_alias_locations(&mut self, declarations: &[TixDeclaration], path: &Path) {
         for decl in declarations {
             match decl {
                 TixDeclaration::TypeAlias { name, span, .. } => {
-                    self.alias_locations.insert(
-                        name.clone(),
-                        AliasLocation {
+                    self.alias_locations
+                        .entry(name.clone())
+                        .or_default()
+                        .push(AliasLocation {
                             file_path: path.to_path_buf(),
                             span: *span,
-                        },
-                    );
+                        });
                 }
                 TixDeclaration::Module {
                     name,
@@ -203,13 +207,13 @@ impl TypeAliasRegistry {
                 } => {
                     // Modules generate a capitalized alias (e.g. "lib" -> "Lib").
                     let alias_name = capitalize(name);
-                    self.alias_locations.insert(
-                        alias_name,
-                        AliasLocation {
+                    self.alias_locations
+                        .entry(alias_name)
+                        .or_default()
+                        .push(AliasLocation {
                             file_path: path.to_path_buf(),
                             span: *span,
-                        },
-                    );
+                        });
                     // Recurse into nested modules.
                     self.record_alias_locations(nested, path);
                 }
@@ -218,10 +222,14 @@ impl TypeAliasRegistry {
         }
     }
 
-    /// Look up the source location of a type alias definition in a `.tix` file.
-    /// Returns `None` for compiled-in stubs and aliases not loaded from disk.
-    pub fn alias_location(&self, name: &str) -> Option<&AliasLocation> {
-        self.alias_locations.get(name)
+    /// Look up the source locations of a type alias definition in `.tix` files.
+    /// Returns an empty slice for compiled-in stubs and aliases not loaded from
+    /// disk. Multiple entries when the alias is defined across several files.
+    pub fn alias_locations(&self, name: &str) -> &[AliasLocation] {
+        self.alias_locations
+            .get(name)
+            .map(|v| v.as_slice())
+            .unwrap_or_default()
     }
 
     /// Recursively load declarations. `val_target` controls where val
@@ -1415,11 +1423,10 @@ mod tests {
         let mut registry = TypeAliasRegistry::new();
         registry.load_tix_file_with_path(&file, &path);
 
-        let loc = registry
-            .alias_location("Derivation")
-            .expect("should have location");
-        assert_eq!(loc.file_path, path);
-        assert_eq!(loc.span, (0, stub.len()));
+        let locs = registry.alias_locations("Derivation");
+        assert_eq!(locs.len(), 1, "should have exactly one location");
+        assert_eq!(locs[0].file_path, path);
+        assert_eq!(locs[0].span, (0, stub.len()));
     }
 
     #[test]
@@ -1432,11 +1439,10 @@ mod tests {
         registry.load_tix_file_with_path(&file, &path);
 
         // Module "lib" generates alias "Lib".
-        let loc = registry
-            .alias_location("Lib")
-            .expect("module alias should have location");
-        assert_eq!(loc.file_path, path);
-        assert_eq!(loc.span, (0, stub.len()));
+        let locs = registry.alias_locations("Lib");
+        assert_eq!(locs.len(), 1, "module alias should have one location");
+        assert_eq!(locs[0].file_path, path);
+        assert_eq!(locs[0].span, (0, stub.len()));
     }
 
     #[test]
@@ -1444,7 +1450,7 @@ mod tests {
         let registry = TypeAliasRegistry::with_builtins();
         // "Lib" is defined in the compiled-in stubs — no file path.
         assert!(
-            registry.alias_location("Lib").is_none(),
+            registry.alias_locations("Lib").is_empty(),
             "compiled-in stubs should not have locations"
         );
     }
@@ -1458,8 +1464,27 @@ mod tests {
         registry.load_tix_file(&file);
 
         assert!(
-            registry.alias_location("Foo").is_none(),
+            registry.alias_locations("Foo").is_empty(),
             "load_tix_file should not record locations"
         );
+    }
+
+    #[test]
+    fn multiple_stubs_accumulate_locations() {
+        let stub_a = "module pkgs { val hello :: string; }";
+        let stub_b = "module pkgs { val gcc :: string; }";
+        let file_a = parse_tix_file(stub_a).expect("parse a");
+        let file_b = parse_tix_file(stub_b).expect("parse b");
+        let path_a = std::path::PathBuf::from("/tmp/a.tix");
+        let path_b = std::path::PathBuf::from("/tmp/b.tix");
+
+        let mut registry = TypeAliasRegistry::new();
+        registry.load_tix_file_with_path(&file_a, &path_a);
+        registry.load_tix_file_with_path(&file_b, &path_b);
+
+        let locs = registry.alias_locations("Pkgs");
+        assert_eq!(locs.len(), 2, "should accumulate locations from both stubs");
+        assert_eq!(locs[0].file_path, path_a);
+        assert_eq!(locs[1].file_path, path_b);
     }
 }

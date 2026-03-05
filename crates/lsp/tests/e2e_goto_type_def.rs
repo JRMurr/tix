@@ -68,6 +68,85 @@ async fn goto_type_def_named_alias() {
     h.shutdown().await;
 }
 
+/// When two stub files both define `module pkgs`, typeDefinition should return
+/// locations from both files so the user can pick which one to jump to.
+#[tokio::test]
+async fn goto_type_def_multiple_stubs() {
+    let mut h = LspTestHarness::new(&[
+        (
+            "tix.toml",
+            indoc! {r#"
+                stubs = ["a.tix", "b.tix"]
+            "#},
+        ),
+        (
+            "a.tix",
+            indoc! {"
+                module pkgs {
+                    val hello :: string;
+                }
+            "},
+        ),
+        (
+            "b.tix",
+            indoc! {"
+                module pkgs {
+                    val gcc :: string;
+                }
+            "},
+        ),
+        (
+            "test.nix",
+            indoc! {"
+                let
+                    /** type: pkgs :: Pkgs */
+                    pkgs = { hello = \"hi\"; gcc = \"gcc\"; };
+                in pkgs
+                #  ^1
+            "},
+        ),
+    ])
+    .await;
+
+    h.open("test.nix").await;
+    let _ = h.wait_for_diagnostics("test.nix", TIMEOUT).await;
+
+    let m = h.markers("test.nix");
+
+    let result = h
+        .goto_type_def("test.nix", m[&1].line, m[&1].character)
+        .await
+        .expect("goto_type_def should return a result");
+
+    let locs = match result {
+        GotoDefinitionResponse::Array(locs) => locs,
+        other => panic!("expected Array response, got {other:?}"),
+    };
+
+    assert_eq!(
+        locs.len(),
+        2,
+        "should return locations from both stub files"
+    );
+
+    let uri_a = Url::from_file_path(h.workspace.path("a.tix")).unwrap();
+    let uri_b = Url::from_file_path(h.workspace.path("b.tix")).unwrap();
+    assert_eq!(locs[0].uri, uri_a);
+    assert_eq!(locs[1].uri, uri_b);
+
+    // Range should cover only the header line (`module pkgs {`), not the
+    // entire block. Both stubs have the module on line 0.
+    for loc in &locs {
+        assert_eq!(loc.range.start.line, 0);
+        assert_eq!(
+            loc.range.end.line, 0,
+            "range should not extend past the header line"
+        );
+    }
+
+    h.shutdown().await;
+}
+
 /// Go-to-type-definition on a plain int should return None (no alias).
 #[tokio::test]
 async fn goto_type_def_plain_type_returns_null() {

@@ -878,10 +878,12 @@ impl LanguageServer for TixLanguageServer {
         };
         let root = snap_ref.syntax.parsed.tree();
         let registry = &self.state.lock().registry;
-        Ok(
-            crate::type_def::goto_type_definition(&snap_ref, pos, &root, registry)
-                .map(GotoDefinitionResponse::Scalar),
-        )
+        let locs = crate::type_def::goto_type_definition(&snap_ref, pos, &root, registry);
+        if locs.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(GotoDefinitionResponse::Array(locs)))
+        }
     }
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
