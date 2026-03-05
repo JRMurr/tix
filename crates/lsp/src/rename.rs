@@ -24,7 +24,17 @@ pub fn prepare_rename(
     pos: Position,
     root: &rnix::Root,
 ) -> Option<PrepareRenameResponse> {
-    let target = crate::references::name_at_position(analysis, pos, root)?;
+    let target = match crate::references::name_at_position(analysis, pos, root) {
+        Some(t) => t,
+        None => {
+            log::debug!(
+                "prepare_rename: no name at position {:?} (offset {})",
+                pos,
+                analysis.syntax.line_index.offset(pos)
+            );
+            return None;
+        }
+    };
 
     // Get the name's source range.
     let ptr = analysis.syntax.source_map.nodes_for_name(target).next()?;

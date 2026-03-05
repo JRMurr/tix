@@ -37,12 +37,12 @@ by design, or informational notes.
 - **rnix error recovery** on incomplete code (`pkgs.` with no field) can cascade,
   mangling subsequent expressions. Upstream issue.
 
-- **Rename "not renameable" in editor**: User reports F2 on `nix/rust.nix` shows
-  "not renameable" for all bindings. E2E tests cannot reproduce — rename works
-  correctly through the test harness (including rust.nix-shaped files with doc
-  annotations, inherit, dotted selects). Suspected editor-side timing issue:
-  `prepareRename` sent before analysis snapshot exists → `ContentModified` error
-  interpreted as "not renameable". Needs investigation with real editor logs.
+- **Rename "not renameable" in editor** (FIXED): Root cause was `name_at_position`
+  using only `right_biased()` for `token_at_offset`. When the cursor is at the end
+  of an identifier (a token boundary), `right_biased()` picks the whitespace token
+  instead of the identifier. VS Code sends cursor positions at the end of words.
+  Fix: try right-biased first, then fall back to left-biased. Regression test:
+  `references::tests::name_at_end_of_identifier`.
 
 ### Minor Untracked Items
 

@@ -14,17 +14,37 @@ use crate::state::FileSnapshot;
 
 /// Find the NameId under the cursor. Works on both definition sites (where a
 /// name is bound) and reference sites (where a name is used).
+///
+/// When the cursor is at a token boundary (e.g. end of an identifier), we try
+/// right-biased first, then fall back to left-biased. This handles the common
+/// case where editors send the cursor position at the end of the word.
 pub fn name_at_position(
     analysis: &FileSnapshot,
     pos: Position,
     root: &rnix::Root,
 ) -> Option<NameId> {
     let offset = analysis.syntax.line_index.offset(pos);
-    let token = root
-        .syntax()
-        .token_at_offset(rowan::TextSize::from(offset))
-        .right_biased()?;
+    let token_at = root.syntax().token_at_offset(rowan::TextSize::from(offset));
 
+    // Try right-biased first (handles cursor at start/middle of token),
+    // then left-biased (handles cursor at end of identifier).
+    let right = token_at.clone().right_biased();
+    let left = token_at.left_biased();
+
+    for token in right.into_iter().chain(left) {
+        if let Some(name_id) = resolve_token_to_name(analysis, &token) {
+            return Some(name_id);
+        }
+    }
+
+    None
+}
+
+/// Walk up from a token to find a NameId (definition or reference site).
+fn resolve_token_to_name(
+    analysis: &FileSnapshot,
+    token: &rowan::SyntaxToken<rnix::NixLanguage>,
+) -> Option<NameId> {
     let mut node = token.parent()?;
     loop {
         let ptr = AstPtr::new(&node);
@@ -143,6 +163,27 @@ mod tests {
 
         let refs = refs_at_marker(src, 1, false);
         assert_eq!(refs.len(), 0, "x has no references");
+    }
+
+    /// Regression: cursor at the end of an identifier (right after the last
+    /// char) should still resolve to that name. VS Code often sends the cursor
+    /// position at the end of the word when the user presses F2.
+    #[test]
+    fn name_at_end_of_identifier() {
+        let src = "let foo = 1; in foo";
+        let t = TestAnalysis::new(src);
+        let analysis = t.snapshot();
+
+        // Position cursor right after `foo` in the definition (byte offset 7,
+        // which is the space after `foo`). This is what VS Code sends when the
+        // cursor is at the end of the word.
+        let pos = analysis.syntax.line_index.position(7); // "let foo " -> after 'o'
+        let result = name_at_position(&analysis, pos, &t.root);
+        assert!(
+            result.is_some(),
+            "cursor at end of identifier `foo` (offset 7, pos {:?}) should resolve to a name",
+            pos,
+        );
     }
 
     #[test]

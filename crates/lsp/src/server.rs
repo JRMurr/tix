@@ -1003,9 +1003,14 @@ impl LanguageServer for TixLanguageServer {
         &self,
         params: TextDocumentPositionParams,
     ) -> Result<Option<PrepareRenameResponse>> {
-        self.with_snapshot(&params.text_document.uri, |snapshot, root| {
-            crate::rename::prepare_rename(snapshot, params.position, root)
-        })
+        let uri = &params.text_document.uri;
+        let pos = params.position;
+        log::debug!("prepare_rename: uri={uri}, pos={pos:?}");
+        let result = self.with_snapshot(uri, |snapshot, root| {
+            crate::rename::prepare_rename(snapshot, pos, root)
+        });
+        log::debug!("prepare_rename: result={result:?}");
+        result
     }
 
     async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
