@@ -13,5 +13,6 @@
 # Set TIX_ROOT to override if launching from elsewhere.
 pkgs.writeShellScriptBin name ''
   root="''${TIX_ROOT:-.}"
+  export RUST_LOG=debug
   exec "$root/target/${profile}/tix" lsp "$@"
 ''
