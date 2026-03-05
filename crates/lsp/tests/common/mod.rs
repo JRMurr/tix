@@ -362,6 +362,295 @@ impl LspTestHarness {
         serde_json::from_value::<GotoDefinitionResponse>(value).ok()
     }
 
+    /// Find references at a given line/character position.
+    pub async fn references(
+        &mut self,
+        name: &str,
+        line: u32,
+        character: u32,
+        include_declaration: bool,
+    ) -> Option<Vec<Location>> {
+        let path = self.workspace.path(name);
+        let uri = Url::from_file_path(&path).unwrap();
+
+        let req = Request::build("textDocument/references")
+            .params(json!({
+                "textDocument": { "uri": uri.as_str() },
+                "position": { "line": line, "character": character },
+                "context": { "includeDeclaration": include_declaration }
+            }))
+            .id(self.next_id())
+            .finish();
+
+        let resp = self.send_request(req).await?;
+        let (_id, result) = resp.into_parts();
+        let value = result.ok()?;
+        serde_json::from_value::<Vec<Location>>(value).ok()
+    }
+
+    /// Prepare rename at a given position (validates rename is possible).
+    pub async fn prepare_rename(
+        &mut self,
+        name: &str,
+        line: u32,
+        character: u32,
+    ) -> Option<PrepareRenameResponse> {
+        let path = self.workspace.path(name);
+        let uri = Url::from_file_path(&path).unwrap();
+
+        let req = Request::build("textDocument/prepareRename")
+            .params(json!({
+                "textDocument": { "uri": uri.as_str() },
+                "position": { "line": line, "character": character }
+            }))
+            .id(self.next_id())
+            .finish();
+
+        let resp = self.send_request(req).await?;
+        let (_id, result) = resp.into_parts();
+        let value = result.ok()?;
+        serde_json::from_value::<PrepareRenameResponse>(value).ok()
+    }
+
+    /// Rename a symbol at a given position.
+    pub async fn rename(
+        &mut self,
+        name: &str,
+        line: u32,
+        character: u32,
+        new_name: &str,
+    ) -> Option<WorkspaceEdit> {
+        let path = self.workspace.path(name);
+        let uri = Url::from_file_path(&path).unwrap();
+
+        let req = Request::build("textDocument/rename")
+            .params(json!({
+                "textDocument": { "uri": uri.as_str() },
+                "position": { "line": line, "character": character },
+                "newName": new_name
+            }))
+            .id(self.next_id())
+            .finish();
+
+        let resp = self.send_request(req).await?;
+        let (_id, result) = resp.into_parts();
+        let value = result.ok()?;
+        serde_json::from_value::<WorkspaceEdit>(value).ok()
+    }
+
+    /// Signature help at a given position.
+    pub async fn signature_help(
+        &mut self,
+        name: &str,
+        line: u32,
+        character: u32,
+    ) -> Option<SignatureHelp> {
+        let path = self.workspace.path(name);
+        let uri = Url::from_file_path(&path).unwrap();
+
+        let req = Request::build("textDocument/signatureHelp")
+            .params(json!({
+                "textDocument": { "uri": uri.as_str() },
+                "position": { "line": line, "character": character }
+            }))
+            .id(self.next_id())
+            .finish();
+
+        let resp = self.send_request(req).await?;
+        let (_id, result) = resp.into_parts();
+        let value = result.ok()?;
+        serde_json::from_value::<SignatureHelp>(value).ok()
+    }
+
+    /// Document highlight at a given position.
+    pub async fn document_highlight(
+        &mut self,
+        name: &str,
+        line: u32,
+        character: u32,
+    ) -> Option<Vec<DocumentHighlight>> {
+        let path = self.workspace.path(name);
+        let uri = Url::from_file_path(&path).unwrap();
+
+        let req = Request::build("textDocument/documentHighlight")
+            .params(json!({
+                "textDocument": { "uri": uri.as_str() },
+                "position": { "line": line, "character": character }
+            }))
+            .id(self.next_id())
+            .finish();
+
+        let resp = self.send_request(req).await?;
+        let (_id, result) = resp.into_parts();
+        let value = result.ok()?;
+        serde_json::from_value::<Vec<DocumentHighlight>>(value).ok()
+    }
+
+    /// Document symbols for a file.
+    pub async fn document_symbols(&mut self, name: &str) -> Option<DocumentSymbolResponse> {
+        let path = self.workspace.path(name);
+        let uri = Url::from_file_path(&path).unwrap();
+
+        let req = Request::build("textDocument/documentSymbol")
+            .params(json!({
+                "textDocument": { "uri": uri.as_str() }
+            }))
+            .id(self.next_id())
+            .finish();
+
+        let resp = self.send_request(req).await?;
+        let (_id, result) = resp.into_parts();
+        let value = result.ok()?;
+        serde_json::from_value::<DocumentSymbolResponse>(value).ok()
+    }
+
+    /// Semantic tokens for a file.
+    pub async fn semantic_tokens(&mut self, name: &str) -> Option<SemanticTokensResult> {
+        let path = self.workspace.path(name);
+        let uri = Url::from_file_path(&path).unwrap();
+
+        let req = Request::build("textDocument/semanticTokens/full")
+            .params(json!({
+                "textDocument": { "uri": uri.as_str() }
+            }))
+            .id(self.next_id())
+            .finish();
+
+        let resp = self.send_request(req).await?;
+        let (_id, result) = resp.into_parts();
+        let value = result.ok()?;
+        serde_json::from_value::<SemanticTokensResult>(value).ok()
+    }
+
+    /// Document links for a file.
+    pub async fn document_links(&mut self, name: &str) -> Option<Vec<DocumentLink>> {
+        let path = self.workspace.path(name);
+        let uri = Url::from_file_path(&path).unwrap();
+
+        let req = Request::build("textDocument/documentLink")
+            .params(json!({
+                "textDocument": { "uri": uri.as_str() }
+            }))
+            .id(self.next_id())
+            .finish();
+
+        let resp = self.send_request(req).await?;
+        let (_id, result) = resp.into_parts();
+        let value = result.ok()?;
+        serde_json::from_value::<Vec<DocumentLink>>(value).ok()
+    }
+
+    /// Format a document.
+    pub async fn formatting(&mut self, name: &str) -> Option<Vec<TextEdit>> {
+        let path = self.workspace.path(name);
+        let uri = Url::from_file_path(&path).unwrap();
+
+        let req = Request::build("textDocument/formatting")
+            .params(json!({
+                "textDocument": { "uri": uri.as_str() },
+                "options": { "tabSize": 2, "insertSpaces": true }
+            }))
+            .id(self.next_id())
+            .finish();
+
+        let resp = self.send_request(req).await?;
+        let (_id, result) = resp.into_parts();
+        let value = result.ok()?;
+        serde_json::from_value::<Vec<TextEdit>>(value).ok()
+    }
+
+    /// Inlay hints for a range in a file.
+    pub async fn inlay_hints(&mut self, name: &str, range: Range) -> Option<Vec<InlayHint>> {
+        let path = self.workspace.path(name);
+        let uri = Url::from_file_path(&path).unwrap();
+
+        let req = Request::build("textDocument/inlayHint")
+            .params(json!({
+                "textDocument": { "uri": uri.as_str() },
+                "range": {
+                    "start": { "line": range.start.line, "character": range.start.character },
+                    "end": { "line": range.end.line, "character": range.end.character }
+                }
+            }))
+            .id(self.next_id())
+            .finish();
+
+        let resp = self.send_request(req).await?;
+        let (_id, result) = resp.into_parts();
+        let value = result.ok()?;
+        serde_json::from_value::<Vec<InlayHint>>(value).ok()
+    }
+
+    /// Selection ranges for multiple positions in a file.
+    pub async fn selection_range(
+        &mut self,
+        name: &str,
+        positions: &[Position],
+    ) -> Option<Vec<SelectionRange>> {
+        let path = self.workspace.path(name);
+        let uri = Url::from_file_path(&path).unwrap();
+
+        let positions_json: Vec<_> = positions
+            .iter()
+            .map(|p| json!({ "line": p.line, "character": p.character }))
+            .collect();
+
+        let req = Request::build("textDocument/selectionRange")
+            .params(json!({
+                "textDocument": { "uri": uri.as_str() },
+                "positions": positions_json
+            }))
+            .id(self.next_id())
+            .finish();
+
+        let resp = self.send_request(req).await?;
+        let (_id, result) = resp.into_parts();
+        let value = result.ok()?;
+        serde_json::from_value::<Vec<SelectionRange>>(value).ok()
+    }
+
+    /// Code actions for a range in a file.
+    pub async fn code_actions(
+        &mut self,
+        name: &str,
+        range: Range,
+        diagnostics: Vec<Diagnostic>,
+    ) -> Option<CodeActionResponse> {
+        let path = self.workspace.path(name);
+        let uri = Url::from_file_path(&path).unwrap();
+
+        let req = Request::build("textDocument/codeAction")
+            .params(json!({
+                "textDocument": { "uri": uri.as_str() },
+                "range": {
+                    "start": { "line": range.start.line, "character": range.start.character },
+                    "end": { "line": range.end.line, "character": range.end.character }
+                },
+                "context": { "diagnostics": diagnostics }
+            }))
+            .id(self.next_id())
+            .finish();
+
+        let resp = self.send_request(req).await?;
+        let (_id, result) = resp.into_parts();
+        let value = result.ok()?;
+        serde_json::from_value::<CodeActionResponse>(value).ok()
+    }
+
+    /// Workspace symbols matching a query.
+    #[allow(deprecated)] // SymbolInformation has deprecated fields
+    pub async fn workspace_symbols(&mut self, query: &str) -> Option<Vec<SymbolInformation>> {
+        let req = Request::build("workspace/symbol")
+            .params(json!({ "query": query }))
+            .id(self.next_id())
+            .finish();
+
+        let resp = self.send_request(req).await?;
+        let (_id, result) = resp.into_parts();
+        let value = result.ok()?;
+        serde_json::from_value::<Vec<SymbolInformation>>(value).ok()
+    }
+
     // ==========================================================================
     // Diagnostics
     // ==========================================================================
