@@ -1075,6 +1075,110 @@ fn arb_annotation_multi_usage() -> impl Strategy<Value = (String, String)> {
     })
 }
 
+/// Usage patterns for a pattern-field annotated parameter `pkgs`.
+#[derive(Debug, Clone, Copy)]
+enum PatFieldUsagePattern {
+    /// `{ pkgs, ... }: pkgs` — direct return
+    DirectReturn,
+    /// `{ pkgs, ... }: let y = pkgs; in y` — let-rebinding
+    LetRebind,
+    /// `{ pkgs, ... }: pkgs.name` — field access
+    FieldAccess,
+    /// `{ pkgs, ... }: { inherit pkgs; }` — inherit
+    Inherit,
+}
+
+const ALL_PAT_FIELD_PATTERNS: &[PatFieldUsagePattern] = &[
+    PatFieldUsagePattern::DirectReturn,
+    PatFieldUsagePattern::LetRebind,
+    PatFieldUsagePattern::FieldAccess,
+    PatFieldUsagePattern::Inherit,
+];
+
+/// Generate Nix source with `# type: pkgs :: Alias` on a pattern field
+/// and a usage of `pkgs` in the body. Returns (alias_name, nix_source).
+fn arb_pat_field_annotation() -> impl Strategy<Value = (String, String)> {
+    let alias_idx = 0..ANNOTATION_ALIASES.len();
+    let pattern_idx = 0..ALL_PAT_FIELD_PATTERNS.len();
+
+    (alias_idx, pattern_idx).prop_map(|(alias_idx, pattern_idx)| {
+        let (alias_name, _) = ANNOTATION_ALIASES[alias_idx];
+        let pattern = ALL_PAT_FIELD_PATTERNS[pattern_idx];
+
+        let nix_src = match pattern {
+            PatFieldUsagePattern::DirectReturn => {
+                format!("{{\n  # type: pkgs :: {alias_name}\n  pkgs,\n  ...\n}}: pkgs")
+            }
+            PatFieldUsagePattern::LetRebind => {
+                format!(
+                    "{{\n  # type: pkgs :: {alias_name}\n  pkgs,\n  ...\n}}:\n\
+                     let y = pkgs; in y"
+                )
+            }
+            PatFieldUsagePattern::FieldAccess => {
+                format!(
+                    "{{\n  # type: pkgs :: {alias_name}\n  pkgs,\n  ...\n}}:\n\
+                     pkgs.name"
+                )
+            }
+            PatFieldUsagePattern::Inherit => {
+                format!(
+                    "{{\n  # type: pkgs :: {alias_name}\n  pkgs,\n  ...\n}}:\n\
+                     {{ inherit pkgs; }}"
+                )
+            }
+        };
+
+        (alias_name.to_string(), nix_src)
+    })
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: 256, .. ProptestConfig::default()
+    })]
+
+    /// Pattern field annotation: expr_ty_map for references to a
+    /// pattern-field annotated parameter should show Named(alias, ...).
+    /// This exercises the pre_apply_entry_lambda_annotations path
+    /// (annotations on destructured lambda parameters).
+    #[test]
+    fn test_annotation_pat_field_usage_named(
+        (alias_name, nix_src) in arb_pat_field_annotation()
+    ) {
+        let registry = &*ANNOTATION_REGISTRY;
+        let (module, inference) = check_str_with_aliases(&nix_src, registry);
+        let inference = inference.expect("should not produce a type error");
+
+        let ref_types: Vec<_> = module
+            .exprs()
+            .filter_map(|(expr_id, expr)| {
+                if let Expr::Reference(name) = expr {
+                    if name == "pkgs" {
+                        return inference
+                            .expr_ty_map
+                            .get(expr_id)
+                            .map(|ty| format!("{ty:?}"));
+                    }
+                }
+                None
+            })
+            .collect();
+
+        prop_assert!(
+            !ref_types.is_empty(),
+            "should find at least one reference to `pkgs`"
+        );
+        for ty_str in &ref_types {
+            prop_assert!(
+                ty_str.contains("Named") && ty_str.contains(&alias_name),
+                "reference to `pkgs` should be Named(\"{}\", ...), got: {:?}",
+                alias_name, ref_types
+            );
+        }
+    }
+}
+
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: 256, .. ProptestConfig::default()
