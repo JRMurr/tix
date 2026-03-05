@@ -915,6 +915,15 @@ impl CheckCtx<'_> {
             };
             // Value type flows into the name slot.
             self.constrain_equal(value_ty, name_ty)?;
+
+            // Propagate alias provenance to the binding name so that
+            // hover on the name (e.g. in `{ inherit pkgs; }`) shows
+            // the alias instead of a bare type variable.
+            if self.types.is_var(value_ty) {
+                if let Some(alias_name) = self.alias_provenance.get(&value_ty).cloned() {
+                    self.alias_provenance.entry(name_ty).or_insert(alias_name);
+                }
+            }
         }
 
         Ok(())
@@ -951,6 +960,16 @@ impl CheckCtx<'_> {
                 }
             };
             self.constrain_equal(value_ty, name_ty)?;
+
+            // Propagate alias provenance to the binding name (same as
+            // infer_bindings above) so hover on attrset field names shows
+            // the alias.
+            if self.types.is_var(value_ty) {
+                if let Some(alias_name) = self.alias_provenance.get(&value_ty).cloned() {
+                    self.alias_provenance.entry(name_ty).or_insert(alias_name);
+                }
+            }
+
             fields.insert(name_text, value_ty);
         }
 

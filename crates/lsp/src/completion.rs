@@ -1140,6 +1140,51 @@ mod tests {
         );
     }
 
+    /// Dot completion on a pattern field annotated with a type alias.
+    /// The alias provides the attrset type without a concrete call site.
+    #[test]
+    fn dot_completion_alias_typed_pat_field() {
+        use lang_check::aliases::TypeAliasRegistry;
+
+        let stubs = r#"
+            type Pkgs = { lib: { id: a -> a, ... }, hello: string, ... };
+        "#;
+        let file = comment_parser::parse_tix_file(stubs).expect("parse stubs");
+        let mut registry = TypeAliasRegistry::new();
+        registry.load_tix_file(&file);
+
+        let src = indoc! {r#"
+            {
+              # type: pkgs :: Pkgs
+              pkgs,
+              ...
+            }:
+            pkgs.
+            #    ^1
+        "#};
+
+        let t = TestAnalysis::with_registry(src, registry);
+        let analysis = t.snapshot();
+        let markers = parse_markers(src);
+        let pos = analysis.syntax.line_index.position(markers[&1]);
+        let docs = DocIndex::new();
+
+        let items = match completion(&analysis, pos, &t.root, &docs, &analysis.syntax.line_index) {
+            Some(CompletionResponse::Array(items)) => items,
+            _ => Vec::new(),
+        };
+        let names = labels(&items);
+        eprintln!("alias_typed completions: {names:?}");
+        assert!(
+            names.contains(&"lib"),
+            "should complete `lib` from Pkgs alias, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"hello"),
+            "should complete `hello` from Pkgs alias, got: {names:?}"
+        );
+    }
+
     /// Regression test: dot completion works when using a fresh parse tree
     /// against stale analysis results. This simulates the real LSP scenario
     /// where the user types `.` (a trigger character) and the editor sends
