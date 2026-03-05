@@ -42,6 +42,10 @@ let
   # Phase 2: Build workspace crates, reusing pre-built deps.
   rustBin = craneLib.buildPackage (commonArgs // {
     inherit cargoArtifacts;
+    # Tests are run separately via rustTests (checks.tests) which has the
+    # needed extra dependencies like nixfmt. Skip them here to avoid
+    # duplicating test deps in the binary build.
+    doCheck = false;
   });
 
   # ==============================================================================
