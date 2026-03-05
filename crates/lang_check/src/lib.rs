@@ -841,10 +841,17 @@ impl<'db> CheckCtx<'db> {
             // pushes all union members as lower bounds into the inferred param,
             // causing false type errors. Skip these with a warning.
             //
+            // Only skip for actual function bindings (expr_arity > 0). For
+            // non-function bindings (lambda params, simple let-bindings), there's
+            // no body-vs-annotation conflict — the constraint is safe. This
+            // prevents over-skipping where a nested union in a field type (e.g.
+            // `module pkgs { val mkDerivation :: (A | B) -> D; }`) would
+            // incorrectly cause the entire annotation to be dropped.
+            //
             // Expand alias references to detect unions hidden behind type aliases
             // (e.g. `Nullable = int | null`).
             let has_union = known_ty.contains_union_resolving(&|name| self.type_aliases.get(name));
-            if has_union {
+            if has_union && expr_arity > 0 {
                 // Still intern and record provenance for display purposes,
                 // but don't apply constraints.
                 let annotation_ty = self.intern_fresh_ty(known_ty);

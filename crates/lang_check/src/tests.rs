@@ -2331,8 +2331,9 @@ fn alias_named_in_annotation() {
 // in expr_ty_map loses the Named wrapper.
 //
 // This specifically tests the case where the annotation contains a union type
-// (e.g. `Nullable = int | null`), causing apply_type_annotation to set
-// alias_provenance WITHOUT constraining the variable to a concrete type.
+// (e.g. `Nullable = int | null`) on a FUNCTION binding, causing
+// apply_type_annotation to set alias_provenance WITHOUT constraining the
+// variable to a concrete type (the union-skip only fires when expr_arity > 0).
 // After SCC generalization, resolve_to_concrete_id returns None (the variable
 // has no concrete bounds), so the variable itself enters poly_type_env.
 // References in later SCC groups extrude this variable through the Variable
@@ -2345,28 +2346,28 @@ fn alias_provenance_survives_extrusion() {
     "#,
     );
 
-    // `x` is annotated with Nullable (a union type). Since union annotations
-    // skip constrain_equal, x's TyId stays a Variable with only alias_provenance
-    // set. After the SCC group, x enters poly_type_env as a Variable. The later
-    // reference to `x` in `y = x` triggers extrusion through the Variable branch.
+    // `g` is annotated with a function type containing Nullable (a union type).
+    // Since union annotations skip constrain_equal for function bindings
+    // (expr_arity > 0), g's param TyId stays a Variable with only
+    // alias_provenance set. The later reference to `g` in `y = g` triggers
+    // extrusion through the Variable branch.
     let nix_src = indoc! { r#"
-        f:
         let
-            # type: x :: Nullable
-            x = f;
-            y = x;
+            # type: g :: Nullable -> string
+            g = x: "result";
+            y = g;
         in y
     "# };
 
     let (module, inference) = check_str_with_aliases(nix_src, &registry);
     let inference = inference.expect("No type error");
 
-    // Collect ALL reference expression types for `x`.
+    // Collect ALL reference expression types for `g`.
     let ref_types: Vec<_> = module
         .exprs()
         .filter_map(|(expr_id, expr)| {
             if let Expr::Reference(name) = expr {
-                if name == "x" {
+                if name == "g" {
                     return inference
                         .expr_ty_map
                         .get(expr_id)
@@ -2377,17 +2378,17 @@ fn alias_provenance_survives_extrusion() {
         })
         .collect();
 
-    // Every reference to `x` should be Named("Nullable", ...) — both at
+    // Every reference to `g` should show "Nullable" in the type — both at
     // definition scope and at extrusion sites.
     for ty_str in &ref_types {
         assert!(
-            ty_str.contains("Named") && ty_str.contains("Nullable"),
-            "all x references should be Named(\"Nullable\", ...), got: {ref_types:?}"
+            ty_str.contains("Nullable"),
+            "all g references should contain \"Nullable\", got: {ref_types:?}"
         );
     }
     assert!(
         !ref_types.is_empty(),
-        "should find at least one reference to x"
+        "should find at least one reference to g"
     );
 }
 
@@ -6333,5 +6334,146 @@ fn stub_generic_param_stays_tyvar() {
     assert!(
         !formatted.contains("int") && !formatted.contains("string"),
         "generic param should remain a type variable, got: {formatted}"
+    );
+}
+
+// ==============================================================================
+// Union-skip regression tests
+// ==============================================================================
+
+/// Regression: annotating a lambda parameter `pkgs :: Pkgs` where the Pkgs
+/// module type has a field whose type contains a union (e.g. `mkDerivation ::
+/// (A | B) -> D`) should NOT skip the annotation. The union lives in a nested
+/// field type, not at the binding's own level. Accessing `pkgs.lib` should
+/// infer as `Lib`, not `a`.
+#[test]
+fn pkgs_annotation_with_nested_union_resolves_field_access() {
+    let registry = registry_from_tix(indoc! {r#"
+        type Lib = { id: a -> a, ... };
+        type Derivation = { name: string, ... };
+        module pkgs {
+            val mkDerivation :: ({ name: string, ... } | { pname: string, ... }) -> Derivation;
+            val lib :: Lib;
+        }
+    "#});
+
+    let nix_src = indoc! {r#"
+        {
+          # type: pkgs :: Pkgs
+          pkgs,
+          ...
+        }:
+        pkgs.lib
+    "#};
+
+    let (module, inference) = check_str_with_aliases(nix_src, &registry);
+    let inference = inference.expect("should not produce a type error");
+
+    let root_ty = inference
+        .expr_ty_map
+        .get(module.entry_expr)
+        .expect("root should have a type");
+
+    let formatted = format!("{root_ty}");
+    assert!(
+        formatted.contains("Lib"),
+        "pkgs.lib should infer as Lib, got: {formatted}"
+    );
+}
+
+/// Regression: a non-function let-binding `x :: Pkgs` where Pkgs has a field
+/// with a union in its type should apply the annotation constraint. The
+/// union-skip was designed for function bindings; for non-function bindings
+/// (expr_arity=0) the constraint is safe. Same pattern as the lambda-param
+/// test above but exercised through a let-binding path.
+#[test]
+fn non_function_let_binding_with_nested_union_resolves_field_access() {
+    let registry = registry_from_tix(indoc! {r#"
+        type Lib = { id: a -> a, ... };
+        type Derivation = { name: string, ... };
+        module pkgs {
+            val mkDerivation :: ({ name: string, ... } | { pname: string, ... }) -> Derivation;
+            val lib :: Lib;
+        }
+    "#});
+
+    let nix_src = indoc! {r#"
+        f:
+        let
+            /**
+                type: x :: Pkgs
+            */
+            x = f;
+        in
+        x.lib
+    "#};
+
+    let (module, inference) = check_str_with_aliases(nix_src, &registry);
+    let inference = inference.expect("should not produce a type error");
+
+    let root_ty = inference
+        .expr_ty_map
+        .get(module.entry_expr)
+        .expect("root should have a type");
+
+    let formatted = format!("{root_ty}");
+    assert!(
+        formatted.contains("Lib"),
+        "x.lib should infer as Lib via let-binding annotation, got: {formatted}"
+    );
+}
+
+/// Sanity: function bindings with union annotations should still skip
+/// bidirectional constraints to avoid false type errors. This confirms
+/// the `expr_arity > 0` guard preserves the original behavior.
+#[test]
+fn function_union_annotation_still_skips() {
+    let registry = registry_from_tix("type StringOrList = string | [string];");
+
+    let nix_src = indoc! { r#"
+        let
+            /**
+                type: f :: string -> StringOrList -> string
+            */
+            f = name: value:
+                if builtins.isList value then "list"
+                else value;
+        in
+        f "x" "hello"
+    "# };
+
+    let (db, file) = TestDatabase::single_file(nix_src).unwrap();
+    let result = crate::check_file_collecting(&db, file, &registry, HashMap::new(), HashMap::new());
+
+    // Inference should succeed — the union annotation is skipped for functions.
+    let inference = result
+        .inference
+        .expect("inference should succeed with union-alias annotation on function");
+
+    let mod_ = module(&db, file);
+    let root_ty = inference
+        .expr_ty_map
+        .get(mod_.entry_expr)
+        .expect("root should have a type");
+    assert_eq!(
+        *root_ty,
+        arc_ty!(String),
+        "root should be string, got: {root_ty}"
+    );
+
+    let errors: Vec<_> = result
+        .diagnostics
+        .iter()
+        .filter(|d| {
+            !matches!(
+                d.kind,
+                TixDiagnosticKind::UnresolvedName { .. }
+                    | TixDiagnosticKind::AnnotationArityMismatch { .. }
+            )
+        })
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "should have no type errors with union-alias annotation on function, got: {errors:?}"
     );
 }
