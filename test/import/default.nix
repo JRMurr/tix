@@ -1,1 +1,5 @@
-{ pkgs }: pkgs.hello
+{
+  # type: pkgs :: Pkgs
+  pkgs,
+}:
+pkgs.hello
