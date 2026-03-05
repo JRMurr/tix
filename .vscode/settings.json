@@ -19,4 +19,5 @@
   ],
   "nix.enableLanguageServer": true,
   "nix.serverPath": "tix-lsp-dev"
+  // "nix.serverPath": ["tix", "lsp"]
 }
