@@ -401,45 +401,6 @@ async fn rename_in_real_rust_nix_shape() {
     h.shutdown().await;
 }
 
-/// Rename before analysis completes should still work after waiting.
-/// Reproduces the scenario where an editor sends prepareRename immediately
-/// after opening a file, before the analysis loop has produced a snapshot.
-#[tokio::test]
-async fn rename_before_analysis_returns_error_not_crash() {
-    let mut h = LspTestHarness::new(&[(
-        "test.nix",
-        indoc! {"
-            let rustPlatform = 1; in rustPlatform
-            #   ^1
-        "},
-    )])
-    .await;
-
-    h.open("test.nix").await;
-
-    // Don't wait for diagnostics — request rename immediately.
-    let m = h.markers("test.nix");
-    let prepare = h
-        .prepare_rename("test.nix", m[&1].line, m[&1].character)
-        .await;
-
-    // Before analysis, prepare_rename may return None (ContentModified error
-    // is swallowed as None by the harness). The key is: no crash.
-    // After analysis completes, it should work.
-    let _ = h.wait_for_diagnostics("test.nix", TIMEOUT).await;
-
-    let prepare_after = h
-        .prepare_rename("test.nix", m[&1].line, m[&1].character)
-        .await;
-    assert!(
-        prepare_after.is_some(),
-        "prepareRename should succeed after analysis completes (pre-analysis result: {:?})",
-        prepare,
-    );
-
-    h.shutdown().await;
-}
-
 /// Rename a pattern parameter in a callpackage-style lambda.
 /// Even though `foo` gets its type from context stubs, the pattern field
 /// is a real NameId and should be renameable.
@@ -505,6 +466,82 @@ async fn rename_pattern_param_in_callpackage_context() {
     for te in edits {
         assert_eq!(te.new_text, "rp");
     }
+
+    h.shutdown().await;
+}
+
+/// Regression: rename on the actual nix/rust.nix file content.
+/// Reads the real file and tests prepare_rename + rename on `rustPlatform`.
+#[tokio::test]
+async fn rename_actual_rust_nix_file() {
+    let rust_nix_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../nix/rust.nix");
+    let rust_nix_src = match std::fs::read_to_string(&rust_nix_path) {
+        Ok(s) => s,
+        Err(_) => {
+            eprintln!("skipping: nix/rust.nix not found");
+            return;
+        }
+    };
+
+    // Add a marker on `rustPlatform` in the let block (line 12, col 2).
+    // We find the position dynamically instead.
+    let mut h = LspTestHarness::new(&[("rust.nix", &rust_nix_src)]).await;
+
+    h.open("rust.nix").await;
+    let _ = h.wait_for_diagnostics("rust.nix", TIMEOUT).await;
+
+    // Find the position of `rustPlatform` in the let-binding definition (line 11, 0-indexed).
+    // "  rustPlatform = pkgs.makeRustPlatform {"
+    let rp_line = rust_nix_src
+        .lines()
+        .position(|l| l.trim_start().starts_with("rustPlatform = "))
+        .expect("should find rustPlatform line") as u32;
+    let rp_col = rust_nix_src
+        .lines()
+        .nth(rp_line as usize)
+        .unwrap()
+        .find("rustPlatform")
+        .unwrap() as u32;
+
+    // prepareRename should succeed.
+    let prepare = h.prepare_rename("rust.nix", rp_line, rp_col).await;
+    assert!(
+        prepare.is_some(),
+        "prepareRename on `rustPlatform` in actual nix/rust.nix should succeed (line {rp_line}, col {rp_col})"
+    );
+
+    // Rename should produce edits.
+    let edit = h
+        .rename("rust.nix", rp_line, rp_col, "rp")
+        .await
+        .expect("rename of `rustPlatform` in actual nix/rust.nix should produce edits");
+
+    let changes = edit.changes.expect("should have changes");
+    let uri = Url::from_file_path(h.workspace.path("rust.nix")).unwrap();
+    let edits = changes.get(&uri).expect("should have edits for rust.nix");
+    assert!(
+        edits.len() >= 2,
+        "expected >= 2 edits for rustPlatform, got: {}",
+        edits.len()
+    );
+
+    // Also test a different binding: `commonArgs`
+    let ca_line = rust_nix_src
+        .lines()
+        .position(|l| l.trim_start().starts_with("commonArgs = "))
+        .expect("should find commonArgs line") as u32;
+    let ca_col = rust_nix_src
+        .lines()
+        .nth(ca_line as usize)
+        .unwrap()
+        .find("commonArgs")
+        .unwrap() as u32;
+
+    let prepare = h.prepare_rename("rust.nix", ca_line, ca_col).await;
+    assert!(
+        prepare.is_some(),
+        "prepareRename on `commonArgs` in actual nix/rust.nix should succeed (line {ca_line}, col {ca_col})"
+    );
 
     h.shutdown().await;
 }

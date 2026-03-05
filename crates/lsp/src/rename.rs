@@ -658,6 +658,130 @@ mod tests {
         }
     }
 
+    /// Regression test: prepare_rename must work on every let-binding in a
+    /// file shaped like nix/rust.nix (pattern with doc annotation, many
+    /// let-bindings using dotted selects, inherit in result attrset).
+    #[test]
+    fn prepare_rename_works_on_rust_nix_shaped_file() {
+        let src = indoc! {r#"
+            {
+              /**
+                type: pkgs :: { lib: a, makeRustPlatform: a -> a, rustc: a, ... }
+              */
+              pkgs,
+              crane,
+            }:
+
+            let
+              lib = pkgs.lib;
+              rustVersion = pkgs.rustc;
+              rustPlatform = pkgs.makeRustPlatform {
+                cargo = rustVersion;
+                rustc = rustVersion;
+              };
+              craneLib = crane;
+              fs = lib;
+              src = fs;
+              commonArgs = {
+                inherit src;
+                pname = "tix";
+                version = "0.1.0";
+              };
+              cargoArtifacts = craneLib;
+              rustBin = craneLib;
+              rustFmt = craneLib;
+            in
+            {
+              inherit rustPlatform;
+              binary = rustBin;
+              checks = {
+                fmt = rustFmt;
+              };
+            }
+        "#};
+
+        let t = TestAnalysis::new(src);
+        let analysis = t.snapshot();
+        let root = t.root;
+
+        // Every LetIn name should be renameable.
+        let mut tested = 0;
+        for (name_id, name) in analysis.syntax.module.names() {
+            if name.kind != lang_ast::NameKind::LetIn {
+                continue;
+            }
+
+            let ptr = match analysis.syntax.source_map.nodes_for_name(name_id).next() {
+                Some(p) => p,
+                None => continue,
+            };
+            let node = ptr.to_node(root.syntax());
+            let pos = analysis.syntax.line_index.range(node.text_range()).start;
+
+            let result = prepare_rename(&analysis, pos, &root);
+            assert!(
+                result.is_some(),
+                "prepare_rename failed for let-binding `{}` at {:?}",
+                name.text,
+                pos,
+            );
+            tested += 1;
+        }
+
+        assert!(
+            tested >= 5,
+            "should have tested at least 5 let-bindings, got {tested}"
+        );
+    }
+
+    /// Test prepare_rename on every name in the actual nix/rust.nix file.
+    /// This catches issues specific to the real file content (path literals,
+    /// doc comments, multiline patterns) that simplified test cases miss.
+    #[test]
+    fn prepare_rename_on_actual_rust_nix() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../nix/rust.nix");
+        let src = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(_) => {
+                eprintln!("skipping: nix/rust.nix not found at {}", path.display());
+                return;
+            }
+        };
+
+        let t = TestAnalysis::new(&src);
+        let analysis = t.snapshot();
+        let root = t.root;
+
+        let mut failed = Vec::new();
+        let mut tested = 0;
+
+        for (name_id, name) in analysis.syntax.module.names() {
+            let ptr = match analysis.syntax.source_map.nodes_for_name(name_id).next() {
+                Some(p) => p,
+                None => continue,
+            };
+            let node = ptr.to_node(root.syntax());
+            let pos = analysis.syntax.line_index.range(node.text_range()).start;
+
+            let result = prepare_rename(&analysis, pos, &root);
+            if result.is_none() {
+                failed.push(format!(
+                    "`{}` ({:?}) at line {} col {}",
+                    name.text, name.kind, pos.line, pos.character
+                ));
+            }
+            tested += 1;
+        }
+
+        assert!(
+            failed.is_empty(),
+            "prepare_rename failed for {} of {} names:\n  {}",
+            failed.len(),
+            tested,
+            failed.join("\n  ")
+        );
+    }
+
     #[test]
     fn is_top_level_export_lambda_not_export() {
         // A file whose top-level expression is a lambda — its param is not
