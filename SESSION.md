@@ -37,6 +37,13 @@ by design, or informational notes.
 - **rnix error recovery** on incomplete code (`pkgs.` with no field) can cascade,
   mangling subsequent expressions. Upstream issue.
 
+- **Rename "not renameable" in editor**: User reports F2 on `nix/rust.nix` shows
+  "not renameable" for all bindings. E2E tests cannot reproduce — rename works
+  correctly through the test harness (including rust.nix-shaped files with doc
+  annotations, inherit, dotted selects). Suspected editor-side timing issue:
+  `prepareRename` sent before analysis snapshot exists → `ContentModified` error
+  interpreted as "not renameable". Needs investigation with real editor logs.
+
 ### Minor Untracked Items
 
 - `test/strings.nix`: `nameFromURL :: String -> String` annotation has wrong arity
