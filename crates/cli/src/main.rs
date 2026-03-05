@@ -1007,7 +1007,7 @@ fn load_single_stub(
     let source = std::fs::read_to_string(path)?;
     let file = comment_parser::parse_tix_file(&source)
         .map_err(|e| format!("Error parsing {}: {}", path.display(), e))?;
-    registry.load_tix_file(&file);
+    registry.load_tix_file_with_path(&file, path);
     Ok(())
 }
 

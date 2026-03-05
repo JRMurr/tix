@@ -675,6 +675,7 @@ impl LanguageServer for TixLanguageServer {
                 )),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
+                type_definition_provider: Some(TypeDefinitionProviderCapability::Simple(true)),
                 completion_provider: Some(CompletionOptions {
                     trigger_characters: Some(vec![".".to_string()]),
                     resolve_provider: Some(true),
@@ -857,6 +858,28 @@ impl LanguageServer for TixLanguageServer {
         let state = self.state.lock();
         Ok(
             crate::goto_def::goto_definition(&state, &snap_ref, pos, &uri, &root)
+                .map(GotoDefinitionResponse::Scalar),
+        )
+    }
+
+    async fn goto_type_definition(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> Result<Option<GotoDefinitionResponse>> {
+        let uri = params.text_document_position_params.text_document.uri;
+        let pos = params.text_document_position_params.position;
+        let path = match uri_to_path(&uri) {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+        let snap_ref = match self.snapshots.get(&path) {
+            Some(s) => s,
+            None => return Err(content_modified_error()),
+        };
+        let root = snap_ref.syntax.parsed.tree();
+        let registry = &self.state.lock().registry;
+        Ok(
+            crate::type_def::goto_type_definition(&snap_ref, pos, &root, registry)
                 .map(GotoDefinitionResponse::Scalar),
         )
     }

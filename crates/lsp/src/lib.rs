@@ -22,6 +22,7 @@ mod signature_help;
 mod state;
 pub mod test_util;
 mod ty_nav;
+mod type_def;
 mod workspace_symbols;
 
 use lang_check::aliases::TypeAliasRegistry;
@@ -43,14 +44,14 @@ pub fn load_stubs(
                 let source = std::fs::read_to_string(&entry_path)?;
                 let file = comment_parser::parse_tix_file(&source)
                     .map_err(|e| format!("Error parsing {}: {e}", entry_path.display()))?;
-                registry.load_tix_file(&file);
+                registry.load_tix_file_with_path(&file, &entry_path);
             }
         }
     } else {
         let source = std::fs::read_to_string(path)?;
         let file = comment_parser::parse_tix_file(&source)
             .map_err(|e| format!("Error parsing {}: {e}", path.display()))?;
-        registry.load_tix_file(&file);
+        registry.load_tix_file_with_path(&file, path);
     }
     Ok(())
 }

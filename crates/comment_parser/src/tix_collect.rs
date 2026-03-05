@@ -94,6 +94,8 @@ fn collect_tix_file_inner(
                 return Ok(());
             }
             Rule::type_alias_decl => {
+                let pair_span = pair.as_span();
+                let span = (pair_span.start(), pair_span.end());
                 let mut inner = pair.into_inner();
                 let doc = take_doc_block(&mut inner);
                 let name: SmolStr = inner
@@ -110,7 +112,12 @@ fn collect_tix_file_inner(
                 })?;
                 ctx.set_path(Vec::new());
 
-                declarations.push(TixDeclaration::TypeAlias { name, body, doc });
+                declarations.push(TixDeclaration::TypeAlias {
+                    name,
+                    body,
+                    doc,
+                    span,
+                });
             }
             Rule::val_decl => {
                 let pair_span = pair.as_span();
@@ -133,6 +140,8 @@ fn collect_tix_file_inner(
                 });
             }
             Rule::module_decl => {
+                let pair_span = pair.as_span();
+                let span = (pair_span.start(), pair_span.end());
                 let mut inner = pair.into_inner();
                 let doc = take_doc_block(&mut inner);
                 let name: SmolStr = inner
@@ -147,6 +156,7 @@ fn collect_tix_file_inner(
                     name,
                     declarations: nested,
                     doc,
+                    span,
                 });
             }
             Rule::EOI => {}
@@ -435,7 +445,9 @@ mod tests {
 
         assert_eq!(file.declarations.len(), 1);
         match &file.declarations[0] {
-            crate::TixDeclaration::TypeAlias { name, body, doc } => {
+            crate::TixDeclaration::TypeAlias {
+                name, body, doc, ..
+            } => {
                 assert_eq!(name.as_str(), "Derivation");
                 assert_eq!(*body, known_ty!({ "name": string, "system": string }));
                 assert_eq!(*doc, None);
@@ -481,6 +493,7 @@ mod tests {
                 name,
                 declarations,
                 doc,
+                ..
             } => {
                 assert_eq!(name.as_str(), "lib");
                 assert_eq!(declarations.len(), 2);
@@ -918,6 +931,60 @@ mod tests {
                 }
                 other => panic!("expected AttrSet, got: {other:?}"),
             },
+            other => panic!("expected TypeAlias, got: {other:?}"),
+        }
+    }
+
+    // =========================================================================
+    // Span capture tests
+    // =========================================================================
+
+    #[test]
+    fn type_alias_span_captured() {
+        let src = "type Foo = int;";
+        let file = parse_tix_file(src).expect("parse error");
+
+        match &file.declarations[0] {
+            crate::TixDeclaration::TypeAlias { span, .. } => {
+                assert_eq!(*span, (0, src.len()));
+            }
+            other => panic!("expected TypeAlias, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn module_span_captured() {
+        let src = "module lib { val id :: a -> a; }";
+        let file = parse_tix_file(src).expect("parse error");
+
+        match &file.declarations[0] {
+            crate::TixDeclaration::Module { span, .. } => {
+                assert_eq!(*span, (0, src.len()));
+            }
+            other => panic!("expected Module, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn spans_in_multi_decl_file() {
+        let src = "type A = int;\ntype B = string;";
+        let file = parse_tix_file(src).expect("parse error");
+
+        assert_eq!(file.declarations.len(), 2);
+
+        match &file.declarations[0] {
+            crate::TixDeclaration::TypeAlias { name, span, .. } => {
+                assert_eq!(name.as_str(), "A");
+                assert_eq!(&src[span.0..span.1], "type A = int;");
+            }
+            other => panic!("expected TypeAlias, got: {other:?}"),
+        }
+
+        match &file.declarations[1] {
+            crate::TixDeclaration::TypeAlias { name, span, .. } => {
+                assert_eq!(name.as_str(), "B");
+                assert_eq!(&src[span.0..span.1], "type B = string;");
+            }
             other => panic!("expected TypeAlias, got: {other:?}"),
         }
     }

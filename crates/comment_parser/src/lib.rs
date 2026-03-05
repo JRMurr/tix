@@ -176,6 +176,8 @@ pub enum TixDeclaration {
         name: SmolStr,
         body: ParsedTy,
         doc: Option<SmolStr>,
+        /// Byte span `(start, end)` of the type alias declaration in the source file.
+        span: (usize, usize),
     },
     ValDecl {
         name: SmolStr,
@@ -189,6 +191,8 @@ pub enum TixDeclaration {
         name: SmolStr,
         declarations: Vec<TixDeclaration>,
         doc: Option<SmolStr>,
+        /// Byte span `(start, end)` of the module declaration in the source file.
+        span: (usize, usize),
     },
 }
 
@@ -210,6 +214,7 @@ pub fn parse_inline_type_alias(source: &str) -> Option<(SmolStr, ParsedTy)> {
     let file = parse_tix_file(trimmed).ok()?;
     file.declarations.into_iter().find_map(|decl| match decl {
         TixDeclaration::TypeAlias { name, body, .. } => Some((name, body)),
+        // ValDecl and Module don't produce inline aliases.
         _ => None,
     })
 }

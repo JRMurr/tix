@@ -8,7 +8,7 @@
 // unresolved names can fall back to global val declarations.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use comment_parser::{ParsedTy, ParsedTyRef, TixDeclFile, TixDeclaration};
 use lang_ty::AttrSetTy;
@@ -90,6 +90,19 @@ impl DocIndex {
 }
 
 // =============================================================================
+// AliasLocation — source location of a type alias or module declaration
+// =============================================================================
+
+/// Points to the definition of a type alias in a `.tix` stub file on disk.
+/// Used by `textDocument/typeDefinition` to navigate from a name with an
+/// alias type to its declaration.
+#[derive(Debug, Clone)]
+pub struct AliasLocation {
+    pub file_path: PathBuf,
+    pub span: (usize, usize),
+}
+
+// =============================================================================
 // TypeAliasRegistry
 // =============================================================================
 
@@ -114,6 +127,11 @@ pub struct TypeAliasRegistry {
     /// Prevents re-reading and re-parsing large stubs (e.g. pkgs.tix) on
     /// every call to `load_context_by_name`.
     loaded_module_stubs: HashSet<SmolStr>,
+
+    /// Source locations for type aliases loaded from disk-based `.tix` files.
+    /// Populated by `load_tix_file_with_path` — compiled-in stubs (via
+    /// `load_tix_file`) intentionally have no locations.
+    alias_locations: HashMap<SmolStr, AliasLocation>,
 }
 
 /// Controls where val declarations are routed during `load_declarations`.
@@ -154,6 +172,58 @@ impl TypeAliasRegistry {
         self.load_field_docs(&file.field_docs);
     }
 
+    /// Load declarations from a parsed .tix file, recording source locations
+    /// for type aliases and modules so `textDocument/typeDefinition` can
+    /// navigate to them. Use this for stubs loaded from disk; compiled-in
+    /// stubs should use `load_tix_file` (no path to record).
+    pub fn load_tix_file_with_path(&mut self, file: &TixDeclFile, path: &Path) {
+        self.load_tix_file(file);
+        self.record_alias_locations(&file.declarations, path);
+    }
+
+    /// Walk declarations and record `AliasLocation` entries for each
+    /// `TypeAlias` and `Module` (using the capitalized alias name for modules).
+    fn record_alias_locations(&mut self, declarations: &[TixDeclaration], path: &Path) {
+        for decl in declarations {
+            match decl {
+                TixDeclaration::TypeAlias { name, span, .. } => {
+                    self.alias_locations.insert(
+                        name.clone(),
+                        AliasLocation {
+                            file_path: path.to_path_buf(),
+                            span: *span,
+                        },
+                    );
+                }
+                TixDeclaration::Module {
+                    name,
+                    declarations: nested,
+                    span,
+                    ..
+                } => {
+                    // Modules generate a capitalized alias (e.g. "lib" -> "Lib").
+                    let alias_name = capitalize(name);
+                    self.alias_locations.insert(
+                        alias_name,
+                        AliasLocation {
+                            file_path: path.to_path_buf(),
+                            span: *span,
+                        },
+                    );
+                    // Recurse into nested modules.
+                    self.record_alias_locations(nested, path);
+                }
+                TixDeclaration::ValDecl { .. } => {}
+            }
+        }
+    }
+
+    /// Look up the source location of a type alias definition in a `.tix` file.
+    /// Returns `None` for compiled-in stubs and aliases not loaded from disk.
+    pub fn alias_location(&self, name: &str) -> Option<&AliasLocation> {
+        self.alias_locations.get(name)
+    }
+
     /// Recursively load declarations. `val_target` controls where val
     /// declarations are routed: `GlobalVals` adds them to the registry's
     /// `global_vals` map; `ContextArgs` collects them into a separate map
@@ -165,7 +235,9 @@ impl TypeAliasRegistry {
     ) {
         for decl in declarations {
             match decl {
-                TixDeclaration::TypeAlias { name, body, doc } => {
+                TixDeclaration::TypeAlias {
+                    name, body, doc, ..
+                } => {
                     self.aliases.insert(name.clone(), body.clone());
                     if let Some(doc) = doc {
                         self.docs.insert_decl_doc(name.clone(), doc.clone());
@@ -188,6 +260,7 @@ impl TypeAliasRegistry {
                     name,
                     declarations,
                     doc,
+                    ..
                 } => {
                     // Convert the module into an attrset type and register it
                     // as a type alias with the capitalized module name.
@@ -260,6 +333,7 @@ impl TypeAliasRegistry {
                     name,
                     declarations: nested,
                     doc,
+                    ..
                 } => {
                     if let Some(doc) = doc {
                         let mut path = prefix.to_vec();
@@ -410,7 +484,7 @@ impl TypeAliasRegistry {
                 match std::fs::read_to_string(&module_path) {
                     Ok(source) => match comment_parser::parse_tix_file(&source) {
                         Ok(file) => {
-                            self.load_tix_file(&file);
+                            self.load_tix_file_with_path(&file, &module_path);
                             self.loaded_module_stubs.insert(alias_name.clone());
                         }
                         Err(e) => {
@@ -1326,5 +1400,66 @@ mod tests {
 
         // Clean up.
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // =========================================================================
+    // AliasLocation tracking tests
+    // =========================================================================
+
+    #[test]
+    fn alias_location_tracked() {
+        let stub = "type Derivation = { name: string };";
+        let file = parse_tix_file(stub).expect("parse error");
+        let path = std::path::PathBuf::from("/tmp/test_alias_loc.tix");
+
+        let mut registry = TypeAliasRegistry::new();
+        registry.load_tix_file_with_path(&file, &path);
+
+        let loc = registry
+            .alias_location("Derivation")
+            .expect("should have location");
+        assert_eq!(loc.file_path, path);
+        assert_eq!(loc.span, (0, stub.len()));
+    }
+
+    #[test]
+    fn module_alias_location_tracked() {
+        let stub = "module lib { val id :: a -> a; }";
+        let file = parse_tix_file(stub).expect("parse error");
+        let path = std::path::PathBuf::from("/tmp/test_module_loc.tix");
+
+        let mut registry = TypeAliasRegistry::new();
+        registry.load_tix_file_with_path(&file, &path);
+
+        // Module "lib" generates alias "Lib".
+        let loc = registry
+            .alias_location("Lib")
+            .expect("module alias should have location");
+        assert_eq!(loc.file_path, path);
+        assert_eq!(loc.span, (0, stub.len()));
+    }
+
+    #[test]
+    fn builtin_stubs_have_no_location() {
+        let registry = TypeAliasRegistry::with_builtins();
+        // "Lib" is defined in the compiled-in stubs — no file path.
+        assert!(
+            registry.alias_location("Lib").is_none(),
+            "compiled-in stubs should not have locations"
+        );
+    }
+
+    #[test]
+    fn load_tix_file_without_path_has_no_location() {
+        let stub = "type Foo = int;";
+        let file = parse_tix_file(stub).expect("parse error");
+
+        let mut registry = TypeAliasRegistry::new();
+        registry.load_tix_file(&file);
+
+        assert!(
+            registry.alias_location("Foo").is_none(),
+            "load_tix_file should not record locations"
+        );
     }
 }

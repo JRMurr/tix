@@ -338,6 +338,30 @@ impl LspTestHarness {
         serde_json::from_value::<CompletionResponse>(value).ok()
     }
 
+    /// Go-to-type-definition at a given line/character position.
+    pub async fn goto_type_def(
+        &mut self,
+        name: &str,
+        line: u32,
+        character: u32,
+    ) -> Option<GotoDefinitionResponse> {
+        let path = self.workspace.path(name);
+        let uri = Url::from_file_path(&path).unwrap();
+
+        let req = Request::build("textDocument/typeDefinition")
+            .params(json!({
+                "textDocument": { "uri": uri.as_str() },
+                "position": { "line": line, "character": character }
+            }))
+            .id(self.next_id())
+            .finish();
+
+        let resp = self.send_request(req).await?;
+        let (_id, result) = resp.into_parts();
+        let value = result.ok()?;
+        serde_json::from_value::<GotoDefinitionResponse>(value).ok()
+    }
+
     /// Go-to-definition at a given line/character position.
     pub async fn goto_def(
         &mut self,
