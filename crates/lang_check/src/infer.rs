@@ -501,6 +501,13 @@ impl CheckCtx<'_> {
                     let fresh = self.new_var();
                     cache.insert(ty_id, fresh);
                     self.link_extruded_var(ty_id, fresh, polarity, v.clone(), cache);
+
+                    // Propagate alias provenance so that usage-site references
+                    // preserve the alias name (e.g., `Pkgs` instead of `a`).
+                    if let Some(name) = self.alias_provenance.get(&ty_id).cloned() {
+                        self.alias_provenance.insert(fresh, name);
+                    }
+
                     fresh
                 }
                 TypeEntry::Variable(_) => {

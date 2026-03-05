@@ -1,5 +1,5 @@
 use indoc::indoc;
-use lang_ast::{module, tests::TestDatabase, Module};
+use lang_ast::{module, tests::TestDatabase, Expr, Module};
 use lang_ty::{arc_ty, OutputTy, PrimitiveTy};
 
 use crate::aliases::TypeAliasRegistry;
@@ -2323,6 +2323,72 @@ fn alias_named_in_annotation() {
     );
     // Display should show just the alias name.
     assert_eq!(format!("{ty}"), "Lib");
+}
+
+// After SCC generalization, references to an alias-annotated let binding go
+// through extrusion. The Variable branch of extrude_inner must propagate
+// alias_provenance to the fresh variable, otherwise the reference's type
+// in expr_ty_map loses the Named wrapper.
+//
+// This specifically tests the case where the annotation contains a union type
+// (e.g. `Nullable = int | null`), causing apply_type_annotation to set
+// alias_provenance WITHOUT constraining the variable to a concrete type.
+// After SCC generalization, resolve_to_concrete_id returns None (the variable
+// has no concrete bounds), so the variable itself enters poly_type_env.
+// References in later SCC groups extrude this variable through the Variable
+// branch, which must copy alias_provenance to the fresh variable.
+#[test]
+fn alias_provenance_survives_extrusion() {
+    let registry = registry_from_tix(
+        r#"
+        type Nullable = int | null;
+    "#,
+    );
+
+    // `x` is annotated with Nullable (a union type). Since union annotations
+    // skip constrain_equal, x's TyId stays a Variable with only alias_provenance
+    // set. After the SCC group, x enters poly_type_env as a Variable. The later
+    // reference to `x` in `y = x` triggers extrusion through the Variable branch.
+    let nix_src = indoc! { r#"
+        f:
+        let
+            # type: x :: Nullable
+            x = f;
+            y = x;
+        in y
+    "# };
+
+    let (module, inference) = check_str_with_aliases(nix_src, &registry);
+    let inference = inference.expect("No type error");
+
+    // Collect ALL reference expression types for `x`.
+    let ref_types: Vec<_> = module
+        .exprs()
+        .filter_map(|(expr_id, expr)| {
+            if let Expr::Reference(name) = expr {
+                if name == "x" {
+                    return inference
+                        .expr_ty_map
+                        .get(expr_id)
+                        .map(|ty| format!("{ty:?}"));
+                }
+            }
+            None
+        })
+        .collect();
+
+    // Every reference to `x` should be Named("Nullable", ...) — both at
+    // definition scope and at extrusion sites.
+    for ty_str in &ref_types {
+        assert!(
+            ty_str.contains("Named") && ty_str.contains("Nullable"),
+            "all x references should be Named(\"Nullable\", ...), got: {ref_types:?}"
+        );
+    }
+    assert!(
+        !ref_types.is_empty(),
+        "should find at least one reference to x"
+    );
 }
 
 // When a let-binding's type flows from an annotated lambda parameter, the

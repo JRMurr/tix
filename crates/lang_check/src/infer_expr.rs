@@ -82,6 +82,22 @@ impl CheckCtx<'_> {
         let expr_slot = self.ty_for_expr(e);
         self.constrain_equal(ty, expr_slot)?;
 
+        // Propagate alias provenance from the inferred type to the expression
+        // slot so that canonicalization of the slot (used by hover/diagnostics)
+        // can wrap the result in Named. Without this, the expr_slot only sees
+        // the constraint bounds (which lack provenance), not the aliased TyId.
+        //
+        // Only do this when the inferred type is a Variable — for concrete types,
+        // the provenance flows naturally through the constraint bounds and the
+        // Concrete branch of extrude already propagates alias provenance.
+        // Propagating for concrete types would cause double-wrapping:
+        // Named("Alias", Named("Alias", ...)).
+        if self.types.is_var(ty) {
+            if let Some(name) = self.alias_provenance.get(&ty).cloned() {
+                self.alias_provenance.entry(expr_slot).or_insert(name);
+            }
+        }
+
         Ok(ty)
     }
 

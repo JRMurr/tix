@@ -27,12 +27,12 @@ use lang_ty::{
     AttrSetTy, OutputTy, PrimitiveTy, TyRef,
 };
 use proptest::prelude::{
-    any, prop, prop_assert_eq, prop_compose, prop_oneof, proptest, BoxedStrategy, Just,
-    ProptestConfig, Strategy,
+    any, prop, prop_assert, prop_assert_eq, prop_compose, prop_oneof, proptest, BoxedStrategy,
+    Just, ProptestConfig, Strategy,
 };
 use smol_str::SmolStr;
 
-use crate::tests::{check_str, get_inferred_root};
+use crate::tests::{check_str, check_str_with_aliases, get_inferred_root};
 
 type NixTextStr = String;
 
@@ -974,5 +974,234 @@ proptest! {
     #[test]
     fn test_narrowing_assert_enables_operation(text in arb_narrowing_assert()) {
         let _ = get_inferred_root(&text);
+    }
+}
+
+// ==============================================================================
+// Annotation Provenance Stability PBT
+// ==============================================================================
+//
+// Verifies that type alias annotations on names (via `# type: x :: Alias`)
+// survive inference and appear consistently in both name_ty_map and
+// expr_ty_map at every usage site. This catches provenance loss through
+// extrusion, constraint propagation, and canonicalization.
+
+use crate::aliases::TypeAliasRegistry;
+use lang_ast::Expr;
+
+/// Stubs defining type aliases with union types (forces the Variable branch
+/// of extrude) and plain attrset types (goes through the Concrete branch).
+const ANNOTATION_STUBS: &str = r#"
+type Nullable = int | null;
+type StringOrInt = string | int;
+type Config = { enable: bool, name: string, ... };
+"#;
+
+static ANNOTATION_REGISTRY: std::sync::LazyLock<TypeAliasRegistry> =
+    std::sync::LazyLock::new(|| {
+        let file =
+            comment_parser::parse_tix_file(ANNOTATION_STUBS).expect("parse annotation stubs");
+        let mut registry = TypeAliasRegistry::new();
+        registry.load_tix_file(&file);
+        registry
+    });
+
+/// Type aliases available for annotation tests. Each entry is
+/// (alias_name, is_union_type). Union types trigger the Variable branch
+/// of extrude because `apply_type_annotation` sets alias_provenance
+/// without constraining to a concrete type.
+const ANNOTATION_ALIASES: &[(&str, bool)] =
+    &[("Nullable", true), ("StringOrInt", true), ("Config", false)];
+
+/// Usage patterns for an annotated let-binding `x`.
+#[derive(Debug, Clone, Copy)]
+enum AnnotationUsagePattern {
+    /// `let x = f; in x` — direct return of annotated binding
+    DirectReturn,
+    /// `let x = f; y = x; in y` — let-rebinding of annotated name
+    LetRebind,
+    /// `let x = f; in { inherit x; }` — inherit usage
+    Inherit,
+}
+
+const ALL_USAGE_PATTERNS: &[AnnotationUsagePattern] = &[
+    AnnotationUsagePattern::DirectReturn,
+    AnnotationUsagePattern::LetRebind,
+    AnnotationUsagePattern::Inherit,
+];
+
+/// Generate a Nix source with an annotated let-binding and a usage pattern.
+/// Returns (alias_name, nix_source).
+fn arb_annotation_usage() -> impl Strategy<Value = (String, String)> {
+    let alias_idx = 0..ANNOTATION_ALIASES.len();
+    let pattern_idx = 0..ALL_USAGE_PATTERNS.len();
+
+    (alias_idx, pattern_idx).prop_map(|(alias_idx, pattern_idx)| {
+        let (alias_name, _is_union) = ANNOTATION_ALIASES[alias_idx];
+        let pattern = ALL_USAGE_PATTERNS[pattern_idx];
+
+        let nix_src = match pattern {
+            AnnotationUsagePattern::DirectReturn => {
+                format!("f:\nlet\n  # type: x :: {alias_name}\n  x = f;\nin x")
+            }
+            AnnotationUsagePattern::LetRebind => {
+                format!("f:\nlet\n  # type: x :: {alias_name}\n  x = f;\n  y = x;\nin y")
+            }
+            AnnotationUsagePattern::Inherit => {
+                format!("f:\nlet\n  # type: x :: {alias_name}\n  x = f;\nin {{ inherit x; }}")
+            }
+        };
+
+        (alias_name.to_string(), nix_src)
+    })
+}
+
+/// Generate multiple usage sites of the same annotated binding.
+/// `let x = f; a = x; b = x; in a` — 2-3 references to the same name.
+fn arb_annotation_multi_usage() -> impl Strategy<Value = (String, String)> {
+    let alias_idx = 0..ANNOTATION_ALIASES.len();
+    let num_uses = 2..=3usize;
+
+    (alias_idx, num_uses).prop_map(|(alias_idx, num_uses)| {
+        let (alias_name, _) = ANNOTATION_ALIASES[alias_idx];
+
+        let mut bindings = format!("f:\nlet\n  # type: x :: {alias_name}\n  x = f;\n");
+        for i in 0..num_uses {
+            let _ = std::fmt::Write::write_fmt(&mut bindings, format_args!("  _u{i} = x;\n"));
+        }
+        bindings.push_str("in x");
+
+        (alias_name.to_string(), bindings)
+    })
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: 256, .. ProptestConfig::default()
+    })]
+
+    /// Annotation stability: if name_ty_map contains a Named wrapper for
+    /// an annotated binding, it should reference the correct alias.
+    /// Note: union-annotated types (e.g. `Nullable = int | null`) may show
+    /// TyVar in name_ty_map because early canonical snapshots see no concrete
+    /// bounds. The Named wrapper is only guaranteed for non-union aliases.
+    #[test]
+    fn test_annotation_definition_named(
+        (alias_name, nix_src) in arb_annotation_usage()
+    ) {
+        let registry = &*ANNOTATION_REGISTRY;
+        let (module, inference) = check_str_with_aliases(&nix_src, registry);
+        let inference = inference.expect("should not produce a type error");
+
+        // The definition of `x` should carry the alias in name_ty_map
+        // when the alias resolves to a concrete type (like Config = { ... }).
+        // For union aliases, early canonical may produce TyVar instead.
+        let x_name_types: Vec<_> = module
+            .names()
+            .filter_map(|(name_id, name)| {
+                if name.text == "x" {
+                    inference
+                        .name_ty_map
+                        .get(name_id)
+                        .map(|ty| format!("{ty:?}"))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        prop_assert!(
+            !x_name_types.is_empty(),
+            "should find name `x` in name_ty_map"
+        );
+        // Soft check: if Named appears, it must reference the correct alias.
+        for ty_str in &x_name_types {
+            if ty_str.contains("Named") {
+                prop_assert!(
+                    ty_str.contains(&alias_name),
+                    "definition of `x` has Named but wrong alias, expected \"{}\", got: {}",
+                    alias_name, ty_str
+                );
+            }
+        }
+    }
+
+    /// Annotation stability at usage sites: expr_ty_map for every reference
+    /// to an annotated name should show Named(alias, ...).
+    #[test]
+    fn test_annotation_usage_site_named(
+        (alias_name, nix_src) in arb_annotation_usage()
+    ) {
+        let registry = &*ANNOTATION_REGISTRY;
+        let (module, inference) = check_str_with_aliases(&nix_src, registry);
+        let inference = inference.expect("should not produce a type error");
+
+        // Every reference expression to `x` should carry the alias.
+        let ref_types: Vec<_> = module
+            .exprs()
+            .filter_map(|(expr_id, expr)| {
+                if let Expr::Reference(name) = expr {
+                    if name == "x" {
+                        return inference
+                            .expr_ty_map
+                            .get(expr_id)
+                            .map(|ty| format!("{ty:?}"));
+                    }
+                }
+                None
+            })
+            .collect();
+
+        prop_assert!(
+            !ref_types.is_empty(),
+            "should find at least one reference to `x`"
+        );
+        for ty_str in &ref_types {
+            prop_assert!(
+                ty_str.contains("Named") && ty_str.contains(&alias_name),
+                "reference to `x` should be Named(\"{}\", ...), got: {:?}",
+                alias_name, ref_types
+            );
+        }
+    }
+
+    /// Multiple usage sites: when the same annotated binding is referenced
+    /// N times, every reference should consistently show Named(alias, ...).
+    #[test]
+    fn test_annotation_multi_usage_stability(
+        (alias_name, nix_src) in arb_annotation_multi_usage()
+    ) {
+        let registry = &*ANNOTATION_REGISTRY;
+        let (module, inference) = check_str_with_aliases(&nix_src, registry);
+        let inference = inference.expect("should not produce a type error");
+
+        let ref_types: Vec<_> = module
+            .exprs()
+            .filter_map(|(expr_id, expr)| {
+                if let Expr::Reference(name) = expr {
+                    if name == "x" {
+                        return inference
+                            .expr_ty_map
+                            .get(expr_id)
+                            .map(|ty| format!("{ty:?}"));
+                    }
+                }
+                None
+            })
+            .collect();
+
+        // Should have multiple references, all showing the alias.
+        prop_assert!(
+            ref_types.len() >= 2,
+            "should find at least 2 references to `x`, found {}",
+            ref_types.len()
+        );
+        for ty_str in &ref_types {
+            prop_assert!(
+                ty_str.contains("Named") && ty_str.contains(&alias_name),
+                "all references to `x` should be Named(\"{}\", ...), got: {:?}",
+                alias_name, ref_types
+            );
+        }
     }
 }

@@ -982,4 +982,65 @@ mod tests {
             "polymorphic let binding should not show `?`, got: {type_text}"
         );
     }
+
+    // ==================================================================
+    // Alias provenance through extrusion
+    // ==================================================================
+
+    #[test]
+    fn hover_alias_provenance_survives_extrusion() {
+        // When a let binding is annotated with a type alias and later
+        // references go through extrusion (because SCC generalization makes
+        // it polymorphic), the alias name should survive on extruded copies.
+        //
+        // This tests the Variable branch of extrude_inner: `pkgs` is a let
+        // binding constrained to Pkgs (an attrset type), which
+        // find_pinned_concrete cannot detect (only handles primitives).
+        // The extruded fresh variable must inherit alias_provenance.
+        let stubs = r#"
+            type Pkgs = { hello: string, lib: { id: a -> a, ... }, ... };
+        "#;
+        let file = comment_parser::parse_tix_file(stubs).expect("parse stubs");
+        let mut registry = TypeAliasRegistry::new();
+        registry.load_tix_file(&file);
+
+        let src = indoc! {"
+            let
+                /** type: pkgs :: Pkgs */
+                pkgs = { hello = \"world\"; lib = { id = x: x; }; };
+            #   ^1
+                lib = pkgs.lib;
+            #         ^2
+            in { inherit pkgs; }
+            #           ^3
+        "};
+        let markers = parse_markers(src);
+        let t = TestAnalysis::with_registry(src, registry);
+
+        // Marker 1: definition site — should show `Pkgs`
+        let h1 = hover_at(&t, markers[&1]).expect("hover on pkgs definition");
+        let (ty1, _) = hover_parts(&h1);
+        assert!(
+            ty1.contains("Pkgs"),
+            "definition-site pkgs should show Pkgs, got: {ty1}"
+        );
+
+        // Marker 2: usage in `pkgs.lib` — pkgs is extruded here because it's
+        // in poly_type_env (generalized from an earlier SCC group). The fresh
+        // variable created by extrude must preserve alias_provenance.
+        let h2 = hover_at(&t, markers[&2]).expect("hover on pkgs usage (pkgs.lib)");
+        let (ty2, _) = hover_parts(&h2);
+        assert!(
+            ty2.contains("Pkgs"),
+            "usage-site pkgs in `pkgs.lib` should show Pkgs after extrusion, got: {ty2}"
+        );
+
+        // Marker 3: inherit site — should show `Pkgs` not `?`
+        let h3 = hover_at(&t, markers[&3]).expect("hover on pkgs in inherit");
+        let (ty3, _) = hover_parts(&h3);
+        assert!(
+            ty3.contains("Pkgs"),
+            "inherit-site pkgs should show Pkgs after extrusion, got: {ty3}"
+        );
+    }
 }
