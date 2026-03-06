@@ -63,8 +63,7 @@ where
     /// Named type — a transparent alias wrapper. `Named(name, inner)` is
     /// semantically identical to `inner` for all type operations. Constrain
     /// unwraps it. Extrude re-wraps it. Canonicalize converts it to
-    /// `OutputTy::Named`. This replaces the `alias_provenance` side-channel
-    /// with structural tracking of alias names.
+    /// `OutputTy::Named`.
     #[debug("Named({_0:?}, {_1:?})")]
     Named(smol_str::SmolStr, R),
 }

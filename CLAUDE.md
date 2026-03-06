@@ -80,7 +80,8 @@ Nix source → [lang_ast::lower] Parse with rnix → Tix AST
 
 - **Bounds-based variables, not union-find**: type variables store upper/lower bounds; `constrain(sub, sup)` propagates bounds inline (no separate solve phase).
 - **Extrude replaces instantiate/generalize**: deep-level variables are copied to fresh variables at the current level with bounds linked via subtyping constraints.
-- **Two type representations**: `Ty<R, VarType>` during inference (includes `Neg`, `Inter`, `Union` for narrowing); `OutputTy` after canonicalization (has Union/Intersection/Neg).
+- **Two type representations**: `Ty<R, VarType>` during inference (includes `Neg`, `Inter`, `Union` for narrowing, `Named` for alias tracking); `OutputTy` after canonicalization (has Union/Intersection/Neg/Named).
+- **Named is fully transparent**: `Named(name, inner)` is semantically identical to `inner`. Constrain unwraps it, extrude re-wraps it, canonicalize converts it to `OutputTy::Named`. Alias names flow structurally through the type system — no side-channel needed.
 - **Polarity-aware canonicalization**: positive positions expand to union of lower bounds; negative positions expand to intersection of upper bounds.
 - **Salsa** for incremental computation (query caching).
 - **Overload resolution is deferred**: operators like `+` and `*` are resolved after the SCC group is fully inferred.

@@ -1011,8 +1011,8 @@ static ANNOTATION_REGISTRY: std::sync::LazyLock<TypeAliasRegistry> =
     });
 
 /// Type aliases available for annotation tests. Each entry is
-/// (alias_name, is_union_type). Union types trigger the Variable branch
-/// of extrude because `apply_type_annotation` sets alias_provenance
+/// (alias_name, is_union_type). Union types trigger the annotation-skip
+/// path in `apply_type_annotation`, which adds a Named lower bound
 /// without constraining to a concrete type.
 const ANNOTATION_ALIASES: &[(&str, bool)] = &[
     ("Nullable", true),

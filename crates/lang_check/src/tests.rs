@@ -2326,18 +2326,14 @@ fn alias_named_in_annotation() {
 }
 
 // After SCC generalization, references to an alias-annotated let binding go
-// through extrusion. The Variable branch of extrude_inner must propagate
-// alias_provenance to the fresh variable, otherwise the reference's type
-// in expr_ty_map loses the Named wrapper.
+// through extrusion. The Named wrapper must survive extrusion so the
+// reference's type in expr_ty_map retains the alias name.
 //
 // This specifically tests the case where the annotation contains a union type
 // (e.g. `Nullable = int | null`) on a FUNCTION binding, causing
-// apply_type_annotation to set alias_provenance WITHOUT constraining the
+// apply_type_annotation to add a Named lower bound WITHOUT constraining the
 // variable to a concrete type (the union-skip only fires when expr_arity > 0).
-// After SCC generalization, resolve_to_concrete_id returns None (the variable
-// has no concrete bounds), so the variable itself enters poly_type_env.
-// References in later SCC groups extrude this variable through the Variable
-// branch, which must copy alias_provenance to the fresh variable.
+// The poly_type_env entry is wrapped in Ty::Named so extrusion preserves it.
 #[test]
 fn alias_provenance_survives_extrusion() {
     let registry = registry_from_tix(
@@ -2348,9 +2344,9 @@ fn alias_provenance_survives_extrusion() {
 
     // `g` is annotated with a function type containing Nullable (a union type).
     // Since union annotations skip constrain_equal for function bindings
-    // (expr_arity > 0), g's param TyId stays a Variable with only
-    // alias_provenance set. The later reference to `g` in `y = g` triggers
-    // extrusion through the Variable branch.
+    // (expr_arity > 0), g's param TyId gets a Named lower bound. The later
+    // reference to `g` in `y = g` triggers extrusion, which must preserve
+    // the Named wrapper via the Ty::Named arm in extrude_inner.
     let nix_src = indoc! { r#"
         let
             # type: g :: Nullable -> string

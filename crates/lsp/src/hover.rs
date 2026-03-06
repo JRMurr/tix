@@ -996,7 +996,7 @@ mod tests {
         // This tests the Variable branch of extrude_inner: `pkgs` is a let
         // binding constrained to Pkgs (an attrset type), which
         // find_pinned_concrete cannot detect (only handles primitives).
-        // The extruded fresh variable must inherit alias_provenance.
+        // The extruded type must preserve the Named wrapper.
         let stubs = r#"
             type Pkgs = { hello: string, lib: { id: a -> a, ... }, ... };
         "#;
@@ -1027,7 +1027,7 @@ mod tests {
 
         // Marker 2: usage in `pkgs.lib` — pkgs is extruded here because it's
         // in poly_type_env (generalized from an earlier SCC group). The fresh
-        // variable created by extrude must preserve alias_provenance.
+        // variable created by extrude must preserve the Named wrapper.
         let h2 = hover_at(&t, markers[&2]).expect("hover on pkgs usage (pkgs.lib)");
         let (ty2, _) = hover_parts(&h2);
         assert!(
