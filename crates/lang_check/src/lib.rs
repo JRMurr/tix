@@ -732,11 +732,11 @@ impl<'db> CheckCtx<'db> {
                 }
                 var
             }
-            // Named: intern the inner type and record the alias provenance on
-            // the resulting TyId so canonicalization can re-wrap it.
+            // Named: intern the inner type and wrap in Ty::Named.
             OutputTy::Named(name, inner) => {
-                let ty_id = self.intern_output_ty_inner(&inner.0, var_map);
-                self.alias_provenance.insert(ty_id, name.clone());
+                let inner_id = self.intern_output_ty_inner(&inner.0, var_map);
+                let ty_id = self.alloc_concrete(Ty::Named(name.clone(), inner_id));
+                self.alias_provenance.insert(ty_id, name.clone()); // dual-write (temporary)
                 ty_id
             }
             // Negation: intern the inner type and wrap in Ty::Neg.
@@ -943,9 +943,10 @@ impl<'db> CheckCtx<'db> {
                         // recursively intern the alias body (with its own
                         // fresh vars) to get a polymorphic instance.
                         if let Some(alias_body) = self.type_aliases.get(ref_name).cloned() {
-                            let ty_id = self.intern_fresh_ty(alias_body);
-                            self.alias_provenance
-                                .insert(ty_id, smol_str::SmolStr::from(ref_name.as_str()));
+                            let inner_id = self.intern_fresh_ty(alias_body);
+                            let name = smol_str::SmolStr::from(ref_name.as_str());
+                            let ty_id = self.alloc_concrete(Ty::Named(name.clone(), inner_id));
+                            self.alias_provenance.insert(ty_id, name); // dual-write (temporary)
                             ty_id
                         } else if let Some(prim) = uppercase_primitive_alias(ref_name) {
                             // Nixpkgs doc comments conventionally use uppercase

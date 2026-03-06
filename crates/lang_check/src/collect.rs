@@ -115,7 +115,15 @@ impl<'a> Canonicalizer<'a> {
     }
 
     fn canonicalize_inner(&mut self, ty_id: TyId, polarity: Polarity) -> OutputTy {
-        let alias_name = self.alias_provenance.get(&ty_id).cloned();
+        // If the entry is a concrete Ty::Named, the Named arm in
+        // canonicalize_concrete handles wrapping — skip the provenance map
+        // to avoid double-wrapping as Named(name, Named(name, ...)).
+        let is_named_concrete = matches!(self.table.get(ty_id), TypeEntry::Concrete(Ty::Named(..)));
+        let alias_name = if is_named_concrete {
+            None
+        } else {
+            self.alias_provenance.get(&ty_id).cloned()
+        };
 
         // Clone only the data we need: for variables, just the relevant bounds
         // Vec (Vec<TyId> ~ Vec<u32>, cheap); for concrete types, the Ty value.
