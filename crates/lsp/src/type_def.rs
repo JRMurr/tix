@@ -6,7 +6,7 @@
 // definition location in the TypeAliasRegistry and returns an LSP Location
 // pointing to the `.tix` stub file where the alias is declared.
 
-use lang_ast::AstPtr;
+use lang_ast::{AstPtr, Expr, Literal};
 use lang_check::aliases::TypeAliasRegistry;
 use rowan::ast::AstNode;
 use tower_lsp::lsp_types::{Location, Position, Url};
@@ -56,9 +56,19 @@ pub fn goto_type_definition(
         // Then check for an expression.
         if let Some(expr_id) = analysis.syntax.source_map.expr_for_node(ptr) {
             if let Some(ty) = inference.expr_ty_map.get(expr_id) {
-                return resolve_decl_locations(extract_alias_name(ty), registry);
+                let locs = resolve_decl_locations(extract_alias_name(ty), registry);
+                if !locs.is_empty() {
+                    return locs;
+                }
             }
-            // Found an expression node but no alias — stop walking.
+            // Fallback: if this is a select field name with no Named alias,
+            // try looking up the field name as a stub val declaration.
+            if let Expr::Literal(Literal::String(field_name)) = &analysis.syntax.module[expr_id] {
+                let locs = resolve_decl_locations(Some(field_name), registry);
+                if !locs.is_empty() {
+                    return locs;
+                }
+            }
             return Vec::new();
         }
 
@@ -221,6 +231,44 @@ mod tests {
         );
         let loc = &locs[0];
 
+        let expected_uri = Url::from_file_path(&stub_path).unwrap();
+        assert_eq!(loc.uri, expected_uri);
+
+        let _ = std::fs::remove_file(&stub_path);
+    }
+
+    #[test]
+    fn type_def_field_name_fallback_to_val_decl() {
+        // When a field's type is not Named (e.g. a lambda), go-to-type-definition
+        // should fall back to the stub val declaration for the field name.
+        let stub = indoc! {"
+            module pkgs {
+                val fetchurl :: { url: string } -> string;
+            }
+        "};
+        let (registry, stub_path) = registry_with_stub(stub);
+
+        let src = indoc! {"
+            let
+                /** type: pkgs :: Pkgs */
+                pkgs = { fetchurl = url: url; };
+            in pkgs.fetchurl
+            #       ^1
+        "};
+        let markers = parse_markers(src);
+
+        let ta = TestAnalysis::with_registry(src, registry.clone());
+        let snap = ta.snapshot();
+        let root = ta.root;
+
+        let pos = snap.syntax.line_index.position(markers[&1]);
+        let locs = goto_type_definition(&snap, pos, &root, &registry);
+        assert_eq!(
+            locs.len(),
+            1,
+            "should resolve field name to stub val declaration"
+        );
+        let loc = &locs[0];
         let expected_uri = Url::from_file_path(&stub_path).unwrap();
         assert_eq!(loc.uri, expected_uri);
 
