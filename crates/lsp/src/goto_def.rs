@@ -9,9 +9,12 @@
 // Cross-file support:
 // - `import ./foo.nix` → jumps to the target file
 // - `x.child` where `x = import ./foo.nix` → jumps to `child` in foo.nix
+// - Unresolved names that match a `val` in .tix stubs → jumps to the stub
+// - `lib.field` where `field` matches a stub val → jumps to the stub
 
 use lang_ast::nameres::ResolveResult;
 use lang_ast::{AstDb, AstPtr, Expr, Literal};
+use lang_check::aliases::DeclLocation;
 use rowan::ast::AstNode;
 use tower_lsp::lsp_types::{Location, Position, Range, Url};
 
@@ -59,9 +62,15 @@ pub fn goto_definition(
 
             // Cross-file: if this is a Select field name (Literal(String)), and the
             // Select's base expression is bound to an import, jump to the field's
-            // definition in the target file.
+            // definition in the target file. Falls back to stub val declarations
+            // for fields like `lib.someFunction` where `lib` comes from a stub module.
             if let Expr::Literal(Literal::String(field_name)) = &analysis.syntax.module[expr_id] {
                 if let Some(location) = try_resolve_select_field(state, analysis, &node, field_name)
+                {
+                    return Some(location);
+                }
+                if let Some(location) =
+                    decl_location_to_lsp(state.registry.decl_locations(field_name).first())
                 {
                     return Some(location);
                 }
@@ -83,7 +92,10 @@ pub fn goto_definition(
             }
 
             // Same-file: Reference expressions resolve via name resolution.
-            if matches!(&analysis.syntax.module[expr_id], Expr::Reference(_)) {
+            // When name resolution has no result (unresolved name), fall back
+            // to stub val declarations — e.g. `mkDerivation` provided by a
+            // .tix stub file.
+            if let Expr::Reference(ref_name) = &analysis.syntax.module[expr_id] {
                 if let Some(res) = analysis.syntax.name_res.get(expr_id) {
                     match res {
                         ResolveResult::Definition(name_id) => {
@@ -100,6 +112,10 @@ pub fn goto_definition(
                         // definition we can jump to within this file.
                         ResolveResult::Builtin(_) | ResolveResult::WithExprs(..) => {}
                     }
+                } else if let Some(location) =
+                    decl_location_to_lsp(state.registry.decl_locations(ref_name.as_str()).first())
+                {
+                    return Some(location);
                 }
             }
             // Found an expression node but can't resolve it — stop walking.
@@ -108,6 +124,27 @@ pub fn goto_definition(
 
         node = node.parent()?;
     }
+}
+
+// ==============================================================================
+// Stub declaration → LSP Location conversion
+// ==============================================================================
+
+/// Convert a `DeclLocation` from the registry into an LSP `Location`.
+/// Reads the `.tix` file from disk to build a `LineIndex` for byte-to-position
+/// conversion. Returns `None` if the file can't be read or the path can't
+/// become a URI.
+fn decl_location_to_lsp(loc: Option<&DeclLocation>) -> Option<Location> {
+    let loc = loc?;
+    let source = std::fs::read_to_string(&loc.file_path).ok()?;
+    let line_index = crate::convert::LineIndex::new(&source);
+    let start = line_index.position(loc.span.0 as u32);
+    let end = line_index.position(loc.span.1 as u32);
+    let uri = Url::from_file_path(&loc.file_path).ok()?;
+    Some(Location::new(
+        uri,
+        tower_lsp::lsp_types::Range::new(start, end),
+    ))
 }
 
 // ==============================================================================
@@ -537,5 +574,117 @@ mod tests {
         let pkg_uri = Url::from_file_path(&pkg_default).unwrap();
         assert_eq!(loc.uri, pkg_uri, "should jump to pkg/default.nix");
         assert_eq!(loc.range.start, Position::new(0, 0));
+    }
+
+    // ------------------------------------------------------------------
+    // Helper: create a registry with a stub file on disk
+    // ------------------------------------------------------------------
+    fn registry_with_stub(stub_content: &str) -> (TypeAliasRegistry, PathBuf) {
+        let stub_path = crate::test_util::temp_path("test.tix");
+        std::fs::write(&stub_path, stub_content).expect("write stub");
+        let mut registry = TypeAliasRegistry::default();
+        let file = comment_parser::parse_tix_file(stub_content).expect("parse stub");
+        registry.load_tix_file_with_path(&file, &stub_path);
+        (registry, stub_path)
+    }
+
+    // ------------------------------------------------------------------
+    // Unresolved reference → stub val declaration
+    // ------------------------------------------------------------------
+    #[test]
+    fn unresolved_ref_jumps_to_stub_val() {
+        let stub = "val mkDerivation :: { name: string } -> int;";
+        let (registry, stub_path) = registry_with_stub(stub);
+
+        let src = indoc! {"
+            mkDerivation { name = \"hello\"; }
+            # ^1
+        "};
+        let markers = parse_markers(src);
+
+        let project = TempProject::new(&[("main.nix", src)]);
+        let main_path = project.path("main.nix");
+
+        let mut state = AnalysisState::new(registry);
+        let (uri, contents) = analyze(&mut state, &main_path);
+        let analysis = state.get_file(&main_path).unwrap().to_snapshot();
+        let root = rnix::Root::parse(&contents).tree();
+
+        // Cursor on `mkDerivation` — an unresolved name backed by a stub val.
+        let pos = analysis.syntax.line_index.position(markers[&1]);
+        let loc = goto_definition(&state, &analysis, pos, &uri, &root);
+        let loc = loc.expect("should resolve unresolved ref to stub val");
+
+        let stub_uri = Url::from_file_path(&stub_path).unwrap();
+        assert_eq!(loc.uri, stub_uri, "should jump to stub file");
+
+        let _ = std::fs::remove_file(&stub_path);
+    }
+
+    // ------------------------------------------------------------------
+    // Select field → stub val declaration (e.g. lib.id)
+    // ------------------------------------------------------------------
+    #[test]
+    fn select_field_jumps_to_stub_val() {
+        let stub = indoc! {"
+            module lib {
+                val id :: a -> a;
+            }
+        "};
+        let (registry, stub_path) = registry_with_stub(stub);
+
+        let src = indoc! {"
+            let
+                /** type: lib :: Lib */
+                lib = { id = x: x; };
+            in lib.id 42
+            #      ^1
+        "};
+        let markers = parse_markers(src);
+
+        let project = TempProject::new(&[("main.nix", src)]);
+        let main_path = project.path("main.nix");
+
+        let mut state = AnalysisState::new(registry);
+        let (uri, contents) = analyze(&mut state, &main_path);
+        let analysis = state.get_file(&main_path).unwrap().to_snapshot();
+        let root = rnix::Root::parse(&contents).tree();
+
+        // Cursor on `id` in `lib.id`.
+        let pos = analysis.syntax.line_index.position(markers[&1]);
+        let loc = goto_definition(&state, &analysis, pos, &uri, &root);
+        let loc = loc.expect("should resolve select field to stub val");
+
+        let stub_uri = Url::from_file_path(&stub_path).unwrap();
+        assert_eq!(loc.uri, stub_uri, "should jump to stub file");
+
+        let _ = std::fs::remove_file(&stub_path);
+    }
+
+    // ------------------------------------------------------------------
+    // Unresolved ref with no stub → still returns None
+    // ------------------------------------------------------------------
+    #[test]
+    fn unresolved_ref_no_stub_returns_none() {
+        let src = indoc! {"
+            unknownFunction 42
+            # ^1
+        "};
+        let markers = parse_markers(src);
+
+        let project = TempProject::new(&[("main.nix", src)]);
+        let main_path = project.path("main.nix");
+
+        let mut state = AnalysisState::new(TypeAliasRegistry::default());
+        let (uri, contents) = analyze(&mut state, &main_path);
+        let analysis = state.get_file(&main_path).unwrap().to_snapshot();
+        let root = rnix::Root::parse(&contents).tree();
+
+        let pos = analysis.syntax.line_index.position(markers[&1]);
+        let loc = goto_definition(&state, &analysis, pos, &uri, &root);
+        assert!(
+            loc.is_none(),
+            "unresolved ref with no stub should return None"
+        );
     }
 }

@@ -49,14 +49,14 @@ pub fn goto_type_definition(
         // Check for a name binding first.
         if let Some(name_id) = analysis.syntax.source_map.name_for_node(ptr) {
             if let Some(ty) = inference.name_ty_map.get(name_id) {
-                return resolve_alias_locations(extract_alias_name(ty), registry);
+                return resolve_decl_locations(extract_alias_name(ty), registry);
             }
         }
 
         // Then check for an expression.
         if let Some(expr_id) = analysis.syntax.source_map.expr_for_node(ptr) {
             if let Some(ty) = inference.expr_ty_map.get(expr_id) {
-                return resolve_alias_locations(extract_alias_name(ty), registry);
+                return resolve_decl_locations(extract_alias_name(ty), registry);
             }
             // Found an expression node but no alias — stop walking.
             return Vec::new();
@@ -76,7 +76,7 @@ pub fn goto_type_definition(
 /// For module declarations the recorded span covers the entire block
 /// (`module pkgs { ... }`). We trim it to just the header line (up to and
 /// including the `{`) so VSCode doesn't try to highlight a huge range.
-fn resolve_alias_locations(
+fn resolve_decl_locations(
     alias_name: Option<&smol_str::SmolStr>,
     registry: &TypeAliasRegistry,
 ) -> Vec<Location> {
@@ -84,7 +84,7 @@ fn resolve_alias_locations(
         return Vec::new();
     };
     registry
-        .alias_locations(name)
+        .decl_locations(name)
         .iter()
         .filter_map(|loc| {
             let source = std::fs::read_to_string(&loc.file_path).ok()?;
@@ -233,7 +233,7 @@ mod tests {
         let registry = TypeAliasRegistry::with_builtins();
         // "Lib" is defined in the builtin stubs.
         assert!(
-            registry.alias_locations("Lib").is_empty(),
+            registry.decl_locations("Lib").is_empty(),
             "compiled-in stubs should not have locations"
         );
     }
