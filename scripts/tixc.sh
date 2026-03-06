@@ -52,4 +52,8 @@ else
     fi
 fi
 
+# Point at the repo's stubs/ directory so go-to-definition works for
+# lib.tix declarations during development (e.g. lib.id, mkDerivation).
+export TIX_BUILTIN_STUBS="${TIX_BUILTIN_STUBS:-$REPO_ROOT/stubs}"
+
 cargo run --bin tix -- "$FILE" "${TIX_ARGS[@]}"

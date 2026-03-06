@@ -163,6 +163,21 @@ impl TypeAliasRegistry {
     /// will check for `<dir>/nixos.tix` before falling back to the
     /// compiled-in minimal stubs.
     pub fn set_builtin_stubs_dir(&mut self, dir: PathBuf) {
+        // If the directory contains lib.tix, reload it with path tracking.
+        // The type data is identical to what `with_builtins()` already loaded
+        // (inserts overwrite), but now `DeclLocation` entries exist so
+        // go-to-definition works for lib stubs like `lib.id`, `mkDerivation`, etc.
+        let lib_path = dir.join("lib.tix");
+        if lib_path.is_file() {
+            match std::fs::read_to_string(&lib_path) {
+                Ok(source) => match comment_parser::parse_tix_file(&source) {
+                    Ok(file) => self.load_tix_file_with_path(&file, &lib_path),
+                    Err(e) => log::warn!("Failed to parse {}: {e}", lib_path.display()),
+                },
+                Err(e) => log::warn!("Failed to read {}: {e}", lib_path.display()),
+            }
+        }
+
         self.builtin_stubs_dir = Some(dir);
     }
 
@@ -1524,5 +1539,47 @@ mod tests {
         let locs = registry.decl_locations("id");
         assert_eq!(locs.len(), 1, "nested val should have one location");
         assert_eq!(locs[0].file_path, path);
+    }
+
+    #[test]
+    fn builtin_stubs_dir_loads_lib() {
+        // When builtin_stubs_dir contains lib.tix, set_builtin_stubs_dir
+        // should reload it with path tracking so go-to-def works.
+        let tmp = std::env::temp_dir().join("tix_test_builtin_stubs_dir_loads_lib");
+        let _ = std::fs::create_dir_all(&tmp);
+
+        // Write a minimal lib.tix that mirrors the compiled-in stubs' structure.
+        let lib_stub = "module lib { val id :: a -> a; }";
+        std::fs::write(tmp.join("lib.tix"), lib_stub).expect("write lib.tix");
+
+        let mut registry = TypeAliasRegistry::with_builtins();
+
+        // Before setting the dir, compiled-in stubs have no locations.
+        assert!(
+            registry.decl_locations("Lib").is_empty(),
+            "compiled-in stubs should not have locations before set_builtin_stubs_dir"
+        );
+
+        registry.set_builtin_stubs_dir(tmp.clone());
+
+        // After setting the dir, lib.tix should be reloaded with path tracking.
+        let lib_path = tmp.join("lib.tix");
+        let locs = registry.decl_locations("Lib");
+        assert!(
+            !locs.is_empty(),
+            "Lib should have locations after set_builtin_stubs_dir"
+        );
+        assert_eq!(locs[0].file_path, lib_path);
+
+        // Val declarations inside the module should also be tracked.
+        let id_locs = registry.decl_locations("id");
+        assert!(
+            !id_locs.is_empty(),
+            "nested val 'id' should have locations after set_builtin_stubs_dir"
+        );
+        assert_eq!(id_locs[0].file_path, lib_path);
+
+        // Clean up.
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

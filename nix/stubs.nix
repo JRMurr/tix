@@ -176,4 +176,5 @@ in pkgs.runCommand "tix-stubs" {
   tix gen-stubs nixos --from-json ${nixosJsonFile} --descriptions -o $out/nixos.tix
   tix gen-stubs home-manager --from-json ${hmJsonFile} --descriptions -o $out/home-manager.tix
   tix gen-stubs pkgs --from-json ${pkgsJsonFile} -o $out/pkgs.tix
+  cp ${../stubs/lib.tix} $out/lib.tix
 ''
