@@ -81,22 +81,8 @@ impl CheckCtx<'_> {
         // Record the inferred type for this expression.
         let expr_slot = self.ty_for_expr(e);
         self.constrain_equal(ty, expr_slot)?;
-
-        // Propagate alias provenance from the inferred type to the expression
-        // slot so that canonicalization of the slot (used by hover/diagnostics)
-        // can wrap the result in Named. Without this, the expr_slot only sees
-        // the constraint bounds (which lack provenance), not the aliased TyId.
-        //
-        // Only do this when the inferred type is a Variable — for concrete types,
-        // the provenance flows naturally through the constraint bounds and the
-        // Concrete branch of extrude already propagates alias provenance.
-        // Propagating for concrete types would cause double-wrapping:
-        // Named("Alias", Named("Alias", ...)).
-        if self.types.is_var(ty) {
-            if let Some(name) = self.alias_provenance.get(&ty).cloned() {
-                self.alias_provenance.entry(expr_slot).or_insert(name);
-            }
-        }
+        // Named types flow through constrain_equal automatically —
+        // no manual provenance propagation needed.
 
         Ok(ty)
     }
@@ -914,16 +900,8 @@ impl CheckCtx<'_> {
                 }
             };
             // Value type flows into the name slot.
+            // Named types flow through constrain_equal automatically.
             self.constrain_equal(value_ty, name_ty)?;
-
-            // Propagate alias provenance to the binding name so that
-            // hover on the name (e.g. in `{ inherit pkgs; }`) shows
-            // the alias instead of a bare type variable.
-            if self.types.is_var(value_ty) {
-                if let Some(alias_name) = self.alias_provenance.get(&value_ty).cloned() {
-                    self.alias_provenance.entry(name_ty).or_insert(alias_name);
-                }
-            }
         }
 
         Ok(())
@@ -959,16 +937,8 @@ impl CheckCtx<'_> {
                     self.infer_expr(e)?
                 }
             };
+            // Named types flow through constrain_equal automatically.
             self.constrain_equal(value_ty, name_ty)?;
-
-            // Propagate alias provenance to the binding name (same as
-            // infer_bindings above) so hover on attrset field names shows
-            // the alias.
-            if self.types.is_var(value_ty) {
-                if let Some(alias_name) = self.alias_provenance.get(&value_ty).cloned() {
-                    self.alias_provenance.entry(name_ty).or_insert(alias_name);
-                }
-            }
 
             fields.insert(name_text, value_ty);
         }

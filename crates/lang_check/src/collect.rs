@@ -129,6 +129,25 @@ impl<'a> Canonicalizer<'a> {
         // Vec (Vec<TyId> ~ Vec<u32>, cheap); for concrete types, the Ty value.
         // This avoids cloning the unused bounds Vec for variables.
         let result = if let Some(v) = self.table.get_var(ty_id) {
+            // Check if any bound (either polarity) is a concrete Named type.
+            // Named bounds are injected by apply_type_annotation /
+            // propagate_annotation_bounds for display purposes. Unlike the
+            // provenance map, Named bounds survive extrusion (they flow
+            // through link_extruded_var). Alias display is polarity-agnostic,
+            // so check both lower and upper bounds.
+            let named_bound = v
+                .lower_bounds
+                .iter()
+                .chain(v.upper_bounds.iter())
+                .copied()
+                .find(|&b| matches!(self.table.get(b), TypeEntry::Concrete(Ty::Named(..))));
+
+            if let Some(named_id) = named_bound {
+                // Canonicalize through the Named entry directly. This
+                // produces OutputTy::Named(name, canonicalize(inner)).
+                return self.canonicalize(named_id, polarity);
+            }
+
             let bounds = match polarity {
                 Positive => v.lower_bounds.clone(),
                 Negative => v.upper_bounds.clone(),

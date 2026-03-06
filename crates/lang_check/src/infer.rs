@@ -245,12 +245,17 @@ impl CheckCtx<'_> {
 
         // Snapshot each successfully-inferred name's canonical type NOW, before
         // exit_level and before use-site extrusions add concrete bounds.
-        for &(name_id, ty) in &inferred {
-            let poly_ty = self.types.resolve_to_concrete_id(ty).unwrap_or(ty);
+        //
+        // Canonicalize via name_slot (the pre-allocated variable for this name)
+        // rather than poly_ty (the concrete inferred type), because name_slot
+        // may have Named lower bounds from apply_type_annotation that aren't
+        // visible on the concrete type itself.
+        for &(name_id, _ty) in &inferred {
+            let name_slot = self.ty_for_name_direct(name_id);
             let output = canonicalize_standalone(
                 &self.types.storage,
                 &self.alias_provenance,
-                poly_ty,
+                name_slot,
                 Polarity::Positive,
             );
             let simplified = simplify(&output);
@@ -281,6 +286,13 @@ impl CheckCtx<'_> {
                 continue;
             }
             let poly_ty = self.types.resolve_to_concrete_id(ty).unwrap_or(ty);
+
+            // If the name slot has a Named lower bound (from type annotation),
+            // wrap poly_ty in Named so that extrusion at usage sites preserves
+            // the alias name (e.g. `Pkgs` instead of the structural attrset).
+            let name_slot = self.ty_for_name_direct(name_id);
+            let poly_ty = self.wrap_named_if_annotated(name_slot, poly_ty);
+
             self.poly_type_env.insert(name_id, poly_ty);
         }
 
@@ -501,12 +513,8 @@ impl CheckCtx<'_> {
                     let fresh = self.new_var();
                     cache.insert(ty_id, fresh);
                     self.link_extruded_var(ty_id, fresh, polarity, v.clone(), cache);
-
-                    // Propagate alias provenance so that usage-site references
-                    // preserve the alias name (e.g., `Pkgs` instead of `a`).
-                    if let Some(name) = self.alias_provenance.get(&ty_id).cloned() {
-                        self.alias_provenance.insert(fresh, name);
-                    }
+                    // Named lower bounds flow to the fresh var through
+                    // link_extruded_var — no manual provenance propagation.
 
                     fresh
                 }
@@ -576,12 +584,8 @@ impl CheckCtx<'_> {
                             self.alloc_concrete(Ty::Named(name, e))
                         }
                     };
-
-                    // Propagate alias provenance through extrusion so that
-                    // references to aliased types preserve the alias name.
-                    if let Some(name) = self.alias_provenance.get(&ty_id).cloned() {
-                        self.alias_provenance.insert(result, name);
-                    }
+                    // Named types flow through extrude structurally via the
+                    // Ty::Named arm above — no manual provenance propagation.
 
                     result
                 }
@@ -1049,5 +1053,20 @@ impl CheckCtx<'_> {
                 Ty::Primitive(_) | Ty::TyVar(_) => {}
             }
         }
+    }
+
+    /// If `name_slot` (a variable) has a Named lower bound from a type
+    /// annotation, wrap `poly_ty` in the same Named. This ensures extrusion
+    /// preserves the alias name at usage sites.
+    fn wrap_named_if_annotated(&mut self, name_slot: TyId, poly_ty: TyId) -> TyId {
+        if let Some(v) = self.types.storage.get_var(name_slot) {
+            for &lb in &v.lower_bounds.clone() {
+                if let TypeEntry::Concrete(Ty::Named(name, _)) = self.types.storage.get(lb) {
+                    let name = name.clone();
+                    return self.alloc_concrete(Ty::Named(name, poly_ty));
+                }
+            }
+        }
+        poly_ty
     }
 }

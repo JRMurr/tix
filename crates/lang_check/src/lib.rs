@@ -735,9 +735,7 @@ impl<'db> CheckCtx<'db> {
             // Named: intern the inner type and wrap in Ty::Named.
             OutputTy::Named(name, inner) => {
                 let inner_id = self.intern_output_ty_inner(&inner.0, var_map);
-                let ty_id = self.alloc_concrete(Ty::Named(name.clone(), inner_id));
-                self.alias_provenance.insert(ty_id, name.clone()); // dual-write (temporary)
-                ty_id
+                self.alloc_concrete(Ty::Named(name.clone(), inner_id))
             }
             // Negation: intern the inner type and wrap in Ty::Neg.
             OutputTy::Neg(inner) => {
@@ -795,11 +793,13 @@ impl<'db> CheckCtx<'db> {
             // incorrectly trigger the arity mismatch.
             if known_ty.is_intersection_of_lambdas() {
                 let annotation_ty = self.intern_fresh_ty(known_ty);
-                if let Some(name) = self.alias_provenance.get(&annotation_ty).cloned() {
-                    self.alias_provenance.insert(ty, name);
-                }
-                // Propagate alias provenance through Lambda parameter structure.
-                self.propagate_lambda_provenance(annotation_ty, name_id);
+                // Add annotation as lower bound of the name slot for display
+                // (no constraint propagation — avoids the false errors that
+                // caused the skip). Use the name slot (always a variable),
+                // not `ty` which may be concrete from infer_expr.
+                let name_slot = self.ty_for_name_direct(name_id);
+                self.types.storage.add_lower_bound(name_slot, annotation_ty);
+                self.propagate_annotation_bounds(annotation_ty, name_id);
                 self.emit_warning(Warning::AnnotationUnchecked {
                     name: self.module[name_id].text.clone(),
                     reason: "intersection-of-function annotations are accepted as declared types \
@@ -852,57 +852,52 @@ impl<'db> CheckCtx<'db> {
             // (e.g. `Nullable = int | null`).
             let has_union = known_ty.contains_union_resolving(&|name| self.type_aliases.get(name));
             if has_union && expr_arity > 0 {
-                // Still intern and record provenance for display purposes,
-                // but don't apply constraints.
+                // Still intern for display purposes, but don't apply constraints.
+                // Add annotation as lower bound of the name slot so
+                // canonicalization shows the alias.
                 let annotation_ty = self.intern_fresh_ty(known_ty);
-                if let Some(name) = self.alias_provenance.get(&annotation_ty).cloned() {
-                    self.alias_provenance.insert(ty, name);
-                }
-                // Propagate alias provenance through Lambda parameter structure
-                // so that annotated param types (e.g. `BwrapArg`) display their
-                // alias name instead of the expanded structural type.
-                self.propagate_lambda_provenance(annotation_ty, name_id);
+                let name_slot = self.ty_for_name_direct(name_id);
+                self.types.storage.add_lower_bound(name_slot, annotation_ty);
+                self.propagate_annotation_bounds(annotation_ty, name_id);
                 return Ok(());
             }
 
             let annotation_ty = self.intern_fresh_ty(known_ty);
             self.constrain_equal(ty, annotation_ty)?;
-
-            // Transfer alias provenance from the annotation to the expression
-            // TyId so that early canonicalization wraps the name's type in
-            // Named. Without this, the provenance lives only on annotation_ty
-            // which early canonicalization never sees directly.
-            if let Some(name) = self.alias_provenance.get(&annotation_ty).cloned() {
-                self.alias_provenance.insert(ty, name);
-            }
-            // Propagate alias provenance through Lambda parameter structure
-            // so that annotated param types display their alias name.
-            self.propagate_lambda_provenance(annotation_ty, name_id);
+            // constrain_equal unwraps Named transparently, so the Named
+            // wrapper doesn't flow into bounds. Add it explicitly as a
+            // lower bound on the name slot for display.
+            let name_slot = self.ty_for_name_direct(name_id);
+            self.types.storage.add_lower_bound(name_slot, annotation_ty);
+            self.propagate_annotation_bounds(annotation_ty, name_id);
         }
 
         Ok(())
     }
 
     /// Walk an interned annotation type and the corresponding expression in
-    /// parallel, transferring alias provenance at each Lambda level.
+    /// parallel, adding the annotation's param types as lower bounds on the
+    /// inferred param types at each Lambda level.
     ///
     /// For `renderArg :: BwrapArg -> string`, the annotation creates a
-    /// `Lambda { param, body }` where `param` has BwrapArg provenance. The
-    /// expression is `Lambda { param: Some(name_id), body }`. We transfer
-    /// provenance from the annotation's param TyId to the inferred param's
-    /// TyId (derived from name_id) so that display shows "BwrapArg" instead
-    /// of the fully expanded structural type.
-    fn propagate_lambda_provenance(&mut self, annotation_ty: TyId, name_id: NameId) {
+    /// `Lambda { param: Named("BwrapArg", ...), body: ... }`. The expression
+    /// is `Lambda { param: Some(name_id), body }`. We add the annotation's
+    /// param (which may be `Named`) as a lower bound of the inferred param
+    /// so that canonicalization shows "BwrapArg" instead of the expanded type.
+    fn propagate_annotation_bounds(&mut self, annotation_ty: TyId, name_id: NameId) {
         let Some(&expr_id) = self.binding_exprs.get(&name_id) else {
             return;
         };
-        self.propagate_lambda_provenance_inner(annotation_ty, expr_id);
+        self.propagate_annotation_bounds_inner(annotation_ty, expr_id);
     }
 
-    fn propagate_lambda_provenance_inner(&mut self, annotation_ty: TyId, expr_id: ExprId) {
-        // Get the annotation type structure.
+    fn propagate_annotation_bounds_inner(&mut self, annotation_ty: TyId, expr_id: ExprId) {
+        // Get the annotation type structure. Unwrap Named wrappers.
         let annot_entry = self.types.storage.get(annotation_ty).clone();
         let (annot_param, annot_body) = match annot_entry {
+            crate::storage::TypeEntry::Concrete(Ty::Named(_, inner)) => {
+                return self.propagate_annotation_bounds_inner(inner, expr_id);
+            }
             crate::storage::TypeEntry::Concrete(Ty::Lambda { param, body }) => (param, body),
             _ => return,
         };
@@ -914,17 +909,23 @@ impl<'db> CheckCtx<'db> {
             _ => return,
         };
 
-        // Transfer provenance from annotation param to inferred param.
+        // Add annotation param (which may be Named) as both lower and upper
+        // bound of the inferred param, so canonicalization picks up the alias
+        // name regardless of polarity. Both are needed because link_extruded_var
+        // copies lower bounds for positive polarity and upper bounds for negative
+        // polarity (Lambda params are extruded in negative polarity).
         if let Some(param_name_id) = param_name {
             let inferred_param_ty = self.ty_for_name_direct(param_name_id);
-            if let Some(name) = self.alias_provenance.get(&annot_param).cloned() {
-                self.alias_provenance.insert(inferred_param_ty, name);
-            }
+            self.types
+                .storage
+                .add_lower_bound(inferred_param_ty, annot_param);
+            self.types
+                .storage
+                .add_upper_bound(inferred_param_ty, annot_param);
         }
 
-        // Recurse into the body: if the annotation body is also a Lambda,
-        // walk into the body expression to transfer deeper provenance.
-        self.propagate_lambda_provenance_inner(annot_body, body_expr);
+        // Recurse into the body to transfer deeper param annotations.
+        self.propagate_annotation_bounds_inner(annot_body, body_expr);
     }
 
     /// Intern a ParsedTy with fresh type variables for each free generic var
@@ -945,9 +946,7 @@ impl<'db> CheckCtx<'db> {
                         if let Some(alias_body) = self.type_aliases.get(ref_name).cloned() {
                             let inner_id = self.intern_fresh_ty(alias_body);
                             let name = smol_str::SmolStr::from(ref_name.as_str());
-                            let ty_id = self.alloc_concrete(Ty::Named(name.clone(), inner_id));
-                            self.alias_provenance.insert(ty_id, name); // dual-write (temporary)
-                            ty_id
+                            self.alloc_concrete(Ty::Named(name, inner_id))
                         } else if let Some(prim) = uppercase_primitive_alias(ref_name) {
                             // Nixpkgs doc comments conventionally use uppercase
                             // primitive names (String, Bool, Int, etc.). Map them
