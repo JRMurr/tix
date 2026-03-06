@@ -251,11 +251,20 @@ fn unwrap_inter_concrete(storage: &TypeStorage, ty: &Ty<TyId>) -> Option<Ty<TyId
     let Ty::Inter(a, b) = ty else { return None };
 
     // Try to get a "useful" type from each side: something that is concrete
-    // and not a Neg (negations are constraints, not types you can do overload
-    // resolution on).
+    // and not a Neg or Named wrapper (negations are constraints, not types you
+    // can do overload resolution on; Named is transparent).
     let useful_from = |id: TyId| -> Option<Ty<TyId>> {
         match storage.get(id) {
             TypeEntry::Concrete(c @ Ty::Inter(..)) => unwrap_inter_concrete(storage, c),
+            TypeEntry::Concrete(Ty::Named(_, inner)) => {
+                // See through Named wrappers to find the useful concrete type.
+                match storage.get(*inner) {
+                    TypeEntry::Concrete(c @ Ty::Inter(..)) => unwrap_inter_concrete(storage, c),
+                    TypeEntry::Concrete(Ty::Neg(_)) => None,
+                    TypeEntry::Concrete(c) => Some(c.clone()),
+                    TypeEntry::Variable(_) => None,
+                }
+            }
             TypeEntry::Concrete(Ty::Neg(_)) => None, // skip negations
             TypeEntry::Concrete(c) => Some(c.clone()),
             TypeEntry::Variable(_) => None,

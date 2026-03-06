@@ -59,6 +59,14 @@ where
     /// Binary — multi-member composites nest.
     #[debug("Union({_0:?}, {_1:?})")]
     Union(R, R),
+
+    /// Named type — a transparent alias wrapper. `Named(name, inner)` is
+    /// semantically identical to `inner` for all type operations. Constrain
+    /// unwraps it. Extrude re-wraps it. Canonicalize converts it to
+    /// `OutputTy::Named`. This replaces the `alias_provenance` side-channel
+    /// with structural tracking of alias names.
+    #[debug("Named({_0:?}, {_1:?})")]
+    Named(smol_str::SmolStr, R),
 }
 
 /// Macro for constructing `OutputTy` values conveniently in tests.

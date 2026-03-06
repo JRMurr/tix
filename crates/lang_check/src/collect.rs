@@ -320,6 +320,12 @@ impl<'a> Canonicalizer<'a> {
                 negate_output_ty(c_inner)
             }
 
+            // Named: canonicalize the inner type and wrap in OutputTy::Named.
+            Ty::Named(name, inner) => {
+                let c = self.canonicalize(*inner, polarity);
+                OutputTy::Named(name.clone(), TyRef::from(c))
+            }
+
             // Intersection: canonicalize both members and flatten/normalize
             // using the same logic as variable bound expansion.
             Ty::Inter(a, b) => {

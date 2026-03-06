@@ -331,6 +331,10 @@ fn canonicalize_ty_structural(
             let cb = canonicalize_standalone(table, provenance, *b, Polarity::Positive);
             OutputTy::Union(vec![lang_ty::TyRef::from(ca), lang_ty::TyRef::from(cb)])
         }
+        lang_ty::Ty::Named(name, inner) => {
+            let c = canonicalize_standalone(table, provenance, *inner, Polarity::Positive);
+            OutputTy::Named(name.clone(), lang_ty::TyRef::from(c))
+        }
     }
 }
 

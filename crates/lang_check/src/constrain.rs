@@ -174,6 +174,10 @@ impl CheckCtx<'_> {
         sup: &Ty<TyId>,
     ) -> Result<(), InferenceError> {
         match (sub, sup) {
+            // Named is transparent — unwrap and constrain the inner type.
+            (Ty::Named(_, inner), _) => self.constrain(*inner, sup_id),
+            (_, Ty::Named(_, inner)) => self.constrain(sub_id, *inner),
+
             // Lambda: contravariant in param, covariant in body.
             (
                 Ty::Lambda {
@@ -396,6 +400,10 @@ impl CheckCtx<'_> {
                 let (a, b) = (*a, *b);
                 self.inter_contains_var(a) || self.inter_contains_var(b)
             }
+            TypeEntry::Concrete(Ty::Named(_, inner)) => {
+                let inner = *inner;
+                self.inter_contains_var(inner)
+            }
             _ => false,
         };
         self.types.inter_var_cache.insert(id, result);
@@ -423,6 +431,10 @@ impl CheckCtx<'_> {
             TypeEntry::Concrete(Ty::Union(a, b)) => {
                 let (a, b) = (*a, *b);
                 self.union_contains_member(a, target) || self.union_contains_member(b, target)
+            }
+            TypeEntry::Concrete(Ty::Named(_, inner)) => {
+                let inner = *inner;
+                self.union_contains_member(inner, target)
             }
             _ => false,
         };
@@ -555,8 +567,14 @@ impl CheckCtx<'_> {
 /// Read-only — no side effects. Used by `constrain_rhs_union` to decide
 /// which union member to route a concrete sub-type to.
 fn is_concrete_compatible(sub: &Ty<TyId>, target: &TypeEntry) -> bool {
+    // Named is transparent — unwrap before checking compatibility.
+    let sub = match sub {
+        Ty::Named(_, _) => return true, // conservative: might be compatible
+        other => other,
+    };
     match target {
         TypeEntry::Variable(_) => true,
+        TypeEntry::Concrete(Ty::Named(_, _)) => true, // conservative
         TypeEntry::Concrete(target_ty) => {
             discriminant_matches(sub, target_ty)
                 || matches!(
@@ -583,6 +601,17 @@ fn discriminant_matches(a: &Ty<TyId>, b: &Ty<TyId>) -> bool {
 ///
 /// See `lang_ty::disjoint::are_shapes_disjoint` for the full disjointness rules.
 fn are_types_disjoint(a: &Ty<TyId>, b: &Ty<TyId>) -> bool {
+    // Named is transparent — unwrap before checking disjointness.
+    if let Ty::Named(_, inner_a) = a {
+        // We can't dereference TyId here (no storage access), so Named
+        // conservatively falls through to Opaque below. This is sound but
+        // could be refined if needed.
+        let _ = inner_a;
+    }
+    if let Ty::Named(_, inner_b) = b {
+        let _ = inner_b;
+    }
+
     // Build owned key maps for attrset shapes. These are allocated only when
     // both types need shape projection (which involves attrsets).
     let a_keys;
@@ -600,6 +629,7 @@ fn are_types_disjoint(a: &Ty<TyId>, b: &Ty<TyId>) -> bool {
         }
         Ty::List(_) => ConstructorShape::List,
         Ty::Lambda { .. } => ConstructorShape::Lambda,
+        // Named falls through to Opaque — conservative (never claims disjoint).
         _ => ConstructorShape::Opaque,
     };
 

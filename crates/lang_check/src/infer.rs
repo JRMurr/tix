@@ -571,6 +571,10 @@ impl CheckCtx<'_> {
                             let eb = self.extrude_inner(b, polarity, cache);
                             self.alloc_concrete(Ty::Union(ea, eb))
                         }
+                        Ty::Named(name, inner) => {
+                            let e = self.extrude_inner(inner, polarity, cache);
+                            self.alloc_concrete(Ty::Named(name, e))
+                        }
                     };
 
                     // Propagate alias provenance through extrusion so that
@@ -1037,6 +1041,9 @@ impl CheckCtx<'_> {
                     self.lift_reachable_vars_inner(b, visited);
                 }
                 Ty::Neg(inner) => {
+                    self.lift_reachable_vars_inner(inner, visited);
+                }
+                Ty::Named(_, inner) => {
                     self.lift_reachable_vars_inner(inner, visited);
                 }
                 Ty::Primitive(_) | Ty::TyVar(_) => {}
