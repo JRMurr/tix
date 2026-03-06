@@ -40,7 +40,6 @@ const CANON_DEADLINE_CHECK_INTERVAL: u32 = 512;
 
 struct Canonicalizer<'a> {
     table: &'a TypeStorage,
-    alias_provenance: &'a FxHashMap<TyId, SmolStr>,
     cache: FxHashMap<(TyId, Polarity), OutputTy>,
     in_progress: FxHashSet<(TyId, Polarity)>,
     /// Optional deadline for canonicalization. When exceeded, remaining
@@ -54,10 +53,9 @@ struct Canonicalizer<'a> {
 }
 
 impl<'a> Canonicalizer<'a> {
-    fn new(table: &'a TypeStorage, alias_provenance: &'a FxHashMap<TyId, SmolStr>) -> Self {
+    fn new(table: &'a TypeStorage) -> Self {
         Self {
             table,
-            alias_provenance,
             cache: FxHashMap::default(),
             in_progress: FxHashSet::default(),
             deadline: None,
@@ -115,26 +113,15 @@ impl<'a> Canonicalizer<'a> {
     }
 
     fn canonicalize_inner(&mut self, ty_id: TyId, polarity: Polarity) -> OutputTy {
-        // If the entry is a concrete Ty::Named, the Named arm in
-        // canonicalize_concrete handles wrapping — skip the provenance map
-        // to avoid double-wrapping as Named(name, Named(name, ...)).
-        let is_named_concrete = matches!(self.table.get(ty_id), TypeEntry::Concrete(Ty::Named(..)));
-        let alias_name = if is_named_concrete {
-            None
-        } else {
-            self.alias_provenance.get(&ty_id).cloned()
-        };
-
         // Clone only the data we need: for variables, just the relevant bounds
         // Vec (Vec<TyId> ~ Vec<u32>, cheap); for concrete types, the Ty value.
         // This avoids cloning the unused bounds Vec for variables.
-        let result = if let Some(v) = self.table.get_var(ty_id) {
+        if let Some(v) = self.table.get_var(ty_id) {
             // Check if any bound (either polarity) is a concrete Named type.
             // Named bounds are injected by apply_type_annotation /
-            // propagate_annotation_bounds for display purposes. Unlike the
-            // provenance map, Named bounds survive extrusion (they flow
-            // through link_extruded_var). Alias display is polarity-agnostic,
-            // so check both lower and upper bounds.
+            // propagate_annotation_bounds for display purposes. Named bounds
+            // survive extrusion (they flow through link_extruded_var). Alias
+            // display is polarity-agnostic, so check both lower and upper bounds.
             let named_bound = v
                 .lower_bounds
                 .iter()
@@ -159,14 +146,6 @@ impl<'a> Canonicalizer<'a> {
                 _ => unreachable!(),
             };
             self.canonicalize_concrete(&ty, polarity)
-        };
-
-        // If this TyId originated from a type alias, wrap the canonical form
-        // in Named so display shows the alias name instead of the expansion.
-        if let Some(name) = alias_name {
-            OutputTy::Named(name, TyRef::from(result))
-        } else {
-            result
         }
     }
 
@@ -433,23 +412,17 @@ impl<'a> Canonicalizer<'a> {
 /// Canonicalize a TyId into an OutputTy using only a TypeStorage reference.
 /// This captures the type's canonical form at the current moment — before
 /// use-site extrusions add concrete bounds back onto polymorphic variables.
-pub fn canonicalize_standalone(
-    table: &TypeStorage,
-    alias_provenance: &FxHashMap<TyId, SmolStr>,
-    ty_id: TyId,
-    polarity: Polarity,
-) -> OutputTy {
-    canonicalize_standalone_with_deadline(table, alias_provenance, ty_id, polarity, None)
+pub fn canonicalize_standalone(table: &TypeStorage, ty_id: TyId, polarity: Polarity) -> OutputTy {
+    canonicalize_standalone_with_deadline(table, ty_id, polarity, None)
 }
 
 pub fn canonicalize_standalone_with_deadline(
     table: &TypeStorage,
-    alias_provenance: &FxHashMap<TyId, SmolStr>,
     ty_id: TyId,
     polarity: Polarity,
     deadline: Option<Instant>,
 ) -> OutputTy {
-    let mut canon = Canonicalizer::new(table, alias_provenance);
+    let mut canon = Canonicalizer::new(table);
     if let Some(d) = deadline {
         canon = canon.with_deadline(d);
     }
@@ -1094,7 +1067,7 @@ impl<'db> Collector<'db> {
         } else {
             self.ctx.deadline
         };
-        let mut canon = Canonicalizer::new(&self.ctx.types.storage, &self.ctx.alias_provenance);
+        let mut canon = Canonicalizer::new(&self.ctx.types.storage);
         if let Some(d) = canon_deadline {
             canon = canon.with_deadline(d);
         }
@@ -1322,8 +1295,7 @@ mod tests {
         table.add_upper_bound(var_id, int_ty);
         table.add_upper_bound(var_id, neg_int);
 
-        let provenance = FxHashMap::default();
-        let result = canonicalize_standalone(&table, &provenance, var_id, Negative);
+        let result = canonicalize_standalone(&table, var_id, Negative);
         assert_eq!(
             result,
             arc_ty!(Bottom),
@@ -1348,8 +1320,7 @@ mod tests {
         table.add_upper_bound(var_id, string_ty);
         table.add_upper_bound(var_id, neg_null);
 
-        let provenance = FxHashMap::default();
-        let result = canonicalize_standalone(&table, &provenance, var_id, Negative);
+        let result = canonicalize_standalone(&table, var_id, Negative);
         // ~null is redundant alongside string (disjoint constructors), so
         // it gets removed, leaving just string.
         assert_eq!(
@@ -1715,8 +1686,7 @@ mod tests {
         table.add_lower_bound(var_id, int_ty);
         table.add_lower_bound(var_id, neg_int);
 
-        let provenance = FxHashMap::default();
-        let result = canonicalize_standalone(&table, &provenance, var_id, Positive);
+        let result = canonicalize_standalone(&table, var_id, Positive);
         assert_eq!(
             result,
             arc_ty!(Top),

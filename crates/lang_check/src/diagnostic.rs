@@ -11,7 +11,6 @@ use std::fmt;
 
 use lang_ast::{AstPtr, ExprId, OverloadBinOp};
 use lang_ty::OutputTy;
-use rustc_hash::FxHashMap;
 use smol_str::SmolStr;
 
 use crate::collect::canonicalize_standalone;
@@ -255,11 +254,7 @@ pub fn suggest_similar<'a>(
 /// Canonicalize a `Ty<TyId>` into an `OutputTy` for display purposes.
 /// Uses positive polarity (output position) since error messages show types
 /// as "what was produced" rather than "what was expected as input".
-fn canonicalize_error_ty(
-    ty: &lang_ty::Ty<TyId>,
-    table: &TypeStorage,
-    provenance: &FxHashMap<TyId, SmolStr>,
-) -> OutputTy {
+fn canonicalize_error_ty(ty: &lang_ty::Ty<TyId>, table: &TypeStorage) -> OutputTy {
     // If the Ty is concrete, we need to find its TyId in the table to
     // canonicalize it. For simple cases (primitives), we can convert directly.
     match ty {
@@ -267,27 +262,23 @@ fn canonicalize_error_ty(
         _ => {
             // For structural types, allocate into a temporary storage isn't
             // practical. Instead, recursively convert children.
-            canonicalize_ty_structural(ty, table, provenance)
+            canonicalize_ty_structural(ty, table)
         }
     }
 }
 
 /// Recursively convert a Ty<TyId> to OutputTy by canonicalizing children.
-fn canonicalize_ty_structural(
-    ty: &lang_ty::Ty<TyId>,
-    table: &TypeStorage,
-    provenance: &FxHashMap<TyId, SmolStr>,
-) -> OutputTy {
+fn canonicalize_ty_structural(ty: &lang_ty::Ty<TyId>, table: &TypeStorage) -> OutputTy {
     match ty {
         lang_ty::Ty::Primitive(p) => OutputTy::Primitive(*p),
         lang_ty::Ty::TyVar(x) => OutputTy::TyVar(*x),
         lang_ty::Ty::List(elem) => {
-            let c_elem = canonicalize_standalone(table, provenance, *elem, Polarity::Positive);
+            let c_elem = canonicalize_standalone(table, *elem, Polarity::Positive);
             OutputTy::List(lang_ty::TyRef::from(c_elem))
         }
         lang_ty::Ty::Lambda { param, body } => {
-            let c_param = canonicalize_standalone(table, provenance, *param, Polarity::Negative);
-            let c_body = canonicalize_standalone(table, provenance, *body, Polarity::Positive);
+            let c_param = canonicalize_standalone(table, *param, Polarity::Negative);
+            let c_body = canonicalize_standalone(table, *body, Polarity::Positive);
             OutputTy::Lambda {
                 param: lang_ty::TyRef::from(c_param),
                 body: lang_ty::TyRef::from(c_body),
@@ -298,17 +289,12 @@ fn canonicalize_ty_structural(
                 .fields
                 .iter()
                 .map(|(k, &v)| {
-                    let c_field = canonicalize_standalone(table, provenance, v, Polarity::Positive);
+                    let c_field = canonicalize_standalone(table, v, Polarity::Positive);
                     (k.clone(), lang_ty::TyRef::from(c_field))
                 })
                 .collect();
             let dyn_ty = attr.dyn_ty.map(|d| {
-                lang_ty::TyRef::from(canonicalize_standalone(
-                    table,
-                    provenance,
-                    d,
-                    Polarity::Positive,
-                ))
+                lang_ty::TyRef::from(canonicalize_standalone(table, d, Polarity::Positive))
             });
             OutputTy::AttrSet(lang_ty::AttrSetTy {
                 fields,
@@ -318,36 +304,32 @@ fn canonicalize_ty_structural(
             })
         }
         lang_ty::Ty::Neg(inner) => {
-            let c_inner = canonicalize_standalone(table, provenance, *inner, Polarity::Positive);
+            let c_inner = canonicalize_standalone(table, *inner, Polarity::Positive);
             OutputTy::Neg(lang_ty::TyRef::from(c_inner))
         }
         lang_ty::Ty::Inter(a, b) => {
-            let ca = canonicalize_standalone(table, provenance, *a, Polarity::Positive);
-            let cb = canonicalize_standalone(table, provenance, *b, Polarity::Positive);
+            let ca = canonicalize_standalone(table, *a, Polarity::Positive);
+            let cb = canonicalize_standalone(table, *b, Polarity::Positive);
             OutputTy::Intersection(vec![lang_ty::TyRef::from(ca), lang_ty::TyRef::from(cb)])
         }
         lang_ty::Ty::Union(a, b) => {
-            let ca = canonicalize_standalone(table, provenance, *a, Polarity::Positive);
-            let cb = canonicalize_standalone(table, provenance, *b, Polarity::Positive);
+            let ca = canonicalize_standalone(table, *a, Polarity::Positive);
+            let cb = canonicalize_standalone(table, *b, Polarity::Positive);
             OutputTy::Union(vec![lang_ty::TyRef::from(ca), lang_ty::TyRef::from(cb)])
         }
         lang_ty::Ty::Named(name, inner) => {
-            let c = canonicalize_standalone(table, provenance, *inner, Polarity::Positive);
+            let c = canonicalize_standalone(table, *inner, Polarity::Positive);
             OutputTy::Named(name.clone(), lang_ty::TyRef::from(c))
         }
     }
 }
 
 /// Convert a single `LocatedError` into a `TixDiagnostic`.
-fn error_to_diagnostic(
-    error: &LocatedError,
-    table: &TypeStorage,
-    provenance: &FxHashMap<TyId, SmolStr>,
-) -> TixDiagnostic {
+fn error_to_diagnostic(error: &LocatedError, table: &TypeStorage) -> TixDiagnostic {
     let kind = match &error.payload {
         InferenceError::TypeMismatch(pair) => {
-            let actual = canonicalize_error_ty(&pair.0, table, provenance);
-            let expected = canonicalize_error_ty(&pair.1, table, provenance);
+            let actual = canonicalize_error_ty(&pair.0, table);
+            let expected = canonicalize_error_ty(&pair.1, table);
             TixDiagnosticKind::TypeMismatch { expected, actual }
         }
         InferenceError::MissingField { field, available } => {
@@ -359,8 +341,8 @@ fn error_to_diagnostic(
             }
         }
         InferenceError::InvalidBinOp(triple) => {
-            let lhs_ty = canonicalize_error_ty(&triple.1, table, provenance);
-            let rhs_ty = canonicalize_error_ty(&triple.2, table, provenance);
+            let lhs_ty = canonicalize_error_ty(&triple.1, table);
+            let rhs_ty = canonicalize_error_ty(&triple.2, table);
             TixDiagnosticKind::InvalidBinOp {
                 op: triple.0,
                 lhs_ty,
@@ -368,8 +350,8 @@ fn error_to_diagnostic(
             }
         }
         InferenceError::InvalidAttrMerge(pair) => {
-            let lhs_ty = canonicalize_error_ty(&pair.0, table, provenance);
-            let rhs_ty = canonicalize_error_ty(&pair.1, table, provenance);
+            let lhs_ty = canonicalize_error_ty(&pair.0, table);
+            let rhs_ty = canonicalize_error_ty(&pair.1, table);
             TixDiagnosticKind::InvalidAttrMerge { lhs_ty, rhs_ty }
         }
     };
@@ -410,14 +392,10 @@ fn warning_to_diagnostic(warning: &LocatedWarning) -> TixDiagnostic {
 }
 
 /// Convert a batch of `LocatedError`s into `TixDiagnostic`s.
-pub fn errors_to_diagnostics(
-    errors: &[LocatedError],
-    table: &TypeStorage,
-    provenance: &FxHashMap<TyId, SmolStr>,
-) -> Vec<TixDiagnostic> {
+pub fn errors_to_diagnostics(errors: &[LocatedError], table: &TypeStorage) -> Vec<TixDiagnostic> {
     errors
         .iter()
-        .map(|e| error_to_diagnostic(e, table, provenance))
+        .map(|e| error_to_diagnostic(e, table))
         .collect()
 }
 

@@ -123,8 +123,7 @@ impl CheckCtx<'_> {
         // Convert internal errors and warnings to display-ready diagnostics
         // while we still have access to the TypeStorage for canonicalization.
         let warnings = std::mem::take(&mut self.warnings);
-        let mut diagnostics =
-            diagnostic::errors_to_diagnostics(&errors, &self.types.storage, &self.alias_provenance);
+        let mut diagnostics = diagnostic::errors_to_diagnostics(&errors, &self.types.storage);
         diagnostics.extend(diagnostic::warnings_to_diagnostics(&warnings));
 
         // Capture before self is moved into Collector.
@@ -252,12 +251,8 @@ impl CheckCtx<'_> {
         // visible on the concrete type itself.
         for &(name_id, _ty) in &inferred {
             let name_slot = self.ty_for_name_direct(name_id);
-            let output = canonicalize_standalone(
-                &self.types.storage,
-                &self.alias_provenance,
-                name_slot,
-                Polarity::Positive,
-            );
+            let output =
+                canonicalize_standalone(&self.types.storage, name_slot, Polarity::Positive);
             let simplified = simplify(&output);
             self.early_canonical.insert(name_id, simplified);
         }

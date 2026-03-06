@@ -463,14 +463,6 @@ pub struct CheckCtx<'db> {
     /// rather than from the generic `import :: a -> b` builtin signature.
     import_types: HashMap<ExprId, OutputTy>,
 
-    /// Tracks which TyIds originated from type alias resolution. When a
-    /// TypeVarValue::Reference is resolved to an alias body in intern_fresh_ty,
-    /// or a Named OutputTy is interned, the resulting TyId is recorded here
-    /// with the alias name. Used during canonicalization to wrap the result in
-    /// OutputTy::Named so hover display shows the alias name instead of the
-    /// fully expanded structural type.
-    alias_provenance: FxHashMap<TyId, smol_str::SmolStr>,
-
     /// Context argument types for the root lambda (from `tix.toml` context
     /// configuration). Maps parameter names (e.g. "config", "lib", "pkgs") to
     /// their declared types. Applied only to the module's entry expression
@@ -562,7 +554,6 @@ impl<'db> CheckCtx<'db> {
             early_canonical: ArenaMap::new(),
             type_aliases,
             import_types,
-            alias_provenance: FxHashMap::default(),
             context_args,
             narrow_overrides: FxHashMap::default(),
             pre_annotated_params: FxHashSet::default(),
