@@ -280,7 +280,7 @@ impl CheckCtx<'_> {
             if self.poly_type_env.contains_idx(name_id) {
                 continue;
             }
-            let poly_ty = self.types.resolve_to_concrete_id(ty).unwrap_or(ty);
+            let poly_ty = self.types.resolve_to_single_concrete_id(ty).unwrap_or(ty);
 
             // If the name slot has a Named lower bound (from type annotation),
             // wrap poly_ty in Named so that extrusion at usage sites preserves

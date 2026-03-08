@@ -6473,3 +6473,30 @@ fn function_union_annotation_still_skips() {
         "should have no type errors with union-alias annotation on function, got: {errors:?}"
     );
 }
+
+// ==============================================================================
+// Let-binding preserves union types
+// ==============================================================================
+
+/// Regression: let-binding a union expression (if true then 1 else "hi") and
+/// referencing the binding should produce the full union (int | string), not
+/// just the first member (int). The bug was in `resolve_to_concrete_id` which
+/// picked the first concrete lower bound when multiple existed.
+#[test]
+fn let_binding_preserves_union() {
+    let ty = get_inferred_root(r#"let x = if true then 1 else "hi"; in x"#);
+    match &ty {
+        OutputTy::Union(members) => {
+            assert_eq!(members.len(), 2, "expected 2 union members, got: {ty}");
+            let has_int = members
+                .iter()
+                .any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::Int)));
+            let has_string = members
+                .iter()
+                .any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::String)));
+            assert!(has_int, "union should contain int, got: {ty}");
+            assert!(has_string, "union should contain string, got: {ty}");
+        }
+        _ => panic!("expected union type (int | string), got: {ty}"),
+    }
+}

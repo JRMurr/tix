@@ -605,23 +605,18 @@ impl CheckCtx<'_> {
     /// as the base type in the intersection, checking existing overrides
     /// first for nested narrowing support.
     ///
-    /// We intentionally bypass `poly_type_env` here because
-    /// `resolve_to_concrete_id` may have collapsed a union-typed variable
-    /// (e.g. `null | int`) to a single concrete type (`null`), which would
-    /// make `Inter(null, ~null)` contradictory. The raw name slot variable
-    /// retains all lower bounds, so the intersection correctly narrows the
-    /// full type.
+    /// We intentionally bypass `poly_type_env` here because we want the raw
+    /// variable with all its lower bounds. While `resolve_to_single_concrete_id`
+    /// now preserves unions (returning None for multi-headed bounds), the name
+    /// slot variable is still the right source for narrowing intersections.
     pub(crate) fn compute_narrow_override(
         &mut self,
         binding: &crate::narrow::NarrowBinding,
     ) -> TyId {
         // For narrowing, use the pre-allocated name slot (raw variable) rather
-        // than the poly_type_env entry. The poly_type_env entry may have been
-        // resolved to a single concrete type via `resolve_to_concrete_id`,
-        // which picks one of potentially many lower bounds (e.g. resolving to
-        // `null` when the actual type is `null | int`). The name slot variable
-        // retains all lower bounds, so `Inter(name_slot, ~Null)` correctly
-        // represents "the original type minus null".
+        // than the poly_type_env entry. The name slot variable retains all
+        // lower bounds, so `Inter(name_slot, ~Null)` correctly represents
+        // "the original type minus null".
         //
         // For nested narrowing (e.g. `if isAttrs x then if x ? y`), check
         // existing overrides first so the inner narrowing builds on top.

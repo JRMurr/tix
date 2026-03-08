@@ -15,6 +15,39 @@ use super::TyId;
 use crate::storage::{TypeEntry, TypeStorage, TypeVariable};
 use lang_ty::{PrimitiveTy, Ty};
 
+/// Coarse type-constructor tag used to distinguish genuine unions from
+/// compatible multi-bound variables. Two concrete types with the same head
+/// (e.g. two `List(...)` with different elements) are structurally compatible
+/// constraints, not a union. Different heads (e.g. `Primitive(Int)` vs
+/// `Primitive(String)`) indicate a genuine union.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TypeHead {
+    Primitive(PrimitiveTy),
+    List,
+    Lambda,
+    AttrSet,
+    Neg,
+    Inter,
+    Union,
+    Named,
+}
+
+impl TypeHead {
+    fn of(ty: &Ty<TyId>) -> Self {
+        match ty {
+            Ty::TyVar(_) => unreachable!("TyVar is not a concrete type"),
+            Ty::Primitive(p) => TypeHead::Primitive(*p),
+            Ty::List(_) => TypeHead::List,
+            Ty::Lambda { .. } => TypeHead::Lambda,
+            Ty::AttrSet(_) => TypeHead::AttrSet,
+            Ty::Neg(_) => TypeHead::Neg,
+            Ty::Inter(_, _) => TypeHead::Inter,
+            Ty::Union(_, _) => TypeHead::Union,
+            Ty::Named(_, _) => TypeHead::Named,
+        }
+    }
+}
+
 /// Storage layer for type allocation, caching, and resolution.
 ///
 /// # Cache Invalidation Rules
@@ -178,6 +211,62 @@ impl TypeTable {
                     }
                 }
                 None
+            }
+        }
+    }
+
+    /// Like `resolve_to_concrete_id`, but returns `None` when lower bounds
+    /// contain 2+ distinct type heads (indicating a genuine union like
+    /// `int | string`). Returns `Some(first_concrete_id)` when all reachable
+    /// concrete types share the same head constructor — multiple `List` bounds
+    /// from different constraint paths are compatible, not a union.
+    ///
+    /// Used by poly_type_env construction where collapsing a union variable
+    /// to a single member would lose type information.
+    pub fn resolve_to_single_concrete_id(&self, ty_id: TyId) -> Option<TyId> {
+        let mut visited = HashSet::new();
+        let mut first_id: Option<TyId> = None;
+        let mut head: Option<TypeHead> = None;
+        if self.resolve_to_single_concrete_id_inner(ty_id, &mut visited, &mut first_id, &mut head) {
+            first_id
+        } else {
+            None // 2+ distinct type heads found (genuine union)
+        }
+    }
+
+    /// Returns `true` to continue searching, `false` when a second distinct
+    /// type head is found (short-circuit).
+    fn resolve_to_single_concrete_id_inner(
+        &self,
+        ty_id: TyId,
+        visited: &mut HashSet<TyId>,
+        first_id: &mut Option<TyId>,
+        head: &mut Option<TypeHead>,
+    ) -> bool {
+        if !visited.insert(ty_id) {
+            return true; // Cycle — skip.
+        }
+        match self.storage.get(ty_id) {
+            TypeEntry::Concrete(ty) => {
+                let this_head = TypeHead::of(ty);
+                match *head {
+                    Some(ref existing) if *existing != this_head => false,
+                    Some(_) => true, // Same head — compatible, keep going.
+                    None => {
+                        *head = Some(this_head);
+                        *first_id = Some(ty_id);
+                        true
+                    }
+                }
+            }
+            TypeEntry::Variable(v) => {
+                let bounds = v.lower_bounds.clone();
+                for lb in bounds {
+                    if !self.resolve_to_single_concrete_id_inner(lb, visited, first_id, head) {
+                        return false;
+                    }
+                }
+                true
             }
         }
     }
@@ -367,12 +456,67 @@ mod tests {
         );
     }
 
-    // TODO: resolve_to_concrete_id returns the first concrete bound when
-    // multiple exist, which can lose information (e.g. picking `null` from
-    // `null | int`). A fix to return None for multiple bounds regresses
-    // extrusion-dependent tests (wrapper_foldl_int_and_list). The fix needs
-    // to account for the poly_type_env / extrusion flow that depends on
-    // seeing through variables to find Lambda structure.
+    // NOTE: resolve_to_concrete_id returns the first concrete bound when
+    // multiple exist, which can lose information for unions. The infer.rs
+    // call site uses resolve_to_single_concrete_id instead, which compares
+    // type heads to detect genuine unions (different constructors) while
+    // still resolving compatible multi-bound variables (same constructor).
+
+    #[test]
+    fn resolve_to_single_concrete_id_single_bound() {
+        let mut tt = TypeTable::new();
+        let var = tt.new_var();
+        let int_ty = tt.alloc_prim(PrimitiveTy::Int);
+        tt.storage.add_lower_bound(var, int_ty);
+
+        // Single concrete lower bound — resolves normally.
+        assert_eq!(tt.resolve_to_single_concrete_id(var), Some(int_ty));
+    }
+
+    #[test]
+    fn resolve_to_single_concrete_id_union_returns_none() {
+        let mut tt = TypeTable::new();
+        let var = tt.new_var();
+        let int_ty = tt.alloc_prim(PrimitiveTy::Int);
+        let string_ty = tt.alloc_prim(PrimitiveTy::String);
+        tt.storage.add_lower_bound(var, int_ty);
+        tt.storage.add_lower_bound(var, string_ty);
+
+        // Two distinct primitive heads — genuine union, returns None.
+        assert_eq!(tt.resolve_to_single_concrete_id(var), None);
+    }
+
+    #[test]
+    fn resolve_to_single_concrete_id_compatible_bounds() {
+        let mut tt = TypeTable::new();
+        let var = tt.new_var();
+        let int_elem = tt.alloc_prim(PrimitiveTy::Int);
+        let list1 = tt.alloc_concrete(Ty::List(int_elem));
+        let elem_var = tt.new_var();
+        let list2 = tt.alloc_concrete(Ty::List(elem_var));
+        tt.storage.add_lower_bound(var, list1);
+        tt.storage.add_lower_bound(var, list2);
+
+        // Both are List — same head constructor, returns first found.
+        assert_eq!(tt.resolve_to_single_concrete_id(var), Some(list1));
+    }
+
+    #[test]
+    fn resolve_to_single_concrete_id_transitive_union() {
+        let mut tt = TypeTable::new();
+        let outer = tt.new_var();
+        let inner = tt.new_var();
+        let int_ty = tt.alloc_prim(PrimitiveTy::Int);
+        let string_ty = tt.alloc_prim(PrimitiveTy::String);
+
+        // outer → inner → {int, string}
+        tt.storage.add_lower_bound(outer, inner);
+        tt.storage.add_lower_bound(inner, int_ty);
+        tt.storage.add_lower_bound(inner, string_ty);
+
+        // Transitively finds the union, returns None.
+        assert_eq!(tt.resolve_to_single_concrete_id(outer), None);
+    }
 
     #[test]
     fn find_pinned_concrete_returns_none_for_unpinned() {

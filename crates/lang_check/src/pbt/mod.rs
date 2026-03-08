@@ -249,14 +249,6 @@ fn text_from_ty(ty: &OutputTy) -> impl Strategy<Value = NixTextStr> {
         OutputTy::Top => unreachable!("Top should be filtered by arb_nix_text_from_ty"),
     };
 
-    // Don't apply let-bind/attrset wrapping for union types — let-binding a union
-    // expression loses the union type through early canonicalization (the reference
-    // sees only the first branch's type). This is a known limitation of the type
-    // checker's early canonicalization.
-    if matches!(ty, OutputTy::Union(_)) {
-        return inner.boxed();
-    }
-
     inner.prop_flat_map(non_type_modifying_transform).boxed()
 }
 
@@ -374,16 +366,9 @@ fn arb_nix_text(args: RecursiveParams) -> impl Strategy<Value = (OutputTy, NixTe
         args.desired_size,
         args.expected_branch_size,
         |inner| {
-            // Wrap inner values in let-bindings/attrset selection, but only for
-            // non-union types — let-binding a union expression loses the union
-            // through early canonicalization.
-            let wrapped = inner.clone().prop_flat_map(|(ty, text)| {
-                if ty.contains_union_or_intersection() {
-                    (Just(ty), Just(text)).boxed()
-                } else {
-                    (Just(ty), non_type_modifying_transform(text)).boxed()
-                }
-            });
+            let wrapped = inner
+                .clone()
+                .prop_flat_map(|(ty, text)| (Just(ty), non_type_modifying_transform(text)));
 
             // all the wrapper types need a ty ref
             let inner = inner.prop_map(|(ty, text)| (TyRef::from(ty), text));
@@ -530,12 +515,14 @@ proptest! {
         let root_ty = get_inferred_root(&text);
         let expected = ty.normalize_vars().normalize_set_ops();
         let actual = root_ty.normalize_set_ops();
-        // Union types have known mismatches: let-binding loses union members
-        // through early canonicalization, and duplicate union members in the
-        // generator may get deduplicated differently than inference produces.
-        // For types involving unions, verify crash freedom only. The focused
-        // test_union_prim_if_else and test_union_three_way tests handle
-        // exact union correctness.
+        // Intersection types can produce mismatches because the generator
+        // doesn't model intersection constraint decomposition.
+        // Union types can also mismatch when the generator creates unions
+        // with duplicate members (e.g. Union([a->null, a->null])) — these
+        // normalize to a single type, but inference produces distinct type
+        // variables for each branch that don't dedup. The focused union
+        // PBT tests (test_union_prim_if_else, test_union_three_way) handle
+        // exact union correctness with distinct-member generators.
         if expected.contains_union_or_intersection()
             || actual.contains_union_or_intersection()
         {
@@ -555,8 +542,6 @@ proptest! {
 // by generating higher-hit-rate union-specific expressions.
 
 /// Pick 2 distinct primitives and generate if-then-else, asserting exact union type.
-/// No let-bind/attrset wrapping — let-binding loses union type info through early
-/// canonicalization.
 fn arb_union_prim_if_else() -> impl Strategy<Value = (OutputTy, NixTextStr)> {
     (any::<PrimitiveTy>(), any::<PrimitiveTy>())
         .prop_filter("need distinct primitives", |(a, b)| a != b)
