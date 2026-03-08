@@ -8,7 +8,6 @@ updated_date: '2026-03-07 16:15'
 labels:
   - type-inference
   - infrastructure
-milestone: m-0
 dependencies: []
 references:
   - 'crates/lang_check/src/constrain.rs:474'
