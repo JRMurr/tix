@@ -5,6 +5,12 @@ by design, or informational notes.
 
 ### Canonicalization / Type Display
 
+- **Let-binding loses union type**: `let x = if true then 1 else "hi"; in x`
+  infers `x :: int | string` but the root expression type for `x` is just the
+  first branch's type (e.g. `int`). Early canonicalization sees partial bounds
+  at the reference site. Affects PBT: union-typed expressions can't be wrapped
+  in `non_type_modifying_transform` (let-bind/attrset selection).
+
 - Early canonicalization captures clean polymorphic types for name bindings, but
   the root expression type still shows contaminated types for inherited names.
   The inherit creates a new NameId whose type comes from extruding the original,
