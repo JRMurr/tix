@@ -297,13 +297,25 @@ fn apply_simplification(
                 return OutputTy::Top;
             }
 
-            match simplified.len() {
+            // Flatten nested unions: Union([a, Union([b, c])]) → Union([a, b, c])
+            let mut flat = Vec::with_capacity(simplified.len());
+            for m in simplified {
+                if let OutputTy::Union(inner) = &*m.0 {
+                    flat.extend(inner.iter().cloned());
+                } else {
+                    flat.push(m);
+                }
+            }
+            // Deduplicate members
+            flat.dedup();
+
+            match flat.len() {
                 // All members were polar-only type variables. Keep the first
                 // member (after substitution) as a representative — it's
                 // unconstrained and effectively represents ⊥ in this position.
                 0 => apply_simplification(&members[0].0, substitution, &FxHashSet::default()),
-                1 => (*simplified.into_iter().next().unwrap().0).clone(),
-                _ => OutputTy::Union(simplified),
+                1 => (*flat.into_iter().next().unwrap().0).clone(),
+                _ => OutputTy::Union(flat),
             }
         }
         OutputTy::Intersection(members) => {
@@ -330,13 +342,25 @@ fn apply_simplification(
                 return OutputTy::Bottom;
             }
 
-            match simplified.len() {
+            // Flatten nested intersections: Inter([a, Inter([b, c])]) → Inter([a, b, c])
+            let mut flat = Vec::with_capacity(simplified.len());
+            for m in simplified {
+                if let OutputTy::Intersection(inner) = &*m.0 {
+                    flat.extend(inner.iter().cloned());
+                } else {
+                    flat.push(m);
+                }
+            }
+            // Deduplicate members
+            flat.dedup();
+
+            match flat.len() {
                 // All members were polar-only type variables. Keep the first
                 // member (after substitution) as a representative — it's
                 // unconstrained and effectively represents ⊤ in this position.
                 0 => apply_simplification(&members[0].0, substitution, &FxHashSet::default()),
-                1 => (*simplified.into_iter().next().unwrap().0).clone(),
-                _ => OutputTy::Intersection(simplified),
+                1 => (*flat.into_iter().next().unwrap().0).clone(),
+                _ => OutputTy::Intersection(flat),
             }
         }
         OutputTy::Named(name, inner) => {
@@ -360,7 +384,24 @@ fn apply_simplification(
 /// This removes type variables that appear in only one polarity (they're
 /// unconstrained in the other direction) and merges variables that always
 /// co-occur at the same positions.
+///
+/// Runs to a fixed point to ensure idempotency — structural changes from
+/// removing/merging variables can expose new simplification opportunities
+/// (e.g. flattened intersections revealing new single-polarity variables).
 pub fn simplify(ty: &OutputTy) -> OutputTy {
+    let mut result = simplify_once(ty);
+    // Iterate until fixed point (typically 1-2 rounds).
+    for _ in 0..5 {
+        let next = simplify_once(&result);
+        if next == result {
+            break;
+        }
+        result = next;
+    }
+    result
+}
+
+fn simplify_once(ty: &OutputTy) -> OutputTy {
     let mut vars = FxHashMap::default();
     let mut path = Vec::new();
     analyze(ty, true, &mut path, &mut vars);

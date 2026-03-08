@@ -223,6 +223,142 @@ impl OutputTy {
         }
     }
 
+    /// Returns true if this type or any of its children contains an Intersection.
+    pub fn contains_intersection(&self) -> bool {
+        match self {
+            OutputTy::Intersection(_) => true,
+            _ => {
+                let mut found = false;
+                self.for_each_child(&mut |child| {
+                    if !found {
+                        found = child.contains_intersection();
+                    }
+                });
+                found
+            }
+        }
+    }
+
+    /// Returns true if this type or any of its children contains a Neg.
+    pub fn contains_neg(&self) -> bool {
+        match self {
+            OutputTy::Neg(_) => true,
+            _ => {
+                let mut found = false;
+                self.for_each_child(&mut |child| {
+                    if !found {
+                        found = child.contains_neg();
+                    }
+                });
+                found
+            }
+        }
+    }
+
+    /// Returns true if this type is or contains Top or Bottom.
+    pub fn contains_top_or_bottom(&self) -> bool {
+        match self {
+            OutputTy::Top | OutputTy::Bottom => true,
+            _ => {
+                let mut found = false;
+                self.for_each_child(&mut |child| {
+                    if !found {
+                        found = child.contains_top_or_bottom();
+                    }
+                });
+                found
+            }
+        }
+    }
+
+    /// Returns true if this type is or contains a bare TyVar outside of Lambda params.
+    /// TyVar is fine inside Lambda params (represents generic params), but can't be
+    /// generated as standalone Nix code.
+    pub fn contains_bare_tyvar(&self) -> bool {
+        match self {
+            OutputTy::TyVar(_) => true,
+            // Lambda params are allowed to have TyVar, so only check body
+            OutputTy::Lambda { body, .. } => body.0.contains_bare_tyvar(),
+            _ => {
+                let mut found = false;
+                self.for_each_child(&mut |child| {
+                    if !found {
+                        found = child.contains_bare_tyvar();
+                    }
+                });
+                found
+            }
+        }
+    }
+
+    /// Recursively flatten, deduplicate, and sort Union/Intersection members
+    /// for order-insensitive comparison. The type checker flattens nested
+    /// unions and may reorder/deduplicate members during canonicalization.
+    pub fn normalize_set_ops(&self) -> OutputTy {
+        match self {
+            OutputTy::Union(members) => {
+                let mut flat: Vec<TyRef> = Vec::new();
+                Self::flatten_union(members, &mut flat);
+                flat.sort();
+                flat.dedup();
+                if flat.len() == 1 {
+                    return flat.into_iter().next().unwrap().0.as_ref().clone();
+                }
+                OutputTy::Union(flat)
+            }
+            OutputTy::Intersection(members) => {
+                let mut flat: Vec<TyRef> = Vec::new();
+                Self::flatten_intersection(members, &mut flat);
+                flat.sort();
+                flat.dedup();
+                if flat.len() == 1 {
+                    return flat.into_iter().next().unwrap().0.as_ref().clone();
+                }
+                OutputTy::Intersection(flat)
+            }
+            _ => self.map_children(&mut |child| child.normalize_set_ops()),
+        }
+    }
+
+    fn flatten_union(members: &[TyRef], out: &mut Vec<TyRef>) {
+        for m in members {
+            let normalized = m.0.normalize_set_ops();
+            if let OutputTy::Union(inner) = &normalized {
+                // Already normalized, so inner members are flat
+                out.extend(inner.iter().cloned());
+            } else {
+                out.push(TyRef::from(normalized));
+            }
+        }
+    }
+
+    fn flatten_intersection(members: &[TyRef], out: &mut Vec<TyRef>) {
+        for m in members {
+            let normalized = m.0.normalize_set_ops();
+            if let OutputTy::Intersection(inner) = &normalized {
+                out.extend(inner.iter().cloned());
+            } else {
+                out.push(TyRef::from(normalized));
+            }
+        }
+    }
+
+    /// Returns true if this type contains a Named wrapper.
+    pub fn contains_named(&self) -> bool {
+        match self {
+            OutputTy::Named(..) => true,
+            _ => {
+                let mut found = false;
+                self.for_each_child(&mut |child| {
+                    if !found {
+                        found = child.contains_named();
+                    }
+                });
+                found
+            }
+        }
+    }
+
     /// Like `normalize_vars`, but displays `?` when the entire type is a bare
     /// type variable (meaning "unconstrained / unknown"). Compound types like
     /// `a -> b -> a` keep normal letter names — those variables represent real
@@ -567,5 +703,25 @@ mod tests {
     fn number_displays_standalone() {
         let ty = OutputTy::Primitive(PrimitiveTy::Number);
         assert_eq!(format!("{ty}"), "number");
+    }
+
+    mod pbt {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #![proptest_config(ProptestConfig {
+                cases: 256, .. ProptestConfig::default()
+            })]
+
+            /// normalize_vars is idempotent: normalizing twice produces the same
+            /// result as normalizing once.
+            #[test]
+            fn normalize_vars_idempotent(ty in any::<OutputTy>()) {
+                let once = ty.normalize_vars();
+                let twice = once.normalize_vars();
+                prop_assert_eq!(once, twice);
+            }
+        }
     }
 }

@@ -102,6 +102,21 @@ fn arb_if_expr() -> impl Strategy<Value = String> {
         .prop_map(|(then_val, else_val)| format!("if true then {then_val} else {else_val}"))
 }
 
+/// `if true then <a> else <b>` with different-typed branches — produces a union type.
+/// Tests LSP crash freedom on union-typed expressions.
+fn arb_if_union_expr() -> impl Strategy<Value = String> {
+    prop_oneof![
+        Just(r#"if true then 1 else "hello""#.to_string()),
+        Just(r#"if true then null else 42"#.to_string()),
+        Just(r#"if true then true else 1.5"#.to_string()),
+        (arb_int(), arb_string_lit()).prop_map(|(i, s)| format!("if true then {i} else {s}")),
+        (arb_null(), arb_bool()).prop_map(|(n, b)| format!("if true then {n} else {b}")),
+        // Nested: 3-way union
+        (arb_int(), arb_string_lit(), arb_float())
+            .prop_map(|(i, s, f)| { format!("if true then {i} else if true then {s} else {f}") }),
+    ]
+}
+
 /// `(<attrset>).<key>` — select expression
 fn arb_select_expr() -> impl Strategy<Value = String> {
     (arb_ident(), arb_literal()).prop_map(|(key, val)| format!("({{ {key} = {val}; }}).{key}"))
@@ -157,6 +172,7 @@ fn arb_nix_source() -> impl Strategy<Value = String> {
         2 => arb_lambda_expr(),
         2 => arb_attrset_expr(),
         1 => arb_if_expr(),
+        1 => arb_if_union_expr(),
         1 => arb_select_expr(),
         1 => arb_list_expr(),
         1 => arb_with_expr(),

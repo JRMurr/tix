@@ -13,7 +13,14 @@ pub struct RecursiveParams {
 }
 
 fn arb_arc_ty(args: RecursiveParams) -> impl Strategy<Value = OutputTy> {
-    let leaf = any::<PrimitiveTy>().prop_map(OutputTy::Primitive);
+    let leaf = prop_oneof![
+        // Primitives (dominant)
+        8 => any::<PrimitiveTy>().prop_map(OutputTy::Primitive),
+        // TyVar, Top, Bottom at low weight so they don't dominate
+        1 => (1..=8u32).prop_map(OutputTy::TyVar),
+        1 => Just(OutputTy::Top),
+        1 => Just(OutputTy::Bottom),
+    ];
 
     leaf.prop_recursive(
         args.depth,
@@ -23,15 +30,22 @@ fn arb_arc_ty(args: RecursiveParams) -> impl Strategy<Value = OutputTy> {
             let inner = inner.prop_map(TyRef::from);
 
             prop_oneof![
-                inner.clone().prop_map(OutputTy::List),
-                (inner.clone(), inner.clone())
+                // Standard structural types
+                3 => inner.clone().prop_map(OutputTy::List),
+                3 => (inner.clone(), inner.clone())
                     .prop_map(|(param, body)| OutputTy::Lambda { param, body }),
-                prop::collection::btree_map(arb_smol_str_ident(), inner.clone(), 0..5)
+                3 => prop::collection::btree_map(arb_smol_str_ident(), inner.clone(), 0..5)
                     .prop_map(|map| OutputTy::AttrSet(AttrSetTy::from_fields(map))),
                 // Union of 2-4 members
-                prop::collection::vec(inner.clone(), 2..5).prop_map(OutputTy::Union),
+                2 => prop::collection::vec(inner.clone(), 2..5).prop_map(OutputTy::Union),
                 // Intersection of 2-4 members
-                prop::collection::vec(inner.clone(), 2..5).prop_map(OutputTy::Intersection),
+                2 => prop::collection::vec(inner.clone(), 2..5).prop_map(OutputTy::Intersection),
+                // Neg wrapping inner (only on atoms per BAS design, but generating on any
+                // inner is fine for robustness testing)
+                1 => inner.clone().prop_map(OutputTy::Neg),
+                // Named wrapper with generated alias name
+                1 => (arb_smol_str_ident(), inner.clone())
+                    .prop_map(|(name, t)| OutputTy::Named(name, t)),
             ]
         },
     )
