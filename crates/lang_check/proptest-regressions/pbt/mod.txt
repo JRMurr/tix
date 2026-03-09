@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 61bb342fc93af9dc85a2f35481e1e559a0bd3f9c111f3b733095e4782f7c4ecb # shrinks to (ty, text) = (Union([Lambda(TyVar(1) -> Null), Lambda(TyVar(1) -> Null)]), "(if true then ((__pbt_p: null)) else ((__pbt_p: null)))")
