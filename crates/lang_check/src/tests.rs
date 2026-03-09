@@ -3506,9 +3506,12 @@ fn narrow_field_access_then_arithmetic() {
 // ==============================================================================
 
 /// Regression test for https://github.com/JRMurr/tix/issues/1:
-/// `sep == true` in an if-condition should narrow `sep` to include bool.
-/// Previously only `== null` was recognized, so `sep` was inferred as
-/// `int | null` and passing `true` was a type error.
+/// `sep == true` in an if-condition should narrow `sep` to include bool
+/// in the then-branch. The else-branch of `sep == true` no longer
+/// produces ¬Bool (since `x == true` being false doesn't prove x isn't
+/// bool — x could be `false`). So calling with `true` now correctly
+/// reports a type error: `false` would reach `sep + 1` which requires
+/// number. Calling with a number or null still works.
 #[test]
 fn narrow_eq_true_accepts_bool_arg() {
     let nix = indoc! {r#"
@@ -3525,12 +3528,12 @@ fn narrow_eq_true_accepts_bool_arg() {
                 sep + 1
             );
         in
-          block 2 3 true
+          block 2 3 null
     "#};
     let ty = get_inferred_root(nix);
     assert!(
         matches!(&ty, OutputTy::Primitive(PrimitiveTy::String)),
-        "block 2 3 true should type-check and return string, got: {ty}"
+        "block 2 3 null should type-check and return string, got: {ty}"
     );
 }
 
@@ -3666,6 +3669,93 @@ fn narrow_eq_string_literal() {
         }
         _ => panic!("expected union (string | int), got: {body}"),
     }
+}
+
+// ==========================================================================
+// Non-null literal equality: else-branch must NOT produce IsNotType
+// ==========================================================================
+//
+// `x == 1` being false doesn't mean x isn't an int (x could be 2).
+// Only null is a singleton type where `x == null` being false guarantees
+// x isn't null. Previously, all literal comparisons produced IsNotType
+// in the else-branch, causing spurious `~int` errors.
+
+/// Nixpkgs `levenshteinAtMost` pattern: after `k == 1` is false in the
+/// else-branch, `k` must still be usable as int. The else-branch should
+/// NOT narrow k to `~int`.
+///
+/// The key trigger is: `k` is constrained to int by arithmetic (`> k`),
+/// then `k == 1` in a nested else-branch produces IsNotType(Int), which
+/// conflicts with the int constraint — yielding `expected ~int, got int`.
+#[test]
+fn narrow_eq_int_else_no_negation() {
+    let nix = indoc! {"
+        let
+          f =
+            k:
+            if k <= 0 then
+              a: b: a == b
+            else
+              let
+                g =
+                  a: b:
+                  let
+                    alen = builtins.stringLength a;
+                    blen = builtins.stringLength b;
+                  in
+                  if alen - blen > k then
+                    false
+                  else if k == 1 then
+                    true
+                  else if k == 2 then
+                    true
+                  else
+                    alen <= k;
+              in
+              g;
+        in f
+    "};
+    let diags = collect_diagnostics(nix);
+    assert!(
+        diags.is_empty(),
+        "should have no diagnostics, got: {diags:?}"
+    );
+}
+
+/// Simpler reproduction: `k` is constrained to int by `a - b > k` in
+/// a nested function (where a, b come from stringLength → int), then
+/// `k == 1` must not produce `~int` in the else-branch.
+#[test]
+fn narrow_eq_int_chained() {
+    let nix = indoc! {"
+        let f = k:
+          let g = s:
+            let len = builtins.stringLength s; in
+            if len - 1 > k then false
+            else if k == 1 then true
+            else len <= k;
+          in g;
+        in f
+    "};
+    let diags = collect_diagnostics(nix);
+    assert!(
+        diags.is_empty(),
+        "should have no diagnostics, got: {diags:?}"
+    );
+}
+
+/// `x: if x == true then x else x` — else-branch should still include bool
+/// (not narrow to `~bool`).
+#[test]
+fn narrow_eq_bool_else_no_negation() {
+    let nix = "x: if x == true then x else x";
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    let body_str = format!("{body}");
+    assert!(
+        !body_str.contains('~'),
+        "else-branch should not contain negated types, got: {body}"
+    );
 }
 
 // ==========================================================================

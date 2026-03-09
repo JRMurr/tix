@@ -144,8 +144,9 @@ pub fn analyze_condition(
         //
         // Recognizes equality comparisons against null, true, false, and
         // other literal values. Narrows the variable to the literal's
-        // primitive type in the matching branch and its negation in the
-        // other branch.
+        // primitive type in the matching branch. The negation (IsNotType)
+        // is only produced for null — the only singleton primitive where
+        // `x == null` being false guarantees x isn't null.
         Expr::BinOp {
             lhs,
             rhs,
@@ -159,27 +160,38 @@ pub fn analyze_condition(
                 return NarrowInfo::default();
             };
 
+            // Only null is a singleton type where `x == null` being false
+            // proves x is not null. For other primitives (int, bool, etc.),
+            // `x == 1` being false doesn't mean x isn't an int — x could be 2.
+            let is_singleton = matches!(prim, NarrowPrimitive::Null);
+
             let (then_pred, else_pred) = if is_eq {
                 (
-                    NarrowPredicate::IsType(prim),
-                    NarrowPredicate::IsNotType(prim),
+                    Some(NarrowPredicate::IsType(prim)),
+                    is_singleton.then_some(NarrowPredicate::IsNotType(prim)),
                 )
             } else {
                 (
-                    NarrowPredicate::IsNotType(prim),
-                    NarrowPredicate::IsType(prim),
+                    is_singleton.then_some(NarrowPredicate::IsNotType(prim)),
+                    Some(NarrowPredicate::IsType(prim)),
                 )
             };
 
             NarrowInfo {
-                then_branch: vec![NarrowBinding {
-                    name: binding,
-                    predicate: then_pred,
-                }],
-                else_branch: vec![NarrowBinding {
-                    name: binding,
-                    predicate: else_pred,
-                }],
+                then_branch: then_pred
+                    .map(|p| NarrowBinding {
+                        name: binding,
+                        predicate: p,
+                    })
+                    .into_iter()
+                    .collect(),
+                else_branch: else_pred
+                    .map(|p| NarrowBinding {
+                        name: binding,
+                        predicate: p,
+                    })
+                    .into_iter()
+                    .collect(),
             }
         }
 
