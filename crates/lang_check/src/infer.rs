@@ -308,6 +308,8 @@ impl CheckCtx<'_> {
             self.lift_reachable_vars(ty);
         }
 
+        self.compact_scc_graph(slots_before);
+
         self.types.storage.exit_level();
 
         // Record the inferred type in poly_type_env for successfully-inferred
@@ -1118,6 +1120,42 @@ impl CheckCtx<'_> {
         self.constrain(merged_id, mg.ret)?;
         self.constrain(mg.ret, merged_id)?;
         Ok(true)
+    }
+
+    /// Compact the bounds graph for an SCC group's type slots.
+    ///
+    /// Runs three passes over `[slots_before..len)`:
+    /// 1. **Pin**: Replace fully-determined variables with their concrete type.
+    /// 2. **Dedup**: Remove duplicate bounds on remaining variables.
+    /// 3. **Variable-free propagation**: Newly-concrete entries may make parents
+    ///    variable-free, enabling O(1) extrusion short-circuits.
+    fn compact_scc_graph(&mut self, slots_before: usize) {
+        let t_compact = Instant::now();
+        let vf_before = self.types.variable_free.len();
+
+        // Pass 1 + 2: pin and dedup in a single scan.
+        let (pinned, deduped) = self.types.compact_pinned_variables(slots_before);
+
+        // Pass 3: propagate variable-free status for all entries in the range.
+        // Newly-compacted entries are now concrete and may enable their parents
+        // to become variable-free too.
+        let len = self.types.storage.len();
+        for idx in slots_before..len {
+            self.types.try_mark_variable_free(TyId(idx as u32));
+        }
+
+        let vf_after = self.types.variable_free.len();
+        let elapsed = t_compact.elapsed();
+        if pinned > 0 || elapsed.as_millis() > 5 {
+            log::info!(
+                "  compact_scc_graph: {:.1}ms, pinned {}, deduped {}, variable_free {} → {}",
+                elapsed.as_secs_f64() * 1000.0,
+                pinned,
+                deduped,
+                vf_before,
+                vf_after,
+            );
+        }
     }
 
     /// Recursively lift all pre-allocated expression TyId slots under `expr`

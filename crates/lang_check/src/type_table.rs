@@ -53,22 +53,20 @@ impl TypeHead {
 /// # Cache Invalidation Rules
 ///
 /// All caches are scoped to the lifetime of a single `CheckCtx` (one per
-/// file). None are cleared between SCC groups within a file. This is safe
-/// because `TypeStorage` is **append-only**: once a TyId is allocated, its
-/// entry never changes (variables accumulate bounds but their identity and
-/// structural type entries are immutable).
+/// file). None are cleared between SCC groups within a file. TypeStorage
+/// is **mostly append-only** — entries are never removed, and concrete
+/// entries are never mutated. The one exception is `replace_var_with_concrete`
+/// used by bounds graph compaction, which overwrites a Variable slot with a
+/// Concrete entry. Per-cache safety analysis:
 ///
 /// | Cache               | Key                    | Invalidation          | Safety invariant                                          |
 /// |---------------------|------------------------|-----------------------|-----------------------------------------------------------|
-/// | `constrain_cache`   | `(TyId, TyId)`         | Never (per-file life) | Prevents re-processing identical constraint pairs         |
-/// | `neg_cache`         | `TyId → TyId`          | Never (per-file life) | Deduplicates `Neg(x)` for TyId-equality in absorption    |
-/// | `prim_cache`        | `PrimitiveTy → TyId`   | Never (per-file life) | Deduplicates primitive type allocations                   |
-/// | `inter_var_cache`   | `TyId → bool`          | Never (per-file life) | Inter/Var structure is immutable once allocated            |
-/// | `union_member_cache`| `(TyId, TyId)`         | Never (per-file life) | Union structure is immutable once allocated                |
-///
-/// **Important**: if `TypeStorage` is ever changed to allow mutation of
-/// existing entries (e.g. in-place type narrowing), all caches must be
-/// reviewed for staleness.
+/// | `constrain_cache`   | `(TyId, TyId)`         | Never (per-file life) | Safe: all constraints already propagated through the pinned variable |
+/// | `neg_cache`         | `TyId → TyId`          | Never (per-file life) | Unaffected: keys are inner TyIds, not compacted variables |
+/// | `prim_cache`        | `PrimitiveTy → TyId`   | Never (per-file life) | Unaffected: keys are primitives, not variables             |
+/// | `inter_var_cache`   | `TyId → bool`          | Never (per-file life) | Conservative: may treat concrete as variable (false positive), sound but over-constraining |
+/// | `union_member_cache`| `(TyId, TyId)`         | Never (per-file life) | Unaffected: union structure is immutable once allocated    |
+/// | `variable_free`     | `TyId`                 | Explicitly updated    | Updated during compaction via `try_mark_variable_free`    |
 #[derive(Debug, Clone)]
 pub(crate) struct TypeTable {
     pub(crate) storage: TypeStorage,
@@ -217,6 +215,86 @@ impl TypeTable {
         if children_vf {
             self.variable_free.insert(ty_id);
         }
+    }
+
+    /// Compact fully-determined variables in the range `[slots_before..len)`.
+    ///
+    /// A variable is "pinned" when the same concrete TyId appears in both its
+    /// lower_bounds and upper_bounds — meaning `ty <: var <: ty`, so `var = ty`.
+    /// Such variables are effectively constants that extrusion would needlessly
+    /// clone. Replacing them with the concrete type in-place eliminates the
+    /// variable from the bounds graph without changing any TyId references.
+    ///
+    /// Falls back to `find_pinned_concrete` for cases where different TyIds
+    /// hold the same primitive value (e.g. two separately-allocated `Int`
+    /// entries).
+    ///
+    /// Returns `(pinned_count, deduped_count)` for logging.
+    pub(crate) fn compact_pinned_variables(&mut self, slots_before: usize) -> (usize, usize) {
+        let len = self.storage.len();
+        let mut pinned_count = 0;
+        let mut deduped_count = 0;
+
+        for idx in slots_before..len {
+            let id = TyId(idx as u32);
+
+            let TypeEntry::Variable(v) = self.storage.get(id) else {
+                continue;
+            };
+
+            // Fast path: check if the same concrete TyId appears in both bounds.
+            // This handles non-primitive types too (Lambda, AttrSet, List, etc.).
+            let mut found_pin: Option<TyId> = None;
+            for &lb in &v.lower_bounds {
+                if matches!(self.storage.get(lb), TypeEntry::Concrete(_)) {
+                    for &ub in &v.upper_bounds {
+                        if lb == ub {
+                            found_pin = Some(lb);
+                            break;
+                        }
+                    }
+                    if found_pin.is_some() {
+                        break;
+                    }
+                }
+            }
+
+            if let Some(concrete_id) = found_pin {
+                let ty = match self.storage.get(concrete_id) {
+                    TypeEntry::Concrete(ty) => ty.clone(),
+                    _ => unreachable!(),
+                };
+                self.storage.replace_var_with_concrete(id, ty);
+                self.try_mark_variable_free(id);
+                pinned_count += 1;
+                continue;
+            }
+
+            // Slow path: check for primitive-value matching via find_pinned_concrete.
+            // Different TyIds may hold the same Primitive value if they were
+            // allocated separately (before prim_cache deduplication was in place
+            // or from different allocation paths).
+            let v_clone = v.clone();
+            if let Some(pinned_ty) = self.find_pinned_concrete(&v_clone) {
+                self.storage.replace_var_with_concrete(id, pinned_ty);
+                self.try_mark_variable_free(id);
+                pinned_count += 1;
+                continue;
+            }
+
+            // Not pinned — deduplicate bounds to reduce subsequent walk costs.
+            let lb_before = v.lower_bounds.len();
+            let ub_before = v.upper_bounds.len();
+            self.storage.dedup_bounds(id);
+            if let TypeEntry::Variable(v_after) = self.storage.get(id) {
+                if v_after.lower_bounds.len() < lb_before || v_after.upper_bounds.len() < ub_before
+                {
+                    deduped_count += 1;
+                }
+            }
+        }
+
+        (pinned_count, deduped_count)
     }
 
     /// Walk lower bounds transitively to find a Concrete entry and return its
@@ -566,5 +644,145 @@ mod tests {
 
         let v = tt.storage.get_var(var).unwrap().clone();
         assert_eq!(tt.find_pinned_concrete(&v), None);
+    }
+
+    // ======================================================================
+    // compact_pinned_variables tests
+    // ======================================================================
+
+    #[test]
+    fn compact_same_tyid_in_both_bounds() {
+        let mut tt = TypeTable::new();
+        let slots_before = tt.storage.len();
+
+        let int_ty = tt.alloc_prim(PrimitiveTy::Int);
+        let var = tt.new_var();
+        // Pin: same TyId in lower and upper bounds.
+        tt.storage.add_lower_bound(var, int_ty);
+        tt.storage.add_upper_bound(var, int_ty);
+
+        let (pinned, _) = tt.compact_pinned_variables(slots_before);
+        assert_eq!(pinned, 1);
+        // The variable slot should now be concrete.
+        assert!(matches!(
+            tt.storage.get(var),
+            TypeEntry::Concrete(Ty::Primitive(PrimitiveTy::Int))
+        ));
+    }
+
+    #[test]
+    fn compact_same_tyid_non_primitive() {
+        let mut tt = TypeTable::new();
+        let slots_before = tt.storage.len();
+
+        let elem = tt.alloc_prim(PrimitiveTy::Int);
+        let list_ty = tt.alloc_concrete(Ty::List(elem));
+        let var = tt.new_var();
+        // Pin: same List TyId in both bounds.
+        tt.storage.add_lower_bound(var, list_ty);
+        tt.storage.add_upper_bound(var, list_ty);
+
+        let (pinned, _) = tt.compact_pinned_variables(slots_before);
+        assert_eq!(pinned, 1);
+        assert!(matches!(
+            tt.storage.get(var),
+            TypeEntry::Concrete(Ty::List(_))
+        ));
+    }
+
+    #[test]
+    fn compact_different_bounds_not_compacted() {
+        let mut tt = TypeTable::new();
+        let slots_before = tt.storage.len();
+
+        let int_ty = tt.alloc_prim(PrimitiveTy::Int);
+        let string_ty = tt.alloc_prim(PrimitiveTy::String);
+        let var = tt.new_var();
+        tt.storage.add_lower_bound(var, int_ty);
+        tt.storage.add_upper_bound(var, string_ty);
+
+        let (pinned, _) = tt.compact_pinned_variables(slots_before);
+        assert_eq!(pinned, 0);
+        // Should still be a variable.
+        assert!(matches!(tt.storage.get(var), TypeEntry::Variable(_)));
+    }
+
+    #[test]
+    fn compact_only_lower_bounds_not_compacted() {
+        let mut tt = TypeTable::new();
+        let slots_before = tt.storage.len();
+
+        let int_ty = tt.alloc_prim(PrimitiveTy::Int);
+        let var = tt.new_var();
+        tt.storage.add_lower_bound(var, int_ty);
+        // No upper bounds.
+
+        let (pinned, _) = tt.compact_pinned_variables(slots_before);
+        assert_eq!(pinned, 0);
+        assert!(matches!(tt.storage.get(var), TypeEntry::Variable(_)));
+    }
+
+    #[test]
+    fn compact_primitive_value_match_different_tyids() {
+        let mut tt = TypeTable::new();
+
+        // Allocate two separate Int TyIds by bypassing the prim_cache.
+        let int1 = tt.storage.new_concrete(Ty::Primitive(PrimitiveTy::Int));
+        let int2 = tt.storage.new_concrete(Ty::Primitive(PrimitiveTy::Int));
+        assert_ne!(int1, int2, "must be distinct TyIds for this test");
+
+        let slots_before = tt.storage.len();
+        let var = tt.new_var();
+        tt.storage.add_lower_bound(var, int1);
+        tt.storage.add_upper_bound(var, int2);
+
+        // The fast path (same TyId) won't match, but find_pinned_concrete
+        // should catch same-primitive-value.
+        let (pinned, _) = tt.compact_pinned_variables(slots_before);
+        assert_eq!(pinned, 1);
+        assert!(matches!(
+            tt.storage.get(var),
+            TypeEntry::Concrete(Ty::Primitive(PrimitiveTy::Int))
+        ));
+    }
+
+    #[test]
+    fn dedup_bounds_removes_duplicates() {
+        let mut tt = TypeTable::new();
+        let var = tt.new_var();
+        let int_ty = tt.alloc_prim(PrimitiveTy::Int);
+
+        // Add duplicates.
+        tt.storage.add_lower_bound(var, int_ty);
+        tt.storage.add_lower_bound(var, int_ty);
+        tt.storage.add_lower_bound(var, int_ty);
+        tt.storage.add_upper_bound(var, int_ty);
+        tt.storage.add_upper_bound(var, int_ty);
+
+        tt.storage.dedup_bounds(var);
+
+        let v = tt.storage.get_var(var).unwrap();
+        assert_eq!(v.lower_bounds.len(), 1);
+        assert_eq!(v.upper_bounds.len(), 1);
+    }
+
+    #[test]
+    fn compact_marks_variable_free() {
+        let mut tt = TypeTable::new();
+        let slots_before = tt.storage.len();
+
+        let int_ty = tt.alloc_prim(PrimitiveTy::Int);
+        // Mark the primitive as variable-free (normally done during inference).
+        tt.variable_free.insert(int_ty);
+
+        let var = tt.new_var();
+        tt.storage.add_lower_bound(var, int_ty);
+        tt.storage.add_upper_bound(var, int_ty);
+
+        assert!(!tt.variable_free.contains(&var));
+        tt.compact_pinned_variables(slots_before);
+        // After compaction, the slot is now Concrete(Int) whose child (int_ty)
+        // is variable-free, so the slot itself should be marked variable-free.
+        assert!(tt.variable_free.contains(&var));
     }
 }

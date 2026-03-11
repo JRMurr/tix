@@ -118,6 +118,29 @@ impl TypeStorage {
         self.current_level -= 1;
     }
 
+    /// Replace a Variable entry with a Concrete entry in-place.
+    ///
+    /// The TyId remains valid — all existing references (bounds, caches) that
+    /// point to this slot now see a Concrete type instead of a Variable. This
+    /// is the core primitive for bounds graph compaction: fully-determined
+    /// variables (pinned between identical concrete bounds) become constants.
+    pub fn replace_var_with_concrete(&mut self, id: TyId, ty: Ty<TyId>) {
+        debug_assert!(matches!(self.get(id), TypeEntry::Variable(_)));
+        *self.get_mut(id) = TypeEntry::Concrete(ty);
+    }
+
+    /// Sort and deduplicate the bounds vectors of a variable. No-op for
+    /// concrete entries. Reduces memory and speeds up subsequent bounds walks
+    /// (extrusion, constraint propagation) by removing redundant entries.
+    pub fn dedup_bounds(&mut self, id: TyId) {
+        if let TypeEntry::Variable(v) = self.get_mut(id) {
+            v.lower_bounds.sort_unstable_by_key(|t| t.0);
+            v.lower_bounds.dedup();
+            v.upper_bounds.sort_unstable_by_key(|t| t.0);
+            v.upper_bounds.dedup();
+        }
+    }
+
     /// Number of entries (variables + concrete types) in the storage.
     pub fn len(&self) -> usize {
         self.entries.len()
