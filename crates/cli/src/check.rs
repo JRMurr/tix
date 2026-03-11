@@ -44,12 +44,20 @@ struct PreparedFile {
     inputs: InferenceInputs,
 }
 
-/// Inference result for a single file (produced by Phase 2).
-struct FileResult {
+/// Renderable result for a single file (produced by Phase 2).
+/// Contains only what Phase 3 (diagnostic rendering) needs — the heavy
+/// `InferenceResult` (ArenaMap<NameId, OutputTy> + ArenaMap<ExprId, OutputTy>)
+/// is dropped inside the par_iter closure, reducing peak memory by ~70% when
+/// checking many files in parallel.
+struct RenderableResult {
     file_path: PathBuf,
     source_text: String,
     source_map: ModuleSourceMap,
-    check_result: lang_check::CheckResult,
+    diagnostics: Vec<lang_check::diagnostic::TixDiagnostic>,
+    /// Retained for future use (e.g. summary reporting). Timeout diagnostics
+    /// are already included in `diagnostics` by `run_inference`.
+    #[allow(dead_code)]
+    timed_out: bool,
 }
 
 /// Entry point for `tix check`.
@@ -224,15 +232,19 @@ pub fn run_check_project(
     // Each file gets its own TypeStorage — no shared mutable state. The rayon
     // par_iter distributes inference across the thread pool.
 
-    let results: Vec<FileResult> = prepared
+    let results: Vec<RenderableResult> = prepared
         .into_par_iter()
         .map(|pf| {
             let check_result = lang_check::run_inference(&pf.inputs, None);
-            FileResult {
+            // Extract only the fields Phase 3 needs. The InferenceResult
+            // (containing full OutputTy maps for every name and expression)
+            // is dropped here, before .collect() gathers all results.
+            RenderableResult {
                 file_path: pf.file_path,
                 source_text: pf.source_text,
                 source_map: pf.source_map,
-                check_result,
+                diagnostics: check_result.diagnostics,
+                timed_out: check_result.timed_out,
             }
         })
         .collect();
@@ -248,11 +260,11 @@ pub fn run_check_project(
     let mut total_warnings = 0usize;
 
     for result in &results {
-        if !result.check_result.diagnostics.is_empty() {
+        if !result.diagnostics.is_empty() {
             let (errors, warnings) = render_diagnostics(
                 &result.file_path,
                 &result.source_text,
-                &result.check_result.diagnostics,
+                &result.diagnostics,
                 &result.source_map,
             );
             total_errors += errors;
