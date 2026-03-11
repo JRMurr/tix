@@ -83,6 +83,67 @@ by design, or informational notes.
 - `LSP LineIndex` UTF-16 fix was applied (commit 0fe9b77) — verify it covers all
   edge cases.
 
+### Memory Profile — `tix check` with parallel inference
+
+#### Small project (test/nixos_fixture, 5 files)
+
+Profiled with DHAT. Peak heap: ~50 MB. Dominated by `OutputTy::map_children` (50%),
+canonicalization (18%), Arc wrapping (10%).
+
+#### Full stubs (TIX_BUILTIN_STUBS with 266K-line stubs)
+
+**Before optimizations** (commit a018cb3, 40 files, `-j 4`):
+
+```
+Without TIX_BUILTIN_STUBS:  200 MB RSS,  0.4s
+With    TIX_BUILTIN_STUBS: 16.2 GB RSS, 21.1s   ← 80x memory increase
+```
+
+**After optimizations** (commit ca201cb, 32 files `test/`, 5 files `test/nixos_fixture/`):
+
+```
+32 files, no stubs:          123 MB RSS, 0.19s
+32 files, 266K-line stubs:   312 MB RSS, 0.83s   ← 2.5x (was 80x)
+ 5 files, no stubs:           94 MB RSS
+ 5 files, 266K-line stubs:   361 MB RSS, 0.73s
+```
+
+52x reduction (16.2 GB → 312 MB) from four changes:
+
+1. **`normalize_vars` short-circuit** — skip full tree walk + rebuild for concrete
+   types with no TyVar nodes (the common case for NixOS config attrsets).
+2. **CoW for `TypeAliasRegistry`** — `Arc<TypeAliasRegistry>` in `CheckCtx`, only
+   clone when inline aliases or context loading needed. Eliminates N deep clones.
+3. **Early `InferenceResult` drop** — `RenderableResult` captures only diagnostics;
+   `InferenceResult` (full OutputTy maps) dropped inside `par_iter` closure.
+4. **Primitive `TyRef` interning** — static cache for all 8 primitives + Top + Bottom,
+   routed through `From<OutputTy>` so every `TyRef` construction site benefits.
+
+**Remaining optimization (deferred):**
+
+- **BTreeMap → sorted Vec for output `AttrSetTy`:** Fields are built once, read-only
+  after. `Vec<(SmolStr, TyRef)>` with binary search would halve allocation overhead.
+  Deferred because it's invasive (~15 files across 4 crates) and current numbers are
+  acceptable.
+
+<details>
+<summary>Pre-optimization heaptrack breakdown (14.8 GB heap)</summary>
+
+| Peak   | Function                            | What |
+|--------|-------------------------------------|------|
+| 3.49 GB | `Iterator::Map::fold` (in `map_children`) | BTreeMap rebuild via `.map().collect()` |
+| 2.97 GB | `TyRef::from(OutputTy)`             | 40M Arc allocs for OutputTy nodes |
+| 1.38 GB | `BTreeMap::from_iter`               | New BTreeMaps for attrset fields |
+| 1.09 GB | `RawVec::finish_grow`               | Vec growth during inference |
+| 889 MB  | `BTreeMap::VacantEntry::insert`     | BTreeMap node insertions |
+| 872 MB  | `OutputTy::map_children` (direct)   | map_children itself |
+| 848 MB  | `BTreeMap::clone::clone_subtree`    | Deep-cloning BTreeMaps |
+| 623 MB  | `BTreeMap::from_iter` (2nd mono)    | Another monomorphization |
+| 583 MB  | `Iterator::Map::fold` (2nd mono)    | Another call chain |
+| 227 MB  | `BTreeMap::insert_recursing`        | B-tree node splits |
+
+</details>
+
 ### Known Performance Characteristics
 
 Intentional O(n^2) trade-offs, acceptable for typical Nix code sizes:
