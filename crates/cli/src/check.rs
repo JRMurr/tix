@@ -33,7 +33,7 @@ struct PrePreparedFile {
     grouped_defs: lang_ast::GroupedDefs,
     import_types: HashMap<lang_ast::ExprId, lang_ty::OutputTy>,
     import_diagnostics: Vec<lang_check::diagnostic::TixDiagnostic>,
-    context_args: HashMap<smol_str::SmolStr, comment_parser::ParsedTy>,
+    context_args: Arc<HashMap<smol_str::SmolStr, comment_parser::ParsedTy>>,
 }
 
 /// A file ready for type inference (produced by Phase 1).
@@ -166,7 +166,7 @@ pub fn run_check_project(
                         "warning: failed to resolve context for {}: {e}",
                         relative.display()
                     );
-                    HashMap::new()
+                    Arc::default()
                 });
 
         // Resolve imports.

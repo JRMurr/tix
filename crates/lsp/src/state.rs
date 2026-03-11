@@ -93,7 +93,7 @@ pub struct SyntaxIntermediate {
     pub parsed: rnix::Parse<rnix::Root>,
     pub line_index: LineIndex,
     pub registry: Arc<TypeAliasRegistry>,
-    pub context_args: HashMap<SmolStr, comment_parser::ParsedTy>,
+    pub context_args: Arc<HashMap<SmolStr, comment_parser::ParsedTy>>,
     pub context_arg_types: HashMap<SmolStr, OutputTy>,
     pub deadline_secs: u64,
 }
@@ -369,7 +369,7 @@ impl AnalysisState {
         }
 
         // Resolve context args for this file from the project's tix.toml.
-        let context_args =
+        let context_args: Arc<HashMap<SmolStr, comment_parser::ParsedTy>> =
             if let (Some(ref cfg), Some(ref dir)) = (&self.project_config, &self.config_dir) {
                 crate::project_config::resolve_context_for_file(
                     &path,
@@ -379,10 +379,10 @@ impl AnalysisState {
                 )
                 .unwrap_or_else(|e| {
                     log::warn!("Failed to resolve context for {}: {e}", path.display());
-                    HashMap::new()
+                    Arc::default()
                 })
             } else {
-                HashMap::new()
+                Arc::default()
             };
 
         // Pre-convert context args to OutputTy for the LSP to use as a fallback
@@ -510,7 +510,7 @@ impl AnalysisState {
         let grouped = lang_ast::group_def(&self.db, nix_file);
 
         // Resolve context args (fast, depends only on project config).
-        let context_args =
+        let context_args: Arc<HashMap<SmolStr, comment_parser::ParsedTy>> =
             if let (Some(ref cfg), Some(ref dir)) = (&self.project_config, &self.config_dir) {
                 crate::project_config::resolve_context_for_file(
                     &path,
@@ -520,10 +520,10 @@ impl AnalysisState {
                 )
                 .unwrap_or_else(|e| {
                     log::warn!("Failed to resolve context for {}: {e}", path.display());
-                    HashMap::new()
+                    Arc::default()
                 })
             } else {
-                HashMap::new()
+                Arc::default()
             };
 
         let context_arg_types: HashMap<SmolStr, OutputTy> = context_args

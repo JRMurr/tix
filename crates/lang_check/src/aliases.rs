@@ -9,6 +9,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use comment_parser::{ParsedTy, ParsedTyRef, TixDeclFile, TixDeclaration};
 use lang_ty::AttrSetTy;
@@ -128,12 +129,23 @@ pub struct TypeAliasRegistry {
     /// every call to `load_context_by_name`.
     loaded_module_stubs: HashSet<SmolStr>,
 
+    /// Cached context args from `load_context_by_name`. Avoids re-reading and
+    /// re-parsing multi-MB context stubs (e.g. nixos.tix at 3.9MB) on every
+    /// call when `tix check` processes many files with the same context.
+    cached_context_args: HashMap<SmolStr, Arc<HashMap<SmolStr, ParsedTy>>>,
+
     /// Source locations for declarations (type aliases, modules, vals) loaded
     /// from disk-based `.tix` files. Multiple locations per name when it
     /// appears in several stub files. Populated by `load_tix_file_with_path`
     /// — compiled-in stubs (via `load_tix_file`) intentionally have no locations.
     decl_locations: HashMap<SmolStr, Vec<DeclLocation>>,
 }
+
+/// Shared, read-only map of context argument names to their declared types.
+/// Wrapped in `Arc` so that cloning is a cheap refcount bump — important when
+/// large context stubs (e.g. 24K+ val declarations from pkgs.tix) are shared
+/// across many files during `tix check`.
+pub type ContextArgs = Arc<HashMap<SmolStr, ParsedTy>>;
 
 /// Controls where val declarations are routed during `load_declarations`.
 enum ValTarget<'a> {
@@ -468,14 +480,31 @@ impl TypeAliasRegistry {
     pub fn load_context_by_name(
         &mut self,
         name: &str,
-    ) -> Option<Result<HashMap<SmolStr, ParsedTy>, Box<dyn std::error::Error>>> {
+    ) -> Option<Result<ContextArgs, Box<dyn std::error::Error>>> {
+        // Return cached result if available. Context stubs are immutable once
+        // loaded, so the parsed args are safe to reuse across files.
+        let cache_key = SmolStr::from(name);
+        if let Some(cached) = self.cached_context_args.get(&cache_key) {
+            return Some(Ok(Arc::clone(cached)));
+        }
+
         // Check override directory first.
         if let Some(ref dir) = self.builtin_stubs_dir {
             let path = dir.join(format!("{name}.tix"));
             if path.is_file() {
                 log::info!("Loading context stubs for @{name} from {}", path.display());
                 return Some(match std::fs::read_to_string(&path) {
-                    Ok(source) => self.load_context_stubs(&source),
+                    Ok(source) => {
+                        let result = self.load_context_stubs(&source);
+                        match result {
+                            Ok(args) => {
+                                let arc = Arc::new(args);
+                                self.cached_context_args.insert(cache_key, Arc::clone(&arc));
+                                Ok(arc)
+                            }
+                            Err(e) => Err(e),
+                        }
+                    }
                     Err(e) => Err(format!("failed to read {}: {e}", path.display()).into()),
                 });
             }
@@ -483,7 +512,15 @@ impl TypeAliasRegistry {
 
         // Fall back to compiled-in stubs.
         if let Some(source) = Self::builtin_context_source(name) {
-            return Some(self.load_context_stubs(source));
+            let result = self.load_context_stubs(source);
+            return Some(match result {
+                Ok(args) => {
+                    let arc = Arc::new(args);
+                    self.cached_context_args.insert(cache_key, Arc::clone(&arc));
+                    Ok(arc)
+                }
+                Err(e) => Err(e),
+            });
         }
 
         // Derive context from a module alias: @callpackage -> Pkgs, @lib -> Lib, etc.
@@ -542,7 +579,9 @@ impl TypeAliasRegistry {
             context_args.entry(module_name).or_insert_with(|| {
                 ParsedTy::TyVar(comment_parser::TypeVarValue::Reference(alias_name.clone()))
             });
-            return Some(Ok(context_args));
+            let arc = Arc::new(context_args);
+            self.cached_context_args.insert(cache_key, Arc::clone(&arc));
+            return Some(Ok(arc));
         }
 
         None

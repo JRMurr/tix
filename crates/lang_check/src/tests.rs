@@ -1403,7 +1403,7 @@ fn alias_with_union_in_param_skips_bidirectional_constraints() {
     "# };
 
     let (db, file) = TestDatabase::single_file(nix_src).unwrap();
-    let result = crate::check_file_collecting(&db, file, &registry, HashMap::new(), HashMap::new());
+    let result = crate::check_file_collecting(&db, file, &registry, HashMap::new(), Arc::default());
 
     // Inference should succeed — the union annotation (via alias) is skipped.
     let inference = result
@@ -1458,7 +1458,7 @@ fn nested_alias_with_union_in_param_skips_bidirectional_constraints() {
     "# };
 
     let (db, file) = TestDatabase::single_file(nix_src).unwrap();
-    let result = crate::check_file_collecting(&db, file, &registry, HashMap::new(), HashMap::new());
+    let result = crate::check_file_collecting(&db, file, &registry, HashMap::new(), Arc::default());
 
     let inference = result
         .inference
@@ -2525,6 +2525,7 @@ fn alias_named_flows_through_let() {
 use comment_parser::ParsedTy;
 use smol_str::SmolStr;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Helper to type-check a string with context args applied to the root lambda.
 pub fn check_str_with_context(
@@ -2542,7 +2543,8 @@ pub fn check_str_with_aliases_and_context(
 ) -> (Module, crate::CheckResult) {
     let (db, file) = TestDatabase::single_file(src).unwrap();
     let module = module(&db, file);
-    let result = crate::check_file_collecting(&db, file, aliases, HashMap::new(), context_args);
+    let result =
+        crate::check_file_collecting(&db, file, aliases, HashMap::new(), Arc::new(context_args));
     (module, result)
 }
 
@@ -2577,7 +2579,8 @@ pub fn get_inferred_root_with_aliases_and_context(
 
 fn nixos_context_args() -> HashMap<SmolStr, ParsedTy> {
     let mut registry = TypeAliasRegistry::with_builtins();
-    registry.load_context_by_name("nixos").unwrap().unwrap()
+    let arc = registry.load_context_by_name("nixos").unwrap().unwrap();
+    Arc::try_unwrap(arc).unwrap_or_else(|a| (*a).clone())
 }
 
 /// NixOS module pattern: `{ config, lib, pkgs, ... }: lib.id 42`
@@ -2714,7 +2717,7 @@ fn doc_comment_context_on_inner_lambda() {
         file,
         &TypeAliasRegistry::with_builtins(),
         HashMap::new(),
-        HashMap::new(), // no file-level context
+        Arc::default(), // no file-level context
     );
 
     let inference = result.inference.expect("inference should succeed");
@@ -4493,7 +4496,7 @@ fn annotation_arity_mismatch_skipped_with_warning() {
         file,
         &TypeAliasRegistry::default(),
         HashMap::new(),
-        HashMap::new(),
+        Arc::default(),
     );
 
     // Inference should succeed (the wrong-arity annotation is skipped).
@@ -4565,7 +4568,7 @@ fn annotation_with_union_skipped() {
         file,
         &TypeAliasRegistry::default(),
         HashMap::new(),
-        HashMap::new(),
+        Arc::default(),
     );
 
     // Inference should succeed — the union annotation is skipped.
@@ -5011,7 +5014,7 @@ fn intersection_annotation_accepted() {
         file,
         &TypeAliasRegistry::default(),
         HashMap::new(),
-        HashMap::new(),
+        Arc::default(),
     );
 
     // Inference should succeed — the intersection annotation is accepted.
@@ -5046,7 +5049,7 @@ fn intersection_annotation_warning_emitted() {
         file,
         &TypeAliasRegistry::default(),
         HashMap::new(),
-        HashMap::new(),
+        Arc::default(),
     );
 
     result.inference.expect("inference should succeed");
@@ -5088,7 +5091,7 @@ fn non_lambda_intersection_falls_through() {
         file,
         &TypeAliasRegistry::default(),
         HashMap::new(),
-        HashMap::new(),
+        Arc::default(),
     );
 
     // The intersection-of-lambda guard should NOT have fired, so there
@@ -6204,7 +6207,7 @@ fn collect_diagnostics_with_deadline(
         file,
         &TypeAliasRegistry::default(),
         HashMap::new(),
-        HashMap::new(),
+        Arc::default(),
         deadline,
     );
     result.diagnostics
@@ -6313,7 +6316,7 @@ fn duplicate_key_is_warning_not_error() {
         file,
         &TypeAliasRegistry::default(),
         HashMap::new(),
-        HashMap::new(),
+        Arc::default(),
     );
     // Inference should succeed despite the warning.
     assert!(result.inference.is_some());
@@ -6537,7 +6540,7 @@ fn function_union_annotation_still_skips() {
     "# };
 
     let (db, file) = TestDatabase::single_file(nix_src).unwrap();
-    let result = crate::check_file_collecting(&db, file, &registry, HashMap::new(), HashMap::new());
+    let result = crate::check_file_collecting(&db, file, &registry, HashMap::new(), Arc::default());
 
     // Inference should succeed — the union annotation is skipped for functions.
     let inference = result

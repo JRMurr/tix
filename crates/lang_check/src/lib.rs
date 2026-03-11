@@ -75,7 +75,7 @@ pub fn check_file_with_imports(
         &indices.binding_expr,
         aliases,
         import_types,
-        HashMap::new(),
+        Arc::default(),
     );
     check.infer_prog(grouped_defs)
 }
@@ -274,7 +274,7 @@ pub struct InferenceInputs {
     pub registry: Arc<TypeAliasRegistry>,
     pub import_types: HashMap<ExprId, OutputTy>,
     pub import_diagnostics: Vec<TixDiagnostic>,
-    pub context_args: HashMap<smol_str::SmolStr, ParsedTy>,
+    pub context_args: Arc<HashMap<smol_str::SmolStr, ParsedTy>>,
     /// Inference deadline in seconds. `None` means no deadline (CLI default).
     pub deadline_secs: Option<u64>,
 }
@@ -296,7 +296,7 @@ pub fn run_inference(
         inputs.grouped_defs.clone(),
         &inputs.registry,
         inputs.import_types.clone(),
-        inputs.context_args.clone(),
+        Arc::clone(&inputs.context_args),
         deadline,
         cancel_flag,
     );
@@ -345,7 +345,7 @@ pub fn check_file_collecting(
     file: NixFile,
     aliases: &TypeAliasRegistry,
     import_types: HashMap<ExprId, OutputTy>,
-    context_args: HashMap<smol_str::SmolStr, ParsedTy>,
+    context_args: Arc<HashMap<smol_str::SmolStr, ParsedTy>>,
 ) -> CheckResult {
     check_file_collecting_with_deadline(db, file, aliases, import_types, context_args, None)
 }
@@ -358,7 +358,7 @@ pub fn check_file_collecting_with_deadline(
     file: NixFile,
     aliases: &TypeAliasRegistry,
     import_types: HashMap<ExprId, OutputTy>,
-    context_args: HashMap<smol_str::SmolStr, ParsedTy>,
+    context_args: Arc<HashMap<smol_str::SmolStr, ParsedTy>>,
     deadline: Option<Instant>,
 ) -> CheckResult {
     check_file_collecting_with_cancel(
@@ -381,7 +381,7 @@ pub fn check_file_collecting_with_cancel(
     file: NixFile,
     aliases: &TypeAliasRegistry,
     import_types: HashMap<ExprId, OutputTy>,
-    context_args: HashMap<smol_str::SmolStr, ParsedTy>,
+    context_args: Arc<HashMap<smol_str::SmolStr, ParsedTy>>,
     deadline: Option<Instant>,
     cancel_flag: Option<Arc<AtomicBool>>,
 ) -> CheckResult {
@@ -439,7 +439,7 @@ pub fn check_with_precomputed(
     grouped_defs: lang_ast::GroupedDefs,
     aliases: &TypeAliasRegistry,
     import_types: HashMap<ExprId, OutputTy>,
-    context_args: HashMap<smol_str::SmolStr, ParsedTy>,
+    context_args: Arc<HashMap<smol_str::SmolStr, ParsedTy>>,
     deadline: Option<Instant>,
     cancel_flag: Option<Arc<AtomicBool>>,
 ) -> CheckResult {
@@ -547,7 +547,7 @@ pub struct CheckCtx<'db> {
     /// configuration). Maps parameter names (e.g. "config", "lib", "pkgs") to
     /// their declared types. Applied only to the module's entry expression
     /// when it's a lambda with a pattern parameter.
-    context_args: HashMap<smol_str::SmolStr, ParsedTy>,
+    context_args: Arc<HashMap<smol_str::SmolStr, ParsedTy>>,
 
     /// Type narrowing overrides for the current branch scope.
     ///
@@ -620,7 +620,7 @@ impl<'db> CheckCtx<'db> {
         binding_exprs: &'db HashMap<NameId, ExprId>,
         type_aliases: TypeAliasRegistry,
         import_types: HashMap<ExprId, OutputTy>,
-        context_args: HashMap<smol_str::SmolStr, ParsedTy>,
+        context_args: Arc<HashMap<smol_str::SmolStr, ParsedTy>>,
     ) -> Self {
         Self {
             module,
@@ -1155,7 +1155,7 @@ impl<'db> CheckCtx<'db> {
     fn resolve_doc_comment_context(
         &mut self,
         expr_id: ExprId,
-    ) -> Option<HashMap<smol_str::SmolStr, ParsedTy>> {
+    ) -> Option<Arc<HashMap<smol_str::SmolStr, ParsedTy>>> {
         let docs = self.module.type_dec_map.docs_for_expr(expr_id)?;
         for doc in docs {
             if let Some(context_name) = parse_context_annotation(doc) {

@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use comment_parser::ParsedTy;
 use lang_check::aliases::TypeAliasRegistry;
@@ -92,12 +93,13 @@ pub fn load_config(path: &Path) -> Result<ProjectConfig, Box<dyn std::error::Err
 }
 
 /// Load a single stub entry. `@`-prefixed entries resolve to built-in context
-/// stubs; all others are treated as file/directory paths relative to `config_dir`.
+/// stubs (returned as `Arc` for cheap sharing); all others are treated as
+/// file/directory paths relative to `config_dir`.
 fn load_stub_entry(
     entry: &str,
     config_dir: &Path,
     registry: &mut TypeAliasRegistry,
-) -> Result<HashMap<SmolStr, ParsedTy>, Box<dyn std::error::Error>> {
+) -> Result<Arc<HashMap<SmolStr, ParsedTy>>, Box<dyn std::error::Error>> {
     if let Some(builtin_name) = entry.strip_prefix('@') {
         registry
             .load_context_by_name(builtin_name)
@@ -106,17 +108,21 @@ fn load_stub_entry(
         let path = config_dir.join(entry);
         let source = std::fs::read_to_string(&path)
             .map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
-        registry.load_context_stubs(&source)
+        registry.load_context_stubs(&source).map(Arc::new)
     }
 }
 
 /// Resolve context args for a file based on `tix.toml` context definitions.
+///
+/// When a context has a single stub entry, the returned `Arc` shares the
+/// cached allocation from the registry — no deep clone of potentially large
+/// context maps (e.g. 24K entries for pkgs.tix).
 pub fn resolve_context_for_file(
     file_path: &Path,
     config: &ProjectConfig,
     config_dir: &Path,
     registry: &mut TypeAliasRegistry,
-) -> Result<HashMap<SmolStr, ParsedTy>, Box<dyn std::error::Error>> {
+) -> Result<Arc<HashMap<SmolStr, ParsedTy>>, Box<dyn std::error::Error>> {
     let relative = file_path.strip_prefix(config_dir).unwrap_or(file_path);
 
     for ctx in config.context.values() {
@@ -140,18 +146,25 @@ pub fn resolve_context_for_file(
             });
 
         if matched && !excluded {
+            // Fast path: single stub entry — return the Arc directly without
+            // allocating a merge HashMap.
+            if ctx.stubs.len() == 1 {
+                return load_stub_entry(&ctx.stubs[0], config_dir, registry);
+            }
+
+            // Multi-stub: merge all entries into a new HashMap.
             let mut merged = HashMap::new();
             for stub_entry in &ctx.stubs {
                 match load_stub_entry(stub_entry, config_dir, registry) {
-                    Ok(args) => merged.extend(args),
+                    Ok(args) => merged.extend(args.iter().map(|(k, v)| (k.clone(), v.clone()))),
                     Err(e) => log::warn!("Failed to load context stub '{stub_entry}': {e}"),
                 }
             }
-            return Ok(merged);
+            return Ok(Arc::new(merged));
         }
     }
 
-    Ok(HashMap::new())
+    Ok(Arc::default())
 }
 
 /// Expand the `[project] analyze` glob patterns into concrete file paths.

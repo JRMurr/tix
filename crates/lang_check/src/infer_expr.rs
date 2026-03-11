@@ -7,6 +7,7 @@
 // where constraints are immediately propagated through the bounds graph.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use super::{CheckCtx, LocatedError, Polarity, TyId};
 use lang_ast::{
@@ -159,7 +160,7 @@ impl CheckCtx<'_> {
                     // - Doc comment context (/** context: nixos */) applies to any lambda
                     let effective_context =
                         if e == self.module.entry_expr && !self.context_args.is_empty() {
-                            Some(self.context_args.clone())
+                            Some(Arc::clone(&self.context_args))
                         } else {
                             self.resolve_doc_comment_context(e)
                         };

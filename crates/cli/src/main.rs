@@ -4,6 +4,7 @@ mod gen_stubs;
 mod init;
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::{error::Error, path::PathBuf};
 
 use clap::{Parser, Subcommand};
@@ -361,7 +362,7 @@ fn run_gen_stub(
         file,
         &registry,
         import_resolution.types,
-        HashMap::new(),
+        Arc::default(),
     );
 
     let root_ty = result
@@ -496,7 +497,7 @@ fn run_verify_stubs(
         file,
         &registry,
         import_resolution.types,
-        HashMap::new(),
+        Arc::default(),
     );
 
     let root_ty = result
@@ -758,11 +759,11 @@ fn run_check(
         config::resolve_context_for_file(&canonical_path, cfg, dir, &mut registry).unwrap_or_else(
             |e| {
                 eprintln!("Warning: failed to resolve context: {e}");
-                HashMap::new()
+                Arc::default()
             },
         )
     } else {
-        HashMap::new()
+        Arc::default()
     };
 
     let db: RootDatabase = Default::default();

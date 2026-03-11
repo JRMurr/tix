@@ -7,6 +7,7 @@
 // type variables via SimpleSub's level-based approach (extrude).
 
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::Instant;
 
 use rustc_hash::FxHashMap;
@@ -198,7 +199,7 @@ impl CheckCtx<'_> {
         // Determine effective context args: file-level context (tix.toml) or
         // doc comment context (/** context: nixos */) on the entry Lambda.
         let effective_context = if !self.context_args.is_empty() {
-            Some(self.context_args.clone())
+            Some(Arc::clone(&self.context_args))
         } else {
             self.resolve_doc_comment_context(self.module.entry_expr)
         };
