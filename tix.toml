@@ -18,3 +18,4 @@ stubs = ["@callpackage"]
 
 [project]
 analyze = ["test/import/lib.nix", "nix/*.nix"]
+exclude = ["result", ".direnv", ".claude"]
