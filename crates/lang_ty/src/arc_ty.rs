@@ -161,9 +161,34 @@ pub type Substitutions = FxHashMap<u32, u32>;
 // ==============================================================================
 
 impl OutputTy {
+    /// Returns true if this type or any of its children contains a TyVar.
+    /// Short-circuits on first hit — O(1) for concrete types, O(n) worst case.
+    pub fn has_type_vars(&self) -> bool {
+        match self {
+            OutputTy::TyVar(_) => true,
+            _ => {
+                let mut found = false;
+                self.for_each_child(&mut |child| {
+                    if !found {
+                        found = child.has_type_vars();
+                    }
+                });
+                found
+            }
+        }
+    }
+
     /// Normalize all the ty vars to start from 0 instead
     /// of the "random" nums it has from solving.
     pub fn normalize_vars(&self) -> OutputTy {
+        // Concrete types with no TyVar nodes are already normalized — skip the
+        // full tree walk + rebuild. This is the common case for NixOS config
+        // attrsets with hundreds of fields, avoiding ~7 GB of map_children
+        // allocations in large stubs.
+        if !self.has_type_vars() {
+            return self.clone();
+        }
+
         let free_vars = self.free_type_vars();
 
         let subs: Substitutions = free_vars
