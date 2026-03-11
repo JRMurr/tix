@@ -1117,27 +1117,31 @@ impl<'db> CheckCtx<'db> {
                     optional_fields: attr.optional_fields.clone(),
                 }))
             }
-            // Union annotations: create a fresh variable with each member as a lower bound.
-            // This encodes `int | string` as a var where `int <: var` and `string <: var`.
+            // Union annotations: build a concrete Ty::Union tree instead of a
+            // variable with lower bounds. This keeps types like `path | string`
+            // fully concrete, which lets the extrusion short-circuit fire for
+            // parent types (e.g. Derivation, Pkgs) that contain union fields.
+            // Semantics are equivalent: constrain(Union(a,b), T) distributes to
+            // constrain(a, T) ∧ constrain(b, T), same as the old variable approach.
             ParsedTy::Union(members) => {
-                let var = self.new_var();
-                for m in members {
-                    let member_ty = self.intern_parsed_ty(&m.0, substitutions);
-                    self.constrain(member_ty, var)
-                        .expect("union annotation constraint should not fail");
-                }
-                var
+                let tys: Vec<TyId> = members
+                    .iter()
+                    .map(|m| self.intern_parsed_ty(&m.0, substitutions))
+                    .collect();
+                tys.into_iter()
+                    .reduce(|acc, ty| self.alloc_concrete(Ty::Union(acc, ty)))
+                    .unwrap_or_else(|| self.new_var())
             }
-            // Intersection annotations: create a fresh variable with each member as an upper bound.
-            // This encodes `a & b` as a var where `var <: a` and `var <: b`.
+            // Intersection annotations: build a concrete Ty::Inter tree.
+            // Same rationale as Union above — keeps the type fully concrete.
             ParsedTy::Intersection(members) => {
-                let var = self.new_var();
-                for m in members {
-                    let member_ty = self.intern_parsed_ty(&m.0, substitutions);
-                    self.constrain(var, member_ty)
-                        .expect("intersection annotation constraint should not fail");
-                }
-                var
+                let tys: Vec<TyId> = members
+                    .iter()
+                    .map(|m| self.intern_parsed_ty(&m.0, substitutions))
+                    .collect();
+                tys.into_iter()
+                    .reduce(|acc, ty| self.alloc_concrete(Ty::Inter(acc, ty)))
+                    .unwrap_or_else(|| self.new_var())
             }
             // Top/Bottom: a fresh unconstrained variable is the correct
             // representation in the bounds system. For Top (any), no upper

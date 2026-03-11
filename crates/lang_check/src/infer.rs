@@ -560,6 +560,14 @@ impl CheckCtx<'_> {
             return ty_id;
         }
 
+        // Fast path: if the entire subtree is variable-free (only concrete
+        // types / primitives, no type variables), it can never change during
+        // extrusion regardless of level. Skip it in O(1).
+        if self.types.variable_free.contains(&ty_id) {
+            cache.insert(ty_id, ty_id);
+            return ty_id;
+        }
+
         // Fast path: non-polymorphic variables (at or below current level) and
         // primitive/TyVar concrete types are returned as-is without cloning.
         match self.types.storage.get(ty_id) {
@@ -567,6 +575,8 @@ impl CheckCtx<'_> {
                 return ty_id;
             }
             TypeEntry::Concrete(Ty::Primitive(_) | Ty::TyVar(_)) => {
+                // Leaf concrete types are trivially variable-free.
+                self.types.variable_free.insert(ty_id);
                 return ty_id;
             }
             _ => {}
@@ -628,6 +638,7 @@ impl CheckCtx<'_> {
                                 // the placeholder so later cache hits return
                                 // the original, and remove the orphaned var.
                                 cache.insert(ty_id, ty_id);
+                                self.types.try_mark_variable_free(ty_id);
                                 return ty_id;
                             }
 
@@ -643,6 +654,7 @@ impl CheckCtx<'_> {
                             let e = self.extrude_inner(elem, polarity, cache);
                             if e == elem {
                                 cache.insert(ty_id, ty_id);
+                                self.types.try_mark_variable_free(ty_id);
                                 return ty_id;
                             }
                             self.alloc_concrete(Ty::List(e))
@@ -669,6 +681,7 @@ impl CheckCtx<'_> {
                             });
                             if !changed {
                                 cache.insert(ty_id, ty_id);
+                                self.types.try_mark_variable_free(ty_id);
                                 return ty_id;
                             }
                             self.alloc_concrete(Ty::AttrSet(AttrSetTy {
@@ -685,6 +698,7 @@ impl CheckCtx<'_> {
                             let e = self.extrude_inner(inner, polarity.flip(), cache);
                             if e == inner {
                                 cache.insert(ty_id, ty_id);
+                                self.types.try_mark_variable_free(ty_id);
                                 return ty_id;
                             }
                             self.alloc_concrete(Ty::Neg(e))
@@ -698,6 +712,7 @@ impl CheckCtx<'_> {
                             let eb = self.extrude_inner(b, polarity, cache);
                             if ea == a && eb == b {
                                 cache.insert(ty_id, ty_id);
+                                self.types.try_mark_variable_free(ty_id);
                                 return ty_id;
                             }
                             self.alloc_concrete(Ty::Inter(ea, eb))
@@ -707,6 +722,7 @@ impl CheckCtx<'_> {
                             let eb = self.extrude_inner(b, polarity, cache);
                             if ea == a && eb == b {
                                 cache.insert(ty_id, ty_id);
+                                self.types.try_mark_variable_free(ty_id);
                                 return ty_id;
                             }
                             self.alloc_concrete(Ty::Union(ea, eb))
@@ -715,6 +731,7 @@ impl CheckCtx<'_> {
                             let e = self.extrude_inner(inner, polarity, cache);
                             if e == inner {
                                 cache.insert(ty_id, ty_id);
+                                self.types.try_mark_variable_free(ty_id);
                                 return ty_id;
                             }
                             self.alloc_concrete(Ty::Named(name, e))
@@ -1132,6 +1149,11 @@ impl CheckCtx<'_> {
 
     fn lift_reachable_vars_inner(&mut self, ty_id: TyId, visited: &mut HashSet<TyId>) {
         if !visited.insert(ty_id) {
+            return;
+        }
+
+        // Variable-free subtrees contain no type variables to lift.
+        if self.types.variable_free.contains(&ty_id) {
             return;
         }
 

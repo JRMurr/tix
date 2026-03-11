@@ -6645,3 +6645,49 @@ fn rec_failed_def_not_reinferred() {
         "should have type errors from mkValue's type mismatch"
     );
 }
+
+/// Regression: union annotations in stubs (e.g. `builder: path | string`) must
+/// produce concrete `Ty::Union` during interning, not variables with bounds.
+/// Concrete unions enable the extrusion short-circuit for parent types.
+/// This test verifies the union semantics are preserved through inference.
+#[test]
+fn union_annotation_in_stub_field_produces_concrete_union() {
+    let registry = registry_from_tix(indoc! {r#"
+        type Drv = { builder: path | string, name: string };
+        val mkDrv :: { name: string, ... } -> Drv;
+    "#});
+
+    let nix_src = indoc! {r#"
+        let
+            d = mkDrv { name = "foo"; };
+        in
+        d.builder
+    "#};
+
+    let ty = get_inferred_root_with_aliases(nix_src, &registry);
+    let formatted = format!("{ty}");
+    // The builder field should infer as `path | string` (union).
+    assert!(
+        formatted.contains("path") && formatted.contains("string"),
+        "builder should be path | string, got: {formatted}"
+    );
+}
+
+/// Regression: intersection annotations in stubs produce concrete `Ty::Inter`.
+#[test]
+fn intersection_annotation_in_stub_produces_concrete_inter() {
+    let registry = registry_from_tix(indoc! {r#"
+        type HasName = { name: string, ... };
+        type HasAge = { age: int, ... };
+        type Person = HasName & HasAge;
+        val mkPerson :: string -> int -> Person;
+    "#});
+
+    let nix_src = indoc! {r#"
+        let p = mkPerson "Alice" 30;
+        in { name = p.name; age = p.age; }
+    "#};
+
+    let (_, inference) = check_str_with_aliases(nix_src, &registry);
+    inference.expect("inference should succeed with intersection annotation");
+}

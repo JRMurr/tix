@@ -35,9 +35,20 @@ pub type TixConfig = tix_lsp::project_config::ProjectConfig;
 /// Hardcoded directory names to always skip during recursive walks.
 const SKIP_DIRS: &[&str] = &[".git", "node_modules", "result", ".direnv", "target"];
 
-/// Discover all `.nix` files under `root`, respecting exclude patterns from
-/// the `[project]` section and hardcoded ignores.
+/// Discover `.nix` files to check under `root`.
+///
+/// If `[project] analyze` globs are configured, only files matching those
+/// patterns are returned (via `resolve_analyze_globs`). Otherwise falls back
+/// to walking all `.nix` files with exclude patterns and hardcoded ignores.
 pub fn discover_all_nix_files(root: &Path, config: &TixConfig) -> Vec<PathBuf> {
+    // If [project] analyze is specified, use those globs instead of walking
+    // everything. This reduces checked files dramatically for projects that
+    // only want a subset analyzed (e.g. 40 → 7 files).
+    let analyze_files = tix_lsp::project_config::resolve_analyze_globs(config, root);
+    if !analyze_files.is_empty() {
+        return analyze_files;
+    }
+
     let exclude_set = build_exclude_set(config);
     let mut paths = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -266,6 +277,47 @@ mod tests {
         let files = discover_all_nix_files(root, &config);
         assert_eq!(files.len(), 1);
         assert!(files[0].ends_with("top.nix"));
+    }
+
+    /// Regression: `discover_all_nix_files` should use `[project] analyze` globs
+    /// when configured, returning only matching files instead of walking everything.
+    #[test]
+    fn discover_respects_analyze_globs() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let root = dir.path();
+
+        // Create directory structure with files inside and outside the analyze pattern.
+        std::fs::create_dir_all(root.join("nix")).unwrap();
+        std::fs::create_dir_all(root.join("test/import")).unwrap();
+        std::fs::write(root.join("nix/foo.nix"), "42").unwrap();
+        std::fs::write(root.join("nix/bar.nix"), "42").unwrap();
+        std::fs::write(root.join("test/import/lib.nix"), "42").unwrap();
+        std::fs::write(root.join("untracked.nix"), "42").unwrap();
+
+        let config: TixConfig = toml::from_str(
+            r#"
+            [project]
+            analyze = ["nix/*.nix", "test/import/lib.nix"]
+            "#,
+        )
+        .unwrap();
+
+        let files = discover_all_nix_files(root, &config);
+        let names: Vec<_> = files
+            .iter()
+            .map(|p| p.strip_prefix(root).unwrap().to_str().unwrap())
+            .collect();
+
+        assert!(names.contains(&"nix/foo.nix"), "should include nix/foo.nix");
+        assert!(names.contains(&"nix/bar.nix"), "should include nix/bar.nix");
+        assert!(
+            names.contains(&"test/import/lib.nix"),
+            "should include test/import/lib.nix"
+        );
+        assert!(
+            !names.iter().any(|n| n.contains("untracked")),
+            "should NOT include untracked.nix outside analyze globs, got: {names:?}"
+        );
     }
 
     #[test]

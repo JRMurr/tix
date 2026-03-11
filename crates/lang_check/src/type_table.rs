@@ -100,6 +100,13 @@ pub(crate) struct TypeTable {
     /// that returned true. Valid for the lifetime of the inference run since
     /// Union structure is immutable once allocated.
     pub(crate) union_member_cache: FxHashSet<(TyId, TyId)>,
+
+    /// TyIds whose entire reachable subtree contains no type variables —
+    /// only concrete types and primitives. This is a structural property
+    /// (level-independent) and never invalidated because TypeStorage is
+    /// append-only. During extrusion, variable-free subtrees are returned
+    /// as-is in O(1) — no clone, no recursion.
+    pub(crate) variable_free: FxHashSet<TyId>,
 }
 
 impl TypeTable {
@@ -111,6 +118,7 @@ impl TypeTable {
             prim_cache: FxHashMap::default(),
             inter_var_cache: FxHashMap::default(),
             union_member_cache: FxHashSet::default(),
+            variable_free: FxHashSet::default(),
         }
     }
 
@@ -181,6 +189,33 @@ impl TypeTable {
         match self.storage.get(id) {
             TypeEntry::Concrete(t) => t.clone(),
             _ => unreachable!("expected concrete type for {id:?}"),
+        }
+    }
+
+    /// If all children of the concrete type at `ty_id` are themselves
+    /// variable-free, mark `ty_id` as variable-free too. No-op for variables.
+    /// Called after extrusion short-circuits to populate the cache bottom-up.
+    pub(crate) fn try_mark_variable_free(&mut self, ty_id: TyId) {
+        let children_vf = match self.storage.get(ty_id) {
+            TypeEntry::Variable(_) => return,
+            TypeEntry::Concrete(ty) => match ty {
+                Ty::Primitive(_) | Ty::TyVar(_) => true,
+                Ty::List(e) => self.variable_free.contains(e),
+                Ty::Lambda { param, body } => {
+                    self.variable_free.contains(param) && self.variable_free.contains(body)
+                }
+                Ty::AttrSet(a) => {
+                    a.fields.values().all(|v| self.variable_free.contains(v))
+                        && a.dyn_ty.is_none_or(|d| self.variable_free.contains(&d))
+                }
+                Ty::Union(a, b) | Ty::Inter(a, b) => {
+                    self.variable_free.contains(a) && self.variable_free.contains(b)
+                }
+                Ty::Neg(i) | Ty::Named(_, i) => self.variable_free.contains(i),
+            },
+        };
+        if children_vf {
+            self.variable_free.insert(ty_id);
         }
     }
 
