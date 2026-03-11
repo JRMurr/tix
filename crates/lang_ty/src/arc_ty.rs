@@ -1,5 +1,5 @@
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use derive_more::Debug;
 use rustc_hash::FxHashMap;
@@ -86,9 +86,67 @@ impl Ord for TyRef {
     }
 }
 
+// ==============================================================================
+// Primitive interning — pre-allocated TyRefs for common OutputTy values
+// ==============================================================================
+//
+// During canonicalization, many identical OutputTy values (all 8 primitives,
+// Top, Bottom) are wrapped in Arc via `TyRef::from()`. With large stubs this
+// produces ~40M small Arc allocations. Interning returns a clone of the cached
+// Arc (cheap refcount bump) instead of allocating a new one.
+
+struct InternedTyRefs {
+    null: TyRef,
+    bool_: TyRef,
+    int: TyRef,
+    float: TyRef,
+    string: TyRef,
+    path: TyRef,
+    uri: TyRef,
+    number: TyRef,
+    top: TyRef,
+    bottom: TyRef,
+}
+
+static INTERNED: LazyLock<InternedTyRefs> = LazyLock::new(|| InternedTyRefs {
+    null: TyRef(Arc::new(OutputTy::Primitive(PrimitiveTy::Null))),
+    bool_: TyRef(Arc::new(OutputTy::Primitive(PrimitiveTy::Bool))),
+    int: TyRef(Arc::new(OutputTy::Primitive(PrimitiveTy::Int))),
+    float: TyRef(Arc::new(OutputTy::Primitive(PrimitiveTy::Float))),
+    string: TyRef(Arc::new(OutputTy::Primitive(PrimitiveTy::String))),
+    path: TyRef(Arc::new(OutputTy::Primitive(PrimitiveTy::Path))),
+    uri: TyRef(Arc::new(OutputTy::Primitive(PrimitiveTy::Uri))),
+    number: TyRef(Arc::new(OutputTy::Primitive(PrimitiveTy::Number))),
+    top: TyRef(Arc::new(OutputTy::Top)),
+    bottom: TyRef(Arc::new(OutputTy::Bottom)),
+});
+
+impl TyRef {
+    /// Return a TyRef for the given OutputTy, using a cached Arc for
+    /// primitives, Top, and Bottom. Falls through to `Arc::new` for
+    /// compound types.
+    pub fn interned(ty: OutputTy) -> Self {
+        match &ty {
+            OutputTy::Primitive(p) => match p {
+                PrimitiveTy::Null => INTERNED.null.clone(),
+                PrimitiveTy::Bool => INTERNED.bool_.clone(),
+                PrimitiveTy::Int => INTERNED.int.clone(),
+                PrimitiveTy::Float => INTERNED.float.clone(),
+                PrimitiveTy::String => INTERNED.string.clone(),
+                PrimitiveTy::Path => INTERNED.path.clone(),
+                PrimitiveTy::Uri => INTERNED.uri.clone(),
+                PrimitiveTy::Number => INTERNED.number.clone(),
+            },
+            OutputTy::Top => INTERNED.top.clone(),
+            OutputTy::Bottom => INTERNED.bottom.clone(),
+            _ => TyRef(Arc::new(ty)),
+        }
+    }
+}
+
 impl From<OutputTy> for TyRef {
     fn from(value: OutputTy) -> Self {
-        TyRef(Arc::new(value))
+        TyRef::interned(value)
     }
 }
 
@@ -728,6 +786,28 @@ mod tests {
     fn number_displays_standalone() {
         let ty = OutputTy::Primitive(PrimitiveTy::Number);
         assert_eq!(format!("{ty}"), "number");
+    }
+
+    #[test]
+    fn interned_primitives_share_arc() {
+        // TyRef::interned should return the same Arc pointer for identical
+        // primitive types, Top, and Bottom — verifying the interning cache.
+        let a = TyRef::interned(OutputTy::Primitive(PrimitiveTy::Int));
+        let b = TyRef::interned(OutputTy::Primitive(PrimitiveTy::Int));
+        assert!(Arc::ptr_eq(&a.0, &b.0), "interned Int should share Arc");
+
+        let c = TyRef::interned(OutputTy::Top);
+        let d = TyRef::interned(OutputTy::Top);
+        assert!(Arc::ptr_eq(&c.0, &d.0), "interned Top should share Arc");
+
+        let e = TyRef::interned(OutputTy::Bottom);
+        let f = TyRef::interned(OutputTy::Bottom);
+        assert!(Arc::ptr_eq(&e.0, &f.0), "interned Bottom should share Arc");
+
+        // TyRef::from also goes through interning.
+        let g: TyRef = OutputTy::Primitive(PrimitiveTy::String).into();
+        let h: TyRef = OutputTy::Primitive(PrimitiveTy::String).into();
+        assert!(Arc::ptr_eq(&g.0, &h.0), "From<OutputTy> should intern");
     }
 
     mod pbt {
