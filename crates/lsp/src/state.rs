@@ -234,7 +234,7 @@ impl fmt::Display for AnalysisTiming {
 /// All mutable state for the LSP's analysis pipeline.
 pub struct AnalysisState {
     pub db: RootDatabase,
-    pub registry: TypeAliasRegistry,
+    pub registry: Arc<TypeAliasRegistry>,
     /// Cached per-file analysis, keyed by the canonical path we give to Salsa.
     pub files: HashMap<PathBuf, FileAnalysis>,
     /// Project-level tix.toml configuration (if discovered).
@@ -266,7 +266,7 @@ impl AnalysisState {
     pub fn new(registry: TypeAliasRegistry) -> Self {
         Self {
             db: RootDatabase::default(),
-            registry,
+            registry: Arc::new(registry),
             files: HashMap::new(),
             project_config: None,
             config_dir: None,
@@ -371,11 +371,16 @@ impl AnalysisState {
         // Resolve context args for this file from the project's tix.toml.
         let context_args =
             if let (Some(ref cfg), Some(ref dir)) = (&self.project_config, &self.config_dir) {
-                crate::project_config::resolve_context_for_file(&path, cfg, dir, &mut self.registry)
-                    .unwrap_or_else(|e| {
-                        log::warn!("Failed to resolve context for {}: {e}", path.display());
-                        HashMap::new()
-                    })
+                crate::project_config::resolve_context_for_file(
+                    &path,
+                    cfg,
+                    dir,
+                    Arc::make_mut(&mut self.registry),
+                )
+                .unwrap_or_else(|e| {
+                    log::warn!("Failed to resolve context for {}: {e}", path.display());
+                    HashMap::new()
+                })
             } else {
                 HashMap::new()
             };
@@ -507,11 +512,16 @@ impl AnalysisState {
         // Resolve context args (fast, depends only on project config).
         let context_args =
             if let (Some(ref cfg), Some(ref dir)) = (&self.project_config, &self.config_dir) {
-                crate::project_config::resolve_context_for_file(&path, cfg, dir, &mut self.registry)
-                    .unwrap_or_else(|e| {
-                        log::warn!("Failed to resolve context for {}: {e}", path.display());
-                        HashMap::new()
-                    })
+                crate::project_config::resolve_context_for_file(
+                    &path,
+                    cfg,
+                    dir,
+                    Arc::make_mut(&mut self.registry),
+                )
+                .unwrap_or_else(|e| {
+                    log::warn!("Failed to resolve context for {}: {e}", path.display());
+                    HashMap::new()
+                })
             } else {
                 HashMap::new()
             };
@@ -540,7 +550,7 @@ impl AnalysisState {
             source_map,
             parsed,
             line_index,
-            registry: Arc::new(self.registry.clone()),
+            registry: Arc::clone(&self.registry),
             context_args,
             context_arg_types,
             deadline_secs: self.deadline_secs,
@@ -703,7 +713,7 @@ impl AnalysisState {
     /// Replace the type alias registry and re-analyze all open files.
     /// Used when stubs configuration changes at runtime.
     pub fn reload_registry(&mut self, registry: TypeAliasRegistry) {
-        self.registry = registry;
+        self.registry = Arc::new(registry);
 
         // Re-analyze every open file with the new registry.
         let paths: Vec<PathBuf> = self.files.keys().cloned().collect();

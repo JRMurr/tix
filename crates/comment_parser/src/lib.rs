@@ -5,6 +5,11 @@ pub mod tix_parser;
 use std::fmt;
 use std::sync::Arc;
 
+/// Directory names inside a stubs root that should be skipped during recursive
+/// loading. These contain on-demand context stubs loaded by `load_context_by_name`
+/// when a file matches a `[context.*]` section in `tix.toml`.
+pub const SKIP_STUB_DIRS: &[&str] = &["contexts", "generated"];
+
 use collect::collect_type_decls;
 use derive_more::Debug;
 use lang_ty::{AttrSetTy, PrimitiveTy};

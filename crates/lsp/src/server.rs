@@ -616,7 +616,10 @@ impl LanguageServer for TixLanguageServer {
                             let mut state = self.state.lock();
                             for stub in &project_cfg.stubs {
                                 let stub_path = config_dir.join(stub);
-                                if let Err(e) = crate::load_stubs(&mut state.registry, &stub_path) {
+                                if let Err(e) = crate::load_stubs(
+                                    Arc::make_mut(&mut state.registry),
+                                    &stub_path,
+                                ) {
                                     log::warn!(
                                         "Failed to load config stub '{}': {e}",
                                         stub_path.display()
