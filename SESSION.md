@@ -119,16 +119,49 @@ With    TIX_BUILTIN_STUBS: 16.2 GB RSS, 21.1s   ← 80x memory increase
 4. **Primitive `TyRef` interning** — static cache for all 8 primitives + Top + Bottom,
    routed through `From<OutputTy>` so every `TyRef` construction site benefits.
 
-**Remaining optimization (deferred):**
+**After further optimizations** (commit 58701fc):
+
+```
+With analyze globs (6 files): 639 MB RSS, 1.8s   ← from 6.8 GB / 18.5s
+All files (40 files):         3.9 GB RSS, 16.3s  ← from 6.8 GB / 18.5s
+```
+
+Three changes: concrete Ty::Union/Ty::Inter in intern_parsed_ty, variable_free cache
+for extrusion short-circuit, discover_all_nix_files respects [project] analyze globs.
+
+**Remaining memory bottleneck — constraint cascade in extrusion (investigated):**
+
+`test/strings.nix` alone uses 1.8 GB RSS / 9.35M type entries. Profile breakdown:
+- SCC groups: 1.88M slots (1.7s). Group 181 (`f` = levenshtein helper) creates 1.49M.
+- `infer_root.infer_expr`: +7.47M slots (2.6s) — from extruding 104 poly bindings.
+- `infer_root.resolve_pending`: 0 new slots but 6.5s — pure constraint traversal.
+- Canonicalization: 3.4s on 9.35M entries.
+
+Root cause: 4 bindings (`concatImapStrings`, `concatImapStringsSep`, `elemAt`,
+`genList`) each create ~1.87M entries from a single `extrude()` call. The extrusion
+itself only creates ~7 new type entries, but `link_extruded_var` triggers constraint
+propagation through the entire bounds graph (cascading through the 1.88M entries from
+the levenshtein SCC group). Each extrusion creates O(graph_size) constrain_cache
+entries. This is inherent to the bounds-based SimpleSub approach — the constraints must
+propagate to maintain soundness.
+
+Possible mitigations (not yet implemented):
+- **Lazy bounds propagation**: Don't propagate bounds through link_extruded_var
+  immediately; instead record the link and propagate on demand when the fresh
+  variable is actually constrained at a use site. Requires careful analysis of
+  when bounds observation occurs.
+- **Bounds graph compaction**: After SCC inference, compact the type graph by
+  resolving transitively-identical variables. Would reduce the graph size before
+  root extrusion.
+- **Per-file deadline**: strings.nix takes 15s alone; a per-file deadline would
+  cap its contribution. Already have the deadline mechanism but it's per-project.
+
+**Other remaining optimization (deferred):**
 
 - **BTreeMap → sorted Vec for output `AttrSetTy`:** Fields are built once, read-only
   after. `Vec<(SmolStr, TyRef)>` with binary search would halve allocation overhead.
   Deferred because it's invasive (~15 files across 4 crates) and current numbers are
   acceptable.
-- **`discover_all_nix_files` ignores `[project] analyze` config field:** Walks all
-  `.nix` files regardless of the analyze globs. `resolve_analyze_globs` exists in
-  `crates/lsp/src/project_config.rs:175` but is never called from the check pipeline.
-  This causes `tix check` to check ~40 files when the config intends only ~6.
 
 <details>
 <summary>Pre-optimization heaptrack breakdown (14.8 GB heap)</summary>
