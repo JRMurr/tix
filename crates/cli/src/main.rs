@@ -220,8 +220,12 @@ enum GenStubsSource {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    env_logger::init();
     let args = Cli::parse();
+
+    // The LSP sets up its own logger with custom filters, so skip here.
+    if !matches!(args.command, Some(Command::Lsp)) {
+        env_logger::init();
+    }
 
     match args.command {
         Some(Command::Init { path, yes, dry_run }) => init::run_init(path, yes, dry_run),
