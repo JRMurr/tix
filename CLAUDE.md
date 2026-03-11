@@ -40,6 +40,23 @@ EOF
 ./scripts/tixc.sh nixpkgs:lib/strings.nix  # nixpkgs subpath
 ```
 
+### Profiling with stubs
+
+To profile realistic workloads, build the full stubs from the flake and point `TIX_BUILTIN_STUBS` at them:
+
+```bash
+nix build .#stubs
+export TIX_BUILTIN_STUBS="$(readlink result)"
+
+# Wall-clock timing + RSS per phase
+./scripts/tixc.sh --timing test/basic.nix
+./scripts/tixc.sh --timing nixpkgs:lib/strings.nix
+
+# Heap profiling (produces dhat-heap.json in cwd)
+cargo build --features dhat-heap
+TIX_BUILTIN_STUBS="$(readlink result)" target/debug/tix test/basic.nix
+# View at https://nnethercote.github.io/dh_view/dh_view.html
+```
 
 ## Must Do
 
