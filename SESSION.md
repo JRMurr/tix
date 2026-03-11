@@ -145,16 +145,26 @@ the levenshtein SCC group). Each extrusion creates O(graph_size) constrain_cache
 entries. This is inherent to the bounds-based SimpleSub approach — the constraints must
 propagate to maintain soundness.
 
-Possible mitigations (not yet implemented):
+**After bounds graph compaction** (commit 85e75de, branch `bounds-graph-compaction`):
+
+```
+strings.nix with stubs:      278 MB RSS, 1.5s    ← from 1.8 GB / ~15s (-85% RSS, -90% time)
+All files, -j 4:             2.6 GB RSS, 8.0s    ← from 3.9 GB / 16.3s (-33% RSS, -51% time)
+All files, -j 16:            5.0 GB RSS, 8.1s    (not directly comparable to -j 4 baseline)
+```
+
+Compaction replaces fully-determined type variables (pinned between identical
+concrete bounds) with their concrete type in-place after each SCC group. This
+eliminates variables that extrusion treats as polymorphic but are effectively
+constants. 39,920 variables pinned across 179 SCC groups in the full test suite.
+
+Remaining mitigations (not yet implemented):
 - **Lazy bounds propagation**: Don't propagate bounds through link_extruded_var
   immediately; instead record the link and propagate on demand when the fresh
   variable is actually constrained at a use site. Requires careful analysis of
   when bounds observation occurs.
-- **Bounds graph compaction**: After SCC inference, compact the type graph by
-  resolving transitively-identical variables. Would reduce the graph size before
-  root extrusion.
-- **Per-file deadline**: strings.nix takes 15s alone; a per-file deadline would
-  cap its contribution. Already have the deadline mechanism but it's per-project.
+- **Per-file deadline**: strings.nix takes 1.5s now; still worth capping for
+  pathological inputs. Already have the deadline mechanism but it's per-project.
 
 **Other remaining optimization (deferred):**
 
