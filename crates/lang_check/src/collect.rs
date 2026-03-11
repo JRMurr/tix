@@ -1072,6 +1072,8 @@ impl<'db> Collector<'db> {
             canon = canon.with_deadline(d);
         }
 
+        let t_names = std::time::Instant::now();
+        let mut late_canon_count = 0u32;
         for (name, ty) in name_tys {
             // Prefer the early-canonicalized type (captured before use-site
             // extrusion contaminated the bounds) over late canonicalization.
@@ -1086,6 +1088,7 @@ impl<'db> Collector<'db> {
                     if deadline_exceeded {
                         OutputTy::TyVar(0)
                     } else {
+                        late_canon_count += 1;
                         canon.canonicalize(ty, Positive)
                     }
                 } else {
@@ -1097,9 +1100,19 @@ impl<'db> Collector<'db> {
                 // can be very expensive on degenerate type graphs from partial inference.
                 OutputTy::TyVar(0)
             } else {
+                late_canon_count += 1;
                 canon.canonicalize(ty, Positive)
             };
             name_ty_map.insert(name, output.normalize_vars());
+        }
+        let names_elapsed = t_names.elapsed();
+        if names_elapsed.as_millis() > 10 {
+            log::info!(
+                "  name canonicalization: {:.1}ms ({} names, {} late-canon)",
+                names_elapsed.as_secs_f64() * 1000.0,
+                name_cnt,
+                late_canon_count,
+            );
         }
 
         // When the inference deadline was exceeded, skip expression-level
@@ -1109,6 +1122,7 @@ impl<'db> Collector<'db> {
         // hover/completion; expr-level types are mainly used for diagnostics
         // and inlay hints, which are less critical on timed-out files.
         if !deadline_exceeded {
+            let t_exprs = std::time::Instant::now();
             let expr_tys: Vec<_> = self
                 .ctx
                 .module
@@ -1125,6 +1139,14 @@ impl<'db> Collector<'db> {
                     output = output.normalize_vars();
                 }
                 expr_ty_map.insert(expr, output);
+            }
+            let exprs_elapsed = t_exprs.elapsed();
+            if exprs_elapsed.as_millis() > 10 {
+                log::info!(
+                    "  expr canonicalization: {:.1}ms ({} exprs)",
+                    exprs_elapsed.as_secs_f64() * 1000.0,
+                    expr_cnt,
+                );
             }
         }
 

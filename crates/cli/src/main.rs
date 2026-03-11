@@ -220,6 +220,7 @@ enum GenStubsSource {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    env_logger::init();
     let args = Cli::parse();
 
     match args.command {

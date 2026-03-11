@@ -283,6 +283,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "comment_parser",
+ "env_logger",
  "globset",
  "indoc",
  "lang_ast",

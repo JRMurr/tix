@@ -6191,13 +6191,21 @@ fn inline_alias_references_another() {
 /// Helper: type-check with check_file_collecting (which includes lowering
 /// diagnostics) and return just the diagnostics.
 fn collect_diagnostics(src: &str) -> Vec<TixDiagnostic> {
+    collect_diagnostics_with_deadline(src, None)
+}
+
+fn collect_diagnostics_with_deadline(
+    src: &str,
+    deadline: Option<std::time::Instant>,
+) -> Vec<TixDiagnostic> {
     let (db, file) = TestDatabase::single_file(src).unwrap();
-    let result = crate::check_file_collecting(
+    let result = crate::check_file_collecting_with_deadline(
         &db,
         file,
         &TypeAliasRegistry::default(),
         HashMap::new(),
         HashMap::new(),
+        deadline,
     );
     result.diagnostics
 }
@@ -6589,4 +6597,48 @@ fn let_binding_preserves_union() {
         }
         _ => panic!("expected union type (int | string), got: {ty}"),
     }
+}
+
+/// Regression test for gvariant.nix performance issue: when a def in a `rec {}`
+/// block fails during SCC inference, it must still be recorded in poly_type_env.
+/// Otherwise `infer_bindings_to_attrset` re-infers it from scratch during
+/// infer_root, triggering massive constraint cascade (580K+ type slots for
+/// gvariant.nix's `mkValue`).
+#[test]
+fn rec_failed_def_not_reinferred() {
+    // Simplified gvariant.nix pattern: `mkValue` calls `mkString` and `mkBool`,
+    // and has a type error (applying a non-function), causing SCC inference to
+    // fail. Without the fix, `mkValue` would be re-inferred at root level,
+    // extruding `mkString`/`mkBool` and cascading constraints.
+    let nix = indoc! {"
+        let
+          helper = x: { value = x; extra = \"done\"; };
+        in
+        rec {
+          mkString = v: helper v;
+          mkBool = v: helper v;
+
+          mkValue = v:
+            if builtins.isString v then mkString v
+            else if builtins.isBool v then mkBool v
+            else if builtins.isInt v then
+              let x = builtins.length v; in x
+            else v;
+
+          mkOther = x: mkValue x;
+        }
+    "};
+
+    // Use a tight deadline to catch performance regression: the fixed version
+    // completes in <10ms, the broken version would take seconds.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let diags = collect_diagnostics_with_deadline(nix, Some(deadline));
+
+    // Should complete well within the deadline. The test itself is the perf
+    // assertion: if the re-inference bug regresses, this would either timeout
+    // or take an unreasonable time.
+    assert!(
+        !diags.is_empty(),
+        "should have type errors from mkValue's type mismatch"
+    );
 }

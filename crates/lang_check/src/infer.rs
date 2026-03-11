@@ -113,8 +113,18 @@ impl CheckCtx<'_> {
         }
 
         if !self.deadline_exceeded && !self.past_deadline() {
+            let t_root = Instant::now();
             if let Err(err) = self.infer_root() {
                 errors.push(err);
+            }
+            let root_elapsed = t_root.elapsed();
+            if root_elapsed.as_millis() > 10 {
+                log::info!(
+                    "infer_root took {:.1}ms (cache: {}, slots: {})",
+                    root_elapsed.as_secs_f64() * 1000.0,
+                    self.types.constrain_cache.len(),
+                    self.types.storage.len(),
+                );
             }
         } else {
             log::warn!("skipping infer_root due to deadline");
@@ -143,8 +153,30 @@ impl CheckCtx<'_> {
     }
 
     fn infer_root(&mut self) -> Result<(), LocatedError> {
-        self.infer_expr(self.module.entry_expr)?;
+        let t0 = Instant::now();
+        let expr_result = self.infer_expr(self.module.entry_expr);
+        let expr_elapsed = t0.elapsed();
+        if expr_elapsed.as_millis() > 50 {
+            log::info!(
+                "infer_root: infer_expr {:.1}ms (ok={}, cache: {}, slots: {})",
+                expr_elapsed.as_secs_f64() * 1000.0,
+                expr_result.is_ok(),
+                self.types.constrain_cache.len(),
+                self.types.storage.len(),
+            );
+        }
+        expr_result?;
+        let t1 = Instant::now();
         self.resolve_pending()?;
+        let resolve_elapsed = t1.elapsed();
+        if resolve_elapsed.as_millis() > 50 {
+            log::info!(
+                "infer_root: resolve_pending {:.1}ms (cache: {}, slots: {})",
+                resolve_elapsed.as_secs_f64() * 1000.0,
+                self.types.constrain_cache.len(),
+                self.types.storage.len(),
+            );
+        }
         Ok(())
     }
 
@@ -204,6 +236,10 @@ impl CheckCtx<'_> {
     /// imbalance and ensures successfully-inferred names within the group are
     /// still recorded.
     fn infer_scc_group(&mut self, group: DependentGroup) -> Option<LocatedError> {
+        let scc_start = std::time::Instant::now();
+        let scc_size = group.len();
+        let cache_before = self.types.constrain_cache.len();
+        let slots_before = self.types.storage.len();
         self.types.storage.enter_level();
 
         // Lift pre-allocated name vars to the current (inner) level so that
@@ -249,6 +285,7 @@ impl CheckCtx<'_> {
         // rather than poly_ty (the concrete inferred type), because name_slot
         // may have Named lower bounds from apply_type_annotation that aren't
         // visible on the concrete type itself.
+        let canon_start = std::time::Instant::now();
         for &(name_id, _ty) in &inferred {
             let name_slot = self.ty_for_name_direct(name_id);
             let output =
@@ -256,6 +293,11 @@ impl CheckCtx<'_> {
             let simplified = simplify(&output);
             self.early_canonical.insert(name_id, simplified);
         }
+        log::debug!(
+            "  early canonicalization: {:.1}ms for {} names",
+            canon_start.elapsed().as_secs_f64() * 1000.0,
+            inferred.len(),
+        );
 
         // Lift any sub-level variables in the type graph to the current SCC
         // level. Stub-interned variables (created at level 0 during annotation
@@ -276,6 +318,7 @@ impl CheckCtx<'_> {
         // one member would lose the union semantics. This matters for type
         // narrowing: `if x == null then ... else x + 1` needs the variable
         // to contain both null and int so that narrowing can exclude null.
+        let inferred_names: HashSet<_> = inferred.iter().map(|&(n, _)| n).collect();
         for (name_id, ty) in inferred {
             if self.poly_type_env.contains_idx(name_id) {
                 continue;
@@ -291,6 +334,34 @@ impl CheckCtx<'_> {
             self.poly_type_env.insert(name_id, poly_ty);
         }
 
+        // Also record defs that FAILED inference, using their pre-allocated
+        // name slot. Without this, `infer_bindings_to_attrset` (for `rec {}`)
+        // would re-infer the failed def's body from scratch at root level,
+        // triggering a massive cascade of extrusions and constraint propagation
+        // (e.g. gvariant.nix's `mkValue` creates 580K+ type slots when
+        // re-inferred because it extrudes every other poly function).
+        if error.is_some() {
+            for def in &group {
+                let name_id = def.name();
+                if !inferred_names.contains(&name_id) && !self.poly_type_env.contains_idx(name_id) {
+                    let name_slot = self.ty_for_name_direct(name_id);
+                    self.poly_type_env.insert(name_id, name_slot);
+                }
+            }
+        }
+
+        let scc_elapsed = scc_start.elapsed();
+        log::info!(
+            "SCC group: {} defs, {:.1}ms, cache {} → {}, slots {} → {}, carried overloads: {}",
+            scc_size,
+            scc_elapsed.as_secs_f64() * 1000.0,
+            cache_before,
+            self.types.constrain_cache.len(),
+            slots_before,
+            self.types.storage.len(),
+            self.deferred.carried.len(),
+        );
+
         error
     }
 
@@ -303,6 +374,7 @@ impl CheckCtx<'_> {
         group: &DependentGroup,
     ) -> (Vec<(lang_ast::NameId, TyId)>, Option<LocatedError>) {
         let mut inferred: Vec<(lang_ast::NameId, TyId)> = Vec::new();
+        let infer_start = std::time::Instant::now();
 
         for def in group {
             if self.deadline_exceeded || self.past_deadline() {
@@ -320,6 +392,7 @@ impl CheckCtx<'_> {
                 Vec::new()
             };
 
+            let def_start = std::time::Instant::now();
             let ty = match self.infer_expr(def.expr()) {
                 Ok(ty) => {
                     self.restore_narrow_overrides(saved);
@@ -331,6 +404,11 @@ impl CheckCtx<'_> {
                 }
             };
             let name_id = def.name();
+            log::debug!(
+                "  def '{}': infer_expr {:.1}ms",
+                self.module[name_id].text,
+                def_start.elapsed().as_secs_f64() * 1000.0,
+            );
 
             // Link the pre-allocated name slot to the inferred type.
             let name_slot = self.ty_for_name_direct(name_id);
@@ -346,11 +424,23 @@ impl CheckCtx<'_> {
             inferred.push((name_id, ty));
         }
 
+        let infer_elapsed = infer_start.elapsed();
+        log::debug!(
+            "  all defs inferred in {:.1}ms, pending: {} active",
+            infer_elapsed.as_secs_f64() * 1000.0,
+            self.deferred.active.len(),
+        );
+
         // Resolve pending overload and merge constraints now that we have
         // type information from the entire SCC group.
+        let resolve_start = std::time::Instant::now();
         if let Err(err) = self.resolve_pending() {
             return (inferred, Some(err));
         }
+        log::debug!(
+            "  resolve_pending: {:.1}ms",
+            resolve_start.elapsed().as_secs_f64() * 1000.0,
+        );
 
         (inferred, None)
     }
