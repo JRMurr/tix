@@ -125,6 +125,10 @@ With    TIX_BUILTIN_STUBS: 16.2 GB RSS, 21.1s   ← 80x memory increase
   after. `Vec<(SmolStr, TyRef)>` with binary search would halve allocation overhead.
   Deferred because it's invasive (~15 files across 4 crates) and current numbers are
   acceptable.
+- **`discover_all_nix_files` ignores `[project] analyze` config field:** Walks all
+  `.nix` files regardless of the analyze globs. `resolve_analyze_globs` exists in
+  `crates/lsp/src/project_config.rs:175` but is never called from the check pipeline.
+  This causes `tix check` to check ~40 files when the config intends only ~6.
 
 <details>
 <summary>Pre-optimization heaptrack breakdown (14.8 GB heap)</summary>

@@ -609,6 +609,11 @@ impl CheckCtx<'_> {
                     unreachable!()
                 }
                 TypeEntry::Concrete(ty) => {
+                    // Short-circuit optimisation: after recursing into children,
+                    // if every child TyId is unchanged we reuse the original
+                    // node instead of allocating a copy. Concrete types are
+                    // immutable in TypeStorage so sharing is safe — only type
+                    // *variables* need fresh copies for polymorphism.
                     let result = match ty {
                         Ty::Lambda { param, body } => {
                             // Insert a placeholder to handle recursive types.
@@ -617,6 +622,15 @@ impl CheckCtx<'_> {
 
                             let p = self.extrude_inner(param, polarity.flip(), cache); // flip polarity
                             let b = self.extrude_inner(body, polarity, cache);
+
+                            if p == param && b == body {
+                                // Nothing changed — reuse original. Overwrite
+                                // the placeholder so later cache hits return
+                                // the original, and remove the orphaned var.
+                                cache.insert(ty_id, ty_id);
+                                return ty_id;
+                            }
+
                             let result = self.alloc_concrete(Ty::Lambda { param: p, body: b });
 
                             // Link placeholder to result.
@@ -627,16 +641,36 @@ impl CheckCtx<'_> {
                         }
                         Ty::List(elem) => {
                             let e = self.extrude_inner(elem, polarity, cache);
+                            if e == elem {
+                                cache.insert(ty_id, ty_id);
+                                return ty_id;
+                            }
                             self.alloc_concrete(Ty::List(e))
                         }
                         Ty::AttrSet(attr) => {
-                            let new_fields = attr
-                                .fields
-                                .iter()
-                                .map(|(k, &v)| (k.clone(), self.extrude_inner(v, polarity, cache)))
-                                .collect();
-                            let new_dyn =
-                                attr.dyn_ty.map(|d| self.extrude_inner(d, polarity, cache));
+                            let mut changed = false;
+                            let new_fields: std::collections::BTreeMap<smol_str::SmolStr, TyId> =
+                                attr.fields
+                                    .iter()
+                                    .map(|(k, &v)| {
+                                        let e = self.extrude_inner(v, polarity, cache);
+                                        if e != v {
+                                            changed = true;
+                                        }
+                                        (k.clone(), e)
+                                    })
+                                    .collect();
+                            let new_dyn = attr.dyn_ty.map(|d| {
+                                let e = self.extrude_inner(d, polarity, cache);
+                                if e != d {
+                                    changed = true;
+                                }
+                                e
+                            });
+                            if !changed {
+                                cache.insert(ty_id, ty_id);
+                                return ty_id;
+                            }
                             self.alloc_concrete(Ty::AttrSet(AttrSetTy {
                                 fields: new_fields,
                                 dyn_ty: new_dyn,
@@ -649,6 +683,10 @@ impl CheckCtx<'_> {
                         // Negation flips polarity, same as Lambda param.
                         Ty::Neg(inner) => {
                             let e = self.extrude_inner(inner, polarity.flip(), cache);
+                            if e == inner {
+                                cache.insert(ty_id, ty_id);
+                                return ty_id;
+                            }
                             self.alloc_concrete(Ty::Neg(e))
                         }
                         // Intersection and Union: covariant — polarity preserved.
@@ -658,15 +696,27 @@ impl CheckCtx<'_> {
                         Ty::Inter(a, b) => {
                             let ea = self.extrude_inner(a, polarity, cache);
                             let eb = self.extrude_inner(b, polarity, cache);
+                            if ea == a && eb == b {
+                                cache.insert(ty_id, ty_id);
+                                return ty_id;
+                            }
                             self.alloc_concrete(Ty::Inter(ea, eb))
                         }
                         Ty::Union(a, b) => {
                             let ea = self.extrude_inner(a, polarity, cache);
                             let eb = self.extrude_inner(b, polarity, cache);
+                            if ea == a && eb == b {
+                                cache.insert(ty_id, ty_id);
+                                return ty_id;
+                            }
                             self.alloc_concrete(Ty::Union(ea, eb))
                         }
                         Ty::Named(name, inner) => {
                             let e = self.extrude_inner(inner, polarity, cache);
+                            if e == inner {
+                                cache.insert(ty_id, ty_id);
+                                return ty_id;
+                            }
                             self.alloc_concrete(Ty::Named(name, e))
                         }
                     };
