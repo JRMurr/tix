@@ -25,7 +25,7 @@ pub use nameres::{group_def, name_resolution, scopes, GroupedDefs, ModuleScopes,
 use rnix::NixLanguage;
 use smol_str::SmolStr;
 
-#[salsa::tracked]
+#[salsa::tracked(no_eq)]
 pub fn module_and_source_maps(db: &dyn crate::AstDb, file: NixFile) -> (Module, ModuleSourceMap) {
     let parsed = db.parse_file(file);
     let root = parsed.tree();

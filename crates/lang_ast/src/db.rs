@@ -77,10 +77,21 @@ impl RootDatabase {
         let existing = self.files.get(&path).map(|entry| *entry.value());
 
         if let Some(file) = existing {
+            // Skip Salsa mutation if contents haven't changed — avoids an
+            // unnecessary revision bump and the downstream query revalidation
+            // walk that would follow.
+            if *file.contents(&*self) == contents {
+                return file;
+            }
             file.set_contents(self).to(contents);
             file
         } else {
             let file = NixFile::new(self, path.clone(), contents);
+            // Path never changes after creation — mark HIGH so Salsa can skip
+            // revalidation of path-dependent queries when only contents change.
+            file.set_path(self)
+                .with_durability(salsa::Durability::HIGH)
+                .to(path.clone());
             self.files.insert(path, file);
             file
         }
