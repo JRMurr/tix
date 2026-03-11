@@ -289,6 +289,7 @@ dependencies = [
  "lang_check",
  "lang_ty",
  "miette",
+ "rayon",
  "rnix",
  "rowan",
  "serde",

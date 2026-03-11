@@ -98,20 +98,11 @@ pub struct SyntaxIntermediate {
     pub deadline_secs: u64,
 }
 
-/// Everything needed to run type inference after the syntax phase.
-/// Produced by `AnalysisState::update_syntax_phase_b()`, consumed by `run_inference()`.
-/// This bundle is Send + Sync so inference can run outside the mutex.
-pub struct InferenceInputs {
-    pub module: Module,
-    pub module_indices: ModuleIndices,
-    pub name_res: NameResolution,
-    pub grouped_defs: GroupedDefs,
-    pub registry: TypeAliasRegistry,
-    pub import_types: HashMap<ExprId, OutputTy>,
-    pub import_diagnostics: Vec<TixDiagnostic>,
-    pub context_args: HashMap<SmolStr, comment_parser::ParsedTy>,
-    pub deadline_secs: u64,
-    // Fields duplicated from SyntaxData for building the legacy FileAnalysis.
+/// LSP-specific inference inputs. Wraps the shared `lang_check::InferenceInputs`
+/// with additional fields needed for building `FileAnalysis`/`FileSnapshot`.
+pub struct LspInferenceInputs {
+    pub core: lang_check::InferenceInputs,
+    // LSP-specific fields for FileAnalysis/FileSnapshot:
     pub nix_file: NixFile,
     pub line_index: LineIndex,
     pub parsed: rnix::Parse<rnix::Root>,
@@ -124,57 +115,14 @@ pub struct InferenceInputs {
 
 /// Run type inference using precomputed syntax data. Does not need the Salsa
 /// database or the analysis mutex. Returns the check result and timing.
+///
+/// Delegates to `lang_check::run_inference()` for the actual work.
 pub fn run_inference(
-    inputs: &InferenceInputs,
+    inputs: &LspInferenceInputs,
     cancel_flag: Option<Arc<AtomicBool>>,
 ) -> (CheckResult, Duration) {
     let t0 = Instant::now();
-    let deadline = Some(Instant::now() + Duration::from_secs(inputs.deadline_secs));
-
-    let mut check_result = lang_check::check_with_precomputed(
-        &inputs.module,
-        &inputs.name_res,
-        &inputs.module_indices,
-        inputs.grouped_defs.clone(),
-        &inputs.registry,
-        inputs.import_types.clone(),
-        inputs.context_args.clone(),
-        deadline,
-        cancel_flag,
-    );
-
-    // Merge import diagnostics.
-    check_result
-        .diagnostics
-        .extend(inputs.import_diagnostics.clone());
-
-    // If inference timed out, add timeout diagnostic.
-    if check_result.timed_out {
-        let missing_bindings: Vec<SmolStr> = inputs
-            .module
-            .names()
-            .filter(|(_, name)| {
-                matches!(
-                    name.kind,
-                    lang_ast::NameKind::LetIn
-                        | lang_ast::NameKind::RecAttrset
-                        | lang_ast::NameKind::PlainAttrset
-                )
-            })
-            .filter(|(id, _)| {
-                check_result
-                    .inference
-                    .as_ref()
-                    .is_none_or(|inf| inf.name_ty_map.get(*id).is_none())
-            })
-            .map(|(_, name)| name.text.clone())
-            .collect();
-        check_result.diagnostics.push(TixDiagnostic {
-            at_expr: inputs.module.entry_expr,
-            kind: TixDiagnosticKind::InferenceTimeout { missing_bindings },
-        });
-    }
-
+    let check_result = lang_check::run_inference(&inputs.core, cancel_flag);
     let elapsed = t0.elapsed();
     (check_result, elapsed)
 }
@@ -182,15 +130,15 @@ pub fn run_inference(
 /// Build a `FileAnalysis` from inference inputs and check result. This is the
 /// legacy path used during the transition — handlers will eventually read from
 /// `FileSnapshot` instead.
-pub fn build_file_analysis(inputs: InferenceInputs, check_result: CheckResult) -> FileAnalysis {
+pub fn build_file_analysis(inputs: LspInferenceInputs, check_result: CheckResult) -> FileAnalysis {
     FileAnalysis {
         nix_file: inputs.nix_file,
         line_index: inputs.line_index,
         parsed: inputs.parsed,
-        module: inputs.module,
-        module_indices: inputs.module_indices,
+        module: inputs.core.module,
+        module_indices: inputs.core.module_indices,
         source_map: inputs.source_map,
-        name_res: inputs.name_res,
+        name_res: inputs.core.name_res,
         scopes: inputs.scopes,
         check_result,
         import_targets: inputs.import_targets,
@@ -624,7 +572,7 @@ impl AnalysisState {
         &mut self,
         intermediate: &SyntaxIntermediate,
     ) -> (
-        InferenceInputs,
+        LspInferenceInputs,
         HashMap<ExprId, PathBuf>,
         HashMap<NameId, PathBuf>,
         Duration,
@@ -665,16 +613,18 @@ impl AnalysisState {
 
         let import_duration = t0.elapsed();
 
-        let inference_inputs = InferenceInputs {
-            module: intermediate.module.clone(),
-            module_indices: intermediate.module_indices.clone(),
-            name_res: intermediate.name_res.clone(),
-            grouped_defs: intermediate.grouped_defs.clone(),
-            registry: intermediate.registry.clone(),
-            import_types: import_resolution.types,
-            import_diagnostics,
-            context_args: intermediate.context_args.clone(),
-            deadline_secs: intermediate.deadline_secs,
+        let inference_inputs = LspInferenceInputs {
+            core: lang_check::InferenceInputs {
+                module: intermediate.module.clone(),
+                module_indices: intermediate.module_indices.clone(),
+                name_res: intermediate.name_res.clone(),
+                grouped_defs: intermediate.grouped_defs.clone(),
+                registry: intermediate.registry.clone(),
+                import_types: import_resolution.types,
+                import_diagnostics,
+                context_args: intermediate.context_args.clone(),
+                deadline_secs: Some(intermediate.deadline_secs),
+            },
             nix_file: intermediate.nix_file,
             line_index: intermediate.line_index.clone(),
             parsed: intermediate.parsed.clone(),

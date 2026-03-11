@@ -256,6 +256,86 @@ pub struct CheckResult {
     pub timed_out: bool,
 }
 
+// ==============================================================================
+// InferenceInputs: precomputed data for running inference off the Salsa DB
+// ==============================================================================
+
+/// Everything needed to run type inference after the syntax phase (parse, lower,
+/// nameres, SCC grouping). This bundle is `Send + Sync` so inference can run on
+/// a thread pool without holding the Salsa database lock.
+///
+/// Shared between the CLI (parallel multi-file check) and the LSP (which wraps
+/// this in `LspInferenceInputs` with additional presentation fields).
+pub struct InferenceInputs {
+    pub module: Module,
+    pub module_indices: lang_ast::ModuleIndices,
+    pub name_res: NameResolution,
+    pub grouped_defs: lang_ast::GroupedDefs,
+    pub registry: TypeAliasRegistry,
+    pub import_types: HashMap<ExprId, OutputTy>,
+    pub import_diagnostics: Vec<TixDiagnostic>,
+    pub context_args: HashMap<smol_str::SmolStr, ParsedTy>,
+    /// Inference deadline in seconds. `None` means no deadline (CLI default).
+    pub deadline_secs: Option<u64>,
+}
+
+/// Run type inference using precomputed syntax data. Does not need the Salsa
+/// database. Consolidates the timeout-diagnostic logic shared by CLI and LSP.
+pub fn run_inference(
+    inputs: &InferenceInputs,
+    cancel_flag: Option<Arc<AtomicBool>>,
+) -> CheckResult {
+    let deadline = inputs
+        .deadline_secs
+        .map(|secs| Instant::now() + std::time::Duration::from_secs(secs));
+
+    let mut check_result = check_with_precomputed(
+        &inputs.module,
+        &inputs.name_res,
+        &inputs.module_indices,
+        inputs.grouped_defs.clone(),
+        &inputs.registry,
+        inputs.import_types.clone(),
+        inputs.context_args.clone(),
+        deadline,
+        cancel_flag,
+    );
+
+    // Merge import diagnostics.
+    check_result
+        .diagnostics
+        .extend(inputs.import_diagnostics.clone());
+
+    // If inference timed out, add timeout diagnostic.
+    if check_result.timed_out {
+        let missing_bindings: Vec<smol_str::SmolStr> = inputs
+            .module
+            .names()
+            .filter(|(_, name)| {
+                matches!(
+                    name.kind,
+                    lang_ast::NameKind::LetIn
+                        | lang_ast::NameKind::RecAttrset
+                        | lang_ast::NameKind::PlainAttrset
+                )
+            })
+            .filter(|(id, _)| {
+                check_result
+                    .inference
+                    .as_ref()
+                    .is_none_or(|inf| inf.name_ty_map.get(*id).is_none())
+            })
+            .map(|(_, name)| name.text.clone())
+            .collect();
+        check_result.diagnostics.push(TixDiagnostic {
+            at_expr: inputs.module.entry_expr,
+            kind: diagnostic::TixDiagnosticKind::InferenceTimeout { missing_bindings },
+        });
+    }
+
+    check_result
+}
+
 /// Type-check a file, collecting errors instead of aborting on the first one.
 /// Always returns partial inference results — even when errors occur, bindings
 /// that were successfully inferred before the error will have types available

@@ -3,26 +3,55 @@
 // ==============================================================================
 //
 // Type-checks all .nix files in a project using tix.toml configuration.
-// Validates that file classifications match their configured contexts and
-// reports a summary of errors and warnings.
+// The pipeline has three phases:
+//   1. Sequential Prepare — Salsa queries, classification, import resolution
+//   2. Parallel Inference — rayon par_iter over prepared files
+//   3. Sequential Render  — deterministic diagnostic output in file order
 
 use std::collections::HashMap;
 use std::error::Error;
 use std::path::PathBuf;
 
 use lang_ast::classify::{classify_nix_file, NixFileKind};
-use lang_ast::{module_and_source_maps, name_resolution, RootDatabase};
+use lang_ast::{module_and_source_maps, name_resolution, ModuleSourceMap, RootDatabase};
 use lang_check::imports::{import_errors_to_diagnostics, resolve_import_types_from_stubs};
+use lang_check::InferenceInputs;
+use rayon::prelude::*;
 
 use crate::config::{self, TixConfig};
 use crate::{build_registry, load_stubs, render_diagnostics};
+
+/// A file ready for type inference (produced by Phase 1).
+struct PreparedFile {
+    file_path: PathBuf,
+    source_text: String,
+    source_map: ModuleSourceMap,
+    inputs: InferenceInputs,
+}
+
+/// Inference result for a single file (produced by Phase 2).
+struct FileResult {
+    file_path: PathBuf,
+    source_text: String,
+    source_map: ModuleSourceMap,
+    check_result: lang_check::CheckResult,
+}
 
 /// Entry point for `tix check`.
 pub fn run_check_project(
     config_path: Option<PathBuf>,
     no_default_stubs: bool,
     verbose: bool,
+    jobs: Option<usize>,
 ) -> Result<(), Box<dyn Error>> {
+    // Configure rayon thread pool if --jobs was specified.
+    if let Some(n) = jobs {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(n)
+            .build_global()
+            .ok(); // Ignored if pool already initialized.
+    }
+
     // Step 1: Find and load tix.toml.
     let (toml_config, config_dir) = find_and_load_config(config_path)?;
 
@@ -53,15 +82,20 @@ pub fn run_check_project(
         return Ok(());
     }
 
-    // Step 4: Create shared database.
-    let db = RootDatabase::default();
-
-    let mut total_errors = 0usize;
-    let mut total_warnings = 0usize;
-    let mut config_warnings: Vec<String> = Vec::new();
     let files_count = nix_files.len();
 
-    // Step 5: Process each file.
+    // =========================================================================
+    // Phase 1 — Sequential Prepare
+    // =========================================================================
+    //
+    // Salsa queries (parse, lower, nameres, SCC grouping), classification,
+    // config validation, context resolution, and import resolution all run
+    // sequentially because the Salsa database is single-threaded.
+
+    let db = RootDatabase::default();
+    let mut prepared: Vec<PreparedFile> = Vec::with_capacity(files_count);
+    let mut config_warnings: Vec<String> = Vec::new();
+
     for file_path in &nix_files {
         let relative = file_path
             .strip_prefix(&config_dir)
@@ -77,7 +111,7 @@ pub fn run_check_project(
             }
         };
 
-        // Parse + lower.
+        // Parse + lower via Salsa.
         let nix_file = match db.read_file(file_path.clone()) {
             Ok(f) => f,
             Err(e) => {
@@ -86,11 +120,11 @@ pub fn run_check_project(
             }
         };
 
-        let (m, source_map) = module_and_source_maps(&db, nix_file);
+        let (module, source_map) = module_and_source_maps(&db, nix_file);
         let name_res = name_resolution(&db, nix_file);
 
         // Classify (AST-only, fast).
-        let classification = classify_nix_file(&m, &name_res);
+        let classification = classify_nix_file(&module, &name_res);
 
         if verbose {
             eprintln!(
@@ -123,59 +157,75 @@ pub fn run_check_project(
         // Resolve imports.
         let base_dir = file_path.parent().unwrap_or(std::path::Path::new("/"));
         let import_resolution =
-            resolve_import_types_from_stubs(&m, &name_res, base_dir, &HashMap::new());
+            resolve_import_types_from_stubs(&module, &name_res, base_dir, &HashMap::new());
         let import_diagnostics = import_errors_to_diagnostics(&import_resolution.errors);
 
-        // Type-check.
-        let mut result = lang_check::check_file_collecting(
-            &db,
-            nix_file,
-            &registry,
-            import_resolution.types,
-            context_args,
-        );
-        result.diagnostics.extend(import_diagnostics);
+        // Remaining Salsa queries for inference.
+        let module_indices = lang_ast::module_indices(&db, nix_file);
+        let grouped_defs = lang_ast::group_def(&db, nix_file);
 
-        // Handle timeout.
-        if result.timed_out {
-            let missing_bindings: Vec<smol_str::SmolStr> = m
-                .names()
-                .filter(|(_, name)| {
-                    matches!(
-                        name.kind,
-                        lang_ast::NameKind::LetIn
-                            | lang_ast::NameKind::RecAttrset
-                            | lang_ast::NameKind::PlainAttrset
-                    )
-                })
-                .filter(|(id, _)| {
-                    result
-                        .inference
-                        .as_ref()
-                        .is_none_or(|inf| inf.name_ty_map.get(*id).is_none())
-                })
-                .map(|(_, name)| name.text.clone())
-                .collect();
-            result
-                .diagnostics
-                .push(lang_check::diagnostic::TixDiagnostic {
-                    at_expr: m.entry_expr,
-                    kind: lang_check::diagnostic::TixDiagnosticKind::InferenceTimeout {
-                        missing_bindings,
-                    },
-                });
-        }
+        prepared.push(PreparedFile {
+            file_path: file_path.clone(),
+            source_text,
+            source_map,
+            inputs: InferenceInputs {
+                module,
+                module_indices,
+                name_res,
+                grouped_defs,
+                registry: registry.clone(),
+                import_types: import_resolution.types,
+                import_diagnostics,
+                context_args,
+                deadline_secs: None, // No deadline for CLI batch mode.
+            },
+        });
+    }
 
-        // Render diagnostics.
-        if !result.diagnostics.is_empty() {
-            let (errors, warnings) =
-                render_diagnostics(file_path, &source_text, &result.diagnostics, &source_map);
+    // =========================================================================
+    // Phase 2 — Parallel Inference
+    // =========================================================================
+    //
+    // Each file gets its own TypeStorage — no shared mutable state. The rayon
+    // par_iter distributes inference across the thread pool.
+
+    let results: Vec<FileResult> = prepared
+        .into_par_iter()
+        .map(|pf| {
+            let check_result = lang_check::run_inference(&pf.inputs, None);
+            FileResult {
+                file_path: pf.file_path,
+                source_text: pf.source_text,
+                source_map: pf.source_map,
+                check_result,
+            }
+        })
+        .collect();
+
+    // =========================================================================
+    // Phase 3 — Sequential Render
+    // =========================================================================
+    //
+    // Iterate results in file order (rayon::par_iter + collect preserves order)
+    // to produce deterministic diagnostic output.
+
+    let mut total_errors = 0usize;
+    let mut total_warnings = 0usize;
+
+    for result in &results {
+        if !result.check_result.diagnostics.is_empty() {
+            let (errors, warnings) = render_diagnostics(
+                &result.file_path,
+                &result.source_text,
+                &result.check_result.diagnostics,
+                &result.source_map,
+            );
             total_errors += errors;
             total_warnings += warnings;
         }
     }
 
-    // Step 6: Print config validation warnings.
+    // Print config validation warnings.
     if !config_warnings.is_empty() {
         eprintln!();
         for warning in &config_warnings {
@@ -183,7 +233,7 @@ pub fn run_check_project(
         }
     }
 
-    // Step 7: Print summary.
+    // Print summary.
     eprintln!(
         "\nChecked {} files: {} errors, {} warnings",
         files_count, total_errors, total_warnings
@@ -196,7 +246,7 @@ pub fn run_check_project(
         );
     }
 
-    // Step 8: Exit code.
+    // Exit code.
     if total_errors > 0 {
         std::process::exit(1);
     }

@@ -103,6 +103,10 @@ enum Command {
         /// Print file classifications
         #[arg(long)]
         verbose: bool,
+
+        /// Number of parallel inference threads (default: number of CPUs)
+        #[arg(short = 'j', long = "jobs", value_name = "N")]
+        jobs: Option<usize>,
     },
 
     /// Verify that a .tix stub matches the inferred type of a Nix file
@@ -224,7 +228,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             config_path,
             no_default_stubs,
             verbose,
-        }) => check::run_check_project(config_path, no_default_stubs, verbose),
+            jobs,
+        }) => check::run_check_project(config_path, no_default_stubs, verbose, jobs),
         Some(Command::GenStubs { source }) => run_gen_stubs(source),
         Some(Command::GenStub {
             file_path,
