@@ -62,12 +62,18 @@ pub fn check_file_with_imports(
 
     // Load inline type aliases from doc comments before inference so they're
     // available for annotation resolution. Inline aliases shadow stub aliases.
-    let mut aliases = aliases.clone();
-    for alias_source in &module.inline_type_aliases {
-        if let Some((name, body)) = comment_parser::parse_inline_type_alias(alias_source) {
-            aliases.load_inline_alias(name, body);
+    // Only clone when inline aliases exist (CoW pattern).
+    let aliases = if module.inline_type_aliases.is_empty() {
+        Arc::new(aliases.clone())
+    } else {
+        let mut cloned = aliases.clone();
+        for alias_source in &module.inline_type_aliases {
+            if let Some((name, body)) = comment_parser::parse_inline_type_alias(alias_source) {
+                cloned.load_inline_alias(name, body);
+            }
         }
-    }
+        Arc::new(cloned)
+    };
 
     let check = CheckCtx::new(
         &module,
@@ -294,7 +300,7 @@ pub fn run_inference(
         &inputs.name_res,
         &inputs.module_indices,
         inputs.grouped_defs.clone(),
-        &inputs.registry,
+        Arc::clone(&inputs.registry),
         inputs.import_types.clone(),
         Arc::clone(&inputs.context_args),
         deadline,
@@ -391,12 +397,18 @@ pub fn check_file_collecting_with_cancel(
     let grouped_defs = lang_ast::group_def(db, file);
 
     // Load inline type aliases from doc comments before inference.
-    let mut aliases = aliases.clone();
-    for alias_source in &module.inline_type_aliases {
-        if let Some((name, body)) = comment_parser::parse_inline_type_alias(alias_source) {
-            aliases.load_inline_alias(name, body);
+    // Only clone when inline aliases exist (CoW pattern).
+    let aliases = if module.inline_type_aliases.is_empty() {
+        Arc::new(aliases.clone())
+    } else {
+        let mut cloned = aliases.clone();
+        for alias_source in &module.inline_type_aliases {
+            if let Some((name, body)) = comment_parser::parse_inline_type_alias(alias_source) {
+                cloned.load_inline_alias(name, body);
+            }
         }
-    }
+        Arc::new(cloned)
+    };
 
     let mut check = CheckCtx::new(
         &module,
@@ -437,19 +449,26 @@ pub fn check_with_precomputed(
     name_res: &NameResolution,
     indices: &lang_ast::ModuleIndices,
     grouped_defs: lang_ast::GroupedDefs,
-    aliases: &TypeAliasRegistry,
+    aliases: Arc<TypeAliasRegistry>,
     import_types: HashMap<ExprId, OutputTy>,
     context_args: Arc<HashMap<smol_str::SmolStr, ParsedTy>>,
     deadline: Option<Instant>,
     cancel_flag: Option<Arc<AtomicBool>>,
 ) -> CheckResult {
     // Load inline type aliases from doc comments before inference.
-    let mut aliases = aliases.clone();
-    for alias_source in &module.inline_type_aliases {
-        if let Some((name, body)) = comment_parser::parse_inline_type_alias(alias_source) {
-            aliases.load_inline_alias(name, body);
+    // CoW: only clone the registry when inline aliases need to be inserted.
+    // Most files have no inline aliases, so the Arc is shared without cloning.
+    let aliases = if module.inline_type_aliases.is_empty() {
+        aliases
+    } else {
+        let mut cloned = (*aliases).clone();
+        for alias_source in &module.inline_type_aliases {
+            if let Some((name, body)) = comment_parser::parse_inline_type_alias(alias_source) {
+                cloned.load_inline_alias(name, body);
+            }
         }
-    }
+        Arc::new(cloned)
+    };
 
     let mut check = CheckCtx::new(
         module,
@@ -536,7 +555,10 @@ pub struct CheckCtx<'db> {
     early_canonical: ArenaMap<NameId, OutputTy>,
 
     /// Type alias registry loaded from .tix declaration files.
-    type_aliases: TypeAliasRegistry,
+    /// Wrapped in Arc for copy-on-write: most files share the registry
+    /// without cloning; Arc::make_mut clones only when mutation is needed
+    /// (inline aliases or context loading).
+    type_aliases: Arc<TypeAliasRegistry>,
 
     /// Pre-computed types for resolved import expressions. When an Apply ExprId
     /// is in this map, its type comes from the imported file's root expression
@@ -618,7 +640,7 @@ impl<'db> CheckCtx<'db> {
         module: &'db Module,
         name_res: &'db NameResolution,
         binding_exprs: &'db HashMap<NameId, ExprId>,
-        type_aliases: TypeAliasRegistry,
+        type_aliases: Arc<TypeAliasRegistry>,
         import_types: HashMap<ExprId, OutputTy>,
         context_args: Arc<HashMap<smol_str::SmolStr, ParsedTy>>,
     ) -> Self {
@@ -1159,7 +1181,9 @@ impl<'db> CheckCtx<'db> {
         let docs = self.module.type_dec_map.docs_for_expr(expr_id)?;
         for doc in docs {
             if let Some(context_name) = parse_context_annotation(doc) {
-                match self.type_aliases.load_context_by_name(&context_name) {
+                // Arc::make_mut triggers a clone only when the refcount > 1
+                // AND this rare code path fires (context doc comments).
+                match Arc::make_mut(&mut self.type_aliases).load_context_by_name(&context_name) {
                     Some(Ok(args)) => return Some(args),
                     Some(Err(e)) => {
                         log::warn!("Failed to parse context stubs for '{context_name}': {e}");
