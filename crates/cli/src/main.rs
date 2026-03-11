@@ -995,6 +995,14 @@ fn load_stubs(registry: &mut TypeAliasRegistry, path: &PathBuf) -> Result<(), Bo
             let entry = entry?;
             let entry_path = entry.path();
             if entry_path.is_dir() {
+                // Skip directories containing on-demand context stubs.
+                // These are loaded by `load_context_by_name` when a file
+                // matches a [context.*] section in tix.toml.
+                if let Some(name) = entry_path.file_name().and_then(|n| n.to_str()) {
+                    if matches!(name, "contexts" | "generated") {
+                        continue;
+                    }
+                }
                 load_stubs(registry, &entry_path)?;
             } else if entry_path.extension().is_some_and(|ext| ext == "tix") {
                 load_single_stub(registry, &entry_path)?;

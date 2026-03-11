@@ -11,6 +11,7 @@
 use std::collections::HashMap;
 use std::error::Error;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use lang_ast::classify::{classify_nix_file, NixFileKind};
 use lang_ast::{module_and_source_maps, name_resolution, ModuleSourceMap, RootDatabase};
@@ -20,6 +21,20 @@ use rayon::prelude::*;
 
 use crate::config::{self, TixConfig};
 use crate::{build_registry, load_stubs, render_diagnostics};
+
+/// Intermediate data from Phase 1 before the registry is wrapped in Arc.
+struct PrePreparedFile {
+    file_path: PathBuf,
+    source_text: String,
+    source_map: ModuleSourceMap,
+    module: lang_ast::Module,
+    module_indices: lang_ast::ModuleIndices,
+    name_res: lang_ast::NameResolution,
+    grouped_defs: lang_ast::GroupedDefs,
+    import_types: HashMap<lang_ast::ExprId, lang_ty::OutputTy>,
+    import_diagnostics: Vec<lang_check::diagnostic::TixDiagnostic>,
+    context_args: HashMap<smol_str::SmolStr, comment_parser::ParsedTy>,
+}
 
 /// A file ready for type inference (produced by Phase 1).
 struct PreparedFile {
@@ -93,7 +108,7 @@ pub fn run_check_project(
     // sequentially because the Salsa database is single-threaded.
 
     let db = RootDatabase::default();
-    let mut prepared: Vec<PreparedFile> = Vec::with_capacity(files_count);
+    let mut pre_prepared: Vec<PrePreparedFile> = Vec::with_capacity(files_count);
     let mut config_warnings: Vec<String> = Vec::new();
 
     for file_path in &nix_files {
@@ -143,7 +158,7 @@ pub fn run_check_project(
             config_warnings.push(warning);
         }
 
-        // Resolve context args from tix.toml.
+        // Resolve context args from tix.toml (may mutate registry).
         let context_args =
             config::resolve_context_for_file(file_path, &toml_config, &config_dir, &mut registry)
                 .unwrap_or_else(|e| {
@@ -164,23 +179,43 @@ pub fn run_check_project(
         let module_indices = lang_ast::module_indices(&db, nix_file);
         let grouped_defs = lang_ast::group_def(&db, nix_file);
 
-        prepared.push(PreparedFile {
+        pre_prepared.push(PrePreparedFile {
             file_path: file_path.clone(),
             source_text,
             source_map,
-            inputs: InferenceInputs {
-                module,
-                module_indices,
-                name_res,
-                grouped_defs,
-                registry: registry.clone(),
-                import_types: import_resolution.types,
-                import_diagnostics,
-                context_args,
-                deadline_secs: None, // No deadline for CLI batch mode.
-            },
+            module,
+            module_indices,
+            name_res,
+            grouped_defs,
+            import_types: import_resolution.types,
+            import_diagnostics,
+            context_args,
         });
     }
+
+    // Wrap registry in Arc now that all mutations (context resolution) are done.
+    // Each file shares a single ref-counted registry instead of deep-cloning it.
+    let registry = Arc::new(registry);
+
+    let prepared: Vec<PreparedFile> = pre_prepared
+        .into_iter()
+        .map(|pp| PreparedFile {
+            file_path: pp.file_path,
+            source_text: pp.source_text,
+            source_map: pp.source_map,
+            inputs: InferenceInputs {
+                module: pp.module,
+                module_indices: pp.module_indices,
+                name_res: pp.name_res,
+                grouped_defs: pp.grouped_defs,
+                registry: Arc::clone(&registry),
+                import_types: pp.import_types,
+                import_diagnostics: pp.import_diagnostics,
+                context_args: pp.context_args,
+                deadline_secs: None, // No deadline for CLI batch mode.
+            },
+        })
+        .collect();
 
     // =========================================================================
     // Phase 2 — Parallel Inference

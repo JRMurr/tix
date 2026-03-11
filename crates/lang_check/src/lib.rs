@@ -271,7 +271,7 @@ pub struct InferenceInputs {
     pub module_indices: lang_ast::ModuleIndices,
     pub name_res: NameResolution,
     pub grouped_defs: lang_ast::GroupedDefs,
-    pub registry: TypeAliasRegistry,
+    pub registry: Arc<TypeAliasRegistry>,
     pub import_types: HashMap<ExprId, OutputTy>,
     pub import_diagnostics: Vec<TixDiagnostic>,
     pub context_args: HashMap<smol_str::SmolStr, ParsedTy>,
