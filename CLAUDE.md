@@ -22,6 +22,7 @@ cargo clippy                         # Lint
 ./scripts/pbt.sh                     # Property-based tests (50k cases default)
 ./scripts/pbt.sh 100000              # PBT with custom case count
 ./scripts/cov.sh                     # Coverage report (cargo-tarpaulin)
+cargo build --features dhat-heap      # Build with heap profiler
 nix build .#                         # Build with nix
 ./scripts/tixc.sh <<< 'let x = 1; in x'     # Type-check Nix from stdin (debug build)
 ./scripts/tixc.sh test/basic.nix             # Type-check a local .nix file
