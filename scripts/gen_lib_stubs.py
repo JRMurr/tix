@@ -810,7 +810,8 @@ type Derivation = {
 };
 
 # Opaque type representing a set of local files.
-type FileSet = { ... };
+# Bare paths are also accepted wherever a FileSet is expected.
+type FileSet = path | { ... };
 
 # Opaque type representing a NixOS option type descriptor (e.g. types.str).
 type OptionType = { ... };"""
