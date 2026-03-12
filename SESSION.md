@@ -191,6 +191,14 @@ Remaining mitigations (not yet implemented):
 
 </details>
 
+### PBT Flakiness
+
+`test_combined_typing` can produce non-deterministic failures where two independent
+unconstrained lambda params get the same or different TyVar indices depending on
+HashMap iteration order. The test doesn't call `normalize_vars` on the actual result,
+so it's sensitive to exact TyVar numbering from inference. Regression seeds are saved
+in `proptest-regressions/pbt/mod.txt` but may not reproduce reliably.
+
 ### Known Performance Characteristics
 
 Intentional O(n^2) trade-offs, acceptable for typical Nix code sizes:
