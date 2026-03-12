@@ -13,6 +13,7 @@ use std::time::Instant;
 
 use la_arena::ArenaMap;
 use rustc_hash::{FxHashMap, FxHashSet};
+use smallvec::SmallVec;
 use smol_str::SmolStr;
 
 use super::{CheckCtx, InferenceResult, Polarity, TyId};
@@ -622,8 +623,8 @@ fn absorb_subsumed_union_members(members: Vec<OutputTy>) -> Vec<OutputTy> {
 /// 4. Remove shared members from each union, producing remainders
 /// 5. Return `Union(shared..., Intersection(remainders..., non_unions...))`
 fn factor_shared_from_intersection(members: Vec<OutputTy>) -> Vec<OutputTy> {
-    let mut unions: Vec<Vec<OutputTy>> = Vec::new();
-    let mut non_unions: Vec<OutputTy> = Vec::new();
+    let mut unions: SmallVec<[SmallVec<[OutputTy; 8]>; 4]> = SmallVec::new();
+    let mut non_unions: SmallVec<[OutputTy; 8]> = SmallVec::new();
 
     for m in members {
         match m {
@@ -644,15 +645,13 @@ fn factor_shared_from_intersection(members: Vec<OutputTy>) -> Vec<OutputTy> {
                 _ => result.push(OutputTy::Union(u.into_iter().map(TyRef::from).collect())),
             }
         }
-        return result;
+        return result.into_vec();
     }
 
-    // Find members present in ALL unions. Use the first union as the candidate
-    // set and intersect with each subsequent union.
-    let mut shared: HashSet<OutputTy> = unions[0].iter().cloned().collect();
+    // Find members present in ALL unions. Linear scan since N is typically 2-8.
+    let mut shared: SmallVec<[OutputTy; 8]> = unions[0].clone();
     for u in &unions[1..] {
-        let u_set: HashSet<OutputTy> = u.iter().cloned().collect();
-        shared.retain(|m| u_set.contains(m));
+        shared.retain(|m| u.contains(m));
     }
 
     if shared.is_empty() {
@@ -661,14 +660,15 @@ fn factor_shared_from_intersection(members: Vec<OutputTy>) -> Vec<OutputTy> {
         for u in unions {
             result.push(OutputTy::Union(u.into_iter().map(TyRef::from).collect()));
         }
-        return result;
+        return result.into_vec();
     }
 
     // Remove shared members from each union, producing remainders.
-    let remainders: Vec<OutputTy> = unions
+    let remainders: SmallVec<[OutputTy; 8]> = unions
         .into_iter()
         .filter_map(|u| {
-            let remainder: Vec<OutputTy> = u.into_iter().filter(|m| !shared.contains(m)).collect();
+            let remainder: SmallVec<[OutputTy; 8]> =
+                u.into_iter().filter(|m| !shared.contains(m)).collect();
             match remainder.len() {
                 0 => None,
                 1 => Some(remainder.into_iter().next().unwrap()),
@@ -680,11 +680,11 @@ fn factor_shared_from_intersection(members: Vec<OutputTy>) -> Vec<OutputTy> {
         .collect();
 
     // Build the factored result: shared | (remainders & non_unions)
-    let mut shared_vec: Vec<OutputTy> = shared.into_iter().collect();
+    let mut shared_vec: SmallVec<[OutputTy; 8]> = shared;
     shared_vec.sort();
 
     // Build the intersection of remainders + non_unions.
-    let mut intersection_parts: Vec<OutputTy> = remainders;
+    let mut intersection_parts: SmallVec<[OutputTy; 8]> = remainders;
     intersection_parts.extend(non_unions);
 
     if intersection_parts.is_empty() {
@@ -728,8 +728,8 @@ fn factor_shared_from_intersection(members: Vec<OutputTy>) -> Vec<OutputTy> {
 /// - `int & ~null` → NOT a contradiction (disjoint, handled by redundant neg removal)
 fn has_type_contradiction(members: &[OutputTy]) -> bool {
     // Collect positive (non-negated) and negated inner types.
-    let mut positives: Vec<&OutputTy> = Vec::new();
-    let mut negated_inners: Vec<&OutputTy> = Vec::new();
+    let mut positives: SmallVec<[&OutputTy; 8]> = SmallVec::new();
+    let mut negated_inners: SmallVec<[&OutputTy; 8]> = SmallVec::new();
 
     for m in members {
         match m {
@@ -858,7 +858,7 @@ fn remove_redundant_negations(members: Vec<OutputTy>) -> Vec<OutputTy> {
     }
 
     // Collect indices of concrete positive members to avoid cloning.
-    let concrete_indices: Vec<usize> = members
+    let concrete_indices: SmallVec<[usize; 8]> = members
         .iter()
         .enumerate()
         .filter_map(|(i, m)| {
@@ -906,25 +906,20 @@ fn flatten_composite(
     members: Vec<OutputTy>,
     extract_nested: fn(&OutputTy) -> Option<&Vec<TyRef>>,
 ) -> Vec<OutputTy> {
-    let mut result = Vec::new();
-    let mut seen = HashSet::new();
+    let mut result: SmallVec<[OutputTy; 8]> = SmallVec::new();
     for m in members {
         if let Some(inner) = extract_nested(&m) {
             for sub in inner {
-                // Check containment first (by ref, no clone) to avoid cloning
-                // items we've already seen.
-                if !seen.contains(&*sub.0) {
-                    let sub_ty = (*sub.0).clone();
-                    seen.insert(sub_ty.clone());
-                    result.push(sub_ty);
+                // Linear contains() is faster than HashSet for N typically 2-8.
+                if !result.contains(&sub.0) {
+                    result.push((*sub.0).clone());
                 }
             }
-        } else if !seen.contains(&m) {
-            seen.insert(m.clone());
+        } else if !result.contains(&m) {
             result.push(m);
         }
     }
-    result
+    result.into_vec()
 }
 
 fn flatten_union(members: Vec<OutputTy>) -> Vec<OutputTy> {
@@ -945,8 +940,8 @@ fn flatten_intersection(members: Vec<OutputTy>) -> Vec<OutputTy> {
 /// The intersection of `{ foo: int }` and `{ bar: string }` is `{ foo: int, bar: string }`.
 /// For overlapping fields, the field types are intersected.
 fn merge_attrset_intersection(members: Vec<OutputTy>) -> Vec<OutputTy> {
-    let mut attrsets: Vec<AttrSetTy<TyRef>> = Vec::new();
-    let mut others: Vec<OutputTy> = Vec::new();
+    let mut attrsets: SmallVec<[AttrSetTy<TyRef>; 4]> = SmallVec::new();
+    let mut others: SmallVec<[OutputTy; 8]> = SmallVec::new();
 
     for m in members {
         match m {
@@ -956,7 +951,7 @@ fn merge_attrset_intersection(members: Vec<OutputTy>) -> Vec<OutputTy> {
     }
 
     if attrsets.is_empty() {
-        return others;
+        return others.into_vec();
     }
 
     // Merge all attrsets. For overlapping fields, if both have concrete types
@@ -1023,7 +1018,7 @@ fn merge_attrset_intersection(members: Vec<OutputTy>) -> Vec<OutputTy> {
     });
 
     others.push(merged);
-    others
+    others.into_vec()
 }
 
 // ==============================================================================
