@@ -1039,6 +1039,7 @@ impl<'db> Collector<'db> {
         Self { ctx }
     }
 
+    #[tracing::instrument(level = "info", skip_all, name = "canonicalize")]
     pub fn finalize_inference(&mut self) -> InferenceResult {
         let deadline_exceeded = self.ctx.deadline_exceeded;
 

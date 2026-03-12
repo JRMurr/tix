@@ -3,6 +3,7 @@ use std::{collections::HashMap, iter, ops};
 use la_arena::{Arena, ArenaMap, Idx as Id};
 use petgraph::graph::DiGraph;
 use smol_str::SmolStr;
+use tracing::instrument;
 
 use super::{BindingValue, Expr, ExprId, Module, NameId};
 use crate::{db::NixFile, module, Bindings};
@@ -291,6 +292,7 @@ pub struct NameResolution {
     refs_by_name: HashMap<NameId, Vec<ExprId>>,
 }
 
+#[instrument(level = "info", skip_all, name = "name_resolution")]
 #[salsa::tracked]
 pub fn name_resolution(db: &dyn crate::AstDb, file: NixFile) -> NameResolution {
     let module = module(db, file);
@@ -578,6 +580,7 @@ pub type DependentGroup = Vec<TypeDef>;
 pub type GroupedDefs = Vec<DependentGroup>;
 type DepGraph = DiGraph<NameId, ()>;
 
+#[instrument(level = "info", skip_all, name = "group_def")]
 #[salsa::tracked]
 pub fn group_def(db: &dyn crate::AstDb, file: NixFile) -> GroupedDefs {
     let module = module(db, file);

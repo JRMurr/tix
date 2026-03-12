@@ -24,6 +24,7 @@ itertools = "0.14.0"
 indoc = "2.0.5"
 rustc-hash = "2.1.0"
 stacker = "0.1"
+tracing = { workspace = true }
 
 
 [dev-dependencies]

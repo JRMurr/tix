@@ -928,6 +928,7 @@ dependencies = [
  "salsa",
  "smol_str",
  "thiserror 2.0.9",
+ "tracing",
 ]
 
 [[package]]
@@ -951,6 +952,7 @@ dependencies = [
  "smol_str",
  "stacker",
  "thiserror 2.0.9",
+ "tracing",
 ]
 
 [[package]]
