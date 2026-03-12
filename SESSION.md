@@ -164,7 +164,8 @@ Remaining mitigations (not yet implemented):
   variable is actually constrained at a use site. Requires careful analysis of
   when bounds observation occurs.
 - **Per-file deadline**: strings.nix takes 1.5s now; still worth capping for
-  pathological inputs. Already have the deadline mechanism but it's per-project.
+  pathological inputs. `tix check` now reads `deadline` from tix.toml and passes
+  it to `InferenceInputs.deadline_secs`.
 
 **Other remaining optimization (deferred):**
 

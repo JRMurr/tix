@@ -226,7 +226,7 @@ pub fn run_check_project(
                 import_types: pp.import_types,
                 import_diagnostics: pp.import_diagnostics,
                 context_args: pp.context_args,
-                deadline_secs: None, // No deadline for CLI batch mode.
+                deadline_secs: toml_config.deadline,
             },
         })
         .collect();

@@ -27,7 +27,9 @@ nix build .#                         # Build with nix
 ./scripts/tixc.sh <<< 'let x = 1; in x'     # Type-check Nix from stdin (debug build)
 ./scripts/tixc.sh test/basic.nix             # Type-check a local .nix file
 ./scripts/tixc.sh nixpkgs:lib/strings.nix    # Type-check a nixpkgs file (requires nix)
-./scripts/nixpkgs-lib-test.sh               # Run tix on nixpkgs lib/ (requires nix)
+./scripts/nixpkgs-lib-test.sh               # Run tix on nixpkgs lib/ sequentially (requires nix)
+./scripts/nixpkgs-lib-test.sh --parallel    # Parallel inference via `tix check` (requires nix)
+./scripts/nixpkgs-lib-test.sh --parallel --timing -j 4  # With timing + thread limit
 ```
 
 
