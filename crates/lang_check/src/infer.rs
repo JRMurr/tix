@@ -459,7 +459,7 @@ impl CheckCtx<'_> {
     // negative = input/contravariant.
 
     pub fn extrude(&mut self, ty_id: TyId, polarity: Polarity) -> TyId {
-        let mut cache = FxHashMap::default();
+        let mut cache = FxHashMap::with_capacity_and_hasher(64, Default::default());
         let result = self.extrude_inner(ty_id, polarity, &mut cache);
 
         // Re-instantiate deferred overloads for any vars that were extruded.
@@ -1197,9 +1197,9 @@ impl CheckCtx<'_> {
 
         if let Some(v) = self.types.storage.get_var(ty_id) {
             let needs_lift = v.level < self.types.storage.current_level;
-            // Clone just the bounds (Vec<TyId> ~ Vec<u32>, cheap) to release borrow.
-            let lower: Vec<TyId> = v.lower_bounds.clone();
-            let upper: Vec<TyId> = v.upper_bounds.clone();
+            // Clone just the bounds (SmallVec<[TyId; 4]>, cheap) to release borrow.
+            let lower = v.lower_bounds.clone();
+            let upper = v.upper_bounds.clone();
 
             if needs_lift {
                 self.types

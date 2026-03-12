@@ -653,7 +653,7 @@ impl<'db> CheckCtx<'db> {
             binding_exprs,
             current_expr: module.entry_expr,
             warnings: Vec::new(),
-            types: TypeTable::new(),
+            types: TypeTable::with_capacity(module.names().len() + module.exprs().len()),
             poly_type_env: ArenaMap::new(),
             deferred: DeferredConstraints::default(),
             early_canonical: ArenaMap::new(),

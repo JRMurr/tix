@@ -120,6 +120,17 @@ impl TypeTable {
         }
     }
 
+    /// Create a TypeTable with pre-sized storage. Avoids Vec doubling
+    /// during the pre-allocation loop in `infer_prog_partial`.
+    pub fn with_capacity(cap: usize) -> Self {
+        Self {
+            storage: TypeStorage::with_capacity(cap),
+            constrain_cache: FxHashSet::with_capacity_and_hasher(cap, Default::default()),
+            variable_free: FxHashSet::with_capacity_and_hasher(cap / 2, Default::default()),
+            ..Self::new()
+        }
+    }
+
     /// Allocate a fresh type variable at the current level.
     pub fn new_var(&mut self) -> TyId {
         self.storage.new_var()
