@@ -741,6 +741,11 @@ impl CheckCtx<'_> {
                     // Named types flow through extrude structurally via the
                     // Ty::Named arm above — no manual provenance propagation.
 
+                    // Cache changed concrete types so repeated visits to the
+                    // same TyId (from structural sharing) don't re-traverse
+                    // the whole subtree. Safe because extrude_inner is
+                    // deterministic for a given (ty_id, polarity, cache) triple.
+                    cache.insert(ty_id, result);
                     result
                 }
             }

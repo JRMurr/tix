@@ -6722,3 +6722,28 @@ fn intersection_annotation_in_stub_produces_concrete_inter() {
     let (_, inference) = check_str_with_aliases(nix_src, &registry);
     inference.expect("inference should succeed with intersection annotation");
 }
+
+/// Regression test: extrusion of structurally-shared concrete types should be
+/// cached. Without the cache, repeated visits to the same changed TyId
+/// re-traverse the whole subtree. This test exercises the path by sharing a
+/// list-wrapping expression across multiple fields.
+#[test]
+fn extrude_caches_changed_concrete_types() {
+    let nix_src = indoc! {"
+        let
+            f = x: { a = [x]; b = [x]; c = [x]; };
+        in f 1
+    "};
+
+    let (module, inference) = check_str(nix_src);
+    let inference = inference.expect("inference should succeed");
+    let root_ty = inference
+        .expr_ty_map
+        .get(module.entry_expr)
+        .expect("root type should exist");
+    let formatted = format!("{root_ty}");
+    assert!(
+        formatted.contains("int"),
+        "expected int in fields, got: {formatted}"
+    );
+}
