@@ -12,7 +12,7 @@
 // - constrain.rs: `Concrete <: Neg(inner)` succeeds when sub and inner are disjoint
 // - collect.rs: redundant negation removal and contradiction detection
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use smol_str::SmolStr;
 
@@ -21,10 +21,14 @@ use crate::PrimitiveTy;
 /// A projection of a type's top-level constructor, carrying only the
 /// information needed for disjointness checks (field keys and openness
 /// for attrsets, nothing for lists/lambdas).
+///
+/// `field_keys` is a pre-collected sorted slice of attrset field names,
+/// avoiding the need to build a throwaway `BTreeMap<SmolStr, ()>` just
+/// to check key membership.
 pub enum ConstructorShape<'a> {
     Primitive(PrimitiveTy),
     AttrSet {
-        fields: &'a BTreeMap<SmolStr, ()>,
+        field_keys: &'a [SmolStr],
         open: bool,
         optional: &'a BTreeSet<SmolStr>,
     },
@@ -71,35 +75,35 @@ pub fn are_shapes_disjoint(a: &ConstructorShape, b: &ConstructorShape) -> bool {
 
         // AttrSet vs Lambda: disjoint unless the attrset has a `__functor`
         // field, which makes it callable in Nix.
-        (AttrSet { fields, .. }, Lambda) | (Lambda, AttrSet { fields, .. }) => {
-            !fields.contains_key(&SmolStr::from("__functor"))
+        (AttrSet { field_keys, .. }, Lambda) | (Lambda, AttrSet { field_keys, .. }) => {
+            !field_keys.contains(&SmolStr::from("__functor"))
         }
 
         // Two attrsets: disjoint if one is closed and the other requires a field
         // the closed one doesn't have (a required field is one that's present in
-        // `fields` but not in `optional`).
+        // `field_keys` but not in `optional`).
         (
             AttrSet {
-                fields: a_fields,
+                field_keys: a_keys,
                 open: a_open,
                 optional: _a_opt,
             },
             AttrSet {
-                fields: b_fields,
+                field_keys: b_keys,
                 open: b_open,
                 optional: b_opt,
             },
         ) => {
             if !a_open {
-                for field in b_fields.keys() {
-                    if !a_fields.contains_key(field) && !b_opt.contains(field) {
+                for field in b_keys.iter() {
+                    if !a_keys.contains(field) && !b_opt.contains(field) {
                         return true;
                     }
                 }
             }
             if !b_open {
-                for field in a_fields.keys() {
-                    if !b_fields.contains_key(field) && !_a_opt.contains(field) {
+                for field in a_keys.iter() {
+                    if !b_keys.contains(field) && !_a_opt.contains(field) {
                         return true;
                     }
                 }
@@ -159,7 +163,7 @@ mod tests {
         ));
         assert!(are_shapes_disjoint(
             &ConstructorShape::AttrSet {
-                fields: &BTreeMap::new(),
+                field_keys: &[],
                 open: false,
                 optional: &BTreeSet::new(),
             },

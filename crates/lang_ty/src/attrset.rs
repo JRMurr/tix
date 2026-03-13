@@ -56,22 +56,23 @@ impl<RefType> AttrSetTy<RefType> {
 impl<RefType: Clone + Debug> AttrSetTy<RefType> {
     /// Merge two attrsets. Fields from `other` override fields from `self` (right-biased).
     pub fn merge(self, other: Self) -> Self {
-        let mut fields: BTreeMap<SmolStr, RefType> = BTreeMap::new();
-
-        for (k, v) in self.fields.iter().chain(other.fields.iter()) {
-            fields.insert(k.clone(), v.clone());
-        }
-
         // Right-biased merge for optional_fields: start with self's optional set,
         // remove keys that are concretely provided in `other` (they become required
         // in the merged result), then union with other's optional set.
-        let mut optional = self.optional_fields.clone();
+        let mut optional = self.optional_fields;
         for key in other.fields.keys() {
             if !other.optional_fields.contains(key) {
                 optional.remove(key);
             }
         }
-        optional.extend(other.optional_fields.iter().cloned());
+        optional.extend(other.optional_fields);
+
+        // Start from self's fields and override with other's, avoiding
+        // redundant re-insertion of self's fields through a fresh BTreeMap.
+        let mut fields = self.fields;
+        for (k, v) in other.fields {
+            fields.insert(k, v);
+        }
 
         Self {
             fields,

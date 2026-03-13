@@ -36,6 +36,8 @@ use lang_ty::{
     disjoint::{are_shapes_disjoint, ConstructorShape},
     AttrSetTy, Ty,
 };
+use smallvec::SmallVec;
+use smol_str::SmolStr;
 
 impl CheckCtx<'_> {
     /// Constrain sub <: sup, locating any error at the current expression.
@@ -612,17 +614,17 @@ fn are_types_disjoint(a: &Ty<TyId>, b: &Ty<TyId>) -> bool {
         let _ = inner_b;
     }
 
-    // Build owned key maps for attrset shapes. These are allocated only when
-    // both types need shape projection (which involves attrsets).
-    let a_keys;
-    let b_keys;
+    // Collect field keys as sorted slices — avoids building a throwaway
+    // BTreeMap<SmolStr, ()> just to check key membership.
+    let a_keys: SmallVec<[SmolStr; 8]>;
+    let b_keys: SmallVec<[SmolStr; 8]>;
 
     let a_shape = match a {
         Ty::Primitive(p) => ConstructorShape::Primitive(*p),
         Ty::AttrSet(attr) => {
-            a_keys = attr.fields.keys().map(|k| (k.clone(), ())).collect();
+            a_keys = attr.fields.keys().cloned().collect();
             ConstructorShape::AttrSet {
-                fields: &a_keys,
+                field_keys: &a_keys,
                 open: attr.open,
                 optional: &attr.optional_fields,
             }
@@ -636,9 +638,9 @@ fn are_types_disjoint(a: &Ty<TyId>, b: &Ty<TyId>) -> bool {
     let b_shape = match b {
         Ty::Primitive(p) => ConstructorShape::Primitive(*p),
         Ty::AttrSet(attr) => {
-            b_keys = attr.fields.keys().map(|k| (k.clone(), ())).collect();
+            b_keys = attr.fields.keys().cloned().collect();
             ConstructorShape::AttrSet {
-                fields: &b_keys,
+                field_keys: &b_keys,
                 open: attr.open,
                 optional: &attr.optional_fields,
             }

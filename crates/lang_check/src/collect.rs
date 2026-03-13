@@ -8,7 +8,7 @@
 // - Negative position (input): variable → intersection of upper bounds
 // Lambda params flip polarity.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::time::Instant;
 
 use la_arena::ArenaMap;
@@ -164,11 +164,9 @@ impl<'a> Canonicalizer<'a> {
     /// checks for atom-only upper bounds — `ret <: Number` becomes `number`
     /// rather than a bare type variable.
     fn expand_bounds(&mut self, bounds: &[TyId], var_id: TyId, polarity: Polarity) -> OutputTy {
-        // Copy TyIds into a local Vec to release the borrow on `bounds`
-        // before calling `self.canonicalize()` which needs `&mut self`.
-        let bounds = bounds.to_vec();
-
         // 1. Canonicalize each bound at the given polarity.
+        // `bounds` is a slice from the caller's local variable (already cloned
+        // from storage), so no borrow conflict with `&mut self`.
         let members: Vec<OutputTy> = bounds
             .iter()
             .map(|&b| self.canonicalize(b, polarity))
@@ -504,14 +502,18 @@ fn remove_tautological_pairs(members: Vec<OutputTy>) -> Vec<OutputTy> {
 
     // Find tautological pairs: a positive member whose negation also appears.
     // T ∨ ¬T = ⊤ when T and the negated inner are structurally equal.
-    let mut tautological_positives: HashSet<usize> = HashSet::new();
-    let mut tautological_negatives: HashSet<usize> = HashSet::new();
+    let mut tautological_positives: SmallVec<[usize; 8]> = SmallVec::new();
+    let mut tautological_negatives: SmallVec<[usize; 8]> = SmallVec::new();
 
     for (pi, pos) in positives.iter().enumerate() {
         for (ni, neg_inner) in negated_inners.iter().enumerate() {
             if pos == neg_inner {
-                tautological_positives.insert(pi);
-                tautological_negatives.insert(ni);
+                if !tautological_positives.contains(&pi) {
+                    tautological_positives.push(pi);
+                }
+                if !tautological_negatives.contains(&ni) {
+                    tautological_negatives.push(ni);
+                }
             }
         }
     }
@@ -552,7 +554,7 @@ fn remove_tautological_pairs(members: Vec<OutputTy>) -> Vec<OutputTy> {
 /// are never absorbed because they assert "exactly these fields".
 fn absorb_subsumed_union_members(members: Vec<OutputTy>) -> Vec<OutputTy> {
     // Collect indices of attrset members for pairwise comparison.
-    let attrset_indices: Vec<usize> = members
+    let attrset_indices: SmallVec<[usize; 8]> = members
         .iter()
         .enumerate()
         .filter_map(|(i, m)| matches!(m, OutputTy::AttrSet(_)).then_some(i))
@@ -563,7 +565,8 @@ fn absorb_subsumed_union_members(members: Vec<OutputTy>) -> Vec<OutputTy> {
     }
 
     // Mark indices that are subsumed by another attrset in the union.
-    let mut subsumed: HashSet<usize> = HashSet::new();
+    // SmallVec for small N (typically 2-4 attrsets in a union).
+    let mut subsumed: SmallVec<[usize; 8]> = SmallVec::new();
     for &i in &attrset_indices {
         if subsumed.contains(&i) {
             continue;
@@ -592,7 +595,7 @@ fn absorb_subsumed_union_members(members: Vec<OutputTy>) -> Vec<OutputTy> {
                     .all(|k| a.optional_fields.contains(k) || b.fields.contains_key(k))
             {
                 // B is more specific than A, so A absorbs B.
-                subsumed.insert(j);
+                subsumed.push(j);
             }
         }
     }
@@ -790,17 +793,17 @@ fn is_output_subtype_or_equal(sub: &OutputTy, sup: &OutputTy) -> bool {
 ///
 /// See `lang_ty::disjoint::are_shapes_disjoint` for the full disjointness rules.
 fn are_output_types_disjoint(a: &OutputTy, b: &OutputTy) -> bool {
-    // Build owned key maps for attrset shapes upfront so borrows outlive the
-    // shape references.
-    let a_keys: BTreeMap<SmolStr, ()>;
-    let b_keys: BTreeMap<SmolStr, ()>;
+    // Collect field keys as sorted slices — avoids building a throwaway
+    // BTreeMap<SmolStr, ()> just to check key membership.
+    let a_keys: SmallVec<[SmolStr; 8]>;
+    let b_keys: SmallVec<[SmolStr; 8]>;
 
     let a_shape = match a {
         OutputTy::Primitive(p) => ConstructorShape::Primitive(*p),
         OutputTy::AttrSet(attr) => {
-            a_keys = attr.fields.keys().map(|k| (k.clone(), ())).collect();
+            a_keys = attr.fields.keys().cloned().collect();
             ConstructorShape::AttrSet {
-                fields: &a_keys,
+                field_keys: &a_keys,
                 open: attr.open,
                 optional: &attr.optional_fields,
             }
@@ -813,9 +816,9 @@ fn are_output_types_disjoint(a: &OutputTy, b: &OutputTy) -> bool {
     let b_shape = match b {
         OutputTy::Primitive(p) => ConstructorShape::Primitive(*p),
         OutputTy::AttrSet(attr) => {
-            b_keys = attr.fields.keys().map(|k| (k.clone(), ())).collect();
+            b_keys = attr.fields.keys().cloned().collect();
             ConstructorShape::AttrSet {
-                fields: &b_keys,
+                field_keys: &b_keys,
                 open: attr.open,
                 optional: &attr.optional_fields,
             }
@@ -875,7 +878,7 @@ fn remove_redundant_negations(members: Vec<OutputTy>) -> Vec<OutputTy> {
 
     // Determine which members to keep. We can't filter in-place because the
     // filter closure needs to reference members by index.
-    let keep: Vec<bool> = members
+    let keep: SmallVec<[bool; 16]> = members
         .iter()
         .map(|m| {
             if let OutputTy::Neg(inner) = m {

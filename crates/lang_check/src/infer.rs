@@ -607,9 +607,14 @@ impl CheckCtx<'_> {
                     }
 
                     // Truly polymorphic — create a fresh variable at the current level.
+                    // Clone only the bounds we need (not the entire TypeVariable).
+                    let bounds_to_copy = match polarity {
+                        Polarity::Positive => v.lower_bounds.clone(),
+                        Polarity::Negative => v.upper_bounds.clone(),
+                    };
                     let fresh = self.new_var();
                     cache.insert(ty_id, fresh);
-                    self.link_extruded_var(ty_id, fresh, polarity, v.clone(), cache);
+                    self.link_extruded_var(ty_id, fresh, polarity, bounds_to_copy, cache);
                     // Named lower bounds flow to the fresh var through
                     // link_extruded_var — no manual provenance propagation.
 
@@ -771,7 +776,7 @@ impl CheckCtx<'_> {
         original: TyId,
         fresh: TyId,
         polarity: Polarity,
-        var: crate::storage::TypeVariable,
+        bounds_to_copy: smallvec::SmallVec<[TyId; 4]>,
         cache: &mut FxHashMap<TyId, TyId>,
     ) {
         // In positive position, `original <: fresh`: the original flows into
@@ -779,16 +784,10 @@ impl CheckCtx<'_> {
         // copy the original's lower bounds (extruded) into fresh.
         //
         // In negative position, `fresh <: original`: symmetrically reversed.
-        let bounds_to_copy = match polarity {
-            Polarity::Positive => {
-                self.types.storage.add_upper_bound(original, fresh);
-                var.lower_bounds.clone()
-            }
-            Polarity::Negative => {
-                self.types.storage.add_lower_bound(original, fresh);
-                var.upper_bounds.clone()
-            }
-        };
+        match polarity {
+            Polarity::Positive => self.types.storage.add_upper_bound(original, fresh),
+            Polarity::Negative => self.types.storage.add_lower_bound(original, fresh),
+        }
 
         for bound in bounds_to_copy {
             let extruded = self.extrude_inner(bound, polarity, cache);
