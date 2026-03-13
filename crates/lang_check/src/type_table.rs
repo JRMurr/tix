@@ -7,8 +7,6 @@
 // constrain() and its recursive helpers stay on CheckCtx because they
 // interleave storage operations with current_expr tracking.
 
-use std::collections::HashSet;
-
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::TyId;
@@ -242,8 +240,11 @@ impl TypeTable {
                 continue;
             };
 
-            // Fast path: check if the same concrete TyId appears in both bounds.
-            // This handles non-primitive types too (Lambda, AttrSet, List, etc.).
+            // Fast path: if the exact same TyId appears in both lower and upper
+            // bounds, the variable is pinned. Safe for all type constructors —
+            // TyId equality means the same allocation, so the entire subtree is
+            // structurally shared with no distinct polymorphic sub-components.
+            // O(|lower| * |upper|) — bounds lists are typically 1-3 entries.
             let mut found_pin: Option<TyId> = None;
             for &lb in &v.lower_bounds {
                 if matches!(self.storage.get(lb), TypeEntry::Concrete(_)) {
@@ -302,14 +303,14 @@ impl TypeTable {
     /// to a Lambda via lower bounds) so poly_type_env stores the structural type
     /// that extrude can traverse.
     pub fn resolve_to_concrete_id(&self, ty_id: TyId) -> Option<TyId> {
-        let mut visited = HashSet::new();
+        let mut visited = FxHashSet::default();
         self.resolve_to_concrete_id_inner(ty_id, &mut visited)
     }
 
     fn resolve_to_concrete_id_inner(
         &self,
         ty_id: TyId,
-        visited: &mut HashSet<TyId>,
+        visited: &mut FxHashSet<TyId>,
     ) -> Option<TyId> {
         if !visited.insert(ty_id) {
             return None; // Cycle detected.
@@ -337,7 +338,7 @@ impl TypeTable {
     /// Used by poly_type_env construction where collapsing a union variable
     /// to a single member would lose type information.
     pub fn resolve_to_single_concrete_id(&self, ty_id: TyId) -> Option<TyId> {
-        let mut visited = HashSet::new();
+        let mut visited = FxHashSet::default();
         let mut first_id: Option<TyId> = None;
         let mut head: Option<TypeHead> = None;
         if self.resolve_to_single_concrete_id_inner(ty_id, &mut visited, &mut first_id, &mut head) {
@@ -352,7 +353,7 @@ impl TypeTable {
     fn resolve_to_single_concrete_id_inner(
         &self,
         ty_id: TyId,
-        visited: &mut HashSet<TyId>,
+        visited: &mut FxHashSet<TyId>,
         first_id: &mut Option<TyId>,
         head: &mut Option<TypeHead>,
     ) -> bool {
@@ -411,14 +412,14 @@ impl TypeTable {
         }
     }
 
-    /// Check if a variable has been pinned to a simple concrete type — i.e. the
-    /// same primitive type appears as both a direct lower and upper bound. This
-    /// indicates the variable was fully resolved (e.g. by overload resolution) and
-    /// is no longer truly polymorphic.
+    /// Slow path for pinning: check if the same primitive *value* appears as both
+    /// a direct lower and upper bound across *different* TyIds. Different TyIds may
+    /// hold the same Primitive value if they were allocated separately (before
+    /// prim_cache deduplication or from different allocation paths).
     ///
-    /// Only primitives are considered "pinned" — types with internal structure
-    /// (Lambda, List, AttrSet) may contain polymorphic sub-components that need
-    /// proper extrusion.
+    /// Only primitives are safe here — different allocations of structured types
+    /// (Lambda, List, AttrSet) may contain distinct sub-allocations that need
+    /// proper extrusion, even if the outer constructors match.
     pub fn find_pinned_concrete(&self, v: &TypeVariable) -> Option<Ty<TyId>> {
         // Collect primitive types from direct lower bounds.
         let lower_prims: Vec<_> = v

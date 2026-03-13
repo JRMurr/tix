@@ -152,7 +152,7 @@ enum ValTarget<'a> {
     /// Store in the registry's `global_vals` map (normal .tix file loading).
     GlobalVals,
     /// Collect into a separate map (context stub loading).
-    ContextArgs(&'a mut HashMap<SmolStr, ParsedTy>),
+    ContextMap(&'a mut HashMap<SmolStr, ParsedTy>),
 }
 
 impl TypeAliasRegistry {
@@ -269,7 +269,7 @@ impl TypeAliasRegistry {
 
     /// Recursively load declarations. `val_target` controls where val
     /// declarations are routed: `GlobalVals` adds them to the registry's
-    /// `global_vals` map; `ContextArgs` collects them into a separate map
+    /// `global_vals` map; `ContextMap` collects them into a separate map
     /// for context-scoped parameters.
     fn load_declarations(
         &mut self,
@@ -291,7 +291,7 @@ impl TypeAliasRegistry {
                         ValTarget::GlobalVals => {
                             self.global_vals.insert(name.clone(), ty.clone());
                         }
-                        ValTarget::ContextArgs(ref mut map) => {
+                        ValTarget::ContextMap(ref mut map) => {
                             map.insert(name.clone(), ty.clone());
                         }
                     }
@@ -463,7 +463,7 @@ impl TypeAliasRegistry {
     ) -> Result<HashMap<SmolStr, ParsedTy>, Box<dyn std::error::Error>> {
         let file = comment_parser::parse_tix_file(source)?;
         let mut context_args = HashMap::new();
-        let mut target = ValTarget::ContextArgs(&mut context_args);
+        let mut target = ValTarget::ContextMap(&mut context_args);
         self.load_declarations(&file.declarations, &mut target);
         self.load_field_docs(&file.field_docs);
         Ok(context_args)

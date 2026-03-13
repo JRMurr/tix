@@ -6,11 +6,10 @@
 // inferring each definition, resolving pending constraints, and generalizing
 // type variables via SimpleSub's level-based approach (extrude).
 
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::{CheckCtx, InferenceError, InferenceResult, LocatedError, Polarity, TyId};
 use crate::collect::{canonicalize_standalone, Collector};
@@ -321,7 +320,7 @@ impl CheckCtx<'_> {
         // one member would lose the union semantics. This matters for type
         // narrowing: `if x == null then ... else x + 1` needs the variable
         // to contain both null and int so that narrowing can exclude null.
-        let inferred_names: HashSet<_> = inferred.iter().map(|&(n, _)| n).collect();
+        let inferred_names: FxHashSet<_> = inferred.iter().map(|&(n, _)| n).collect();
         for (name_id, ty) in inferred {
             if self.poly_type_env.contains_idx(name_id) {
                 continue;
@@ -1181,11 +1180,11 @@ impl CheckCtx<'_> {
     /// processing) are treated as polymorphic during extrusion at consumer
     /// call sites.
     fn lift_reachable_vars(&mut self, ty_id: TyId) {
-        let mut visited = HashSet::new();
+        let mut visited = FxHashSet::default();
         self.lift_reachable_vars_inner(ty_id, &mut visited);
     }
 
-    fn lift_reachable_vars_inner(&mut self, ty_id: TyId, visited: &mut HashSet<TyId>) {
+    fn lift_reachable_vars_inner(&mut self, ty_id: TyId, visited: &mut FxHashSet<TyId>) {
         if !visited.insert(ty_id) {
             return;
         }
