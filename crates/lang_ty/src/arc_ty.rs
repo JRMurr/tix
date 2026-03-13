@@ -426,6 +426,45 @@ impl OutputTy {
         }
     }
 
+    /// Returns true if any TyVar index appears in Lambda param position more
+    /// than once across distinct Lambdas. This happens when the PBT generator
+    /// produces types like `TyVar(1) -> TyVar(1) -> int` — the code generator
+    /// creates independent shadowing params, so the checker infers distinct
+    /// variables where the type expects shared ones.
+    pub fn has_shared_tyvar_across_lambda_params(&self) -> bool {
+        let mut seen = rustc_hash::FxHashSet::default();
+        self.check_shared_lambda_param_tyvars(&mut seen)
+    }
+
+    /// Walk the type tree collecting TyVar indices from Lambda param positions.
+    /// Returns true as soon as a duplicate is found.
+    fn check_shared_lambda_param_tyvars(&self, seen: &mut rustc_hash::FxHashSet<u32>) -> bool {
+        match self {
+            OutputTy::Lambda { param, body } => {
+                // Collect TyVar indices directly in this param position.
+                if let OutputTy::TyVar(idx) = &*param.0 {
+                    if !seen.insert(*idx) {
+                        return true;
+                    }
+                }
+                // Recurse into param (for nested lambdas in param position)
+                // and body (for chained lambdas like `a -> b -> c`).
+                param.0.check_shared_lambda_param_tyvars(seen)
+                    || body.0.check_shared_lambda_param_tyvars(seen)
+            }
+            OutputTy::TyVar(_) | OutputTy::Primitive(_) | OutputTy::Bottom | OutputTy::Top => false,
+            _ => {
+                let mut found = false;
+                self.for_each_child(&mut |child| {
+                    if !found {
+                        found = child.check_shared_lambda_param_tyvars(seen);
+                    }
+                });
+                found
+            }
+        }
+    }
+
     /// Returns true if this type contains a Named wrapper.
     pub fn contains_named(&self) -> bool {
         match self {
@@ -808,6 +847,64 @@ mod tests {
         let g: TyRef = OutputTy::Primitive(PrimitiveTy::String).into();
         let h: TyRef = OutputTy::Primitive(PrimitiveTy::String).into();
         assert!(Arc::ptr_eq(&g.0, &h.0), "From<OutputTy> should intern");
+    }
+
+    #[test]
+    fn shared_tyvar_across_lambda_params_detected() {
+        // TyVar(1) -> TyVar(1) -> int: same var in two Lambda params → true
+        let ty = OutputTy::Lambda {
+            param: OutputTy::TyVar(1).into(),
+            body: OutputTy::Lambda {
+                param: OutputTy::TyVar(1).into(),
+                body: OutputTy::Primitive(PrimitiveTy::Int).into(),
+            }
+            .into(),
+        };
+        assert!(ty.has_shared_tyvar_across_lambda_params());
+    }
+
+    #[test]
+    fn distinct_tyvar_across_lambda_params_ok() {
+        // TyVar(1) -> TyVar(2) -> int: distinct vars → false
+        let ty = OutputTy::Lambda {
+            param: OutputTy::TyVar(1).into(),
+            body: OutputTy::Lambda {
+                param: OutputTy::TyVar(2).into(),
+                body: OutputTy::Primitive(PrimitiveTy::Int).into(),
+            }
+            .into(),
+        };
+        assert!(!ty.has_shared_tyvar_across_lambda_params());
+    }
+
+    #[test]
+    fn tyvar_in_param_and_body_not_shared() {
+        // TyVar(1) -> TyVar(1): same var in param + body of one Lambda → false
+        let ty = OutputTy::Lambda {
+            param: OutputTy::TyVar(1).into(),
+            body: OutputTy::TyVar(1).into(),
+        };
+        assert!(!ty.has_shared_tyvar_across_lambda_params());
+    }
+
+    #[test]
+    fn no_lambda_no_sharing() {
+        assert!(!OutputTy::Primitive(PrimitiveTy::Int).has_shared_tyvar_across_lambda_params());
+    }
+
+    #[test]
+    fn shared_tyvar_nested_in_list() {
+        // [TyVar(1) -> TyVar(1) -> int]: sharing detected inside list element
+        let inner = OutputTy::Lambda {
+            param: OutputTy::TyVar(1).into(),
+            body: OutputTy::Lambda {
+                param: OutputTy::TyVar(1).into(),
+                body: OutputTy::Primitive(PrimitiveTy::Int).into(),
+            }
+            .into(),
+        };
+        let ty = OutputTy::List(inner.into());
+        assert!(ty.has_shared_tyvar_across_lambda_params());
     }
 
     mod pbt {

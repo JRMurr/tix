@@ -48,15 +48,6 @@ by design, or informational notes.
   Fix: try right-biased first, then fall back to left-biased. Regression test:
   `references::tests::name_at_end_of_identifier`.
 
-### PBT
-
-- **Shared type vars across lambda scopes**: PBT generator can produce types like
-  `Lambda(TyVar(8) -> Lambda(TyVar(8) -> Int))` where both params share a variable,
-  but the code generator creates independent shadowing params whose types are correctly
-  inferred as distinct variables. Comparison then fails because the generated code
-  can't represent shared-variable types. Need to either filter these cases or generate
-  Nix code that actually links the params (e.g. `x: y: x + y` with a constraint).
-
 ### Minor Untracked Items
 
 - `test/strings.nix`: `nameFromURL :: String -> String` annotation has wrong arity

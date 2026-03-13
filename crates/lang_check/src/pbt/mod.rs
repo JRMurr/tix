@@ -411,6 +411,7 @@ fn arb_nix_text_from_ty() -> impl Strategy<Value = (OutputTy, NixTextStr)> {
                     && !ty.contains_top_or_bottom()
                     && !ty.contains_bare_tyvar()
                     && !ty.contains_named()
+                    && !ty.has_shared_tyvar_across_lambda_params()
             },
         )
         .prop_flat_map(|ty| (Just(ty.clone()), text_from_ty(&ty)))
