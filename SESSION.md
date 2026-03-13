@@ -167,6 +167,16 @@ Remaining mitigations (not yet implemented):
   pathological inputs. `tix check` now reads `deadline` from tix.toml and passes
   it to `InferenceInputs.deadline_secs`.
 
+**Additional micro-optimizations (committed):**
+
+- SmallVec for remaining Vec/HashSet in canonicalization helpers
+  (absorb_subsumed, remove_redundant_negations, remove_tautological_pairs)
+- ConstructorShape uses `&[SmolStr]` field_keys instead of BTreeMap<SmolStr, ()>
+- Removed redundant `bounds.to_vec()` in expand_bounds
+- `link_extruded_var` takes only polarity-relevant bounds (not full TypeVariable)
+- `AttrSetTy::merge()` reuses self.fields in-place
+- `[profile.release]` with thin LTO + codegen-units=1
+
 **Other remaining optimization (deferred):**
 
 - **BTreeMap → sorted Vec for output `AttrSetTy`:** Fields are built once, read-only
