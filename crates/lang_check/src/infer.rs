@@ -625,22 +625,52 @@ impl CheckCtx<'_> {
                     // node instead of allocating a copy. Concrete types are
                     // immutable in TypeStorage so sharing is safe — only type
                     // *variables* need fresh copies for polymorphism.
+                    //
+                    // Macros for the two mechanical patterns that repeat across
+                    // most Ty variant arms:
+                    //
+                    //   extrude_single!(child, polarity, rebuild) — List, Neg, Named
+                    //   extrude_binary!(a, b, rebuild)            — Inter, Union
+
+                    /// Extrude a single-child type. If the child is unchanged,
+                    /// reuse the original node; otherwise rebuild with the new child.
+                    macro_rules! extrude_single {
+                        ($child:expr, $pol:expr, |$e:ident| $rebuild:expr) => {{
+                            let $e = self.extrude_inner($child, $pol, cache);
+                            if $e == $child {
+                                return self.extrude_reuse(ty_id, cache);
+                            }
+                            self.alloc_concrete($rebuild)
+                        }};
+                    }
+
+                    /// Extrude a two-child type (both covariant). If both children
+                    /// are unchanged, reuse the original; otherwise rebuild.
+                    macro_rules! extrude_binary {
+                        ($a:expr, $b:expr, |$ea:ident, $eb:ident| $rebuild:expr) => {{
+                            let $ea = self.extrude_inner($a, polarity, cache);
+                            let $eb = self.extrude_inner($b, polarity, cache);
+                            if $ea == $a && $eb == $b {
+                                return self.extrude_reuse(ty_id, cache);
+                            }
+                            self.alloc_concrete($rebuild)
+                        }};
+                    }
+
                     let result = match ty {
                         Ty::Lambda { param, body } => {
                             // Insert a placeholder to handle recursive types.
                             let placeholder = self.new_var();
                             cache.insert(ty_id, placeholder);
 
-                            let p = self.extrude_inner(param, polarity.flip(), cache); // flip polarity
+                            let p = self.extrude_inner(param, polarity.flip(), cache);
                             let b = self.extrude_inner(body, polarity, cache);
 
                             if p == param && b == body {
                                 // Nothing changed — reuse original. Overwrite
                                 // the placeholder so later cache hits return
                                 // the original, and remove the orphaned var.
-                                cache.insert(ty_id, ty_id);
-                                self.types.try_mark_variable_free(ty_id);
-                                return ty_id;
+                                return self.extrude_reuse(ty_id, cache);
                             }
 
                             let result = self.alloc_concrete(Ty::Lambda { param: p, body: b });
@@ -652,13 +682,7 @@ impl CheckCtx<'_> {
                             result
                         }
                         Ty::List(elem) => {
-                            let e = self.extrude_inner(elem, polarity, cache);
-                            if e == elem {
-                                cache.insert(ty_id, ty_id);
-                                self.types.try_mark_variable_free(ty_id);
-                                return ty_id;
-                            }
-                            self.alloc_concrete(Ty::List(e))
+                            extrude_single!(elem, polarity, |e| Ty::List(e))
                         }
                         Ty::AttrSet(attr) => {
                             let mut changed = false;
@@ -681,9 +705,7 @@ impl CheckCtx<'_> {
                                 e
                             });
                             if !changed {
-                                cache.insert(ty_id, ty_id);
-                                self.types.try_mark_variable_free(ty_id);
-                                return ty_id;
+                                return self.extrude_reuse(ty_id, cache);
                             }
                             self.alloc_concrete(Ty::AttrSet(AttrSetTy {
                                 fields: new_fields,
@@ -696,50 +718,22 @@ impl CheckCtx<'_> {
                         Ty::Primitive(_) | Ty::TyVar(_) => unreachable!(),
                         // Negation flips polarity, same as Lambda param.
                         Ty::Neg(inner) => {
-                            let e = self.extrude_inner(inner, polarity.flip(), cache);
-                            if e == inner {
-                                cache.insert(ty_id, ty_id);
-                                self.types.try_mark_variable_free(ty_id);
-                                return ty_id;
-                            }
-                            self.alloc_concrete(Ty::Neg(e))
+                            extrude_single!(inner, polarity.flip(), |e| Ty::Neg(e))
                         }
                         // Intersection and Union: covariant — polarity preserved.
                         // This is what makes narrowing survive generalization:
                         // Inter(α, ¬T) extrudes to Inter(α', ¬T') where α' is
                         // the fresh call-site copy.
                         Ty::Inter(a, b) => {
-                            let ea = self.extrude_inner(a, polarity, cache);
-                            let eb = self.extrude_inner(b, polarity, cache);
-                            if ea == a && eb == b {
-                                cache.insert(ty_id, ty_id);
-                                self.types.try_mark_variable_free(ty_id);
-                                return ty_id;
-                            }
-                            self.alloc_concrete(Ty::Inter(ea, eb))
+                            extrude_binary!(a, b, |ea, eb| Ty::Inter(ea, eb))
                         }
                         Ty::Union(a, b) => {
-                            let ea = self.extrude_inner(a, polarity, cache);
-                            let eb = self.extrude_inner(b, polarity, cache);
-                            if ea == a && eb == b {
-                                cache.insert(ty_id, ty_id);
-                                self.types.try_mark_variable_free(ty_id);
-                                return ty_id;
-                            }
-                            self.alloc_concrete(Ty::Union(ea, eb))
+                            extrude_binary!(a, b, |ea, eb| Ty::Union(ea, eb))
                         }
                         Ty::Named(name, inner) => {
-                            let e = self.extrude_inner(inner, polarity, cache);
-                            if e == inner {
-                                cache.insert(ty_id, ty_id);
-                                self.types.try_mark_variable_free(ty_id);
-                                return ty_id;
-                            }
-                            self.alloc_concrete(Ty::Named(name, e))
+                            extrude_single!(inner, polarity, |e| Ty::Named(name, e))
                         }
                     };
-                    // Named types flow through extrude structurally via the
-                    // Ty::Named arm above — no manual provenance propagation.
 
                     // Cache changed concrete types so repeated visits to the
                     // same TyId (from structural sharing) don't re-traverse
@@ -750,6 +744,16 @@ impl CheckCtx<'_> {
                 }
             }
         })
+    }
+
+    /// Mark a concrete type as unchanged during extrusion: cache it as
+    /// identity-mapped and mark variable-free. Returns the original TyId
+    /// for use in early-return.
+    #[inline(always)]
+    fn extrude_reuse(&mut self, ty_id: TyId, cache: &mut FxHashMap<TyId, TyId>) -> TyId {
+        cache.insert(ty_id, ty_id);
+        self.types.try_mark_variable_free(ty_id);
+        ty_id
     }
 
     /// Link a freshly extruded variable to the original polymorphic variable.
