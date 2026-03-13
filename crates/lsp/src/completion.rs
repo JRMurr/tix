@@ -2355,6 +2355,7 @@ mod tests {
             deadline: None,
             import_deadline: None,
             project: None,
+            diagnostics: None,
         });
         state.config_dir = Some(temp_dir.clone());
 
@@ -2405,6 +2406,7 @@ mod tests {
             deadline: None,
             import_deadline: None,
             project: None,
+            diagnostics: None,
         });
         state.config_dir = Some(temp_dir.clone());
 
@@ -2851,6 +2853,7 @@ mod tests {
             deadline: None,
             import_deadline: None,
             project: None,
+            diagnostics: None,
         });
         state.config_dir = Some(temp_dir.clone());
 

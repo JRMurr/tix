@@ -37,7 +37,7 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 
-use crate::config::TixConfig;
+use crate::config::{DiagnosticsConfig, TixConfig};
 use crate::state::{AnalysisState, FileSnapshot, InferenceData};
 
 /// Quiescence delay for diagnostic publication. Diagnostics are held back
@@ -82,6 +82,9 @@ pub struct TixLanguageServer {
     /// Processed one-at-a-time during idle periods (no pending user events),
     /// ensuring user edits always take priority.
     background_queue: Arc<Mutex<VecDeque<(PathBuf, String)>>>,
+    /// Shared diagnostics config — the analysis loop reads this to determine
+    /// what diagnostics to emit. Updated by `did_change_configuration`.
+    diag_config: Arc<Mutex<DiagnosticsConfig>>,
 }
 
 impl TixLanguageServer {
@@ -94,9 +97,10 @@ impl TixLanguageServer {
         let cancel_flag = Arc::new(AtomicBool::new(false));
         let snapshots = Arc::new(DashMap::new());
         let background_queue = Arc::new(Mutex::new(VecDeque::new()));
+        let diag_config = Arc::new(Mutex::new(DiagnosticsConfig::default()));
 
-        // Spawn the analysis loop eagerly. diagnostics_enabled defaults to
-        // true; if the editor sends a different config via initializationOptions
+        // Spawn the analysis loop eagerly. Diagnostics default to enabled;
+        // if the editor sends a different config via initializationOptions
         // before opening files, it takes effect before any analysis runs.
         spawn_analysis_loop(
             event_rx,
@@ -107,7 +111,7 @@ impl TixLanguageServer {
             cancel_flag.clone(),
             snapshots.clone(),
             background_queue.clone(),
-            true, // diagnostics default on
+            diag_config.clone(),
         );
 
         Self {
@@ -119,6 +123,7 @@ impl TixLanguageServer {
             pending_text,
             snapshots,
             background_queue,
+            diag_config,
         }
     }
 
@@ -224,7 +229,7 @@ fn spawn_analysis_loop(
     cancel_flag: Arc<AtomicBool>,
     _snapshots: Arc<DashMap<PathBuf, FileSnapshot>>,
     background_queue: Arc<Mutex<VecDeque<(PathBuf, String)>>>,
-    diagnostics_enabled: bool,
+    diag_config: Arc<Mutex<DiagnosticsConfig>>,
 ) {
     tokio::spawn(async move {
         // Pending diagnostics waiting for quiescence, keyed by path.
@@ -501,18 +506,29 @@ fn spawn_analysis_loop(
                     }
                 }
 
-                let diags = if diagnostics_enabled && !was_cancelled {
+                let dc = diag_config.lock().clone();
+                let diags = if dc.enable && !was_cancelled {
                     if let Some(snap) = _snapshots.get(path) {
                         let root = snap.syntax.parsed.tree();
                         let file_uri = Url::from_file_path(path)
                             .unwrap_or_else(|_| Url::parse("file:///unknown").unwrap());
-                        crate::diagnostics::to_lsp_diagnostics(
+                        let mut diags = crate::diagnostics::to_lsp_diagnostics(
                             &check_result.diagnostics,
                             &snap.syntax.source_map,
                             &snap.syntax.line_index,
                             &root,
                             &file_uri,
-                        )
+                        );
+                        // Append unknown-type diagnostics for `?`-typed bindings.
+                        diags.extend(crate::diagnostics::unknown_type_diagnostics(
+                            &check_result,
+                            &snap.syntax.module,
+                            &snap.syntax.source_map,
+                            &snap.syntax.line_index,
+                            &root,
+                            dc.unknown_type,
+                        ));
+                        diags
                     } else {
                         vec![]
                     }
@@ -630,6 +646,15 @@ impl LanguageServer for TixLanguageServer {
                             if let Some(secs) = project_cfg.deadline {
                                 log::info!("Inference deadline: {secs}s (from tix.toml)");
                                 state.deadline_secs = secs;
+                            }
+
+                            // Apply diagnostics overrides from tix.toml (project
+                            // config is the base; editor settings override later).
+                            if let Some(diag_proj) = &project_cfg.diagnostics {
+                                let mut dc = self.diag_config.lock();
+                                if let Some(level) = diag_proj.unknown_type {
+                                    dc.unknown_type = level;
+                                }
                             }
 
                             // Resolve analyze globs before moving config into state.
@@ -782,6 +807,9 @@ impl LanguageServer for TixLanguageServer {
             old.stubs != new_config.stubs
         };
 
+        // Update the shared diagnostics config so the analysis loop picks it up.
+        *self.diag_config.lock() = new_config.diagnostics.clone();
+
         // Collect diagnostics to publish while holding the lock, then
         // release the lock before awaiting the publish calls.
         let file_diagnostics = if stubs_changed {
@@ -789,21 +817,30 @@ impl LanguageServer for TixLanguageServer {
             let mut state = self.state.lock();
             state.reload_registry(registry);
 
-            let diagnostics_enabled = new_config.diagnostics.enable;
+            let dc = new_config.diagnostics.clone();
             state
                 .files
                 .iter()
                 .filter_map(|(path, analysis)| {
                     let uri = Url::from_file_path(path).ok()?;
-                    let diags = if diagnostics_enabled {
+                    let diags = if dc.enable {
                         let root = analysis.parsed.tree();
-                        crate::diagnostics::to_lsp_diagnostics(
+                        let mut diags = crate::diagnostics::to_lsp_diagnostics(
                             &analysis.check_result.diagnostics,
                             &analysis.source_map,
                             &analysis.line_index,
                             &root,
                             &uri,
-                        )
+                        );
+                        diags.extend(crate::diagnostics::unknown_type_diagnostics(
+                            &analysis.check_result,
+                            &analysis.module,
+                            &analysis.source_map,
+                            &analysis.line_index,
+                            &root,
+                            dc.unknown_type,
+                        ));
+                        diags
                     } else {
                         vec![]
                     };

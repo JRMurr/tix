@@ -10,6 +10,7 @@
 use lang_ast::nameres::ResolveResult;
 use lang_ast::{AstPtr, Expr, NameKind};
 use lang_check::aliases::DocIndex;
+use lang_ty::OutputTy;
 use rowan::ast::AstNode;
 use tower_lsp::lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind, Position, Range};
 
@@ -59,15 +60,29 @@ pub fn hover(
                 // Param/PatField: keep letter names (genuine polymorphism).
                 // All other bindings: replace single-occurrence TyVars with `?`.
                 let kind = analysis.syntax.module[name_id].kind;
+                let is_unknown = !is_param_kind(kind) && matches!(ty, OutputTy::TyVar(_));
                 let ty_str = if is_param_kind(kind) {
                     format!("{ty}")
                 } else {
                     format!("{}", ty.normalize_replacing_unknown())
                 };
 
+                // When the type is `?`, append an actionable explanation.
+                let combined_doc = if is_unknown {
+                    let explanation = "**Type unknown** — tix could not infer a concrete type.\n\
+                        - Add a type annotation: `/** type: name :: YourType */`\n\
+                        - Provide a `.tix` stub file";
+                    match doc {
+                        Some(d) => Some(format!("{d}\n\n{explanation}")),
+                        None => Some(explanation.to_string()),
+                    }
+                } else {
+                    doc
+                };
+
                 return Some(make_hover(
                     format!("{name_text} :: {ty_str}"),
-                    doc.as_deref(),
+                    combined_doc.as_deref(),
                     range,
                 ));
             }
@@ -980,6 +995,60 @@ mod tests {
         assert!(
             !type_text.contains("?"),
             "polymorphic let binding should not show `?`, got: {type_text}"
+        );
+    }
+
+    // ==================================================================
+    // Enhanced hover for unknown types
+    // ==================================================================
+
+    #[test]
+    fn hover_unknown_type_shows_explanation() {
+        // An unconstrained let binding should show `?` AND an actionable
+        // explanation about type annotations / stubs.
+        let src = indoc! {"
+            x: let y = x; in y
+            #      ^1
+        "};
+        let markers = parse_markers(src);
+        let t = TestAnalysis::new(src);
+        let h = hover_at(&t, markers[&1]).expect("hover on y");
+        let (type_text, doc) = hover_parts(&h);
+
+        assert!(
+            type_text.contains("?"),
+            "unconstrained let binding should show `?`, got: {type_text}"
+        );
+        let doc = doc.expect("unknown type should have explanation doc");
+        assert!(
+            doc.contains("Type unknown"),
+            "hover explanation should mention 'Type unknown', got: {doc}"
+        );
+        assert!(
+            doc.contains("type annotation"),
+            "hover explanation should mention type annotation, got: {doc}"
+        );
+        assert!(
+            doc.contains(".tix"),
+            "hover explanation should mention .tix stub files, got: {doc}"
+        );
+    }
+
+    #[test]
+    fn hover_known_type_no_explanation() {
+        // A binding with a known type should NOT have the unknown-type explanation.
+        let src = indoc! {"
+            let x = 1; in x
+            #   ^1
+        "};
+        let markers = parse_markers(src);
+        let t = TestAnalysis::new(src);
+        let h = hover_at(&t, markers[&1]).expect("hover on x");
+        let (_type_text, doc) = hover_parts(&h);
+
+        assert!(
+            doc.is_none(),
+            "known-type binding should not have explanation doc, got: {doc:?}"
         );
     }
 

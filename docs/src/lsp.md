@@ -30,19 +30,22 @@ Communicates over stdin/stdout. Stubs are loaded from `tix.toml` (auto-discovere
 | **Document Highlight** | Highlight all uses of the name under cursor |
 | **Code Actions** | Quick fixes: add missing field, add type annotation, remove unused binding |
 | **Formatting** | Runs `nixfmt` |
-| **Diagnostics** | Type errors, missing fields, import resolution errors, inference timeouts |
+| **Diagnostics** | Type errors, missing fields, import resolution errors, inference timeouts — each with a stable [error code](./diagnostics/index.md) |
 
 ## Diagnostics
 
 When diagnostics are enabled (`"diagnostics": { "enable": true }`), tix reports:
 
-- **Type errors** (ERROR): type mismatches, invalid operators, invalid attrset merges
-- **Missing fields** (ERROR): accessing a field that doesn't exist on a closed attrset
-- **Unresolved names** (WARNING): references to names that can't be resolved
-- **Import errors** (WARNING): `import ./missing.nix` where the target file doesn't exist, cyclic imports, or errors in the imported file
-- **Inference timeout** (WARNING): when type inference exceeds the 10-second deadline, partial results are still available for bindings inferred before the timeout
+- **Type errors** (ERROR): type mismatches ([E001](./diagnostics/e001.md)), invalid operators ([E003](./diagnostics/e003.md)), invalid attrset merges ([E004](./diagnostics/e004.md))
+- **Missing fields** (ERROR): accessing a field that doesn't exist on a closed attrset ([E002](./diagnostics/e002.md))
+- **Unresolved names** (WARNING): references to names that can't be resolved ([E005](./diagnostics/e005.md))
+- **Import errors** (WARNING): `import ./missing.nix` where the target file doesn't exist ([E007](./diagnostics/e007.md)), angle bracket imports like `<nixpkgs>` ([E012](./diagnostics/e012.md)), or files that haven't been analyzed ([E013](./diagnostics/e013.md))
+- **Inference timeout** (WARNING): when type inference exceeds the 10-second deadline ([E008](./diagnostics/e008.md))
+- **Unknown type** (configurable): bindings whose type is `?` ([E014](./diagnostics/e014.md)) — default severity: hint
 
-Import errors appear at the `import` expression so you can see which import failed and why. The CLI (`tix`) shows the same diagnostics with source context.
+Every diagnostic has a stable error code (e.g. `E001`) that links to documentation. In VS Code, click the code in the Problems panel to open the docs page.
+
+Import errors appear at the `import` expression so you can see which import failed and why. The CLI (`tix`) shows the same diagnostics with error codes in Rust-style format: `error[E001]: message`.
 
 ## Code Actions
 
@@ -78,7 +81,7 @@ Install the [Nix IDE](https://marketplace.visualstudio.com/items?itemName=jnoort
   "nix.serverSettings": {
     "stubs": ["./my-stubs"],
     "inlayHints": { "enable": true },
-    "diagnostics": { "enable": true }
+    "diagnostics": { "enable": true, "unknownType": "hint" }
   }
 }
 ```

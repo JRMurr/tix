@@ -39,6 +39,18 @@ pub struct ProjectConfig {
     /// Project-wide analysis configuration.
     #[serde(default)]
     pub project: Option<ProjectSection>,
+
+    /// Diagnostic severity overrides.
+    #[serde(default)]
+    pub diagnostics: Option<DiagnosticsProjectConfig>,
+}
+
+/// The `[diagnostics]` section of `tix.toml`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DiagnosticsProjectConfig {
+    /// Severity for unknown-type (`?`) diagnostics: "off", "hint", "warning", "error".
+    #[serde(default)]
+    pub unknown_type: Option<crate::config::DiagnosticLevel>,
 }
 
 /// The `[project]` section of `tix.toml`.
@@ -382,5 +394,40 @@ mod tests {
             "common/homemanager/default.nix should match home-manager context (has osConfig), got keys: {:?}",
             args.keys().collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn diagnostics_section_parses() {
+        let toml_str = r#"
+            [diagnostics]
+            unknown_type = "warning"
+        "#;
+        let config: ProjectConfig = toml::from_str(toml_str).expect("parse error");
+        let diag = config
+            .diagnostics
+            .expect("diagnostics section should exist");
+        assert_eq!(
+            diag.unknown_type,
+            Some(crate::config::DiagnosticLevel::Warning)
+        );
+    }
+
+    #[test]
+    fn diagnostics_section_defaults_to_none() {
+        let config: ProjectConfig = toml::from_str("").expect("parse error");
+        assert!(config.diagnostics.is_none());
+    }
+
+    #[test]
+    fn diagnostics_section_off() {
+        let toml_str = r#"
+            [diagnostics]
+            unknown_type = "off"
+        "#;
+        let config: ProjectConfig = toml::from_str(toml_str).expect("parse error");
+        let diag = config
+            .diagnostics
+            .expect("diagnostics section should exist");
+        assert_eq!(diag.unknown_type, Some(crate::config::DiagnosticLevel::Off));
     }
 }

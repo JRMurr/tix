@@ -8,6 +8,21 @@
 - [Configuration](./configuration.md)
 - [LSP](./lsp.md)
 - [Limitations](./limitations.md)
+- [Diagnostics](./diagnostics/index.md)
+  - [E001: Type Mismatch](./diagnostics/e001.md)
+  - [E002: Missing Field](./diagnostics/e002.md)
+  - [E003: Invalid Binary Operator](./diagnostics/e003.md)
+  - [E004: Invalid Attribute Set Merge](./diagnostics/e004.md)
+  - [E005: Unresolved Name](./diagnostics/e005.md)
+  - [E006: Duplicate Key](./diagnostics/e006.md)
+  - [E007: Import Not Found](./diagnostics/e007.md)
+  - [E008: Inference Timeout](./diagnostics/e008.md)
+  - [E009: Annotation Arity Mismatch](./diagnostics/e009.md)
+  - [E010: Annotation Not Verified](./diagnostics/e010.md)
+  - [E011: Annotation Parse Error](./diagnostics/e011.md)
+  - [E012: Angle Bracket Import](./diagnostics/e012.md)
+  - [E013: Imported File Not Analyzed](./diagnostics/e013.md)
+  - [E014: Unknown Type](./diagnostics/e014.md)
 
 ---
 

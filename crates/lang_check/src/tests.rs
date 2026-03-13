@@ -1722,14 +1722,17 @@ mod import_tests {
         );
     }
 
-    // Angle bracket search paths (e.g. `<nixpkgs>`) should be silently
-    // skipped — no FileNotFound error for a nonsensical joined path.
+    // Angle bracket search paths (e.g. `<nixpkgs>`) produce an
+    // AngleBracketImport diagnostic instead of a FileNotFound error.
     #[test]
     fn import_angle_bracket_skipped() {
         let (ty, errors) = get_multifile_result(&[("/main.nix", "import <nixpkgs> { }")]);
         assert!(
-            errors.is_empty(),
-            "angle bracket import should not produce errors, got: {:?}",
+            errors.iter().any(|e| matches!(
+                &e.kind,
+                crate::imports::ImportErrorKind::AngleBracketImport(p) if p == "<nixpkgs>"
+            )),
+            "expected AngleBracketImport error, got: {:?}",
             errors.iter().map(|e| &e.kind).collect::<Vec<_>>()
         );
         // Falls through to the generic `import :: a -> b` builtin.

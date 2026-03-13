@@ -93,6 +93,17 @@ exclude = ["result", ".direnv", "vendor/**"]
 
 Files matching `analyze` are processed in the background after LSP initialization. As each file's type is inferred, any open files that import it are automatically re-analyzed with the updated type information.
 
+### Diagnostics
+
+Control the severity of optional diagnostics. Currently the only configurable diagnostic is `unknown_type` ([E014](./diagnostics/e014.md)), which fires when a binding has type `?`.
+
+```toml
+[diagnostics]
+unknown_type = "hint"  # "off", "hint", "warning", or "error" (default: "hint")
+```
+
+The LSP editor settings (`tix.diagnostics.unknownType`) take precedence over `tix.toml` when both are set.
+
 ### Inference deadline
 
 By default the LSP aborts type inference after 10 seconds per file and returns partial results. If you work with large files that need more time:

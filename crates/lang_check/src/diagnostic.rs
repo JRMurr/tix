@@ -84,6 +84,69 @@ pub enum TixDiagnosticKind {
         /// were skipped.
         missing_bindings: Vec<SmolStr>,
     },
+    /// An angle bracket import (e.g. `import <nixpkgs>`) was encountered.
+    /// These require NIX_PATH resolution which tix doesn't implement.
+    AngleBracketImport {
+        path: String,
+    },
+    /// An imported file exists but has no ephemeral stub (hasn't been
+    /// analyzed). The resulting type is unconstrained (`?`).
+    ImportUnresolved {
+        path: String,
+    },
+}
+
+// ==============================================================================
+// Diagnostic Error Codes
+// ==============================================================================
+//
+// Every diagnostic has a stable error code (E001–E014) that appears in CLI
+// output (`error[E001]: ...`) and as a clickable link in the LSP.  Once
+// assigned, a code never changes meaning — new diagnostics get new codes.
+
+const DOCS_BASE_URL: &str = "https://jrmurr.github.io/tix/diagnostics";
+
+impl TixDiagnosticKind {
+    /// Stable error code for this diagnostic kind.
+    pub fn code(&self) -> &'static str {
+        match self {
+            TixDiagnosticKind::TypeMismatch { .. } => "E001",
+            TixDiagnosticKind::MissingField { .. } => "E002",
+            TixDiagnosticKind::InvalidBinOp { .. } => "E003",
+            TixDiagnosticKind::InvalidAttrMerge { .. } => "E004",
+            TixDiagnosticKind::UnresolvedName { .. } => "E005",
+            TixDiagnosticKind::DuplicateKey { .. } => "E006",
+            TixDiagnosticKind::ImportNotFound { .. } => "E007",
+            TixDiagnosticKind::InferenceTimeout { .. } => "E008",
+            TixDiagnosticKind::AnnotationArityMismatch { .. } => "E009",
+            TixDiagnosticKind::AnnotationUnchecked { .. } => "E010",
+            TixDiagnosticKind::AnnotationParseError { .. } => "E011",
+            TixDiagnosticKind::AngleBracketImport { .. } => "E012",
+            TixDiagnosticKind::ImportUnresolved { .. } => "E013",
+        }
+    }
+
+    /// URL to the documentation page for this error code.
+    pub fn docs_url(&self) -> String {
+        let code = self.code().to_ascii_lowercase();
+        format!("{DOCS_BASE_URL}/{code}.html")
+    }
+
+    /// Whether this diagnostic is a warning (true) or an error (false).
+    pub fn is_warning(&self) -> bool {
+        matches!(
+            self,
+            TixDiagnosticKind::UnresolvedName { .. }
+                | TixDiagnosticKind::AnnotationArityMismatch { .. }
+                | TixDiagnosticKind::AnnotationUnchecked { .. }
+                | TixDiagnosticKind::AnnotationParseError { .. }
+                | TixDiagnosticKind::DuplicateKey { .. }
+                | TixDiagnosticKind::ImportNotFound { .. }
+                | TixDiagnosticKind::InferenceTimeout { .. }
+                | TixDiagnosticKind::AngleBracketImport { .. }
+                | TixDiagnosticKind::ImportUnresolved { .. }
+        )
+    }
 }
 
 impl fmt::Display for TixDiagnosticKind {
@@ -149,6 +212,18 @@ impl fmt::Display for TixDiagnosticKind {
             }
             TixDiagnosticKind::ImportNotFound { path } => {
                 write!(f, "import target not found: {path}")
+            }
+            TixDiagnosticKind::AngleBracketImport { path } => {
+                write!(
+                    f,
+                    "cannot resolve angle bracket import `{path}` — add a type annotation or stub"
+                )
+            }
+            TixDiagnosticKind::ImportUnresolved { path } => {
+                write!(
+                    f,
+                    "imported file `{path}` has not been analyzed — add it to [project] analyze in tix.toml or open it in the editor"
+                )
             }
             TixDiagnosticKind::InferenceTimeout { missing_bindings } => {
                 if missing_bindings.is_empty() {
@@ -610,5 +685,99 @@ mod tests {
         assert!(msg.contains("`a`"));
         assert!(msg.contains("`e`"));
         assert!(msg.contains("and 2 more"));
+    }
+
+    // ==================================================================
+    // Error codes
+    // ==================================================================
+
+    #[test]
+    fn diagnostic_codes_are_stable() {
+        assert_eq!(
+            TixDiagnosticKind::TypeMismatch {
+                expected: OutputTy::Primitive(lang_ty::PrimitiveTy::Int),
+                actual: OutputTy::Primitive(lang_ty::PrimitiveTy::String),
+            }
+            .code(),
+            "E001"
+        );
+        assert_eq!(
+            TixDiagnosticKind::InvalidBinOp {
+                op: OverloadBinOp::Add,
+                lhs_ty: OutputTy::Primitive(lang_ty::PrimitiveTy::Int),
+                rhs_ty: OutputTy::Primitive(lang_ty::PrimitiveTy::String),
+            }
+            .code(),
+            "E003"
+        );
+        assert_eq!(
+            TixDiagnosticKind::AngleBracketImport {
+                path: "<nixpkgs>".to_string(),
+            }
+            .code(),
+            "E012"
+        );
+        assert_eq!(
+            TixDiagnosticKind::ImportUnresolved {
+                path: "/foo.nix".to_string(),
+            }
+            .code(),
+            "E013"
+        );
+    }
+
+    #[test]
+    fn docs_url_format() {
+        let kind = TixDiagnosticKind::TypeMismatch {
+            expected: OutputTy::Primitive(lang_ty::PrimitiveTy::Int),
+            actual: OutputTy::Primitive(lang_ty::PrimitiveTy::String),
+        };
+        assert_eq!(
+            kind.docs_url(),
+            "https://jrmurr.github.io/tix/diagnostics/e001.html"
+        );
+    }
+
+    #[test]
+    fn is_warning_classification() {
+        assert!(TixDiagnosticKind::UnresolvedName { name: "x".into() }.is_warning());
+        assert!(TixDiagnosticKind::AngleBracketImport {
+            path: "<nixpkgs>".to_string()
+        }
+        .is_warning());
+        assert!(TixDiagnosticKind::ImportUnresolved {
+            path: "/foo.nix".to_string()
+        }
+        .is_warning());
+        assert!(!TixDiagnosticKind::TypeMismatch {
+            expected: OutputTy::Primitive(lang_ty::PrimitiveTy::Int),
+            actual: OutputTy::Primitive(lang_ty::PrimitiveTy::String),
+        }
+        .is_warning());
+    }
+
+    // ==================================================================
+    // New variant display
+    // ==================================================================
+
+    #[test]
+    fn angle_bracket_import_display() {
+        let kind = TixDiagnosticKind::AngleBracketImport {
+            path: "<nixpkgs>".to_string(),
+        };
+        let msg = kind.to_string();
+        assert!(msg.contains("angle bracket import"));
+        assert!(msg.contains("<nixpkgs>"));
+        assert!(msg.contains("stub"));
+    }
+
+    #[test]
+    fn import_unresolved_display() {
+        let kind = TixDiagnosticKind::ImportUnresolved {
+            path: "/tmp/lib.nix".to_string(),
+        };
+        let msg = kind.to_string();
+        assert!(msg.contains("/tmp/lib.nix"));
+        assert!(msg.contains("not been analyzed"));
     }
 }

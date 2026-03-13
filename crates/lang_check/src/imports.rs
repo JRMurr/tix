@@ -22,21 +22,31 @@ use lang_ty::OutputTy;
 // Import Scanning
 // ==============================================================================
 
+/// Result of scanning literal imports: resolved paths and angle bracket imports.
+pub struct ScannedImports {
+    /// Successfully resolved `(apply_expr_id, resolved_path)` pairs.
+    pub resolved: Vec<(ExprId, PathBuf)>,
+    /// Angle bracket imports that could not be resolved.
+    pub angle_bracket: Vec<ImportError>,
+}
+
 /// Scan a module's AST for `import <literal-path>` patterns.
 ///
 /// Walks all expressions looking for Apply nodes where:
 /// - `fun` is a Reference("import") that resolves to Builtin("import")
 /// - `arg` is a Literal(Path(..))
 ///
-/// Returns `(apply_expr_id, resolved_path)` pairs. Non-literal import args
-/// (interpolations, variables, etc.) are silently skipped — they remain as
-/// unconstrained type variables via the normal `import :: a -> b` synthesis.
+/// Returns resolved `(apply_expr_id, resolved_path)` pairs and angle bracket
+/// import errors. Non-literal import args (interpolations, variables, etc.)
+/// are silently skipped — they remain as unconstrained type variables via the
+/// normal `import :: a -> b` synthesis.
 pub fn scan_literal_imports(
     module: &Module,
     name_res: &NameResolution,
     base_dir: &Path,
-) -> Vec<(ExprId, PathBuf)> {
-    let mut imports = Vec::new();
+) -> ScannedImports {
+    let mut resolved = Vec::new();
+    let mut angle_bracket = Vec::new();
 
     for (expr_id, expr) in module.exprs() {
         let Expr::Apply { fun, arg } = expr else {
@@ -63,19 +73,26 @@ pub fn scan_literal_imports(
             continue;
         };
 
-        // Skip angle bracket search paths (e.g. `<nixpkgs>`). These require
-        // NIX_PATH resolution which we don't implement yet — treating them as
-        // literal path components produces nonsensical paths.
+        // Angle bracket search paths (e.g. `<nixpkgs>`) require NIX_PATH
+        // resolution which we don't implement yet. Record them as diagnostics
+        // so users know why the type is unconstrained.
         // TODO: resolve via NIX_PATH
         if path_str.starts_with('<') {
+            angle_bracket.push(ImportError {
+                kind: ImportErrorKind::AngleBracketImport(path_str.clone()),
+                at_expr: expr_id,
+            });
             continue;
         }
 
-        let resolved = base_dir.join(path_str);
-        imports.push((expr_id, resolved));
+        let path = base_dir.join(path_str);
+        resolved.push((expr_id, path));
     }
 
-    imports
+    ScannedImports {
+        resolved,
+        angle_bracket,
+    }
 }
 
 // ==============================================================================
@@ -194,6 +211,10 @@ pub(crate) fn resolve_directory_path(path: PathBuf) -> Option<PathBuf> {
 #[derive(Debug, Clone)]
 pub enum ImportErrorKind {
     FileNotFound(PathBuf),
+    /// An angle bracket import like `<nixpkgs>` that can't be resolved.
+    AngleBracketImport(String),
+    /// File exists but has no ephemeral stub (hasn't been analyzed).
+    NoStubAvailable(PathBuf),
 }
 
 #[derive(Debug, Clone)]
@@ -240,22 +261,23 @@ pub fn resolve_import_types_from_stubs(
     base_dir: &Path,
     ephemeral_stubs: &HashMap<PathBuf, OutputTy>,
 ) -> ImportResolution {
-    let literal_imports = scan_literal_imports(module, name_res, base_dir);
+    let scanned = scan_literal_imports(module, name_res, base_dir);
     let callpackage_imports = scan_callpackage_imports(module, base_dir);
 
     // Track which paths are already handled by regular imports so we don't
     // double-resolve files that appear in both `import ./x` and `callPackage ./x`.
-    let import_paths: HashSet<PathBuf> = literal_imports
+    let import_paths: HashSet<PathBuf> = scanned
+        .resolved
         .iter()
         .filter_map(|(_, p)| p.canonicalize().ok())
         .collect();
 
     let mut types = HashMap::new();
-    let mut errors = Vec::new();
+    let mut errors: Vec<ImportError> = scanned.angle_bracket;
     let mut targets = HashMap::new();
 
     // ---- Literal imports ----
-    for (apply_expr_id, target_path) in literal_imports {
+    for (apply_expr_id, target_path) in scanned.resolved {
         let target_path = target_path.canonicalize().unwrap_or(target_path);
 
         let target_path = match resolve_directory_path(target_path.clone()) {
@@ -281,11 +303,16 @@ pub fn resolve_import_types_from_stubs(
         }
 
         // No stub available. If the file doesn't exist on disk either,
-        // report an error. Otherwise fall through to the generic
-        // `import :: a -> b` builtin type.
+        // report FileNotFound. If it exists but hasn't been analyzed,
+        // report ImportUnresolved as a hint.
         if !target_path.exists() {
             errors.push(ImportError {
                 kind: ImportErrorKind::FileNotFound(target_path),
+                at_expr: apply_expr_id,
+            });
+        } else {
+            errors.push(ImportError {
+                kind: ImportErrorKind::NoStubAvailable(target_path),
                 at_expr: apply_expr_id,
             });
         }
@@ -319,10 +346,15 @@ pub fn resolve_import_types_from_stubs(
             continue;
         }
 
-        // No stub — report FileNotFound if the file doesn't exist on disk.
+        // No stub — report FileNotFound or ImportUnresolved.
         if !target_path.exists() {
             errors.push(ImportError {
                 kind: ImportErrorKind::FileNotFound(target_path),
+                at_expr: outer_apply_id,
+            });
+        } else {
+            errors.push(ImportError {
+                kind: ImportErrorKind::NoStubAvailable(target_path),
                 at_expr: outer_apply_id,
             });
         }
@@ -347,6 +379,14 @@ pub fn import_errors_to_diagnostics(
             let kind = match &err.kind {
                 ImportErrorKind::FileNotFound(path) => {
                     crate::diagnostic::TixDiagnosticKind::ImportNotFound {
+                        path: path.display().to_string(),
+                    }
+                }
+                ImportErrorKind::AngleBracketImport(path) => {
+                    crate::diagnostic::TixDiagnosticKind::AngleBracketImport { path: path.clone() }
+                }
+                ImportErrorKind::NoStubAvailable(path) => {
+                    crate::diagnostic::TixDiagnosticKind::ImportUnresolved {
                         path: path.display().to_string(),
                     }
                 }

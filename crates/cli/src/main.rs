@@ -898,15 +898,7 @@ fn render_diagnostics(
     let mut warning_count = 0;
 
     for diag in diagnostics {
-        let is_warning = matches!(
-            diag.kind,
-            TixDiagnosticKind::UnresolvedName { .. }
-                | TixDiagnosticKind::AnnotationArityMismatch { .. }
-                | TixDiagnosticKind::AnnotationUnchecked { .. }
-                | TixDiagnosticKind::DuplicateKey { .. }
-                | TixDiagnosticKind::ImportNotFound { .. }
-                | TixDiagnosticKind::InferenceTimeout { .. }
-        );
+        let is_warning = diag.kind.is_warning();
         if is_warning {
             warning_count += 1;
         } else {
@@ -950,7 +942,11 @@ fn render_diagnostics(
             _ => None,
         };
 
-        let mut builder = miette::MietteDiagnostic::new(diag.kind.to_string());
+        // Format: "error[E001]: message" or "warning[E012]: message"
+        let level = if is_warning { "warning" } else { "error" };
+        let message = format!("{level}[{}]: {}", diag.kind.code(), diag.kind);
+
+        let mut builder = miette::MietteDiagnostic::new(message).with_url(diag.kind.docs_url());
         if !labels.is_empty() {
             builder = builder.with_labels(labels);
         }
