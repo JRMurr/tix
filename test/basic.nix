@@ -41,6 +41,8 @@ let
 
   three = add 1 2;
 
+  id = x: x;
+
   /**
     Concatenate a list of strings.
 
