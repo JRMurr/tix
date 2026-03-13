@@ -1403,7 +1403,13 @@ fn alias_with_union_in_param_skips_bidirectional_constraints() {
     "# };
 
     let (db, file) = TestDatabase::single_file(nix_src).unwrap();
-    let result = crate::check_file_collecting(&db, file, &registry, HashMap::new(), Arc::default());
+    let result = crate::check_file_collecting(
+        &db,
+        file,
+        Arc::new(registry.clone()),
+        HashMap::new(),
+        Arc::default(),
+    );
 
     // Inference should succeed — the union annotation (via alias) is skipped.
     let inference = result
@@ -1458,7 +1464,13 @@ fn nested_alias_with_union_in_param_skips_bidirectional_constraints() {
     "# };
 
     let (db, file) = TestDatabase::single_file(nix_src).unwrap();
-    let result = crate::check_file_collecting(&db, file, &registry, HashMap::new(), Arc::default());
+    let result = crate::check_file_collecting(
+        &db,
+        file,
+        Arc::new(registry.clone()),
+        HashMap::new(),
+        Arc::default(),
+    );
 
     let inference = result
         .inference
@@ -1548,6 +1560,7 @@ mod import_tests {
     use lang_ty::{arc_ty, OutputTy};
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
 
     use crate::aliases::TypeAliasRegistry;
     use crate::check_file_with_imports;
@@ -1847,9 +1860,12 @@ mod import_tests {
                     &ephemeral_stubs,
                 );
 
-                if let Ok(dep_result) =
-                    check_file_with_imports(&db, dep_file, aliases, dep_resolution.types)
-                {
+                if let Ok(dep_result) = check_file_with_imports(
+                    &db,
+                    dep_file,
+                    Arc::new(aliases.clone()),
+                    dep_resolution.types,
+                ) {
                     if let Some(root_ty) = dep_result.expr_ty_map.get(dep_module.entry_expr) {
                         ephemeral_stubs.insert(dep_path, root_ty.clone());
                     }
@@ -1867,8 +1883,9 @@ mod import_tests {
             resolve_import_types_from_stubs(&module, &name_res, base_dir, &ephemeral_stubs);
         let errors = resolution.errors;
 
-        let result = check_file_with_imports(&db, entry_file, aliases, resolution.types)
-            .expect("inference should succeed");
+        let result =
+            check_file_with_imports(&db, entry_file, Arc::new(aliases.clone()), resolution.types)
+                .expect("inference should succeed");
 
         let root_ty = result
             .expr_ty_map
@@ -2543,8 +2560,13 @@ pub fn check_str_with_aliases_and_context(
 ) -> (Module, crate::CheckResult) {
     let (db, file) = TestDatabase::single_file(src).unwrap();
     let module = module(&db, file);
-    let result =
-        crate::check_file_collecting(&db, file, aliases, HashMap::new(), Arc::new(context_args));
+    let result = crate::check_file_collecting(
+        &db,
+        file,
+        Arc::new(aliases.clone()),
+        HashMap::new(),
+        Arc::new(context_args),
+    );
     (module, result)
 }
 
@@ -2715,7 +2737,7 @@ fn doc_comment_context_on_inner_lambda() {
     let result = crate::check_file_collecting(
         &db,
         file,
-        &TypeAliasRegistry::with_builtins(),
+        Arc::new(TypeAliasRegistry::with_builtins()),
         HashMap::new(),
         Arc::default(), // no file-level context
     );
@@ -2783,7 +2805,8 @@ fn context_args_preserve_alias_provenance() {
     " };
     let (db, file) = TestDatabase::single_file(nix_src).unwrap();
     let module = module(&db, file);
-    let result = crate::check_file_collecting(&db, file, &registry, HashMap::new(), ctx);
+    let result =
+        crate::check_file_collecting(&db, file, Arc::new(registry.clone()), HashMap::new(), ctx);
     let inference = result.inference.expect("inference should succeed");
 
     // The `config` pattern field should be typed as Named("NixosConfig", ...)
@@ -2850,7 +2873,8 @@ fn callpackage_context_types_pkgs_parameter_as_alias() {
     " };
     let (db, file) = TestDatabase::single_file(nix_src).unwrap();
     let module = module(&db, file);
-    let result = crate::check_file_collecting(&db, file, &registry, HashMap::new(), ctx);
+    let result =
+        crate::check_file_collecting(&db, file, Arc::new(registry.clone()), HashMap::new(), ctx);
     let inference = result.inference.expect("inference should succeed");
 
     // `pkgs` should be typed as Named("Pkgs", ...) via alias provenance.
@@ -2930,7 +2954,8 @@ fn callpackage_context_loads_pkgs_from_builtin_stubs_dir() {
     " };
     let (db, file) = TestDatabase::single_file(nix_src).unwrap();
     let module = module(&db, file);
-    let result = crate::check_file_collecting(&db, file, &registry, HashMap::new(), ctx);
+    let result =
+        crate::check_file_collecting(&db, file, Arc::new(registry.clone()), HashMap::new(), ctx);
     let inference = result.inference.expect("inference should succeed");
 
     let root_ty = inference
@@ -4494,7 +4519,7 @@ fn annotation_arity_mismatch_skipped_with_warning() {
     let result = crate::check_file_collecting(
         &db,
         file,
-        &TypeAliasRegistry::default(),
+        Arc::new(TypeAliasRegistry::default()),
         HashMap::new(),
         Arc::default(),
     );
@@ -4566,7 +4591,7 @@ fn annotation_with_union_skipped() {
     let result = crate::check_file_collecting(
         &db,
         file,
-        &TypeAliasRegistry::default(),
+        Arc::new(TypeAliasRegistry::default()),
         HashMap::new(),
         Arc::default(),
     );
@@ -5012,7 +5037,7 @@ fn intersection_annotation_accepted() {
     let result = crate::check_file_collecting(
         &db,
         file,
-        &TypeAliasRegistry::default(),
+        Arc::new(TypeAliasRegistry::default()),
         HashMap::new(),
         Arc::default(),
     );
@@ -5047,7 +5072,7 @@ fn intersection_annotation_warning_emitted() {
     let result = crate::check_file_collecting(
         &db,
         file,
-        &TypeAliasRegistry::default(),
+        Arc::new(TypeAliasRegistry::default()),
         HashMap::new(),
         Arc::default(),
     );
@@ -5089,7 +5114,7 @@ fn non_lambda_intersection_falls_through() {
     let result = crate::check_file_collecting(
         &db,
         file,
-        &TypeAliasRegistry::default(),
+        Arc::new(TypeAliasRegistry::default()),
         HashMap::new(),
         Arc::default(),
     );
@@ -6205,7 +6230,7 @@ fn collect_diagnostics_with_deadline(
     let result = crate::check_file_collecting_with_deadline(
         &db,
         file,
-        &TypeAliasRegistry::default(),
+        Arc::new(TypeAliasRegistry::default()),
         HashMap::new(),
         Arc::default(),
         deadline,
@@ -6314,7 +6339,7 @@ fn duplicate_key_is_warning_not_error() {
     let result = crate::check_file_collecting(
         &db,
         file,
-        &TypeAliasRegistry::default(),
+        Arc::new(TypeAliasRegistry::default()),
         HashMap::new(),
         Arc::default(),
     );
@@ -6540,7 +6565,13 @@ fn function_union_annotation_still_skips() {
     "# };
 
     let (db, file) = TestDatabase::single_file(nix_src).unwrap();
-    let result = crate::check_file_collecting(&db, file, &registry, HashMap::new(), Arc::default());
+    let result = crate::check_file_collecting(
+        &db,
+        file,
+        Arc::new(registry.clone()),
+        HashMap::new(),
+        Arc::default(),
+    );
 
     // Inference should succeed — the union annotation is skipped for functions.
     let inference = result

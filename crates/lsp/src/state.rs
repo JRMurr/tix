@@ -408,7 +408,7 @@ impl AnalysisState {
         let mut check_result = lang_check::check_file_collecting_with_cancel(
             &self.db,
             nix_file,
-            &self.registry,
+            Arc::clone(&self.registry),
             import_resolution.types,
             context_args,
             deadline,

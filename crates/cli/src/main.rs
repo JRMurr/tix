@@ -360,7 +360,7 @@ fn run_gen_stub(
     let result = lang_check::check_file_collecting(
         &db,
         file,
-        &registry,
+        Arc::new(registry),
         import_resolution.types,
         Arc::default(),
     );
@@ -492,10 +492,11 @@ fn run_verify_stubs(
     let import_resolution =
         resolve_import_types_from_stubs(&module, &name_res, base_dir, &HashMap::new());
 
+    let registry = Arc::new(registry);
     let result = lang_check::check_file_collecting(
         &db,
         file,
-        &registry,
+        Arc::clone(&registry),
         import_resolution.types,
         Arc::default(),
     );
@@ -782,8 +783,13 @@ fn run_check(
 
     let import_diagnostics = import_errors_to_diagnostics(&import_resolution.errors);
 
-    let mut result =
-        check_file_collecting(&db, file, &registry, import_resolution.types, context_args);
+    let mut result = check_file_collecting(
+        &db,
+        file,
+        Arc::new(registry),
+        import_resolution.types,
+        context_args,
+    );
 
     // Merge import diagnostics into the check result.
     result.diagnostics.extend(import_diagnostics);

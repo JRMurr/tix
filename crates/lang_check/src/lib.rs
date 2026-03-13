@@ -45,14 +45,16 @@ pub fn check_file_with_aliases(
     file: NixFile,
     aliases: &TypeAliasRegistry,
 ) -> Result<InferenceResult, Box<TixDiagnostic>> {
-    check_file_with_imports(db, file, aliases, HashMap::new())
+    // This is the boundary where the one clone happens for callers that don't
+    // already hold an Arc. All downstream functions share this Arc without cloning.
+    check_file_with_imports(db, file, Arc::new(aliases.clone()), HashMap::new())
 }
 
 /// Type-check a file with pre-loaded aliases and pre-resolved import types.
 pub fn check_file_with_imports(
     db: &dyn AstDb,
     file: NixFile,
-    aliases: &TypeAliasRegistry,
+    aliases: Arc<TypeAliasRegistry>,
     import_types: HashMap<ExprId, OutputTy>,
 ) -> Result<InferenceResult, Box<TixDiagnostic>> {
     let module = lang_ast::module(db, file);
@@ -62,11 +64,12 @@ pub fn check_file_with_imports(
 
     // Load inline type aliases from doc comments before inference so they're
     // available for annotation resolution. Inline aliases shadow stub aliases.
-    // Only clone when inline aliases exist (CoW pattern).
+    // CoW: only clone the registry when inline aliases need to be inserted.
+    // Most files have no inline aliases, so the Arc is shared without cloning.
     let aliases = if module.inline_type_aliases.is_empty() {
-        Arc::new(aliases.clone())
+        aliases
     } else {
-        let mut cloned = aliases.clone();
+        let mut cloned = (*aliases).clone();
         for alias_source in &module.inline_type_aliases {
             if let Some((name, body)) = comment_parser::parse_inline_type_alias(alias_source) {
                 cloned.load_inline_alias(name, body);
@@ -349,7 +352,7 @@ pub fn run_inference(
 pub fn check_file_collecting(
     db: &dyn AstDb,
     file: NixFile,
-    aliases: &TypeAliasRegistry,
+    aliases: Arc<TypeAliasRegistry>,
     import_types: HashMap<ExprId, OutputTy>,
     context_args: Arc<HashMap<smol_str::SmolStr, ParsedTy>>,
 ) -> CheckResult {
@@ -362,7 +365,7 @@ pub fn check_file_collecting(
 pub fn check_file_collecting_with_deadline(
     db: &dyn AstDb,
     file: NixFile,
-    aliases: &TypeAliasRegistry,
+    aliases: Arc<TypeAliasRegistry>,
     import_types: HashMap<ExprId, OutputTy>,
     context_args: Arc<HashMap<smol_str::SmolStr, ParsedTy>>,
     deadline: Option<Instant>,
@@ -385,7 +388,7 @@ pub fn check_file_collecting_with_deadline(
 pub fn check_file_collecting_with_cancel(
     db: &dyn AstDb,
     file: NixFile,
-    aliases: &TypeAliasRegistry,
+    aliases: Arc<TypeAliasRegistry>,
     import_types: HashMap<ExprId, OutputTy>,
     context_args: Arc<HashMap<smol_str::SmolStr, ParsedTy>>,
     deadline: Option<Instant>,
@@ -397,11 +400,12 @@ pub fn check_file_collecting_with_cancel(
     let grouped_defs = lang_ast::group_def(db, file);
 
     // Load inline type aliases from doc comments before inference.
-    // Only clone when inline aliases exist (CoW pattern).
+    // CoW: only clone the registry when inline aliases need to be inserted.
+    // Most files have no inline aliases, so the Arc is shared without cloning.
     let aliases = if module.inline_type_aliases.is_empty() {
-        Arc::new(aliases.clone())
+        aliases
     } else {
-        let mut cloned = aliases.clone();
+        let mut cloned = (*aliases).clone();
         for alias_source in &module.inline_type_aliases {
             if let Some((name, body)) = comment_parser::parse_inline_type_alias(alias_source) {
                 cloned.load_inline_alias(name, body);
