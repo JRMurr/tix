@@ -163,6 +163,26 @@ tix check -j 4         # Limit to 4 parallel inference threads
 
 Exit code is 1 if any type errors are found, 0 otherwise (config warnings don't affect the exit code).
 
+### Timing and profiling
+
+Show per-phase timing and RSS memory usage:
+
+```bash
+tix my-file.nix --timing
+tix check --timing
+```
+
+This prints a breakdown of wall-clock time and memory for each pipeline phase (registry loading, parsing, name resolution, inference, diagnostics).
+
+For detailed heap profiling, build with the `dhat-heap` feature:
+
+```bash
+cargo build --release --features dhat-heap
+tix my-file.nix    # produces dhat-heap.json
+```
+
+View the result at [dhat-viewer](https://nnethercote.github.io/dh_view/dh_view.html).
+
 ### Generate stubs
 
 Generate typed stubs from your NixOS or Home Manager configuration:

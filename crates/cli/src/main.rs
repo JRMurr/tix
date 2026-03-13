@@ -2,6 +2,7 @@ mod check;
 mod config;
 mod gen_stubs;
 mod init;
+mod timing;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -16,6 +17,10 @@ use lang_check::imports::{import_errors_to_diagnostics, resolve_import_types_fro
 use lang_ty::OutputTy;
 use miette::{LabeledSpan, NamedSource};
 use rowan::ast::AstNode;
+
+#[cfg(feature = "dhat-heap")]
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
 
 // =============================================================================
 // CLI Argument Parsing
@@ -48,6 +53,10 @@ struct Cli {
     /// Path to tix.toml config file (auto-discovered if not specified)
     #[arg(long = "config", value_name = "PATH")]
     config_path: Option<PathBuf>,
+
+    /// Print per-phase timing and memory usage
+    #[arg(long)]
+    timing: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -108,6 +117,10 @@ enum Command {
         /// Number of parallel inference threads (default: number of CPUs)
         #[arg(short = 'j', long = "jobs", value_name = "N")]
         jobs: Option<usize>,
+
+        /// Print per-phase timing and memory usage
+        #[arg(long)]
+        timing: bool,
     },
 
     /// Verify that a .tix stub matches the inferred type of a Nix file
@@ -221,11 +234,14 @@ enum GenStubsSource {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    #[cfg(feature = "dhat-heap")]
+    let _profiler = dhat::Profiler::new_heap();
+
     let args = Cli::parse();
 
     // The LSP sets up its own logger with custom filters, so skip here.
     if !matches!(args.command, Some(Command::Lsp)) {
-        env_logger::init();
+        timing::init_tracing(args.timing);
     }
 
     match args.command {
@@ -235,7 +251,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             no_default_stubs,
             verbose,
             jobs,
-        }) => check::run_check_project(config_path, no_default_stubs, verbose, jobs),
+            timing,
+        }) => check::run_check_project(config_path, no_default_stubs, verbose, jobs, timing),
         Some(Command::GenStubs { source }) => run_gen_stubs(source),
         Some(Command::GenStub {
             file_path,
@@ -294,6 +311,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 args.stub_paths,
                 args.no_default_stubs,
                 args.config_path,
+                args.timing,
             )
         }
     }
@@ -698,8 +716,12 @@ fn run_check(
     stub_paths: Vec<PathBuf>,
     no_default_stubs: bool,
     config_path: Option<PathBuf>,
+    show_timing: bool,
 ) -> Result<(), Box<dyn Error>> {
+    let mut timer = timing::Timer::new(show_timing);
+
     let mut registry = build_registry(no_default_stubs, &stub_paths)?;
+    timer.mark("registry");
 
     // Discover or load tix.toml configuration.
     let canonical_path = std::fs::canonicalize(&file_path).unwrap_or(file_path.clone());
@@ -773,6 +795,8 @@ fn run_check(
 
     let (module, source_map) = module_and_source_maps(&db, file);
     let name_res = name_resolution(&db, file);
+    timer.mark("parse+lower+nameres");
+
     let base_dir = file_path.parent().unwrap_or(std::path::Path::new("/"));
 
     // CLI uses stubs-only model: no recursive import inference. Imports
@@ -782,6 +806,7 @@ fn run_check(
         resolve_import_types_from_stubs(&module, &name_res, base_dir, &HashMap::new());
 
     let import_diagnostics = import_errors_to_diagnostics(&import_resolution.errors);
+    timer.mark("import-resolution");
 
     let mut result = check_file_collecting(
         &db,
@@ -790,6 +815,7 @@ fn run_check(
         import_resolution.types,
         context_args,
     );
+    timer.mark("inference+collect");
 
     // Merge import diagnostics into the check result.
     result.diagnostics.extend(import_diagnostics);
@@ -829,6 +855,8 @@ fn run_check(
     if error_count > 0 {
         std::process::exit(1);
     }
+
+    timer.mark("diagnostics");
 
     // If inference succeeded, print binding types and root type.
     if let Some(inference) = &result.inference {
@@ -877,6 +905,8 @@ fn run_check(
             }
         }
     }
+
+    timer.summary();
 
     Ok(())
 }

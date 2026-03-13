@@ -4,11 +4,18 @@
 # as pass / type-error / timeout / crash. Exits non-zero only on crashes.
 #
 # Usage:
-#   ./scripts/nixpkgs-lib-test.sh [--timeout <secs>]
+#   ./scripts/nixpkgs-lib-test.sh [--timeout <secs>] [--parallel] [--jobs N] [--timing]
+#
+# --parallel  Copy lib/ to a temp directory, generate a tix.toml, and run
+#             `tix check` for parallel inference via rayon instead of
+#             checking each file sequentially in its own process.
 #
 set -euo pipefail
 
 TIMEOUT=60
+PARALLEL=0
+JOBS=""
+TIMING=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -16,9 +23,21 @@ while [[ $# -gt 0 ]]; do
             TIMEOUT="$2"
             shift 2
             ;;
+        --parallel)
+            PARALLEL=1
+            shift
+            ;;
+        --jobs|-j)
+            JOBS="$2"
+            shift 2
+            ;;
+        --timing)
+            TIMING=1
+            shift
+            ;;
         *)
             echo "Unknown flag: $1" >&2
-            echo "Usage: $0 [--timeout <secs>]" >&2
+            echo "Usage: $0 [--timeout <secs>] [--parallel] [--jobs N] [--timing]" >&2
             exit 2
             ;;
     esac
@@ -41,6 +60,69 @@ if [[ ! -d "$LIB_DIR" ]]; then
     echo "ERROR: $LIB_DIR does not exist" >&2
     exit 2
 fi
+
+# ==============================================================================
+# Parallel mode: copy lib/ to tmpdir, generate tix.toml, run `tix check`
+# ==============================================================================
+
+if [[ "$PARALLEL" -eq 1 ]]; then
+    TMPDIR="$(mktemp -d)"
+    trap 'rm -rf "$TMPDIR"' EXIT
+
+    echo "Copying $LIB_DIR → $TMPDIR/lib ..."
+    cp -a "$LIB_DIR" "$TMPDIR/lib"
+    # Nix store is read-only; make the copy writable so we can add tix.toml.
+    chmod -R u+w "$TMPDIR/lib"
+
+    # Generate a tix.toml that mirrors the sequential mode's exclude rules.
+    cat > "$TMPDIR/lib/tix.toml" <<'TOML'
+# Auto-generated for parallel nixpkgs lib/ checking.
+deadline = 60
+
+[project]
+exclude = ["tests/**", "deprecated/**"]
+TOML
+
+    # Override deadline from --timeout flag.
+    sed -i "s/^deadline = .*/deadline = ${TIMEOUT}/" "$TMPDIR/lib/tix.toml"
+
+    echo "Generated $TMPDIR/lib/tix.toml"
+    echo "---"
+
+    # Build the tix check command.
+    CHECK_ARGS=(check --config "$TMPDIR/lib/tix.toml" --verbose)
+    if [[ -n "$JOBS" ]]; then
+        CHECK_ARGS+=(-j "$JOBS")
+    fi
+    if [[ "$TIMING" -eq 1 ]]; then
+        CHECK_ARGS+=(--timing)
+    fi
+
+    # Point at repo stubs so lib functions resolve.
+    export TIX_BUILTIN_STUBS="${TIX_BUILTIN_STUBS:-$REPO_ROOT/stubs}"
+
+    echo "Running: tix ${CHECK_ARGS[*]}"
+    echo "---"
+
+    # tix check exits 1 on type errors (expected), only treat signals/crashes
+    # (exit >= 2, excluding 1) as failures.
+    set +e
+    "$TIX_CLI" "${CHECK_ARGS[@]}"
+    rc=$?
+    set -e
+
+    if [[ $rc -ge 2 ]]; then
+        echo ""
+        echo "tix check crashed (exit $rc)"
+        exit 1
+    fi
+
+    exit 0
+fi
+
+# ==============================================================================
+# Sequential mode (original behavior)
+# ==============================================================================
 
 # Collect .nix files, excluding tests/ and deprecated/ subdirectories.
 mapfile -t NIX_FILES < <(

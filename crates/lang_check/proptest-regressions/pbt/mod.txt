@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 61bb342fc93af9dc85a2f35481e1e559a0bd3f9c111f3b733095e4782f7c4ecb # shrinks to (ty, text) = (Union([Lambda(TyVar(1) -> Null), Lambda(TyVar(1) -> Null)]), "(if true then ((__pbt_p: null)) else ((__pbt_p: null)))")
+cc 7090d935eb65fe5d797e72d0e0cc007e3783d9c76d82d816c259cabf6a1963c2 # shrinks to (ty, text) = (AttrSetTy { fields: {"_pbt_mTDh__kN3U": Lambda(TyVar(1) -> Lambda(TyVar(1) -> Bool))}, dyn_ty: None, open: false, optional_fields: {} }, "({\"_pbt_mTDh__kN3U\"=((__pbt_p: ((__pbt_p: false)));})")

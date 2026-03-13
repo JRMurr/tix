@@ -31,8 +31,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use thiserror::Error;
+use tracing::instrument;
 use type_table::TypeTable;
 
+#[instrument(level = "info", skip_all, name = "check_file")]
 #[salsa::tracked]
 pub fn check_file(db: &dyn AstDb, file: NixFile) -> Result<InferenceResult, Box<TixDiagnostic>> {
     check_file_with_aliases(db, file, &TypeAliasRegistry::default())
@@ -290,6 +292,7 @@ pub struct InferenceInputs {
 
 /// Run type inference using precomputed syntax data. Does not need the Salsa
 /// database. Consolidates the timeout-diagnostic logic shared by CLI and LSP.
+#[instrument(level = "info", skip_all, name = "run_inference")]
 pub fn run_inference(
     inputs: &InferenceInputs,
     cancel_flag: Option<Arc<AtomicBool>>,
@@ -654,7 +657,7 @@ impl<'db> CheckCtx<'db> {
             binding_exprs,
             current_expr: module.entry_expr,
             warnings: Vec::new(),
-            types: TypeTable::new(),
+            types: TypeTable::with_capacity(module.names().len() + module.exprs().len()),
             poly_type_env: ArenaMap::new(),
             deferred: DeferredConstraints::default(),
             early_canonical: ArenaMap::new(),

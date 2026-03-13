@@ -24,7 +24,9 @@ use lower::lower;
 pub use nameres::{group_def, name_resolution, scopes, GroupedDefs, ModuleScopes, NameResolution};
 use rnix::NixLanguage;
 use smol_str::SmolStr;
+use tracing::instrument;
 
+#[instrument(level = "info", skip_all, name = "parse+lower")]
 #[salsa::tracked(no_eq)]
 pub fn module_and_source_maps(db: &dyn crate::AstDb, file: NixFile) -> (Module, ModuleSourceMap) {
     let parsed = db.parse_file(file);
@@ -52,6 +54,7 @@ pub struct ModuleIndices {
     pub param_to_lambda: HashMap<NameId, ExprId>,
 }
 
+#[instrument(level = "info", skip_all, name = "module_indices")]
 #[salsa::tracked]
 pub fn module_indices(db: &dyn crate::AstDb, file: NixFile) -> ModuleIndices {
     let module = module(db, file);

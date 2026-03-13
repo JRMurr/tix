@@ -22,11 +22,14 @@ cargo clippy                         # Lint
 ./scripts/pbt.sh                     # Property-based tests (50k cases default)
 ./scripts/pbt.sh 100000              # PBT with custom case count
 ./scripts/cov.sh                     # Coverage report (cargo-tarpaulin)
+cargo build --features dhat-heap      # Build with heap profiler
 nix build .#                         # Build with nix
 ./scripts/tixc.sh <<< 'let x = 1; in x'     # Type-check Nix from stdin (debug build)
 ./scripts/tixc.sh test/basic.nix             # Type-check a local .nix file
 ./scripts/tixc.sh nixpkgs:lib/strings.nix    # Type-check a nixpkgs file (requires nix)
-./scripts/nixpkgs-lib-test.sh               # Run tix on nixpkgs lib/ (requires nix)
+./scripts/nixpkgs-lib-test.sh               # Run tix on nixpkgs lib/ sequentially (requires nix)
+./scripts/nixpkgs-lib-test.sh --parallel    # Parallel inference via `tix check` (requires nix)
+./scripts/nixpkgs-lib-test.sh --parallel --timing -j 4  # With timing + thread limit
 ```
 
 
@@ -39,6 +42,23 @@ EOF
 ./scripts/tixc.sh nixpkgs:lib/strings.nix  # nixpkgs subpath
 ```
 
+### Profiling with stubs
+
+To profile realistic workloads, build the full stubs from the flake and point `TIX_BUILTIN_STUBS` at them:
+
+```bash
+nix build .#stubs
+export TIX_BUILTIN_STUBS="$(readlink result)"
+
+# Wall-clock timing + RSS per phase
+./scripts/tixc.sh --timing test/basic.nix
+./scripts/tixc.sh --timing nixpkgs:lib/strings.nix
+
+# Heap profiling (produces dhat-heap.json in cwd)
+cargo build --features dhat-heap
+TIX_BUILTIN_STUBS="$(readlink result)" target/debug/tix test/basic.nix
+# View at https://nnethercote.github.io/dh_view/dh_view.html
+```
 
 ## Must Do
 

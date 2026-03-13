@@ -6,6 +6,8 @@
 // Each type variable tracks lower bounds (types that flow into it) and
 // upper bounds (types it flows into). Concrete types are stored directly.
 
+use smallvec::SmallVec;
+
 use super::TyId;
 use lang_ty::Ty;
 
@@ -13,9 +15,9 @@ use lang_ty::Ty;
 #[derive(Debug, Clone)]
 pub struct TypeVariable {
     /// Types that flow INTO this variable (produces union in positive position).
-    pub lower_bounds: Vec<TyId>,
+    pub lower_bounds: SmallVec<[TyId; 4]>,
     /// Types this variable flows INTO (produces intersection in negative position).
-    pub upper_bounds: Vec<TyId>,
+    pub upper_bounds: SmallVec<[TyId; 4]>,
     /// The binding level — used to determine which variables are polymorphic.
     /// Variables created at a deeper level than the current scope are generalizable.
     pub level: u32,
@@ -42,12 +44,19 @@ impl TypeStorage {
         }
     }
 
+    pub fn with_capacity(cap: usize) -> Self {
+        Self {
+            entries: Vec::with_capacity(cap),
+            current_level: 0,
+        }
+    }
+
     /// Allocate a fresh type variable at the current level.
     pub fn new_var(&mut self) -> TyId {
         let id = TyId(self.entries.len() as u32);
         self.entries.push(TypeEntry::Variable(TypeVariable {
-            lower_bounds: Vec::new(),
-            upper_bounds: Vec::new(),
+            lower_bounds: SmallVec::new(),
+            upper_bounds: SmallVec::new(),
             level: self.current_level,
         }));
         id

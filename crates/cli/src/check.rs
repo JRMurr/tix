@@ -20,6 +20,7 @@ use lang_check::InferenceInputs;
 use rayon::prelude::*;
 
 use crate::config::{self, TixConfig};
+use crate::timing;
 use crate::{build_registry, load_stubs, render_diagnostics};
 
 /// Intermediate data from Phase 1 before the registry is wrapped in Arc.
@@ -66,7 +67,10 @@ pub fn run_check_project(
     no_default_stubs: bool,
     verbose: bool,
     jobs: Option<usize>,
+    show_timing: bool,
 ) -> Result<(), Box<dyn Error>> {
+    let mut timer = timing::Timer::new(show_timing);
+
     // Configure rayon thread pool if --jobs was specified.
     if let Some(n) = jobs {
         rayon::ThreadPoolBuilder::new()
@@ -96,6 +100,7 @@ pub fn run_check_project(
         eprintln!("error: cyclic type aliases detected: {:?}", cycles);
         std::process::exit(1);
     }
+    timer.mark("registry+stubs");
 
     // Step 3: Discover all .nix files.
     let nix_files = config::discover_all_nix_files(&config_dir, &toml_config);
@@ -200,6 +205,7 @@ pub fn run_check_project(
             context_args,
         });
     }
+    timer.mark("prepare (sequential)");
 
     // Wrap registry in Arc now that all mutations (context resolution) are done.
     // Each file shares a single ref-counted registry instead of deep-cloning it.
@@ -220,7 +226,7 @@ pub fn run_check_project(
                 import_types: pp.import_types,
                 import_diagnostics: pp.import_diagnostics,
                 context_args: pp.context_args,
-                deadline_secs: None, // No deadline for CLI batch mode.
+                deadline_secs: toml_config.deadline,
             },
         })
         .collect();
@@ -248,6 +254,7 @@ pub fn run_check_project(
             }
         })
         .collect();
+    timer.mark("inference (parallel)");
 
     // =========================================================================
     // Phase 3 — Sequential Render
@@ -292,6 +299,9 @@ pub fn run_check_project(
             config_warnings.len()
         );
     }
+
+    timer.mark("render");
+    timer.summary();
 
     // Exit code.
     if total_errors > 0 {
