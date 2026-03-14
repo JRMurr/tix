@@ -32,6 +32,10 @@ nix build .#                         # Build with nix
 ./scripts/nixpkgs-lib-test.sh --parallel --timing -j 4  # With timing + thread limit
 ./scripts/nixpkgs-lib-test.sh --release     # Run with optimized release build
 ./scripts/nixpkgs-lib-test.sh --parallel --release --timing  # Parallel + release + timing
+./scripts/nixpkgs-test.sh                                   # Run tix on ALL of nixpkgs (parallel, requires nix)
+./scripts/nixpkgs-test.sh pkgs/                             # Check only pkgs/ subdirectory
+./scripts/nixpkgs-test.sh --release --timing lib/ nixos/    # Check lib/ + nixos/ with timing
+./scripts/nixpkgs-test.sh --deadline 10 -j 4                # Custom deadline + thread limit
 ```
 
 

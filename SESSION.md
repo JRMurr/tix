@@ -68,8 +68,18 @@ by design, or informational notes.
 - Dynamic attrset keys not tracked in recursive sets (`nameres.rs`): could cause
   incorrect SCC grouping in edge cases.
 
-- Extrude carried-overload loop is O(n^2) (`infer.rs`): could be linear with
-  worklist approach.
+- ~~Extrude carried-overload loop is O(n^2) (`infer.rs`): could be linear with
+  worklist approach.~~ Fixed: per-name carried map + eager resolution + pruning.
+
+- **Stack overflow in canonicalization on large pkgs files**: running `tix check`
+  on all of nixpkgs/pkgs (~37k files) crashes with a stack overflow during expr
+  canonicalization of a file with ~154k expressions. Inference completes fine;
+  the issue is deeply recursive OutputTy structures in the collect/render phase.
+  Needs iterative (non-recursive) canonicalization or stacker/explicit stack.
+
+- **~20 GB RSS on full nixpkgs**: checking all 42k files uses ~20 GB RAM. Most
+  comes from parallel inference holding all files' type state concurrently.
+  Could mitigate with bounded parallelism or streaming results.
 
 - Stale analysis name lookup (`completion.rs`): `find_name_type_by_text()` returns
   first match when source_map fails, may pick wrong shadowed binding.
