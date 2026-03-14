@@ -4,7 +4,7 @@
 # as pass / type-error / timeout / crash. Exits non-zero only on crashes.
 #
 # Usage:
-#   ./scripts/nixpkgs-lib-test.sh [--timeout <secs>] [--parallel] [--jobs N] [--timing]
+#   ./scripts/nixpkgs-lib-test.sh [--timeout <secs>] [--parallel] [--jobs N] [--timing] [--release]
 #
 # --parallel  Copy lib/ to a temp directory, generate a tix.toml, and run
 #             `tix check` for parallel inference via rayon instead of
@@ -16,6 +16,7 @@ TIMEOUT=60
 PARALLEL=0
 JOBS=""
 TIMING=0
+RELEASE=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -35,9 +36,13 @@ while [[ $# -gt 0 ]]; do
             TIMING=1
             shift
             ;;
+        --release)
+            RELEASE=1
+            shift
+            ;;
         *)
             echo "Unknown flag: $1" >&2
-            echo "Usage: $0 [--timeout <secs>] [--parallel] [--jobs N] [--timing]" >&2
+            echo "Usage: $0 [--timeout <secs>] [--parallel] [--jobs N] [--timing] [--release]" >&2
             exit 2
             ;;
     esac
@@ -47,9 +52,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Build tix first so timing is clean.
-echo "Building tix..."
-cargo build --bin tix --manifest-path "$REPO_ROOT/Cargo.toml" 2>&1
-TIX_CLI="$REPO_ROOT/target/debug/tix"
+CARGO_BUILD_ARGS=(build --bin tix --manifest-path "$REPO_ROOT/Cargo.toml")
+if [[ "$RELEASE" -eq 1 ]]; then
+    CARGO_BUILD_ARGS+=(--release)
+    TIX_CLI="$REPO_ROOT/target/release/tix"
+    echo "Building tix (release)..."
+else
+    TIX_CLI="$REPO_ROOT/target/debug/tix"
+    echo "Building tix (debug)..."
+fi
+cargo "${CARGO_BUILD_ARGS[@]}" 2>&1
 
 # Resolve pinned nixpkgs path from flake.
 echo "Resolving nixpkgs path..."

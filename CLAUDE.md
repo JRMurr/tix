@@ -30,6 +30,8 @@ nix build .#                         # Build with nix
 ./scripts/nixpkgs-lib-test.sh               # Run tix on nixpkgs lib/ sequentially (requires nix)
 ./scripts/nixpkgs-lib-test.sh --parallel    # Parallel inference via `tix check` (requires nix)
 ./scripts/nixpkgs-lib-test.sh --parallel --timing -j 4  # With timing + thread limit
+./scripts/nixpkgs-lib-test.sh --release     # Run with optimized release build
+./scripts/nixpkgs-lib-test.sh --parallel --release --timing  # Parallel + release + timing
 ```
 
 
