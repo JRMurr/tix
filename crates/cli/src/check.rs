@@ -241,7 +241,9 @@ pub fn run_check_project(
     let results: Vec<RenderableResult> = prepared
         .into_par_iter()
         .map(|pf| {
+            tracing::info!("inference start: {}", pf.file_path.display());
             let check_result = lang_check::run_inference(&pf.inputs, None);
+            tracing::info!("inference done:  {}", pf.file_path.display());
             // Extract only the fields Phase 3 needs. The InferenceResult
             // (containing full OutputTy maps for every name and expression)
             // is dropped here, before .collect() gathers all results.

@@ -71,15 +71,32 @@ by design, or informational notes.
 - ~~Extrude carried-overload loop is O(n^2) (`infer.rs`): could be linear with
   worklist approach.~~ Fixed: per-name carried map + eager resolution + pruning.
 
-- **Stack overflow in canonicalization on large pkgs files**: running `tix check`
-  on all of nixpkgs/pkgs (~37k files) crashes with a stack overflow during expr
-  canonicalization of a file with ~154k expressions. Inference completes fine;
-  the issue is deeply recursive OutputTy structures in the collect/render phase.
-  Needs iterative (non-recursive) canonicalization or stacker/explicit stack.
+- **OOM on full nixpkgs pkgs/**: even with `-j 1`, certain files cause
+  unbounded memory growth during inference or canonicalization, eventually
+  getting OOM-killed on 32 GB RAM. Two distinct failure modes:
 
-- **~20 GB RSS on full nixpkgs**: checking all 42k files uses ~20 GB RAM. Most
-  comes from parallel inference holding all files' type state concurrently.
-  Could mitigate with bounded parallelism or streaming results.
+  1. **Auto-generated giant package sets** (stack overflow in canonicalization):
+     `hackage-packages.nix` (764k lines, 154k exprs), `lisp-modules/imported.nix`
+     (108k lines), `tlpdb.nix`, `perl-packages.nix`, `python-packages.nix`,
+     `all-packages.nix`. These are excluded in `nixpkgs-test.sh`.
+
+  2. **Small files with deeply recursive inferred types** that blow up during
+     canonicalization or inference itself. Known examples:
+     - `chromium/common.nix` (976 lines, 278 let-bindings) — canonicalization
+       of 278 names eats >32 GB. The types are enormous due to deep attrset
+       nesting and conditional flags.
+     - `chicken/4/default.nix` (24 lines) — likely imports something that
+       produces huge types.
+
+  Root cause: canonicalization and OutputTy construction have no memory budget.
+  Possible mitigations: memory-bounded canonicalization (bail out if OutputTy
+  exceeds a depth/size limit), iterative instead of recursive tree walks,
+  or a per-file RSS watchdog.
+
+- **~20 GB RSS on full nixpkgs** (parallel): checking all 42k files in parallel
+  uses ~20 GB RAM. Most comes from parallel inference holding all files' type
+  state concurrently. Limiting `-j` helps but the per-file OOM above is the
+  harder problem.
 
 - Stale analysis name lookup (`completion.rs`): `find_name_type_by_text()` returns
   first match when source_map fails, may pick wrong shadowed binding.

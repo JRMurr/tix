@@ -162,7 +162,19 @@ toml_array() {
     echo "$result"
 }
 
-EXCLUDE_PATTERNS=("**/tests/**" "**/test/**" "**/deprecated/**")
+EXCLUDE_PATTERNS=(
+    "**/tests/**"
+    "**/test/**"
+    "**/deprecated/**"
+    # Auto-generated giant package sets (hundreds of thousands of lines,
+    # not useful to type-check). See SESSION.md.
+    "**/haskell-modules/hackage-packages.nix"
+    "**/lisp-modules/imported.nix"
+    "**/tex/texlive/tlpdb.nix"
+    "**/top-level/perl-packages.nix"
+    "**/top-level/python-packages.nix"
+    "**/top-level/all-packages.nix"
+)
 
 {
     echo "# Auto-generated for nixpkgs checking."
