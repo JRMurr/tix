@@ -482,7 +482,7 @@ impl CheckCtx<'_> {
 
                     // If the name is in poly_type_env, instantiate via extrude.
                     if let Some(&poly_ty) = self.poly_type_env.get(name) {
-                        let result = self.extrude(poly_ty, Polarity::Positive);
+                        let result = self.extrude(poly_ty, Polarity::Positive, Some(name));
                         Ok(result)
                     } else {
                         // Not yet generalized — return the pre-allocated TyId directly.
@@ -799,7 +799,40 @@ impl CheckCtx<'_> {
                     self.constrain_at(ret_ty, bound_ty)?;
                 }
 
-                // Still push the overload for deferred full resolution, which
+                // Eager resolution: if both operands are already concrete
+                // primitives, resolve the overload immediately and skip the
+                // deferred path entirely. This prevents PendingOverload
+                // entries from accumulating and being carried across SCC
+                // groups — the main cause of exponential blowup in files
+                // like generators.nix and fileset/internal.nix.
+                let lhs_concrete = self.types.find_concrete_through_inter(lhs_ty);
+                let rhs_concrete = self.types.find_concrete_through_inter(rhs_ty);
+
+                if let (Some(Ty::Primitive(lhs_prim)), Some(Ty::Primitive(rhs_prim))) =
+                    (&lhs_concrete, &rhs_concrete)
+                {
+                    if let Some(result_prim) = (spec.full_resolve)(lhs_prim, rhs_prim) {
+                        let result_ty = self.alloc_prim(result_prim);
+                        self.constrain_at(ret_ty, result_ty)?;
+                        self.constrain_at(result_ty, ret_ty)?;
+                        return Ok(ret_ty);
+                    }
+                }
+
+                // Early LHS resolution: if only the LHS is concrete, we can
+                // sometimes pin the return type early (e.g. string + _ → string).
+                // Still push the overload for error detection, but the pinned
+                // ret_ty means resolve_pending will fully resolve it within the
+                // same SCC group, preventing it from being carried.
+                if let Some(Ty::Primitive(lhs_prim)) = &lhs_concrete {
+                    if let Some(result_prim) = (spec.early_ret_from_lhs)(lhs_prim) {
+                        let result_ty = self.alloc_prim(result_prim);
+                        self.constrain_at(ret_ty, result_ty)?;
+                        self.constrain_at(result_ty, ret_ty)?;
+                    }
+                }
+
+                // Push the overload for deferred full resolution, which
                 // will pin to the precise type (int vs float) when both
                 // operands become concrete.
                 self.deferred
@@ -922,7 +955,7 @@ impl CheckCtx<'_> {
                 | BindingValue::Expr(e)
                 | BindingValue::InheritFrom(e)) = value;
                 self.current_expr = e;
-                let instantiated = self.extrude(poly_ty, Polarity::Positive);
+                let instantiated = self.extrude(poly_ty, Polarity::Positive, Some(name));
                 fields.insert(name_text, instantiated);
                 continue;
             }

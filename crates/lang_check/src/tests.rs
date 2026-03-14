@@ -738,6 +738,14 @@ test_case!(
 // Unary negation constrains the operand to Number immediately.
 test_case!(negate_lambda_number, "a: -a", (Number -> Number));
 
+// Eager resolution: literal binary ops with concrete operands resolve
+// immediately without going through the deferred overload path.
+test_case!(eager_add_string, r#""a" + "b""#, String);
+test_case!(eager_add_int, "1 + 2", Int);
+test_case!(eager_add_float, "1.0 + 2", Float);
+test_case!(eager_mul_int, "3 * 4", Int);
+test_case!(eager_mul_float, "1.0 * 2", Float);
+
 // Fully-applied arithmetic still produces precise types.
 test_case!(sub_concrete_int, "3 - 1", Int);
 test_case!(mul_concrete_float, "3.14 * 2", Float);

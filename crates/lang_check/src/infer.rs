@@ -265,12 +265,28 @@ impl CheckCtx<'_> {
 
         // --- Cleanup always runs, even on error ---
 
-        // Move unresolved overloads to the carried list — they'll be
-        // re-instantiated per call-site during extrusion.
+        // Move unresolved overloads to the per-name carried map — they'll be
+        // re-instantiated per call-site during extrusion of that name.
         let remaining = std::mem::take(&mut self.deferred.active);
+        let group_names: Vec<lang_ast::NameId> = group.iter().map(|d| d.name()).collect();
         for constraint in remaining {
             if let super::PendingConstraint::Overload(ov) = constraint {
-                self.deferred.carried.push(ov);
+                if group_names.len() == 1 {
+                    self.deferred
+                        .carried
+                        .entry(group_names[0])
+                        .or_default()
+                        .push(ov);
+                } else {
+                    // Mutual recursion: clone overloads to each name in the group
+                    for &name_id in &group_names {
+                        self.deferred
+                            .carried
+                            .entry(name_id)
+                            .or_default()
+                            .push(ov.clone());
+                    }
+                }
             }
             // Merges and HasField constraints are discarded here — they're
             // only relevant within their SCC group. (Constraints that couldn't
@@ -361,7 +377,11 @@ impl CheckCtx<'_> {
             self.types.constrain_cache.len(),
             slots_before,
             self.types.storage.len(),
-            self.deferred.carried.len(),
+            self.deferred
+                .carried
+                .values()
+                .map(|v| v.len())
+                .sum::<usize>(),
         );
 
         error
@@ -457,18 +477,18 @@ impl CheckCtx<'_> {
     // The `polarity` parameter tracks variance: positive = output/covariant,
     // negative = input/contravariant.
 
-    pub fn extrude(&mut self, ty_id: TyId, polarity: Polarity) -> TyId {
+    pub fn extrude(
+        &mut self,
+        ty_id: TyId,
+        polarity: Polarity,
+        name: Option<lang_ast::NameId>,
+    ) -> TyId {
         let mut cache = FxHashMap::with_capacity_and_hasher(64, Default::default());
         let result = self.extrude_inner(ty_id, polarity, &mut cache);
 
-        // Re-instantiate deferred overloads for any vars that were extruded.
-        // This creates per-call-site overload constraints with the fresh vars.
-        //
-        // NOTE: This fixed-point loop is O(n²) in the worst case (n deferred
-        // overloads where each pass resolves one). A worklist approach — only
-        // re-checking overloads whose operands were just added to the cache —
-        // would be O(n). Not a concern for typical Nix code, but worth
-        // revisiting if profiling shows extrude as a bottleneck.
+        // Re-instantiate deferred overloads for the name being instantiated.
+        // Only overloads carried under this name are scanned — this keeps
+        // growth O(N) instead of O(3^N) when many SCC groups carry overloads.
         //
         // When at least one operand of a deferred overload was extruded, we need
         // a fresh copy of the entire overload for this call site. For operand
@@ -481,7 +501,13 @@ impl CheckCtx<'_> {
         // may add new entries to the cache, which then makes other overloads
         // eligible for re-instantiation (e.g. when overload chains share
         // intermediate result vars like `(a + b) + (c + d)`).
-        let num_carried = self.deferred.carried.len();
+        let Some(name_id) = name else {
+            return result;
+        };
+        let Some(carried) = self.deferred.carried.get(&name_id) else {
+            return result;
+        };
+        let num_carried = carried.len();
         let mut processed = vec![false; num_carried];
         loop {
             let mut made_progress = false;
@@ -493,11 +519,12 @@ impl CheckCtx<'_> {
 
                 // Extract fields by index to avoid holding a borrow on self.deferred
                 // while calling &mut self methods below.
-                let ov_lhs = self.deferred.carried[i].constraint.lhs;
-                let ov_rhs = self.deferred.carried[i].constraint.rhs;
-                let ov_ret = self.deferred.carried[i].constraint.ret;
-                let ov_op = self.deferred.carried[i].op;
-                let ov_at = self.deferred.carried[i].constraint.at_expr;
+                let carried = &self.deferred.carried[&name_id];
+                let ov_lhs = carried[i].constraint.lhs;
+                let ov_rhs = carried[i].constraint.rhs;
+                let ov_ret = carried[i].constraint.ret;
+                let ov_op = carried[i].op;
+                let ov_at = carried[i].constraint.at_expr;
 
                 let any_extruded = cache.contains_key(&ov_lhs)
                     || cache.contains_key(&ov_rhs)
@@ -1151,16 +1178,38 @@ impl CheckCtx<'_> {
             self.types.try_mark_variable_free(TyId(idx as u32));
         }
 
+        // Pass 4: prune carried overloads whose operands are both concrete.
+        // These are fully resolved and would never contribute new constraints
+        // during future extrusions — keeping them would cause stale entries
+        // to accumulate.
+        let carried_before: usize = self.deferred.carried.values().map(|v| v.len()).sum();
+        let types = &self.types;
+        for overloads in self.deferred.carried.values_mut() {
+            overloads.retain(|ov| {
+                let lhs_concrete = types
+                    .find_concrete_through_inter(ov.constraint.lhs)
+                    .is_some();
+                let rhs_concrete = types
+                    .find_concrete_through_inter(ov.constraint.rhs)
+                    .is_some();
+                !(lhs_concrete && rhs_concrete)
+            });
+        }
+        self.deferred.carried.retain(|_, v| !v.is_empty());
+        let carried_after: usize = self.deferred.carried.values().map(|v| v.len()).sum();
+        let pruned = carried_before - carried_after;
+
         let vf_after = self.types.variable_free.len();
         let elapsed = t_compact.elapsed();
-        if pinned > 0 || elapsed.as_millis() > 5 {
+        if pinned > 0 || pruned > 0 || elapsed.as_millis() > 5 {
             log::info!(
-                "  compact_scc_graph: {:.1}ms, pinned {}, deduped {}, variable_free {} → {}",
+                "  compact_scc_graph: {:.1}ms, pinned {}, deduped {}, variable_free {} → {}, carried pruned {}",
                 elapsed.as_secs_f64() * 1000.0,
                 pinned,
                 deduped,
                 vf_before,
                 vf_after,
+                pruned,
             );
         }
     }

@@ -523,9 +523,11 @@ pub enum PendingConstraint {
 pub struct DeferredConstraints {
     /// Active pending constraints for the current SCC group.
     pub active: Vec<PendingConstraint>,
-    /// Overloads carried over from previous groups — re-instantiated per
-    /// call-site during extrusion.
-    pub carried: Vec<PendingOverload>,
+    /// Overloads carried over from previous groups, keyed by the name they
+    /// were generalized with. During extrusion, only overloads for the name
+    /// being instantiated are re-instantiated — changing growth from O(3^N)
+    /// to O(N).
+    pub carried: FxHashMap<lang_ast::NameId, Vec<PendingOverload>>,
 }
 
 #[derive(Debug, Clone)]
