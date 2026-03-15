@@ -336,17 +336,13 @@ pub fn run_check_project(
 
             let check_result = lang_check::run_inference(&inputs, None);
 
-            // Store root type in coordinator cache so later files can use it.
-            if let Some(ref inf) = check_result.inference {
-                if let Some(root_ty) = inf.expr_ty_map.get(inputs.module.entry_expr) {
-                    coordinator.set_signature(
-                        &fm.file_path,
-                        lang_check::FileSignature {
-                            root_ty: root_ty.clone(),
-                        },
-                    );
-                }
-            }
+            // NOTE: We intentionally do NOT store root types in the coordinator
+            // cache during batch mode. Accumulating OutputTy for 40k+ files
+            // causes OOM (OutputTy is a recursive Arc tree — attrsets with
+            // hundreds of fields are common in nixpkgs). The "opportunistic"
+            // cross-file resolution via resolve_imports above will read from
+            // the cache if anything is there, but we don't populate it.
+            // TODO: add memory-budgeted caching for cross-file types in batch mode
 
             tracing::info!("inference done:  {}", fm.file_path.display());
 
