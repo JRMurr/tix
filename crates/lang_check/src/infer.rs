@@ -24,6 +24,16 @@ use lang_ast::Expr;
 use lang_ty::simplify::simplify;
 use lang_ty::{AttrSetTy, PrimitiveTy, Ty};
 
+/// Read current process RSS from /proc/self/statm (Linux). Returns MB, or 0
+/// on non-Linux platforms.
+pub(crate) fn rss_mb() -> f64 {
+    std::fs::read_to_string("/proc/self/statm")
+        .ok()
+        .and_then(|s| s.split_whitespace().nth(1)?.parse::<u64>().ok())
+        .map(|pages| (pages * 4096) as f64 / (1024.0 * 1024.0))
+        .unwrap_or(0.0)
+}
+
 /// Result of attempting to resolve a single overloaded binary operation.
 enum OverloadProgress {
     /// Both operands were concrete; the return type has been fully constrained.
@@ -102,9 +112,11 @@ impl CheckCtx<'_> {
             let elapsed = t_group.elapsed();
             if elapsed.as_millis() > 50 {
                 log::info!(
-                    "SCC group {i}/{n_groups} ({}) took {:.1}ms",
+                    "SCC group {i}/{n_groups} ({}) took {:.1}ms (slots: {}, RSS: {:.0}MB)",
                     group_names.join(", "),
                     elapsed.as_secs_f64() * 1000.0,
+                    self.types.storage.len(),
+                    rss_mb(),
                 );
             }
             if let Some(err) = err {
@@ -120,10 +132,11 @@ impl CheckCtx<'_> {
             let root_elapsed = t_root.elapsed();
             if root_elapsed.as_millis() > 10 {
                 log::info!(
-                    "infer_root took {:.1}ms (cache: {}, slots: {})",
+                    "infer_root took {:.1}ms (cache: {}, slots: {}, RSS: {:.0}MB)",
                     root_elapsed.as_secs_f64() * 1000.0,
                     self.types.constrain_cache.len(),
                     self.types.storage.len(),
+                    rss_mb(),
                 );
             }
         } else {
@@ -145,8 +158,9 @@ impl CheckCtx<'_> {
         let canon_elapsed = t_canon.elapsed();
         if canon_elapsed.as_millis() > 50 {
             log::info!(
-                "canonicalization took {:.1}ms",
-                canon_elapsed.as_secs_f64() * 1000.0
+                "canonicalization took {:.1}ms (RSS: {:.0}MB)",
+                canon_elapsed.as_secs_f64() * 1000.0,
+                rss_mb(),
             );
         }
         (result, diagnostics, timed_out)

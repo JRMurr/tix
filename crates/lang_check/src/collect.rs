@@ -1107,10 +1107,12 @@ impl<'db> Collector<'db> {
         let names_elapsed = t_names.elapsed();
         if names_elapsed.as_millis() > 10 {
             log::info!(
-                "  name canonicalization: {:.1}ms ({} names, {} late-canon)",
+                "  name canonicalization: {:.1}ms ({} names, {} late-canon, cache: {}, RSS: {:.0}MB)",
                 names_elapsed.as_secs_f64() * 1000.0,
                 name_cnt,
                 late_canon_count,
+                canon.cache.len(),
+                super::infer::rss_mb(),
             );
         }
 
@@ -1142,9 +1144,11 @@ impl<'db> Collector<'db> {
             let exprs_elapsed = t_exprs.elapsed();
             if exprs_elapsed.as_millis() > 10 {
                 log::info!(
-                    "  expr canonicalization: {:.1}ms ({} exprs)",
+                    "  expr canonicalization: {:.1}ms ({} exprs, cache: {}, RSS: {:.0}MB)",
                     exprs_elapsed.as_secs_f64() * 1000.0,
                     expr_cnt,
+                    canon.cache.len(),
+                    super::infer::rss_mb(),
                 );
             }
         }
