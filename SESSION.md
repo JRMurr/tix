@@ -75,10 +75,10 @@ by design, or informational notes.
   unbounded memory growth during inference or canonicalization, eventually
   getting OOM-killed on 32 GB RAM. Two distinct failure modes:
 
-  1. **Auto-generated giant package sets** (stack overflow in canonicalization):
-     `hackage-packages.nix` (764k lines, 154k exprs), `lisp-modules/imported.nix`
-     (108k lines), `tlpdb.nix`, `perl-packages.nix`, `python-packages.nix`,
-     `all-packages.nix`. These are excluded in `nixpkgs-test.sh`.
+  1. **Auto-generated giant package sets** — previously excluded from
+     `nixpkgs-test`, now all complete successfully. Worst case is
+     `hackage-packages.nix` (769k lines) at ~31s / 1.3 GB RSS.
+     `nixpkgs-test` deadline bumped from 30s to 60s to accommodate.
 
   2. **Small files with deeply recursive inferred types** that blow up during
      canonicalization or inference itself. Known examples:

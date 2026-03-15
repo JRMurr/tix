@@ -58,30 +58,10 @@ let
   '';
 
   # Exclude patterns shared between nixpkgs-test and nixpkgs-lib-test.
-  # Auto-generated giant package sets that blow up memory.
   nixpkgsExcludePatterns = [
     "**/tests/**"
     "**/test/**"
     "**/deprecated/**"
-    "**/haskell-modules/hackage-packages.nix"
-    "**/lisp-modules/imported.nix"
-    "**/tex/texlive/tlpdb.nix"
-    "**/tex/texlive/fixed-hashes.nix"
-    "**/top-level/perl-packages.nix"
-    "**/top-level/python-packages.nix"
-    "**/top-level/all-packages.nix"
-    "**/node-packages/node-packages.nix"
-    "**/vim/plugins/generated.nix"
-    "**/vim/plugins/nvim-treesitter/generated.nix"
-    "**/elisp-packages/elpa-generated.nix"
-    "**/elisp-packages/elpa-devel-generated.nix"
-    "**/elisp-packages/nongnu-generated.nix"
-    "**/elisp-packages/nongnu-devel-generated.nix"
-    "**/lua-modules/generated-packages.nix"
-    "**/home-assistant/component-packages.nix"
-    "**/maintainers/maintainer-list.nix"
-    "**/gitlab/rubyEnv/gemset.nix"
-    "**/mastodon/gemset.nix"
   ];
 
   # Format a list of strings as a TOML array literal.
@@ -215,7 +195,7 @@ in
     text = ''
       ${sharedHelpers}
 
-      DEADLINE=30
+      DEADLINE=60
       JOBS=""
       TIMING=0
       RELEASE=0
@@ -262,7 +242,7 @@ in
             echo "                      Examples: lib/ pkgs/ nixos/ pkgs/by-name/"
             echo ""
             echo "Options:"
-            echo "  --deadline <secs>   Per-file inference deadline (default: 30)"
+            echo "  --deadline <secs>   Per-file inference deadline (default: 60)"
             echo "  --jobs, -j <N>      Number of parallel inference threads"
             echo "  --timing            Print per-phase timing and memory usage"
             echo "  --release           Build tix in release mode"
