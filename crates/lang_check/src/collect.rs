@@ -9,6 +9,7 @@
 // Lambda params flip polarity.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Instant;
 
 use la_arena::ArenaMap;
@@ -41,7 +42,10 @@ const CANON_DEADLINE_CHECK_INTERVAL: u32 = 512;
 
 struct Canonicalizer<'a> {
     table: &'a TypeStorage,
-    cache: FxHashMap<(TyId, Polarity), OutputTy>,
+    cache: FxHashMap<(TyId, Polarity), TyRef>,
+    /// Structural dedup: maps OutputTy → TyRef so that structurally
+    /// identical types share a single Arc allocation.
+    intern_table: FxHashMap<OutputTy, TyRef>,
     in_progress: FxHashSet<(TyId, Polarity)>,
     /// Optional deadline for canonicalization. When exceeded, remaining
     /// types degrade to TyVar (same as inference deadline_exceeded).
@@ -58,6 +62,7 @@ impl<'a> Canonicalizer<'a> {
         Self {
             table,
             cache: FxHashMap::default(),
+            intern_table: FxHashMap::default(),
             in_progress: FxHashSet::default(),
             deadline: None,
             op_counter: 0,
@@ -70,10 +75,30 @@ impl<'a> Canonicalizer<'a> {
         self
     }
 
-    fn canonicalize(&mut self, ty_id: TyId, polarity: Polarity) -> OutputTy {
+    /// Wrap an OutputTy in a TyRef, deduplicating structurally identical types.
+    /// Primitives, Top, Bottom, and TyVar use global interning (via TyRef::from).
+    /// Compound types are deduplicated via the per-canonicalization intern table.
+    fn intern(&mut self, ty: OutputTy) -> TyRef {
+        match &ty {
+            OutputTy::Primitive(_) | OutputTy::Top | OutputTy::Bottom | OutputTy::TyVar(_) => {
+                TyRef::from(ty)
+            }
+            _ => {
+                if let Some(existing) = self.intern_table.get(&ty) {
+                    existing.clone()
+                } else {
+                    let tyref = TyRef(Arc::new(ty.clone()));
+                    self.intern_table.insert(ty, tyref.clone());
+                    tyref
+                }
+            }
+        }
+    }
+
+    fn canonicalize(&mut self, ty_id: TyId, polarity: Polarity) -> TyRef {
         // Fast path: if deadline already exceeded, return degraded type.
         if self.deadline_exceeded {
-            return OutputTy::TyVar(ty_id.0);
+            return TyRef::from(OutputTy::TyVar(ty_id.0));
         }
 
         // Periodic deadline check.
@@ -86,18 +111,19 @@ impl<'a> Canonicalizer<'a> {
             {
                 log::warn!("canonicalization deadline exceeded, degrading remaining types");
                 self.deadline_exceeded = true;
-                return OutputTy::TyVar(ty_id.0);
+                return TyRef::from(OutputTy::TyVar(ty_id.0));
             }
         }
 
         let key = (ty_id, polarity);
 
+        // Cache hit: Arc refcount bump (O(1)) instead of deep clone.
         if let Some(cached) = self.cache.get(&key) {
             return cached.clone();
         }
 
         if self.in_progress.contains(&key) {
-            return OutputTy::TyVar(ty_id.0);
+            return TyRef::from(OutputTy::TyVar(ty_id.0));
         }
 
         // Guard against stack overflow on deeply nested type graphs.
@@ -113,7 +139,7 @@ impl<'a> Canonicalizer<'a> {
         })
     }
 
-    fn canonicalize_inner(&mut self, ty_id: TyId, polarity: Polarity) -> OutputTy {
+    fn canonicalize_inner(&mut self, ty_id: TyId, polarity: Polarity) -> TyRef {
         // Clone only the data we need: for variables, just the relevant bounds
         // Vec (Vec<TyId> ~ Vec<u32>, cheap); for concrete types, the Ty value.
         // This avoids cloning the unused bounds Vec for variables.
@@ -163,11 +189,11 @@ impl<'a> Canonicalizer<'a> {
     /// In positive position with no concrete lower bounds, a display heuristic
     /// checks for atom-only upper bounds — `ret <: Number` becomes `number`
     /// rather than a bare type variable.
-    fn expand_bounds(&mut self, bounds: &[TyId], var_id: TyId, polarity: Polarity) -> OutputTy {
+    fn expand_bounds(&mut self, bounds: &[TyId], var_id: TyId, polarity: Polarity) -> TyRef {
         // 1. Canonicalize each bound at the given polarity.
         // `bounds` is a slice from the caller's local variable (already cloned
         // from storage), so no borrow conflict with `&mut self`.
-        let members: Vec<OutputTy> = bounds
+        let members: Vec<TyRef> = bounds
             .iter()
             .map(|&b| self.canonicalize(b, polarity))
             .collect();
@@ -180,9 +206,9 @@ impl<'a> Canonicalizer<'a> {
 
         // 3. Filter bare TyVar (uninformative in either position), Bottom
         //    (identity for union), and Top (identity for intersection).
-        let concrete: Vec<OutputTy> = flattened
+        let concrete: Vec<TyRef> = flattened
             .into_iter()
-            .filter(|m| !matches!(m, OutputTy::TyVar(_) | OutputTy::Bottom | OutputTy::Top))
+            .filter(|m| !matches!(&*m.0, OutputTy::TyVar(_) | OutputTy::Bottom | OutputTy::Top))
             .collect();
 
         // 4. Polarity-specific normalization.
@@ -207,7 +233,7 @@ impl<'a> Canonicalizer<'a> {
                 let concrete = remove_redundant_negations(concrete);
                 // Contradiction detection: T ∧ ¬S = ⊥ when T ⊆ S.
                 if has_type_contradiction(&concrete) {
-                    return OutputTy::Bottom;
+                    return self.intern(OutputTy::Bottom);
                 }
                 // Factor shared members from intersections of unions:
                 // (A|C) & (B|C) = C | (A&B).
@@ -220,13 +246,13 @@ impl<'a> Canonicalizer<'a> {
             0 if had_concrete && polarity == Positive => {
                 // Tautology removal emptied the vec — all concrete members
                 // cancelled out (e.g. int | ~int). This is Top (any value).
-                OutputTy::Top
+                self.intern(OutputTy::Top)
             }
             0 => self.expand_bounds_empty_fallback(var_id, polarity),
             1 => concrete.into_iter().next().unwrap(),
             _ => match polarity {
-                Positive => OutputTy::Union(concrete.into_iter().map(TyRef::from).collect()),
-                Negative => OutputTy::Intersection(concrete.into_iter().map(TyRef::from).collect()),
+                Positive => self.intern(OutputTy::Union(concrete)),
+                Negative => self.intern(OutputTy::Intersection(concrete)),
             },
         }
     }
@@ -240,7 +266,7 @@ impl<'a> Canonicalizer<'a> {
     ///   expand them at positive polarity. Unlike positive, all lower bounds are
     ///   used (not just atoms) because they represent explicitly declared types.
     ///   If no lower bounds, return a bare TyVar.
-    fn expand_bounds_empty_fallback(&mut self, var_id: TyId, polarity: Polarity) -> OutputTy {
+    fn expand_bounds_empty_fallback(&mut self, var_id: TyId, polarity: Polarity) -> TyRef {
         if polarity == Negative {
             // When a variable in negative position (e.g. a function parameter) has
             // no upper bounds but does have lower bounds, those lower bounds
@@ -257,7 +283,7 @@ impl<'a> Canonicalizer<'a> {
                     return self.expand_bounds(&lower, var_id, Positive);
                 }
             }
-            return OutputTy::TyVar(var_id.0);
+            return TyRef::from(OutputTy::TyVar(var_id.0));
         }
 
         // Positive position: look for atom-only upper bounds.
@@ -281,34 +307,34 @@ impl<'a> Canonicalizer<'a> {
                 return self.expand_bounds(&atom_uppers, var_id, Negative);
             }
         }
-        OutputTy::TyVar(var_id.0)
+        TyRef::from(OutputTy::TyVar(var_id.0))
     }
 
-    fn canonicalize_concrete(&mut self, ty: &Ty<TyId>, polarity: Polarity) -> OutputTy {
-        match ty {
+    fn canonicalize_concrete(&mut self, ty: &Ty<TyId>, polarity: Polarity) -> TyRef {
+        // Simple arms build OutputTy and fall through to self.intern() at the
+        // bottom. Complex arms (Inter, Union, Neg) return early with TyRef.
+        let output = match ty {
             Ty::Primitive(p) => OutputTy::Primitive(*p),
             Ty::TyVar(x) => OutputTy::TyVar(*x),
             Ty::List(elem) => {
                 let c_elem = self.canonicalize(*elem, polarity);
-                OutputTy::List(TyRef::from(c_elem))
+                OutputTy::List(c_elem)
             }
             Ty::Lambda { param, body } => {
                 let c_param = self.canonicalize(*param, polarity.flip());
                 let c_body = self.canonicalize(*body, polarity);
                 OutputTy::Lambda {
-                    param: TyRef::from(c_param),
-                    body: TyRef::from(c_body),
+                    param: c_param,
+                    body: c_body,
                 }
             }
             Ty::AttrSet(attr) => {
                 let mut new_fields = BTreeMap::new();
                 for (k, &v) in &attr.fields {
                     let c_field = self.canonicalize(v, polarity);
-                    new_fields.insert(k.clone(), TyRef::from(c_field));
+                    new_fields.insert(k.clone(), c_field);
                 }
-                let dyn_ty = attr
-                    .dyn_ty
-                    .map(|d| TyRef::from(self.canonicalize(d, polarity)));
+                let dyn_ty = attr.dyn_ty.map(|d| self.canonicalize(d, polarity));
                 OutputTy::AttrSet(AttrSetTy {
                     fields: new_fields,
                     dyn_ty,
@@ -328,7 +354,7 @@ impl<'a> Canonicalizer<'a> {
             // Named: canonicalize the inner type and wrap in OutputTy::Named.
             Ty::Named(name, inner) => {
                 let c = self.canonicalize(*inner, polarity);
-                OutputTy::Named(name.clone(), TyRef::from(c))
+                OutputTy::Named(name.clone(), c)
             }
 
             // Intersection: canonicalize both members and flatten/normalize
@@ -340,16 +366,18 @@ impl<'a> Canonicalizer<'a> {
                 // Filter bare TyVar, Bottom, and Top. Keep all members
                 // around for fallback if every concrete member is filtered out.
                 let all_members = members.clone();
-                let concrete: Vec<OutputTy> = members
+                let concrete: Vec<TyRef> = members
                     .into_iter()
-                    .filter(|m| !matches!(m, OutputTy::TyVar(_) | OutputTy::Bottom | OutputTy::Top))
+                    .filter(|m| {
+                        !matches!(&*m.0, OutputTy::TyVar(_) | OutputTy::Bottom | OutputTy::Top)
+                    })
                     .collect();
                 // Check for contradictions in all polarities for Inter types.
                 // Unlike variable-bound intersections (negative polarity only),
                 // Inter types from narrowing can appear in either polarity and
                 // may contain contradictions like String ∧ Int = ⊥.
                 if has_type_contradiction(&concrete) {
-                    return OutputTy::Bottom;
+                    return self.intern(OutputTy::Bottom);
                 }
                 let had_concrete = !concrete.is_empty();
                 let concrete = match polarity {
@@ -365,16 +393,19 @@ impl<'a> Canonicalizer<'a> {
                 // Factor shared members from intersections of unions:
                 // (A|C) & (B|C) = C | (A&B).
                 let concrete = factor_shared_from_intersection(concrete);
-                match concrete.len() {
+                return match concrete.len() {
                     // Tautology removal emptied a non-empty vec in positive
                     // position — return Top.
-                    0 if had_concrete && polarity == Positive => OutputTy::Top,
+                    0 if had_concrete && polarity == Positive => self.intern(OutputTy::Top),
                     // All concrete members were filtered out. Fall back to
                     // the first member before filtering (a TyVar or Bottom).
-                    0 => all_members.into_iter().next().unwrap_or(OutputTy::Bottom),
+                    0 => all_members
+                        .into_iter()
+                        .next()
+                        .unwrap_or_else(|| self.intern(OutputTy::Bottom)),
                     1 => concrete.into_iter().next().unwrap(),
-                    _ => OutputTy::Intersection(concrete.into_iter().map(TyRef::from).collect()),
-                }
+                    _ => self.intern(OutputTy::Intersection(concrete)),
+                };
             }
 
             // Union: canonicalize both members and flatten/normalize.
@@ -383,9 +414,11 @@ impl<'a> Canonicalizer<'a> {
                 let cb = self.canonicalize(*b, polarity);
                 let members = flatten_union(vec![ca, cb]);
                 let all_members = members.clone();
-                let concrete: Vec<OutputTy> = members
+                let concrete: Vec<TyRef> = members
                     .into_iter()
-                    .filter(|m| !matches!(m, OutputTy::TyVar(_) | OutputTy::Bottom | OutputTy::Top))
+                    .filter(|m| {
+                        !matches!(&*m.0, OutputTy::TyVar(_) | OutputTy::Bottom | OutputTy::Top)
+                    })
                     .collect();
                 let had_concrete = !concrete.is_empty();
                 let concrete = match polarity {
@@ -395,16 +428,20 @@ impl<'a> Canonicalizer<'a> {
                     }
                     Negative => absorb_subsumed_union_members(concrete),
                 };
-                match concrete.len() {
+                return match concrete.len() {
                     // Tautology removal emptied a non-empty vec in positive
                     // position — return Top.
-                    0 if had_concrete && polarity == Positive => OutputTy::Top,
-                    0 => all_members.into_iter().next().unwrap_or(OutputTy::Bottom),
+                    0 if had_concrete && polarity == Positive => self.intern(OutputTy::Top),
+                    0 => all_members
+                        .into_iter()
+                        .next()
+                        .unwrap_or_else(|| self.intern(OutputTy::Bottom)),
                     1 => concrete.into_iter().next().unwrap(),
-                    _ => OutputTy::Union(concrete.into_iter().map(TyRef::from).collect()),
-                }
+                    _ => self.intern(OutputTy::Union(concrete)),
+                };
             }
-        }
+        };
+        self.intern(output)
     }
 }
 
@@ -425,7 +462,7 @@ pub fn canonicalize_standalone_with_deadline(
     if let Some(d) = deadline {
         canon = canon.with_deadline(d);
     }
-    canon.canonicalize(ty_id, polarity)
+    (*canon.canonicalize(ty_id, polarity).0).clone()
 }
 
 // ==============================================================================
@@ -440,31 +477,36 @@ pub fn canonicalize_standalone_with_deadline(
 /// 4. Anything else   → `Neg(inner)`                     (wrap as-is)
 ///
 /// Recurses on each member so nested structures are fully normalized.
-fn negate_output_ty(inner: OutputTy) -> OutputTy {
+fn negate_output_ty(inner: TyRef) -> OutputTy {
     // Guard against stack overflow on deeply nested Union/Intersection trees
     // (De Morgan expansion recurses independently of canonicalize).
-    stacker::maybe_grow(256 * 1024, 1024 * 1024, || match inner {
-        // ¬(¬A) → A
-        OutputTy::Neg(a) => (*a.0).clone(),
-
-        // ¬(A ∨ B ∨ …) → ¬A ∧ ¬B ∧ …
-        OutputTy::Union(members) => OutputTy::Intersection(
-            members
-                .into_iter()
-                .map(|m| TyRef::from(negate_output_ty((*m.0).clone())))
-                .collect(),
-        ),
-
-        // ¬(A ∧ B ∧ …) → ¬A ∨ ¬B ∨ …
-        OutputTy::Intersection(members) => OutputTy::Union(
-            members
-                .into_iter()
-                .map(|m| TyRef::from(negate_output_ty((*m.0).clone())))
-                .collect(),
-        ),
-
+    stacker::maybe_grow(256 * 1024, 1024 * 1024, || {
+        // Match on a reference to avoid moving `inner` while borrowed.
+        // The wildcard arm uses `inner.clone()` (cheap Arc refcount bump).
+        if let OutputTy::Neg(a) = &*inner.0 {
+            // ¬(¬A) → A
+            return (*a.0).clone();
+        }
+        if let OutputTy::Union(members) = &*inner.0 {
+            // ¬(A ∨ B ∨ …) → ¬A ∧ ¬B ∧ …
+            return OutputTy::Intersection(
+                members
+                    .iter()
+                    .map(|m| TyRef::from(negate_output_ty(m.clone())))
+                    .collect(),
+            );
+        }
+        if let OutputTy::Intersection(members) = &*inner.0 {
+            // ¬(A ∧ B ∧ …) → ¬A ∨ ¬B ∨ …
+            return OutputTy::Union(
+                members
+                    .iter()
+                    .map(|m| TyRef::from(negate_output_ty(m.clone())))
+                    .collect(),
+            );
+        }
         // Leaf or compound type that isn't union/intersection/neg — just wrap.
-        other => OutputTy::Neg(TyRef::from(other)),
+        OutputTy::Neg(inner)
     })
 }
 
@@ -475,11 +517,11 @@ fn negate_output_ty(inner: OutputTy) -> OutputTy {
 /// Handles all constructor kinds — primitives, attrsets, lists, lambdas — by
 /// checking structural equality between positive members and negated members.
 /// For primitives, also handles subtype tautologies (Int ∨ ¬Int).
-fn remove_tautological_pairs(members: Vec<OutputTy>) -> Vec<OutputTy> {
+fn remove_tautological_pairs(members: Vec<TyRef>) -> Vec<TyRef> {
     // Collect negated inner types.
     let negated_inners: Vec<&OutputTy> = members
         .iter()
-        .filter_map(|m| match m {
+        .filter_map(|m| match &*m.0 {
             OutputTy::Neg(inner) => Some(&*inner.0),
             _ => None,
         })
@@ -494,10 +536,11 @@ fn remove_tautological_pairs(members: Vec<OutputTy>) -> Vec<OutputTy> {
         .iter()
         .filter(|m| {
             !matches!(
-                m,
+                &*m.0,
                 OutputTy::Neg(_) | OutputTy::TyVar(_) | OutputTy::Bottom | OutputTy::Top
             )
         })
+        .map(|m| &*m.0)
         .collect();
 
     // Find tautological pairs: a positive member whose negation also appears.
@@ -527,7 +570,7 @@ fn remove_tautological_pairs(members: Vec<OutputTy>) -> Vec<OutputTy> {
     let mut neg_idx = 0;
     members
         .into_iter()
-        .filter(|m| match m {
+        .filter(|m| match &*m.0 {
             OutputTy::Neg(_) => {
                 let keep = !tautological_negatives.contains(&neg_idx);
                 neg_idx += 1;
@@ -552,12 +595,12 @@ fn remove_tautological_pairs(members: Vec<OutputTy>) -> Vec<OutputTy> {
 /// This is exact: `A | B = A` when `B <: A` structurally. The common case is
 /// `{ ... }` (open, no fields) absorbing any open attrset. Closed attrsets
 /// are never absorbed because they assert "exactly these fields".
-fn absorb_subsumed_union_members(members: Vec<OutputTy>) -> Vec<OutputTy> {
+fn absorb_subsumed_union_members(members: Vec<TyRef>) -> Vec<TyRef> {
     // Collect indices of attrset members for pairwise comparison.
     let attrset_indices: SmallVec<[usize; 8]> = members
         .iter()
         .enumerate()
-        .filter_map(|(i, m)| matches!(m, OutputTy::AttrSet(_)).then_some(i))
+        .filter_map(|(i, m)| matches!(&*m.0, OutputTy::AttrSet(_)).then_some(i))
         .collect();
 
     if attrset_indices.len() < 2 {
@@ -575,11 +618,11 @@ fn absorb_subsumed_union_members(members: Vec<OutputTy>) -> Vec<OutputTy> {
             if i == j || subsumed.contains(&j) {
                 continue;
             }
-            let a = match &members[i] {
+            let a = match &*members[i].0 {
                 OutputTy::AttrSet(a) => a,
                 _ => unreachable!(),
             };
-            let b = match &members[j] {
+            let b = match &*members[j].0 {
                 OutputTy::AttrSet(b) => b,
                 _ => unreachable!(),
             };
@@ -625,16 +668,16 @@ fn absorb_subsumed_union_members(members: Vec<OutputTy>) -> Vec<OutputTy> {
 /// 3. Find OutputTy members present in ALL unions (set intersection)
 /// 4. Remove shared members from each union, producing remainders
 /// 5. Return `Union(shared..., Intersection(remainders..., non_unions...))`
-fn factor_shared_from_intersection(members: Vec<OutputTy>) -> Vec<OutputTy> {
-    let mut unions: SmallVec<[SmallVec<[OutputTy; 8]>; 4]> = SmallVec::new();
-    let mut non_unions: SmallVec<[OutputTy; 8]> = SmallVec::new();
+fn factor_shared_from_intersection(members: Vec<TyRef>) -> Vec<TyRef> {
+    let mut unions: SmallVec<[SmallVec<[TyRef; 8]>; 4]> = SmallVec::new();
+    let mut non_unions: SmallVec<[TyRef; 8]> = SmallVec::new();
 
     for m in members {
-        match m {
+        match &*m.0 {
             OutputTy::Union(inner) => {
-                unions.push(inner.into_iter().map(|r| (*r.0).clone()).collect());
+                unions.push(inner.iter().cloned().collect());
             }
-            other => non_unions.push(other),
+            _ => non_unions.push(m),
         }
     }
 
@@ -645,14 +688,14 @@ fn factor_shared_from_intersection(members: Vec<OutputTy>) -> Vec<OutputTy> {
             match u.len() {
                 0 => {}
                 1 => result.push(u.into_iter().next().unwrap()),
-                _ => result.push(OutputTy::Union(u.into_iter().map(TyRef::from).collect())),
+                _ => result.push(TyRef::from(OutputTy::Union(u.into_vec()))),
             }
         }
         return result.into_vec();
     }
 
     // Find members present in ALL unions. Linear scan since N is typically 2-8.
-    let mut shared: SmallVec<[OutputTy; 8]> = unions[0].clone();
+    let mut shared: SmallVec<[TyRef; 8]> = unions[0].clone();
     for u in &unions[1..] {
         shared.retain(|m| u.contains(m));
     }
@@ -661,57 +704,51 @@ fn factor_shared_from_intersection(members: Vec<OutputTy>) -> Vec<OutputTy> {
         // No shared members — reassemble unchanged.
         let mut result = non_unions;
         for u in unions {
-            result.push(OutputTy::Union(u.into_iter().map(TyRef::from).collect()));
+            result.push(TyRef::from(OutputTy::Union(u.into_vec())));
         }
         return result.into_vec();
     }
 
     // Remove shared members from each union, producing remainders.
-    let remainders: SmallVec<[OutputTy; 8]> = unions
+    let remainders: SmallVec<[TyRef; 8]> = unions
         .into_iter()
         .filter_map(|u| {
-            let remainder: SmallVec<[OutputTy; 8]> =
+            let remainder: SmallVec<[TyRef; 8]> =
                 u.into_iter().filter(|m| !shared.contains(m)).collect();
             match remainder.len() {
                 0 => None,
                 1 => Some(remainder.into_iter().next().unwrap()),
-                _ => Some(OutputTy::Union(
-                    remainder.into_iter().map(TyRef::from).collect(),
-                )),
+                _ => Some(TyRef::from(OutputTy::Union(remainder.into_vec()))),
             }
         })
         .collect();
 
     // Build the factored result: shared | (remainders & non_unions)
-    let mut shared_vec: SmallVec<[OutputTy; 8]> = shared;
+    let mut shared_vec: SmallVec<[TyRef; 8]> = shared;
     shared_vec.sort();
 
     // Build the intersection of remainders + non_unions.
-    let mut intersection_parts: SmallVec<[OutputTy; 8]> = remainders;
+    let mut intersection_parts: SmallVec<[TyRef; 8]> = remainders;
     intersection_parts.extend(non_unions);
 
     if intersection_parts.is_empty() {
         // All union members were shared — result is just the shared union.
         match shared_vec.len() {
             1 => vec![shared_vec.into_iter().next().unwrap()],
-            _ => vec![OutputTy::Union(
-                shared_vec.into_iter().map(TyRef::from).collect(),
-            )],
+            _ => vec![TyRef::from(OutputTy::Union(shared_vec.into_vec()))],
         }
     } else {
         // Result is shared | intersection(remainders, non_unions).
         let intersection = match intersection_parts.len() {
             1 => intersection_parts.into_iter().next().unwrap(),
-            _ => OutputTy::Intersection(intersection_parts.into_iter().map(TyRef::from).collect()),
+            _ => TyRef::from(OutputTy::Intersection(intersection_parts.into_vec())),
         };
         shared_vec.push(intersection);
         // Return as a single-element vec containing the final Union.
         // The caller (expand_bounds/canonicalize_concrete) will wrap in
         // Intersection if there are multiple members, but we've already
         // restructured into a Union, so return it as one element.
-        vec![OutputTy::Union(
-            shared_vec.into_iter().map(TyRef::from).collect(),
-        )]
+        vec![TyRef::from(OutputTy::Union(shared_vec.into_vec()))]
     }
 }
 
@@ -729,13 +766,13 @@ fn factor_shared_from_intersection(members: Vec<OutputTy>) -> Vec<OutputTy> {
 /// - `{name: string} & ~{name: string}` → contradiction (structural equality)
 /// - `number & ~int` → NOT a contradiction (Number ⊄ Int)
 /// - `int & ~null` → NOT a contradiction (disjoint, handled by redundant neg removal)
-fn has_type_contradiction(members: &[OutputTy]) -> bool {
+fn has_type_contradiction(members: &[TyRef]) -> bool {
     // Collect positive (non-negated) and negated inner types.
     let mut positives: SmallVec<[&OutputTy; 8]> = SmallVec::new();
     let mut negated_inners: SmallVec<[&OutputTy; 8]> = SmallVec::new();
 
     for m in members {
-        match m {
+        match &*m.0 {
             OutputTy::Neg(inner) => negated_inners.push(&inner.0),
             OutputTy::TyVar(_) | OutputTy::Bottom | OutputTy::Top => {}
             other => positives.push(other),
@@ -843,12 +880,12 @@ fn are_output_types_disjoint(a: &OutputTy, b: &OutputTy) -> bool {
 ///
 /// Does NOT remove when the only positive members are TyVars — `a & ~null`
 /// stays as-is because `a` could be null.
-fn remove_redundant_negations(members: Vec<OutputTy>) -> Vec<OutputTy> {
+fn remove_redundant_negations(members: Vec<TyRef>) -> Vec<TyRef> {
     // Check for positive members with known constructors (not TyVar/Bottom/Neg).
     // Use indices to avoid cloning — are_output_types_disjoint takes references.
     let has_concrete = members.iter().any(|m| {
         matches!(
-            m,
+            &*m.0,
             OutputTy::Primitive(_)
                 | OutputTy::AttrSet(_)
                 | OutputTy::List(_)
@@ -866,7 +903,7 @@ fn remove_redundant_negations(members: Vec<OutputTy>) -> Vec<OutputTy> {
         .enumerate()
         .filter_map(|(i, m)| {
             matches!(
-                m,
+                &*m.0,
                 OutputTy::Primitive(_)
                     | OutputTy::AttrSet(_)
                     | OutputTy::List(_)
@@ -881,12 +918,12 @@ fn remove_redundant_negations(members: Vec<OutputTy>) -> Vec<OutputTy> {
     let keep: SmallVec<[bool; 16]> = members
         .iter()
         .map(|m| {
-            if let OutputTy::Neg(inner) = m {
+            if let OutputTy::Neg(inner) = &*m.0 {
                 // Keep this negation only if it's NOT disjoint from all concrete
                 // positives. If it IS disjoint from every positive, it's redundant.
                 !concrete_indices
                     .iter()
-                    .all(|&i| are_output_types_disjoint(&members[i], &inner.0))
+                    .all(|&i| are_output_types_disjoint(&members[i].0, &inner.0))
             } else {
                 true
             }
@@ -906,16 +943,16 @@ fn remove_redundant_negations(members: Vec<OutputTy>) -> Vec<OutputTy> {
 /// Uses structural equality (not normalize_vars) so that distinct type variables
 /// are preserved even if they'd normalize to the same index.
 fn flatten_composite(
-    members: Vec<OutputTy>,
+    members: Vec<TyRef>,
     extract_nested: fn(&OutputTy) -> Option<&Vec<TyRef>>,
-) -> Vec<OutputTy> {
-    let mut result: SmallVec<[OutputTy; 8]> = SmallVec::new();
+) -> Vec<TyRef> {
+    let mut result: SmallVec<[TyRef; 8]> = SmallVec::new();
     for m in members {
-        if let Some(inner) = extract_nested(&m) {
+        if let Some(inner) = extract_nested(&m.0) {
             for sub in inner {
                 // Linear contains() is faster than HashSet for N typically 2-8.
-                if !result.contains(&sub.0) {
-                    result.push((*sub.0).clone());
+                if !result.contains(sub) {
+                    result.push(sub.clone());
                 }
             }
         } else if !result.contains(&m) {
@@ -925,14 +962,14 @@ fn flatten_composite(
     result.into_vec()
 }
 
-fn flatten_union(members: Vec<OutputTy>) -> Vec<OutputTy> {
+fn flatten_union(members: Vec<TyRef>) -> Vec<TyRef> {
     flatten_composite(members, |ty| match ty {
         OutputTy::Union(inner) => Some(inner),
         _ => None,
     })
 }
 
-fn flatten_intersection(members: Vec<OutputTy>) -> Vec<OutputTy> {
+fn flatten_intersection(members: Vec<TyRef>) -> Vec<TyRef> {
     flatten_composite(members, |ty| match ty {
         OutputTy::Intersection(inner) => Some(inner),
         _ => None,
@@ -942,14 +979,14 @@ fn flatten_intersection(members: Vec<OutputTy>) -> Vec<OutputTy> {
 /// Merge multiple attrsets in an intersection into a single attrset.
 /// The intersection of `{ foo: int }` and `{ bar: string }` is `{ foo: int, bar: string }`.
 /// For overlapping fields, the field types are intersected.
-fn merge_attrset_intersection(members: Vec<OutputTy>) -> Vec<OutputTy> {
+fn merge_attrset_intersection(members: Vec<TyRef>) -> Vec<TyRef> {
     let mut attrsets: SmallVec<[AttrSetTy<TyRef>; 4]> = SmallVec::new();
-    let mut others: SmallVec<[OutputTy; 8]> = SmallVec::new();
+    let mut others: SmallVec<[TyRef; 8]> = SmallVec::new();
 
     for m in members {
-        match m {
-            OutputTy::AttrSet(attr) => attrsets.push(attr),
-            other => others.push(other),
+        match &*m.0 {
+            OutputTy::AttrSet(attr) => attrsets.push(attr.clone()),
+            _ => others.push(m),
         }
     }
 
@@ -1020,7 +1057,7 @@ fn merge_attrset_intersection(members: Vec<OutputTy>) -> Vec<OutputTy> {
         optional_fields: merged_optional,
     });
 
-    others.push(merged);
+    others.push(TyRef::from(merged));
     others.into_vec()
 }
 
@@ -1088,7 +1125,7 @@ impl<'db> Collector<'db> {
                         OutputTy::TyVar(0)
                     } else {
                         late_canon_count += 1;
-                        canon.canonicalize(ty, Positive)
+                        (*canon.canonicalize(ty, Positive).0).clone()
                     }
                 } else {
                     early.clone()
@@ -1100,7 +1137,7 @@ impl<'db> Collector<'db> {
                 OutputTy::TyVar(0)
             } else {
                 late_canon_count += 1;
-                canon.canonicalize(ty, Positive)
+                (*canon.canonicalize(ty, Positive).0).clone()
             };
             name_ty_map.insert(name, output.normalize_vars());
         }
@@ -1133,7 +1170,7 @@ impl<'db> Collector<'db> {
                 .collect();
 
             for (expr, ty) in expr_tys {
-                let mut output = canon.canonicalize(ty, Positive);
+                let mut output = (*canon.canonicalize(ty, Positive).0).clone();
                 if expr == self.ctx.module.entry_expr {
                     output = output.normalize_vars();
                 }
@@ -1170,7 +1207,7 @@ mod tests {
     #[test]
     fn negate_double_neg() {
         // ¬(¬Int) → Int
-        let inner = OutputTy::Neg(TyRef::from(arc_ty!(Int)));
+        let inner = TyRef::from(OutputTy::Neg(TyRef::from(arc_ty!(Int))));
         let negated = negate_output_ty(inner);
         // Double negation in negate_output_ty: Neg(Neg(x)) matches the Neg arm,
         // but the input is Neg(Int) — the outer negate_output_ty sees Neg(Int)
@@ -1181,7 +1218,7 @@ mod tests {
     #[test]
     fn negate_union_de_morgan() {
         // ¬(Int ∨ String) → ¬Int ∧ ¬String
-        let input = arc_ty!(union!(Int, String));
+        let input = TyRef::from(arc_ty!(union!(Int, String)));
         let result = negate_output_ty(input);
         let expected = OutputTy::Intersection(vec![
             TyRef::from(OutputTy::Neg(TyRef::from(arc_ty!(Int)))),
@@ -1193,7 +1230,7 @@ mod tests {
     #[test]
     fn negate_intersection_de_morgan() {
         // ¬(Int ∧ String) → ¬Int ∨ ¬String
-        let input = arc_ty!(isect!(Int, String));
+        let input = TyRef::from(arc_ty!(isect!(Int, String)));
         let result = negate_output_ty(input);
         let expected = OutputTy::Union(vec![
             TyRef::from(OutputTy::Neg(TyRef::from(arc_ty!(Int)))),
@@ -1205,10 +1242,10 @@ mod tests {
     #[test]
     fn negate_nested_de_morgan() {
         // ¬(¬Int ∨ String) → ¬(¬Int) ∧ ¬String → Int ∧ ¬String
-        let input = OutputTy::Union(vec![
+        let input = TyRef::from(OutputTy::Union(vec![
             TyRef::from(OutputTy::Neg(TyRef::from(arc_ty!(Int)))),
             TyRef::from(arc_ty!(String)),
-        ]);
+        ]));
         let result = negate_output_ty(input);
         let expected = OutputTy::Intersection(vec![
             TyRef::from(arc_ty!(Int)),
@@ -1220,7 +1257,7 @@ mod tests {
     #[test]
     fn negate_primitive_wraps() {
         // ¬Int → Neg(Int)
-        let result = negate_output_ty(arc_ty!(Int));
+        let result = negate_output_ty(TyRef::from(arc_ty!(Int)));
         assert_eq!(result, OutputTy::Neg(TyRef::from(arc_ty!(Int))));
     }
 
@@ -1229,42 +1266,54 @@ mod tests {
     #[test]
     fn contradiction_exact_match() {
         // Int ∧ ¬Int → contradiction
-        let members = vec![arc_ty!(Int), OutputTy::Neg(TyRef::from(arc_ty!(Int)))];
+        let members = vec![
+            TyRef::from(arc_ty!(Int)),
+            TyRef::from(OutputTy::Neg(TyRef::from(arc_ty!(Int)))),
+        ];
         assert!(has_type_contradiction(&members));
     }
 
     #[test]
     fn contradiction_subtype() {
         // Int ∧ ¬Number → contradiction (Int <: Number)
-        let members = vec![arc_ty!(Int), OutputTy::Neg(TyRef::from(arc_ty!(Number)))];
+        let members = vec![
+            TyRef::from(arc_ty!(Int)),
+            TyRef::from(OutputTy::Neg(TyRef::from(arc_ty!(Number)))),
+        ];
         assert!(has_type_contradiction(&members));
     }
 
     #[test]
     fn contradiction_float_subtype() {
         // Float ∧ ¬Number → contradiction (Float <: Number)
-        let members = vec![arc_ty!(Float), OutputTy::Neg(TyRef::from(arc_ty!(Number)))];
+        let members = vec![
+            TyRef::from(arc_ty!(Float)),
+            TyRef::from(OutputTy::Neg(TyRef::from(arc_ty!(Number)))),
+        ];
         assert!(has_type_contradiction(&members));
     }
 
     #[test]
     fn no_contradiction_different_types() {
         // Int ∧ ¬String — no contradiction
-        let members = vec![arc_ty!(Int), OutputTy::Neg(TyRef::from(arc_ty!(String)))];
+        let members = vec![
+            TyRef::from(arc_ty!(Int)),
+            TyRef::from(OutputTy::Neg(TyRef::from(arc_ty!(String)))),
+        ];
         assert!(!has_type_contradiction(&members));
     }
 
     #[test]
     fn contradiction_disjoint_positives() {
         // Int ∧ String — disjoint primitives, IS a contradiction.
-        let members = vec![arc_ty!(Int), arc_ty!(String)];
+        let members = vec![TyRef::from(arc_ty!(Int)), TyRef::from(arc_ty!(String))];
         assert!(has_type_contradiction(&members));
     }
 
     #[test]
     fn no_contradiction_same_positives() {
         // Int ∧ Int — same type, no contradiction.
-        let members = vec![arc_ty!(Int), arc_ty!(Int)];
+        let members = vec![TyRef::from(arc_ty!(Int)), TyRef::from(arc_ty!(Int))];
         assert!(!has_type_contradiction(&members));
     }
 
@@ -1273,7 +1322,10 @@ mod tests {
     #[test]
     fn tautology_exact_match() {
         // Int ∨ ¬Int → empty (both removed)
-        let members = vec![arc_ty!(Int), OutputTy::Neg(TyRef::from(arc_ty!(Int)))];
+        let members = vec![
+            TyRef::from(arc_ty!(Int)),
+            TyRef::from(OutputTy::Neg(TyRef::from(arc_ty!(Int)))),
+        ];
         let result = remove_tautological_pairs(members);
         assert!(result.is_empty());
     }
@@ -1282,18 +1334,21 @@ mod tests {
     fn tautology_preserves_other_members() {
         // Int ∨ ¬Int ∨ String → String
         let members = vec![
-            arc_ty!(Int),
-            OutputTy::Neg(TyRef::from(arc_ty!(Int))),
-            arc_ty!(String),
+            TyRef::from(arc_ty!(Int)),
+            TyRef::from(OutputTy::Neg(TyRef::from(arc_ty!(Int)))),
+            TyRef::from(arc_ty!(String)),
         ];
         let result = remove_tautological_pairs(members);
-        assert_eq!(result, vec![arc_ty!(String)]);
+        assert_eq!(result, vec![TyRef::from(arc_ty!(String))]);
     }
 
     #[test]
     fn no_tautology_different_types() {
         // Int ∨ ¬String — no tautology, kept as-is
-        let members = vec![arc_ty!(Int), OutputTy::Neg(TyRef::from(arc_ty!(String)))];
+        let members = vec![
+            TyRef::from(arc_ty!(Int)),
+            TyRef::from(OutputTy::Neg(TyRef::from(arc_ty!(String)))),
+        ];
         let result = remove_tautological_pairs(members.clone());
         assert_eq!(result, members);
     }
@@ -1508,7 +1563,10 @@ mod tests {
     fn contradiction_attrset_neg_attrset() {
         // {x: int} ∧ ¬{x: int} → contradiction (same attrset).
         let attrset = arc_ty!({ "x": Int });
-        let members = vec![attrset.clone(), OutputTy::Neg(TyRef::from(attrset))];
+        let members = vec![
+            TyRef::from(attrset.clone()),
+            TyRef::from(OutputTy::Neg(TyRef::from(attrset))),
+        ];
         assert!(has_type_contradiction(&members));
     }
 
@@ -1516,7 +1574,10 @@ mod tests {
     fn contradiction_list_neg_list() {
         // [int] ∧ ¬[int] → contradiction.
         let list = arc_ty!([Int]);
-        let members = vec![list.clone(), OutputTy::Neg(TyRef::from(list))];
+        let members = vec![
+            TyRef::from(list.clone()),
+            TyRef::from(OutputTy::Neg(TyRef::from(list))),
+        ];
         assert!(has_type_contradiction(&members));
     }
 
@@ -1524,8 +1585,8 @@ mod tests {
     fn no_contradiction_attrset_neg_null() {
         // {x: int} ∧ ¬null — not contradictory (different constructors).
         let members = vec![
-            arc_ty!({ "x": Int }),
-            OutputTy::Neg(TyRef::from(arc_ty!(Null))),
+            TyRef::from(arc_ty!({ "x": Int })),
+            TyRef::from(OutputTy::Neg(TyRef::from(arc_ty!(Null)))),
         ];
         assert!(!has_type_contradiction(&members));
     }
@@ -1533,7 +1594,10 @@ mod tests {
     #[test]
     fn no_contradiction_list_neg_string() {
         // [int] ∧ ¬string — not contradictory.
-        let members = vec![arc_ty!([Int]), OutputTy::Neg(TyRef::from(arc_ty!(String)))];
+        let members = vec![
+            TyRef::from(arc_ty!([Int])),
+            TyRef::from(OutputTy::Neg(TyRef::from(arc_ty!(String)))),
+        ];
         assert!(!has_type_contradiction(&members));
     }
 
@@ -1543,34 +1607,43 @@ mod tests {
     fn redundant_neg_removed_attrset_neg_null() {
         // {x: int} ∧ ¬null → {x: int} (attrset is inherently non-null).
         let attrset = arc_ty!({ "x": Int });
-        let members = vec![attrset.clone(), OutputTy::Neg(TyRef::from(arc_ty!(Null)))];
+        let members = vec![
+            TyRef::from(attrset.clone()),
+            TyRef::from(OutputTy::Neg(TyRef::from(arc_ty!(Null)))),
+        ];
         let result = remove_redundant_negations(members);
-        assert_eq!(result, vec![attrset]);
+        assert_eq!(result, vec![TyRef::from(attrset)]);
     }
 
     #[test]
     fn redundant_neg_removed_list_neg_string() {
         // [int] ∧ ¬string → [int] (list is inherently non-string).
         let list = arc_ty!([Int]);
-        let members = vec![list.clone(), OutputTy::Neg(TyRef::from(arc_ty!(String)))];
+        let members = vec![
+            TyRef::from(list.clone()),
+            TyRef::from(OutputTy::Neg(TyRef::from(arc_ty!(String)))),
+        ];
         let result = remove_redundant_negations(members);
-        assert_eq!(result, vec![list]);
+        assert_eq!(result, vec![TyRef::from(list)]);
     }
 
     #[test]
     fn redundant_neg_removed_number_neg_null() {
         // number ∧ ¬null → number (number and null are disjoint).
-        let members = vec![arc_ty!(Number), OutputTy::Neg(TyRef::from(arc_ty!(Null)))];
+        let members = vec![
+            TyRef::from(arc_ty!(Number)),
+            TyRef::from(OutputTy::Neg(TyRef::from(arc_ty!(Null)))),
+        ];
         let result = remove_redundant_negations(members);
-        assert_eq!(result, vec![arc_ty!(Number)]);
+        assert_eq!(result, vec![TyRef::from(arc_ty!(Number))]);
     }
 
     #[test]
     fn redundant_neg_kept_when_only_tyvar() {
         // a ∧ ¬null — TyVar could be null, so ¬null is not redundant.
         let members = vec![
-            OutputTy::TyVar(0),
-            OutputTy::Neg(TyRef::from(arc_ty!(Null))),
+            TyRef::from(OutputTy::TyVar(0)),
+            TyRef::from(OutputTy::Neg(TyRef::from(arc_ty!(Null)))),
         ];
         let result = remove_redundant_negations(members.clone());
         assert_eq!(result, members);
@@ -1580,7 +1653,10 @@ mod tests {
     fn redundant_neg_not_removed_when_overlapping() {
         // int ∧ ¬number — not redundant (Int <: Number, this is a contradiction,
         // but the negation itself is NOT redundant — it carries information).
-        let members = vec![arc_ty!(Int), OutputTy::Neg(TyRef::from(arc_ty!(Number)))];
+        let members = vec![
+            TyRef::from(arc_ty!(Int)),
+            TyRef::from(OutputTy::Neg(TyRef::from(arc_ty!(Number)))),
+        ];
         let result = remove_redundant_negations(members.clone());
         assert_eq!(result, members);
     }
@@ -1591,7 +1667,10 @@ mod tests {
     fn tautology_attrset_neg_attrset() {
         // {x: int} ∨ ¬{x: int} → empty (tautology).
         let attrset = arc_ty!({ "x": Int });
-        let members = vec![attrset.clone(), OutputTy::Neg(TyRef::from(attrset))];
+        let members = vec![
+            TyRef::from(attrset.clone()),
+            TyRef::from(OutputTy::Neg(TyRef::from(attrset))),
+        ];
         let result = remove_tautological_pairs(members);
         assert!(result.is_empty());
     }
@@ -1600,7 +1679,10 @@ mod tests {
     fn tautology_list_neg_list() {
         // [int] ∨ ¬[int] → empty.
         let list = arc_ty!([Int]);
-        let members = vec![list.clone(), OutputTy::Neg(TyRef::from(list))];
+        let members = vec![
+            TyRef::from(list.clone()),
+            TyRef::from(OutputTy::Neg(TyRef::from(list))),
+        ];
         let result = remove_tautological_pairs(members);
         assert!(result.is_empty());
     }
@@ -1610,12 +1692,12 @@ mod tests {
         // {x: int} ∨ ¬{x: int} ∨ string → string.
         let attrset = arc_ty!({ "x": Int });
         let members = vec![
-            attrset.clone(),
-            OutputTy::Neg(TyRef::from(attrset)),
-            arc_ty!(String),
+            TyRef::from(attrset.clone()),
+            TyRef::from(OutputTy::Neg(TyRef::from(attrset))),
+            TyRef::from(arc_ty!(String)),
         ];
         let result = remove_tautological_pairs(members);
-        assert_eq!(result, vec![arc_ty!(String)]);
+        assert_eq!(result, vec![TyRef::from(arc_ty!(String))]);
     }
 
     // -- is_output_subtype_or_equal tests --------------------------------------
@@ -1672,7 +1754,10 @@ mod tests {
         // so Number ∧ ¬Int = Float (a valid, inhabited type). The old
         // "not disjoint" check incorrectly flagged this as contradictory
         // because Number and Int overlap.
-        let members = vec![arc_ty!(Number), OutputTy::Neg(TyRef::from(arc_ty!(Int)))];
+        let members = vec![
+            TyRef::from(arc_ty!(Number)),
+            TyRef::from(OutputTy::Neg(TyRef::from(arc_ty!(Int)))),
+        ];
         assert!(
             !has_type_contradiction(&members),
             "Number ∧ ¬Int should NOT be a contradiction (Number ⊄ Int)"
@@ -1682,7 +1767,10 @@ mod tests {
     #[test]
     fn no_contradiction_number_neg_float() {
         // Number ∧ ¬Float should NOT be a contradiction (Number ∧ ¬Float = Int).
-        let members = vec![arc_ty!(Number), OutputTy::Neg(TyRef::from(arc_ty!(Float)))];
+        let members = vec![
+            TyRef::from(arc_ty!(Number)),
+            TyRef::from(OutputTy::Neg(TyRef::from(arc_ty!(Float)))),
+        ];
         assert!(
             !has_type_contradiction(&members),
             "Number ∧ ¬Float should NOT be a contradiction (Number ⊄ Float)"
@@ -1725,9 +1813,9 @@ mod tests {
     fn top_identity_for_has_type_contradiction() {
         // Top in a contradiction check should be ignored (like TyVar).
         let members = vec![
-            arc_ty!(Top),
-            arc_ty!(Int),
-            OutputTy::Neg(TyRef::from(arc_ty!(String))),
+            TyRef::from(arc_ty!(Top)),
+            TyRef::from(arc_ty!(Int)),
+            TyRef::from(OutputTy::Neg(TyRef::from(arc_ty!(String)))),
         ];
         assert!(!has_type_contradiction(&members));
     }
@@ -1740,9 +1828,9 @@ mod tests {
         // The bare open attrset subsumes any open attrset with more fields.
         let bare_open = arc_ty!({ ; ... });
         let specific_open = arc_ty!({ "setenv": String; ... });
-        let members = vec![bare_open.clone(), specific_open];
+        let members = vec![TyRef::from(bare_open.clone()), TyRef::from(specific_open)];
         let result = absorb_subsumed_union_members(members);
-        assert_eq!(result, vec![bare_open]);
+        assert_eq!(result, vec![TyRef::from(bare_open)]);
     }
 
     #[test]
@@ -1751,9 +1839,9 @@ mod tests {
         // { x: int } | { x: int, y: string } → unchanged (both closed).
         let a = arc_ty!({ "x": Int });
         let b = arc_ty!({ "x": Int, "y": String });
-        let members = vec![a.clone(), b.clone()];
+        let members = vec![TyRef::from(a.clone()), TyRef::from(b.clone())];
         let result = absorb_subsumed_union_members(members);
-        assert_eq!(result, vec![a, b]);
+        assert_eq!(result, vec![TyRef::from(a), TyRef::from(b)]);
     }
 
     #[test]
@@ -1761,9 +1849,9 @@ mod tests {
         // { x: int, ... } | { y: string, ... } → unchanged (neither subsumes).
         let a = arc_ty!({ "x": Int; ... });
         let b = arc_ty!({ "y": String; ... });
-        let members = vec![a.clone(), b.clone()];
+        let members = vec![TyRef::from(a.clone()), TyRef::from(b.clone())];
         let result = absorb_subsumed_union_members(members);
-        assert_eq!(result, vec![a, b]);
+        assert_eq!(result, vec![TyRef::from(a), TyRef::from(b)]);
     }
 
     #[test]
@@ -1772,9 +1860,9 @@ mod tests {
         // The first subsumes the second (every required field of first is in second).
         let general = arc_ty!({ "x": Int; ... });
         let specific = arc_ty!({ "x": Int, "y": String; ... });
-        let members = vec![general.clone(), specific];
+        let members = vec![TyRef::from(general.clone()), TyRef::from(specific)];
         let result = absorb_subsumed_union_members(members);
-        assert_eq!(result, vec![general]);
+        assert_eq!(result, vec![TyRef::from(general)]);
     }
 
     #[test]
@@ -1782,9 +1870,16 @@ mod tests {
         // string | { ... } | { x: int, ... } → string | { ... }
         let bare_open = arc_ty!({ ; ... });
         let specific = arc_ty!({ "x": Int; ... });
-        let members = vec![arc_ty!(String), bare_open.clone(), specific];
+        let members = vec![
+            TyRef::from(arc_ty!(String)),
+            TyRef::from(bare_open.clone()),
+            TyRef::from(specific),
+        ];
         let result = absorb_subsumed_union_members(members);
-        assert_eq!(result, vec![arc_ty!(String), bare_open]);
+        assert_eq!(
+            result,
+            vec![TyRef::from(arc_ty!(String)), TyRef::from(bare_open)]
+        );
     }
 
     // -- factor_shared_from_intersection tests --------------------------------
@@ -1794,19 +1889,19 @@ mod tests {
         // (A|C) & (B|C) → C | (A&B)
         // (int|string) & (bool|string) → string | (int & bool)
         let members = vec![
-            OutputTy::Union(vec![
+            TyRef::from(OutputTy::Union(vec![
                 TyRef::from(arc_ty!(Int)),
                 TyRef::from(arc_ty!(String)),
-            ]),
-            OutputTy::Union(vec![
+            ])),
+            TyRef::from(OutputTy::Union(vec![
                 TyRef::from(arc_ty!(Bool)),
                 TyRef::from(arc_ty!(String)),
-            ]),
+            ])),
         ];
         let result = factor_shared_from_intersection(members);
         assert_eq!(result.len(), 1, "should produce single element: {result:?}");
         // The result should be a Union containing string and (int & bool).
-        match &result[0] {
+        match &*result[0].0 {
             OutputTy::Union(parts) => {
                 assert_eq!(parts.len(), 2, "union should have 2 members: {parts:?}");
                 // One should be string, the other an intersection of int & bool.
@@ -1827,14 +1922,14 @@ mod tests {
     #[test]
     fn factor_no_shared_unchanged() {
         // (int|string) & (bool|float) → unchanged (no shared members).
-        let u1 = OutputTy::Union(vec![
+        let u1 = TyRef::from(OutputTy::Union(vec![
             TyRef::from(arc_ty!(Int)),
             TyRef::from(arc_ty!(String)),
-        ]);
-        let u2 = OutputTy::Union(vec![
+        ]));
+        let u2 = TyRef::from(OutputTy::Union(vec![
             TyRef::from(arc_ty!(Bool)),
             TyRef::from(arc_ty!(Float)),
-        ]);
+        ]));
         let members = vec![u1.clone(), u2.clone()];
         let result = factor_shared_from_intersection(members);
         // Should reassemble as two union members unchanged.
@@ -1844,11 +1939,11 @@ mod tests {
     #[test]
     fn factor_fewer_than_two_unions_unchanged() {
         // Only one union member — nothing to factor.
-        let u1 = OutputTy::Union(vec![
+        let u1 = TyRef::from(OutputTy::Union(vec![
             TyRef::from(arc_ty!(Int)),
             TyRef::from(arc_ty!(String)),
-        ]);
-        let non_union = arc_ty!(Bool);
+        ]));
+        let non_union = TyRef::from(arc_ty!(Bool));
         let members = vec![u1.clone(), non_union.clone()];
         let result = factor_shared_from_intersection(members);
         assert_eq!(result, vec![non_union, u1]);
@@ -1858,19 +1953,19 @@ mod tests {
     fn factor_mixed_union_and_non_union() {
         // (int|string) & (bool|string) & null → string | ((int & bool) & null)
         let members = vec![
-            OutputTy::Union(vec![
+            TyRef::from(OutputTy::Union(vec![
                 TyRef::from(arc_ty!(Int)),
                 TyRef::from(arc_ty!(String)),
-            ]),
-            OutputTy::Union(vec![
+            ])),
+            TyRef::from(OutputTy::Union(vec![
                 TyRef::from(arc_ty!(Bool)),
                 TyRef::from(arc_ty!(String)),
-            ]),
-            arc_ty!(Null),
+            ])),
+            TyRef::from(arc_ty!(Null)),
         ];
         let result = factor_shared_from_intersection(members);
         assert_eq!(result.len(), 1, "should produce single element: {result:?}");
-        match &result[0] {
+        match &*result[0].0 {
             OutputTy::Union(parts) => {
                 assert_eq!(parts.len(), 2, "should have shared + remainder: {parts:?}");
                 let has_string = parts.iter().any(|p| *p.0 == arc_ty!(String));
@@ -1878,5 +1973,38 @@ mod tests {
             }
             other => panic!("expected Union, got: {other:?}"),
         }
+    }
+
+    #[test]
+    fn structural_dedup_shares_arc() {
+        // Two distinct TyIds canonicalizing to the same compound type should
+        // share the same Arc via the intern table.
+        use crate::storage::TypeStorage;
+        use lang_ty::Ty;
+        use std::sync::Arc;
+
+        let mut table = TypeStorage::new();
+        let int_ty = table.new_concrete(Ty::Primitive(lang_ty::PrimitiveTy::Int));
+        let string_ty = table.new_concrete(Ty::Primitive(lang_ty::PrimitiveTy::String));
+
+        // Create two distinct concrete TyIds for the same lambda type.
+        let lambda1 = table.new_concrete(Ty::Lambda {
+            param: int_ty,
+            body: string_ty,
+        });
+        let lambda2 = table.new_concrete(Ty::Lambda {
+            param: int_ty,
+            body: string_ty,
+        });
+
+        let mut canon = Canonicalizer::new(&table);
+        let ty1 = canon.canonicalize(lambda1, Positive);
+        let ty2 = canon.canonicalize(lambda2, Positive);
+
+        assert_eq!(*ty1.0, *ty2.0, "should be structurally equal");
+        assert!(
+            Arc::ptr_eq(&ty1.0, &ty2.0),
+            "structurally identical compound types should share Arc via intern table"
+        );
     }
 }
