@@ -244,15 +244,22 @@ pub fn run_check_project(
     let precomputed: DashMap<PathBuf, SyntaxBundle> = DashMap::with_capacity(pre_prepared.len());
     let mut metadata: Vec<FileMetadata> = Vec::with_capacity(pre_prepared.len());
     for pp in pre_prepared {
+        // Canonicalize the key so it matches the canonical paths that
+        // resolve_import_types produces when looking up import targets.
+        // Without this, symlinked projects (like nixpkgs-test's /tmp → /nix/store)
+        // would never match and all imports would get ⊤.
+        let canonical_path =
+            std::fs::canonicalize(&pp.file_path).unwrap_or_else(|_| pp.file_path.clone());
+
         metadata.push(FileMetadata {
-            file_path: pp.file_path.clone(),
+            file_path: canonical_path.clone(),
             source_text: pp.source_text,
             source_map: pp.source_map,
         });
         precomputed.insert(
-            pp.file_path.clone(),
+            canonical_path.clone(),
             SyntaxBundle {
-                path: pp.file_path,
+                path: canonical_path,
                 module: pp.module,
                 module_indices: pp.module_indices,
                 name_res: pp.name_res,
@@ -268,40 +275,89 @@ pub fn run_check_project(
     let syntax_provider = CliSyntaxProvider { precomputed };
 
     // =========================================================================
-    // Phase 2 — Parallel Inference with demand-driven import resolution
+    // Phase 2 — Parallel Inference with opportunistic cross-file resolution
     // =========================================================================
     //
-    // The coordinator infers all files in parallel via rayon. When a file
-    // imports another, the coordinator recursively infers the dependency
-    // first. Each file is inferred at most once (results cached in the
-    // coordinator's DashMap).
+    // Each file is inferred independently in parallel. Import types are resolved
+    // from the coordinator cache: if file B was already inferred by another
+    // rayon thread before file A starts, A gets B's real type. Otherwise the
+    // import falls through to ⊤ (same as before). After inference, each file's
+    // root type is stored in the coordinator cache for subsequent files to use.
+    //
+    // This is "opportunistic" rather than demand-driven: we don't recursively
+    // chase imports (which would serialize on deep import chains), but files
+    // processed earlier naturally feed types to files processed later.
     //
     // Critical memory optimization: the InferenceResult (ArenaMap<NameId/ExprId,
     // OutputTy>) is dropped per-file inside the par_iter closure, before
-    // .collect() gathers all results. This reduces peak memory by ~70% when
-    // checking many files in parallel.
+    // .collect() gathers all results. This reduces peak memory by ~70%.
 
     let coordinator = InferenceCoordinator::new();
     let results: Vec<RenderableResult> = metadata
         .into_par_iter()
         .map(|fm| {
             tracing::info!("inference start: {}", fm.file_path.display());
-            let result = coordinator.demand_file(&fm.file_path, &syntax_provider, None);
+
+            // Consume the pre-extracted SyntaxBundle from the DashMap.
+            let bundle = match syntax_provider.syntax_for_file(&fm.file_path) {
+                Some(b) => b,
+                None => {
+                    return RenderableResult {
+                        file_path: fm.file_path,
+                        source_text: fm.source_text,
+                        source_map: fm.source_map,
+                        diagnostics: vec![],
+                        timed_out: false,
+                    };
+                }
+            };
+
+            let base_dir = fm.file_path.parent().unwrap_or(std::path::Path::new("/"));
+
+            // Resolve imports from whatever is already in the coordinator cache.
+            // No recursive demand — just read what's available.
+            let import_resolution =
+                coordinator.resolve_imports(&bundle.module, &bundle.name_res, base_dir);
+            let import_diagnostics =
+                lang_check::imports::import_errors_to_diagnostics(&import_resolution.errors);
+
+            // Build InferenceInputs and run inference.
+            let inputs = lang_check::InferenceInputs {
+                module: bundle.module,
+                module_indices: bundle.module_indices,
+                name_res: bundle.name_res,
+                grouped_defs: bundle.grouped_defs,
+                registry: bundle.registry,
+                import_types: import_resolution.types,
+                import_diagnostics,
+                context_args: bundle.context_args,
+                deadline_secs: bundle.deadline_secs,
+            };
+
+            let check_result = lang_check::run_inference(&inputs, None);
+
+            // Store root type in coordinator cache so later files can use it.
+            if let Some(ref inf) = check_result.inference {
+                if let Some(root_ty) = inf.expr_ty_map.get(inputs.module.entry_expr) {
+                    coordinator.set_signature(
+                        &fm.file_path,
+                        lang_check::FileSignature {
+                            root_ty: root_ty.clone(),
+                        },
+                    );
+                }
+            }
+
             tracing::info!("inference done:  {}", fm.file_path.display());
 
             // Extract only diagnostics + timed_out. The heavy InferenceResult
-            // (full OutputTy maps for every name and expression) is dropped
-            // here, matching the old pipeline's memory behavior.
-            let (diagnostics, timed_out) = result
-                .map(|cr| (cr.check_result.diagnostics, cr.check_result.timed_out))
-                .unwrap_or_default();
-
+            // is dropped here, matching the old pipeline's memory behavior.
             RenderableResult {
                 file_path: fm.file_path,
                 source_text: fm.source_text,
                 source_map: fm.source_map,
-                diagnostics,
-                timed_out,
+                diagnostics: check_result.diagnostics,
+                timed_out: check_result.timed_out,
             }
         })
         .collect();
