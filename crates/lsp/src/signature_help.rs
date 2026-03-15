@@ -235,7 +235,8 @@ fn format_signature(
 
     // Add the return type.
     let return_ty = peel_lambdas(fun_ty, param_types.len());
-    label_parts.push(format!("{return_ty}"));
+    let dc = lang_ty::DisplayConfig::hover();
+    label_parts.push(return_ty.display_truncated(&dc));
 
     let label = label_parts.join(" -> ");
     (label, param_labels, param_docs)
@@ -246,12 +247,13 @@ fn format_signature(
 /// For attrset types (pattern parameters), shows a condensed field list.
 /// For other types, uses the standard display.
 fn format_param_type(ty: &OutputTy) -> String {
+    let dc = lang_ty::DisplayConfig::hover();
     match unwrap_named_ref(ty) {
         OutputTy::AttrSet(ref attr) => {
             // Show field names with types for pattern parameters.
             let mut parts = Vec::new();
             for (name, field_ty) in &attr.fields {
-                parts.push(format!("{name}: {field_ty}"));
+                parts.push(format!("{name}: {}", field_ty.display_truncated(&dc)));
             }
             if attr.open {
                 parts.push("...".to_string());
@@ -259,15 +261,18 @@ fn format_param_type(ty: &OutputTy) -> String {
             format!("{{ {} }}", parts.join(", "))
         }
         // For lambda params, parenthesize to avoid ambiguity in the signature.
-        OutputTy::Lambda { .. } => format!("({ty})"),
+        OutputTy::Lambda { .. } => format!("({})", ty.display_truncated(&dc)),
         // For union/intersection params, parenthesize.
-        OutputTy::Union(_) | OutputTy::Intersection(_) => format!("({ty})"),
-        _ => format!("{ty}"),
+        OutputTy::Union(_) | OutputTy::Intersection(_) => {
+            format!("({})", ty.display_truncated(&dc))
+        }
+        _ => ty.display_truncated(&dc),
     }
 }
 
 /// Get documentation for a parameter type (e.g. listing pattern fields).
 fn format_param_doc(ty: &OutputTy) -> Option<String> {
+    let dc = lang_ty::DisplayConfig::hover();
     match unwrap_named_ref(ty) {
         OutputTy::AttrSet(ref attr) if !attr.fields.is_empty() => {
             let mut lines = vec!["**Fields:**".to_string()];
@@ -277,7 +282,10 @@ fn format_param_doc(ty: &OutputTy) -> Option<String> {
                 } else {
                     ""
                 };
-                lines.push(format!("- `{name}`: `{field_ty}`{opt}"));
+                lines.push(format!(
+                    "- `{name}`: `{}`{opt}",
+                    field_ty.display_truncated(&dc)
+                ));
             }
             if attr.open {
                 lines.push("- `...` (accepts additional fields)".to_string());

@@ -61,10 +61,11 @@ pub fn hover(
                 // All other bindings: replace single-occurrence TyVars with `?`.
                 let kind = analysis.syntax.module[name_id].kind;
                 let is_unknown = !is_param_kind(kind) && matches!(ty, OutputTy::TyVar(_));
+                let dc = lang_ty::DisplayConfig::hover();
                 let ty_str = if is_param_kind(kind) {
-                    format!("{ty}")
+                    ty.display_truncated(&dc)
                 } else {
-                    format!("{}", ty.normalize_replacing_unknown())
+                    ty.normalize_replacing_unknown().display_truncated(&dc)
                 };
 
                 // When the type is `?`, append an actionable explanation.
@@ -119,6 +120,7 @@ pub fn hover(
                         .unwrap_or(false),
                     _ => false,
                 };
+                let dc = lang_ty::DisplayConfig::hover();
                 let ty_display = if is_param_ref {
                     ty.normalize_vars()
                 } else {
@@ -131,7 +133,7 @@ pub fn hover(
                 if let Expr::Reference(ref_name) = &analysis.syntax.module[expr_id] {
                     let doc = docs.decl_doc(ref_name.as_str());
                     return Some(make_hover(
-                        format!("{ty_display}"),
+                        ty_display.display_truncated(&dc),
                         doc.map(|d| d.as_str()),
                         range,
                     ));
@@ -141,7 +143,11 @@ pub fn hover(
                 // walking the Select chain to build a field path and finding
                 // the base name's type alias.
                 let doc = try_select_field_doc(analysis, expr_id, docs);
-                return Some(make_hover(format!("{ty_display}"), doc.as_deref(), range));
+                return Some(make_hover(
+                    ty_display.display_truncated(&dc),
+                    doc.as_deref(),
+                    range,
+                ));
             }
         }
 
@@ -226,7 +232,8 @@ fn try_attrpath_key_hover(
     let last_segment = full_path.last()?;
     let range = analysis.syntax.line_index.range(token.text_range());
 
-    let type_display = format!("{last_segment} :: {resolved_ty}");
+    let dc = lang_ty::DisplayConfig::hover();
+    let type_display = format!("{last_segment} :: {}", resolved_ty.display_truncated(&dc));
 
     Some(make_hover(type_display, doc.as_deref(), range))
 }

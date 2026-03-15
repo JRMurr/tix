@@ -10,7 +10,7 @@
 use std::fmt;
 
 use lang_ast::{AstPtr, ExprId, OverloadBinOp};
-use lang_ty::OutputTy;
+use lang_ty::{DisplayConfig, OutputTy};
 use smol_str::SmolStr;
 
 use crate::collect::canonicalize_standalone;
@@ -151,9 +151,15 @@ impl TixDiagnosticKind {
 
 impl fmt::Display for TixDiagnosticKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let dc = DisplayConfig::diagnostic();
         match self {
             TixDiagnosticKind::TypeMismatch { expected, actual } => {
-                write!(f, "type mismatch: expected `{expected}`, got `{actual}`")
+                write!(
+                    f,
+                    "type mismatch: expected `{}`, got `{}`",
+                    expected.display_truncated(&dc),
+                    actual.display_truncated(&dc)
+                )
             }
             TixDiagnosticKind::MissingField {
                 field,
@@ -177,12 +183,19 @@ impl fmt::Display for TixDiagnosticKind {
                 Ok(())
             }
             TixDiagnosticKind::InvalidBinOp { op, lhs_ty, rhs_ty } => {
-                write!(f, "cannot apply `{op}` to `{lhs_ty}` and `{rhs_ty}`")
+                write!(
+                    f,
+                    "cannot apply `{op}` to `{}` and `{}`",
+                    lhs_ty.display_truncated(&dc),
+                    rhs_ty.display_truncated(&dc)
+                )
             }
             TixDiagnosticKind::InvalidAttrMerge { lhs_ty, rhs_ty } => {
                 write!(
                     f,
-                    "cannot merge `{lhs_ty}` with `{rhs_ty}`: both sides must be attribute sets"
+                    "cannot merge `{}` with `{}`: both sides must be attribute sets",
+                    lhs_ty.display_truncated(&dc),
+                    rhs_ty.display_truncated(&dc)
                 )
             }
             TixDiagnosticKind::UnresolvedName { name } => {

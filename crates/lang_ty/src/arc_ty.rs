@@ -806,6 +806,348 @@ fn tyvar_name(idx: u32) -> String {
     }
 }
 
+// ==============================================================================
+// Truncated display — bounded type output for large types
+// ==============================================================================
+//
+// The `Display` trait impl remains unlimited (used by gen-stub, tests, and
+// anywhere correctness requires full output). `display_truncated` provides
+// bounded output for CLI, LSP, and diagnostics where readability matters more
+// than completeness.
+
+/// Controls how much of a type is shown by `display_truncated`.
+/// A limit of 0 means unlimited for that dimension.
+#[derive(Debug, Clone, Copy)]
+pub struct DisplayConfig {
+    /// Maximum attrset fields to show before eliding.
+    pub max_fields: usize,
+    /// Maximum union/intersection members to show before eliding.
+    pub max_members: usize,
+    /// Maximum nesting depth before collapsing.
+    pub max_depth: usize,
+    /// Hard character budget — output is cut with `...` when exceeded.
+    pub max_chars: usize,
+}
+
+impl DisplayConfig {
+    /// No limits — equivalent to the `Display` trait output.
+    pub fn full() -> Self {
+        Self {
+            max_fields: 0,
+            max_members: 0,
+            max_depth: 0,
+            max_chars: 0,
+        }
+    }
+
+    /// CLI binding/root output: readable summary of large types.
+    pub fn cli() -> Self {
+        Self {
+            max_fields: 10,
+            max_members: 8,
+            max_depth: 5,
+            max_chars: 2000,
+        }
+    }
+
+    /// LSP hover: slightly more generous than CLI.
+    pub fn hover() -> Self {
+        Self {
+            max_fields: 15,
+            max_members: 8,
+            max_depth: 6,
+            max_chars: 4000,
+        }
+    }
+
+    /// LSP inlay hints: very compact.
+    pub fn inlay() -> Self {
+        Self {
+            max_fields: 3,
+            max_members: 3,
+            max_depth: 2,
+            max_chars: 80,
+        }
+    }
+
+    /// LSP completion detail: compact.
+    pub fn completion() -> Self {
+        Self {
+            max_fields: 3,
+            max_members: 3,
+            max_depth: 2,
+            max_chars: 120,
+        }
+    }
+
+    /// Diagnostic error messages: moderate detail.
+    pub fn diagnostic() -> Self {
+        Self {
+            max_fields: 8,
+            max_members: 5,
+            max_depth: 4,
+            max_chars: 500,
+        }
+    }
+
+    fn is_unlimited(&self) -> bool {
+        self.max_fields == 0 && self.max_members == 0 && self.max_depth == 0 && self.max_chars == 0
+    }
+}
+
+impl OutputTy {
+    /// Render the type with truncation limits applied. Small types that fit
+    /// within all limits produce output identical to `Display`. Large types
+    /// are elided with `...` at appropriate points.
+    pub fn display_truncated(&self, config: &DisplayConfig) -> String {
+        if config.is_unlimited() {
+            return format!("{self}");
+        }
+        let mut buf = String::new();
+        let mut state = TruncState {
+            config,
+            chars_written: 0,
+            budget_exceeded: false,
+        };
+        write_truncated(self, &mut buf, &mut state, 0);
+        buf
+    }
+}
+
+struct TruncState<'a> {
+    config: &'a DisplayConfig,
+    chars_written: usize,
+    budget_exceeded: bool,
+}
+
+impl TruncState<'_> {
+    fn at_depth_limit(&self, depth: usize) -> bool {
+        self.config.max_depth > 0 && depth >= self.config.max_depth
+    }
+
+    /// Push a string fragment, enforcing the character budget.
+    /// Returns false if the budget was already exceeded before this call.
+    fn push(&mut self, buf: &mut String, s: &str) -> bool {
+        if self.budget_exceeded {
+            return false;
+        }
+        let max = self.config.max_chars;
+        if max > 0 && self.chars_written + s.len() > max {
+            // Exceeded — write what fits, then append "..."
+            let remaining = max.saturating_sub(self.chars_written);
+            if remaining > 0 {
+                buf.push_str(&s[..remaining]);
+            }
+            buf.push_str("...");
+            self.chars_written = max;
+            self.budget_exceeded = true;
+            return false;
+        }
+        buf.push_str(s);
+        self.chars_written += s.len();
+        true
+    }
+}
+
+fn write_truncated(ty: &OutputTy, buf: &mut String, state: &mut TruncState<'_>, depth: usize) {
+    if state.budget_exceeded {
+        return;
+    }
+
+    stacker::maybe_grow(256 * 1024, 1024 * 1024, || match ty {
+        OutputTy::TyVar(x) => {
+            state.push(buf, &tyvar_name(*x));
+        }
+        OutputTy::Primitive(p) => {
+            state.push(buf, &format!("{p}"));
+        }
+        OutputTy::Bottom => {
+            state.push(buf, "never");
+        }
+        OutputTy::Top => {
+            state.push(buf, "any");
+        }
+
+        // Named aliases are already short — show the alias name, don't count depth.
+        OutputTy::Named(name, _) => {
+            state.push(buf, name);
+        }
+
+        OutputTy::List(inner) => {
+            if state.at_depth_limit(depth) {
+                state.push(buf, "[...]");
+            } else {
+                state.push(buf, "[");
+                if !state.budget_exceeded {
+                    write_truncated(&inner.0, buf, state, depth + 1);
+                }
+                if !state.budget_exceeded {
+                    state.push(buf, "]");
+                }
+            }
+        }
+
+        OutputTy::Lambda { param, body } => {
+            if state.at_depth_limit(depth) {
+                state.push(buf, "... -> ...");
+            } else {
+                let needs_parens = matches!(
+                    &*param.0,
+                    OutputTy::Lambda { .. } | OutputTy::Union(_) | OutputTy::Intersection(_)
+                );
+                if needs_parens {
+                    state.push(buf, "(");
+                    if !state.budget_exceeded {
+                        write_truncated(&param.0, buf, state, depth + 1);
+                    }
+                    if !state.budget_exceeded {
+                        state.push(buf, ")");
+                    }
+                } else {
+                    write_truncated(&param.0, buf, state, depth + 1);
+                }
+                if !state.budget_exceeded {
+                    state.push(buf, " -> ");
+                }
+                if !state.budget_exceeded {
+                    write_truncated(&body.0, buf, state, depth + 1);
+                }
+            }
+        }
+
+        OutputTy::AttrSet(attr) => {
+            if state.at_depth_limit(depth) {
+                let total = attr.fields.len() + attr.dyn_ty.is_some() as usize + attr.open as usize;
+                state.push(buf, &format!("{{ ... {total} fields ... }}"));
+            } else {
+                state.push(buf, "{ ");
+                let max_f = state.config.max_fields;
+                let mut count = 0;
+                let total_fields = attr.fields.len();
+                for (k, v) in attr.fields.iter() {
+                    if state.budget_exceeded {
+                        return;
+                    }
+                    if max_f > 0 && count >= max_f {
+                        let remaining = total_fields - count
+                            + attr.dyn_ty.is_some() as usize
+                            + attr.open as usize;
+                        state.push(buf, &format!("... ({remaining} more)"));
+                        state.push(buf, " }");
+                        return;
+                    }
+                    if count > 0 {
+                        state.push(buf, ", ");
+                    }
+                    let opt = if attr.optional_fields.contains(k) {
+                        "?"
+                    } else {
+                        ""
+                    };
+                    state.push(buf, &format!("{k}{opt}: "));
+                    if !state.budget_exceeded {
+                        write_truncated(&v.0, buf, state, depth + 1);
+                    }
+                    count += 1;
+                }
+                if let Some(dyn_ty) = &attr.dyn_ty {
+                    if !state.budget_exceeded {
+                        if count > 0 {
+                            state.push(buf, ", ");
+                        }
+                        state.push(buf, "_: ");
+                        if !state.budget_exceeded {
+                            write_truncated(&dyn_ty.0, buf, state, depth + 1);
+                        }
+                    }
+                }
+                if attr.open && !state.budget_exceeded {
+                    if count > 0 || attr.dyn_ty.is_some() {
+                        state.push(buf, ", ");
+                    }
+                    state.push(buf, "...");
+                }
+                if !state.budget_exceeded {
+                    state.push(buf, " }");
+                }
+            }
+        }
+
+        OutputTy::Union(members) => {
+            write_members_truncated(members, " | ", depth, buf, state, |m| {
+                matches!(&*m.0, OutputTy::Lambda { .. })
+            });
+        }
+
+        OutputTy::Intersection(members) => {
+            write_members_truncated(members, " & ", depth, buf, state, |m| {
+                matches!(&*m.0, OutputTy::Lambda { .. } | OutputTy::Union(_))
+            });
+        }
+
+        OutputTy::Neg(inner) => {
+            let needs_parens = matches!(
+                &*inner.0,
+                OutputTy::Union(_) | OutputTy::Intersection(_) | OutputTy::Lambda { .. }
+            );
+            if needs_parens {
+                state.push(buf, "~(");
+                if !state.budget_exceeded {
+                    write_truncated(&inner.0, buf, state, depth);
+                }
+                if !state.budget_exceeded {
+                    state.push(buf, ")");
+                }
+            } else {
+                state.push(buf, "~");
+                if !state.budget_exceeded {
+                    write_truncated(&inner.0, buf, state, depth);
+                }
+            }
+        }
+    });
+}
+
+/// Write union/intersection members with truncation.
+fn write_members_truncated(
+    members: &[TyRef],
+    separator: &str,
+    depth: usize,
+    buf: &mut String,
+    state: &mut TruncState<'_>,
+    needs_parens: impl Fn(&TyRef) -> bool,
+) {
+    if state.at_depth_limit(depth) {
+        state.push(buf, "...");
+        return;
+    }
+    let max_m = state.config.max_members;
+    for (i, m) in members.iter().enumerate() {
+        if state.budget_exceeded {
+            return;
+        }
+        if max_m > 0 && i >= max_m {
+            let remaining = members.len() - i;
+            state.push(buf, &format!("{separator}... ({remaining} more)"));
+            return;
+        }
+        if i > 0 {
+            state.push(buf, separator);
+        }
+        if needs_parens(m) {
+            state.push(buf, "(");
+            if !state.budget_exceeded {
+                write_truncated(&m.0, buf, state, depth + 1);
+            }
+            if !state.budget_exceeded {
+                state.push(buf, ")");
+            }
+        } else {
+            write_truncated(&m.0, buf, state, depth + 1);
+        }
+    }
+}
+
 impl fmt::Display for OutputTy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Guard against stack overflow on deeply nested type trees.
@@ -874,6 +1216,13 @@ impl fmt::Display for OutputTy {
             OutputTy::Bottom => write!(f, "never"),
             OutputTy::Top => write!(f, "any"),
         })
+    }
+}
+
+impl TyRef {
+    /// Delegates to `OutputTy::display_truncated`.
+    pub fn display_truncated(&self, config: &DisplayConfig) -> String {
+        self.0.display_truncated(config)
     }
 }
 
@@ -1193,5 +1542,169 @@ mod tests {
                 prop_assert_eq!(once, twice);
             }
         }
+    }
+
+    // ==================================================================
+    // Truncated display
+    // ==================================================================
+
+    #[test]
+    fn truncated_full_matches_display() {
+        let ty = OutputTy::Lambda {
+            param: OutputTy::Primitive(PrimitiveTy::Int).into(),
+            body: OutputTy::Primitive(PrimitiveTy::String).into(),
+        };
+        assert_eq!(
+            ty.display_truncated(&DisplayConfig::full()),
+            format!("{ty}")
+        );
+    }
+
+    #[test]
+    fn truncated_fields_elided() {
+        // Build an attrset with 15 fields, truncate at 3.
+        let fields: Vec<(SmolStr, TyRef)> = (0..15)
+            .map(|i| {
+                (
+                    SmolStr::new(format!("f{i:02}")),
+                    TyRef::from(OutputTy::Primitive(PrimitiveTy::Int)),
+                )
+            })
+            .collect();
+        let ty = OutputTy::AttrSet(AttrSetTy {
+            fields: fields.into_iter().collect(),
+            dyn_ty: None,
+            open: false,
+            optional_fields: Default::default(),
+        });
+        let config = DisplayConfig {
+            max_fields: 3,
+            max_members: 0,
+            max_depth: 0,
+            max_chars: 0,
+        };
+        let result = ty.display_truncated(&config);
+        assert!(result.contains("... (12 more)"), "got: {result}");
+        // Should show exactly 3 fields before the ellipsis.
+        assert_eq!(result.matches(": int").count(), 3, "got: {result}");
+    }
+
+    #[test]
+    fn truncated_members_elided() {
+        let members: Vec<TyRef> = (0..10)
+            .map(|_| TyRef::from(OutputTy::Primitive(PrimitiveTy::Int)))
+            .collect();
+        let ty = OutputTy::Union(members);
+        let config = DisplayConfig {
+            max_fields: 0,
+            max_members: 2,
+            max_depth: 0,
+            max_chars: 0,
+        };
+        let result = ty.display_truncated(&config);
+        assert!(result.contains("... (8 more)"), "got: {result}");
+    }
+
+    #[test]
+    fn truncated_depth_limit() {
+        // Nested lambdas beyond depth limit.
+        let deep = OutputTy::Lambda {
+            param: OutputTy::Lambda {
+                param: OutputTy::Lambda {
+                    param: OutputTy::Primitive(PrimitiveTy::Int).into(),
+                    body: OutputTy::Primitive(PrimitiveTy::Int).into(),
+                }
+                .into(),
+                body: OutputTy::Primitive(PrimitiveTy::Int).into(),
+            }
+            .into(),
+            body: OutputTy::Primitive(PrimitiveTy::Int).into(),
+        };
+        let config = DisplayConfig {
+            max_fields: 0,
+            max_members: 0,
+            max_depth: 2,
+            max_chars: 0,
+        };
+        let result = deep.display_truncated(&config);
+        assert!(result.contains("... -> ..."), "got: {result}");
+    }
+
+    #[test]
+    fn truncated_char_budget() {
+        let ty = OutputTy::Lambda {
+            param: OutputTy::Primitive(PrimitiveTy::Int).into(),
+            body: OutputTy::Primitive(PrimitiveTy::String).into(),
+        };
+        let config = DisplayConfig {
+            max_fields: 0,
+            max_members: 0,
+            max_depth: 0,
+            max_chars: 8,
+        };
+        let result = ty.display_truncated(&config);
+        // "int -> string" is 13 chars; at budget 8 we get "int -> s..."
+        assert!(result.ends_with("..."), "got: {result}");
+        assert!(result.len() <= 11, "got len={}: {result}", result.len()); // 8 + "..."
+    }
+
+    #[test]
+    fn truncated_named_shows_alias() {
+        let ty = OutputTy::Named(
+            SmolStr::new("Derivation"),
+            TyRef::from(OutputTy::AttrSet(AttrSetTy {
+                fields: Default::default(),
+                dyn_ty: None,
+                open: true,
+                optional_fields: Default::default(),
+            })),
+        );
+        let config = DisplayConfig::cli();
+        assert_eq!(ty.display_truncated(&config), "Derivation");
+    }
+
+    #[test]
+    fn truncated_small_type_unchanged() {
+        // Types that fit within all limits should match Display exactly.
+        let ty = OutputTy::Lambda {
+            param: OutputTy::Primitive(PrimitiveTy::Int).into(),
+            body: OutputTy::Primitive(PrimitiveTy::String).into(),
+        };
+        assert_eq!(ty.display_truncated(&DisplayConfig::cli()), format!("{ty}"));
+    }
+
+    #[test]
+    fn truncated_attrset_depth_collapse() {
+        // At depth limit, attrset shows field count summary.
+        let ty = OutputTy::AttrSet(AttrSetTy {
+            fields: vec![
+                (
+                    SmolStr::new("x"),
+                    TyRef::from(OutputTy::Primitive(PrimitiveTy::Int)),
+                ),
+                (
+                    SmolStr::new("y"),
+                    TyRef::from(OutputTy::Primitive(PrimitiveTy::String)),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            dyn_ty: None,
+            open: true,
+            optional_fields: Default::default(),
+        });
+        // Wrapping in a lambda so the attrset is at depth 1 (past limit).
+        let wrapper = OutputTy::Lambda {
+            param: ty.into(),
+            body: OutputTy::Primitive(PrimitiveTy::Int).into(),
+        };
+        let config = DisplayConfig {
+            max_fields: 0,
+            max_members: 0,
+            max_depth: 1,
+            max_chars: 0,
+        };
+        let result = wrapper.display_truncated(&config);
+        assert!(result.contains("... 3 fields ..."), "got: {result}");
     }
 }

@@ -57,6 +57,10 @@ struct Cli {
     /// Print per-phase timing and memory usage
     #[arg(long)]
     timing: bool,
+
+    /// Show complete types without truncation
+    #[arg(long)]
+    full_types: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -312,6 +316,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 args.no_default_stubs,
                 args.config_path,
                 args.timing,
+                args.full_types,
             )
         }
     }
@@ -717,6 +722,7 @@ fn run_check(
     no_default_stubs: bool,
     config_path: Option<PathBuf>,
     show_timing: bool,
+    full_types: bool,
 ) -> Result<(), Box<dyn Error>> {
     let mut timer = timing::Timer::new(show_timing);
 
@@ -891,14 +897,23 @@ fn run_check(
             }
         }
 
+        let display_config = if full_types {
+            lang_ty::DisplayConfig::full()
+        } else {
+            lang_ty::DisplayConfig::cli()
+        };
+
         println!("Bindings:");
         for (name, (_kind, ty)) in &seen {
-            println!("  {name} :: {ty}");
+            println!("  {name} :: {}", ty.display_truncated(&display_config));
         }
 
         // Print the root expression type.
         match inference.expr_ty_map.get(module.entry_expr) {
-            Some(root_ty) => println!("\nRoot type:\n  {root_ty}"),
+            Some(root_ty) => println!(
+                "\nRoot type:\n  {}",
+                root_ty.display_truncated(&display_config)
+            ),
             None => {
                 eprintln!("error: could not infer type for root expression");
                 std::process::exit(1);

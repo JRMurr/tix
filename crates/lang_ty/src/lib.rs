@@ -7,7 +7,7 @@ pub mod simplify;
 #[cfg(any(test, feature = "proptest_support"))]
 pub mod arbitrary;
 
-pub use arc_ty::{OutputTy, Substitutions, TyRef};
+pub use arc_ty::{DisplayConfig, OutputTy, Substitutions, TyRef};
 pub use attrset::AttrSetTy;
 use derive_more::Debug;
 pub use primitive::PrimitiveTy;

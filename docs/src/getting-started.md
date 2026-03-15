@@ -163,6 +163,14 @@ tix check -j 4         # Limit to 4 parallel inference threads
 
 Exit code is 1 if any type errors are found, 0 otherwise (config warnings don't affect the exit code).
 
+### Full type output
+
+By default, large types are truncated for readability (fields, union members, nesting depth, and total characters are bounded). To see complete types without truncation:
+
+```bash
+tix my-file.nix --full-types
+```
+
 ### Timing and profiling
 
 Show per-phase timing and RSS memory usage:

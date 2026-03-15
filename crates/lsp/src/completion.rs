@@ -124,12 +124,13 @@ pub fn completion(
         let scope_id = scope_at_token(analysis, &token)?;
         let visible = collect_visible_names_no_inference(analysis, scope_id);
 
+        let dc = lang_ty::DisplayConfig::completion();
         let items: Vec<CompletionItem> = visible
             .into_iter()
             .map(|(name, ty)| CompletionItem {
                 label: name.to_string(),
                 kind: Some(completion_kind_for_ty(ty.as_ref())),
-                detail: ty.as_ref().map(|t| format!("{t}")),
+                detail: ty.as_ref().map(|t| t.display_truncated(&dc)),
                 ..Default::default()
             })
             .collect();
@@ -673,11 +674,14 @@ fn try_inherit_completion(
         let items = fields
             .iter()
             .filter(|(name, _)| !existing.contains(name))
-            .map(|(name, ty)| CompletionItem {
-                label: name.to_string(),
-                kind: Some(CompletionItemKind::FIELD),
-                detail: Some(format!("{ty}")),
-                ..Default::default()
+            .map(|(name, ty)| {
+                let dc = lang_ty::DisplayConfig::completion();
+                CompletionItem {
+                    label: name.to_string(),
+                    kind: Some(CompletionItemKind::FIELD),
+                    detail: Some(ty.display_truncated(&dc)),
+                    ..Default::default()
+                }
             })
             .collect();
 
@@ -703,13 +707,14 @@ fn try_inherit_completion(
         let scope_id = analysis.syntax.scopes.scope_for_expr(enclosing_expr_id)?;
         let visible = collect_visible_names(analysis, inference, scope_id);
 
+        let dc = lang_ty::DisplayConfig::completion();
         let items = visible
             .iter()
             .filter(|(name, _)| !existing.contains(name))
             .map(|(name, ty)| CompletionItem {
                 label: name.to_string(),
                 kind: Some(completion_kind_for_ty(ty.as_ref())),
-                detail: ty.as_ref().map(|t| format!("{t}")),
+                detail: ty.as_ref().map(|t| t.display_truncated(&dc)),
                 ..Default::default()
             })
             .collect();
@@ -730,12 +735,13 @@ fn try_identifier_completion(
     let scope_id = scope_at_token(analysis, token)?;
     let visible = collect_visible_names(analysis, inference, scope_id);
 
+    let dc = lang_ty::DisplayConfig::completion();
     let items: Vec<CompletionItem> = visible
         .iter()
         .map(|(name, ty)| CompletionItem {
             label: name.to_string(),
             kind: Some(completion_kind_for_ty(ty.as_ref())),
-            detail: ty.as_ref().map(|t| format!("{t}")),
+            detail: ty.as_ref().map(|t| t.display_truncated(&dc)),
             ..Default::default()
         })
         .collect();
@@ -939,7 +945,7 @@ fn fields_to_completion_items(
             CompletionItem {
                 label: name.to_string(),
                 kind: Some(CompletionItemKind::FIELD),
-                detail: Some(format!("{ty}")),
+                detail: Some(ty.display_truncated(&lang_ty::DisplayConfig::completion())),
                 documentation,
                 data,
                 ..Default::default()

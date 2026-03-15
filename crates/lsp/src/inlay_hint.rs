@@ -66,10 +66,11 @@ pub fn inlay_hints(analysis: &FileSnapshot, range: Range, root: &rnix::Root) -> 
 
         // Param/PatField: keep letter names (genuine polymorphism).
         // All other bindings: replace single-occurrence TyVars with `?`.
+        let dc = lang_ty::DisplayConfig::inlay();
         let ty_str = if matches!(name.kind, NameKind::Param | NameKind::PatField) {
-            format!("{ty}")
+            ty.display_truncated(&dc)
         } else {
-            format!("{}", ty.normalize_replacing_unknown())
+            ty.normalize_replacing_unknown().display_truncated(&dc)
         };
 
         hints.push(InlayHint {
