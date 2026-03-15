@@ -62,6 +62,11 @@
             tix = rustAttrs.binary;
           };
 
+          scripts = import ./nix/scripts.nix {
+            inherit pkgs;
+            nixpkgs-src = nixpkgs.outPath;
+          };
+
           # Wraps the tix binary so that @nixos and @home-manager context
           # references in tix.toml resolve to the fully-typed generated stubs
           # instead of the minimal compiled-in ones.
@@ -98,6 +103,7 @@
             stubs = tix-stubs;
             with-stubs = tix-with-stubs;
             inherit tix-code tix-code-dev tix-code-release;
+            inherit (scripts) tixc nixpkgs-test nixpkgs-lib-test;
             docs = pkgs.stdenv.mkDerivation {
               name = "tix-docs";
               src = ./docs;
