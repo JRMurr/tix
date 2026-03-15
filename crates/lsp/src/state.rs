@@ -7,7 +7,7 @@
 // rnix::Root is !Send + !Sync and all analysis must run on a single thread
 // (via spawn_blocking).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
@@ -19,8 +19,9 @@ use lang_ast::{
     ModuleScopes, ModuleSourceMap, NameId, NameResolution, NixFile, RootDatabase,
 };
 use lang_check::aliases::TypeAliasRegistry;
+use lang_check::coordinator::InferenceCoordinator;
 use lang_check::diagnostic::{TixDiagnostic, TixDiagnosticKind};
-use lang_check::imports::{import_errors_to_diagnostics, resolve_import_types_from_stubs};
+use lang_check::imports::import_errors_to_diagnostics;
 use lang_check::CheckResult;
 #[cfg(test)]
 use lang_check::InferenceResult;
@@ -245,21 +246,11 @@ pub struct AnalysisState {
     /// `deadline` in `tix.toml`, defaults to 10.
     pub deadline_secs: u64,
 
-    /// Inferred root types of open/analyzed files. Keyed by canonical path.
-    /// Used as cross-file type source for the stubs-based import model:
-    /// when file A imports file B, and B's ephemeral stub is available,
-    /// A gets B's real type instead of ⊤.
-    ephemeral_stubs: HashMap<PathBuf, OutputTy>,
-
-    /// Reverse dependency index: maps an imported file path to the set of
-    /// open files that import it. When a file's ephemeral stub changes,
-    /// all its dependents are scheduled for re-analysis.
-    import_dependents: HashMap<PathBuf, HashSet<PathBuf>>,
-
-    /// Forward dependency index: maps an importer path to the set of files
-    /// it imports. Used for O(old_import_count) cleanup when an importer's
-    /// dependencies change — avoids scanning all keys in import_dependents.
-    import_forward: HashMap<PathBuf, Vec<PathBuf>>,
+    /// Shared inference coordinator: caches file signatures (root types),
+    /// tracks import dependencies, and handles invalidation cascading.
+    /// Replaces the previous ephemeral_stubs / import_dependents / import_forward
+    /// fields with a unified interface shared with the CLI.
+    pub coordinator: InferenceCoordinator,
 }
 
 impl AnalysisState {
@@ -271,9 +262,7 @@ impl AnalysisState {
             project_config: None,
             config_dir: None,
             deadline_secs: 10,
-            ephemeral_stubs: HashMap::new(),
-            import_dependents: HashMap::new(),
-            import_forward: HashMap::new(),
+            coordinator: InferenceCoordinator::new(),
         }
     }
 
@@ -329,8 +318,9 @@ impl AnalysisState {
         // -- Phase 3: Import resolution (stubs-based, O(1) lookup) --
         let t0 = Instant::now();
         let base_dir = path.parent().unwrap_or(std::path::Path::new("/"));
-        let import_resolution =
-            resolve_import_types_from_stubs(&module, &name_res, base_dir, &self.ephemeral_stubs);
+        let import_resolution = self
+            .coordinator
+            .resolve_imports(&module, &name_res, base_dir);
 
         let import_diagnostics = import_errors_to_diagnostics(&import_resolution.errors);
 
@@ -594,11 +584,10 @@ impl AnalysisState {
             .path
             .parent()
             .unwrap_or(std::path::Path::new("/"));
-        let import_resolution = resolve_import_types_from_stubs(
+        let import_resolution = self.coordinator.resolve_imports(
             &intermediate.module,
             &intermediate.name_res,
             base_dir,
-            &self.ephemeral_stubs,
         );
 
         let import_diagnostics = import_errors_to_diagnostics(&import_resolution.errors);
@@ -654,67 +643,35 @@ impl AnalysisState {
         )
     }
 
-    /// Store or update the ephemeral stub for a file. Returns `true` if the
-    /// type actually changed (callers use this to decide whether to trigger
-    /// dependent re-analysis).
+    /// Store or update the file signature in the coordinator cache.
+    /// Returns `true` if the type actually changed (callers use this to decide
+    /// whether to trigger dependent re-analysis).
     pub fn update_ephemeral_stub(&mut self, path: &Path, root_ty: OutputTy) -> bool {
-        let changed = self
-            .ephemeral_stubs
-            .get(path)
-            .is_none_or(|existing| *existing != root_ty);
-        if changed {
-            self.ephemeral_stubs.insert(path.to_path_buf(), root_ty);
-        }
-        changed
+        self.coordinator
+            .set_signature(path, lang_check::FileSignature { root_ty })
     }
 
-    /// Record the import dependencies for a file. Replaces any previous entries
-    /// for this importer, and updates the reverse index so dependents can be
-    /// looked up efficiently.
+    /// Record the import dependencies for a file via the coordinator.
     pub fn record_import_deps(&mut self, importer: &Path, imported: &[PathBuf]) {
-        // Remove old entries using the forward index — O(old_import_count)
-        // instead of O(total_import_targets).
-        if let Some(old_deps) = self.import_forward.remove(importer) {
-            for dep in &old_deps {
-                if let Some(set) = self.import_dependents.get_mut(dep) {
-                    set.remove(importer);
-                }
-            }
-        }
-
-        // Insert new entries.
-        for dep in imported {
-            self.import_dependents
-                .entry(dep.clone())
-                .or_default()
-                .insert(importer.to_path_buf());
-        }
-
-        // Update forward index.
-        self.import_forward
-            .insert(importer.to_path_buf(), imported.to_vec());
+        self.coordinator.record_deps(importer, imported);
     }
 
     /// Return the set of files that import the given path (its dependents).
-    /// Used to schedule re-analysis when a file's ephemeral stub changes.
     pub fn get_dependents(&self, path: &Path) -> Vec<PathBuf> {
-        self.import_dependents
-            .get(path)
-            .map(|set| set.iter().cloned().collect())
-            .unwrap_or_default()
+        self.coordinator.get_dependents(path)
     }
 
-    /// Remove the ephemeral stub for a file (called on `didClose`).
+    /// Remove the file's signature from the coordinator (called on `didClose`).
     /// Returns the paths of files that depended on this stub.
     pub fn remove_ephemeral_stub(&mut self, path: &Path) -> Vec<PathBuf> {
-        self.ephemeral_stubs.remove(path);
-        self.get_dependents(path)
+        self.coordinator.remove_signature(path)
     }
 
     /// Replace the type alias registry and re-analyze all open files.
     /// Used when stubs configuration changes at runtime.
     pub fn reload_registry(&mut self, registry: TypeAliasRegistry) {
         self.registry = Arc::new(registry);
+        self.coordinator.clear();
 
         // Re-analyze every open file with the new registry.
         let paths: Vec<PathBuf> = self.files.keys().cloned().collect();
