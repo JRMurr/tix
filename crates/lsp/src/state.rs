@@ -19,12 +19,12 @@ use lang_ast::{
     ModuleScopes, ModuleSourceMap, NameId, NameResolution, NixFile, RootDatabase,
 };
 use lang_check::aliases::TypeAliasRegistry;
-use lang_check::coordinator::InferenceCoordinator;
+use lang_check::coordinator::{InferenceCoordinator, SyntaxProvider};
 use lang_check::diagnostic::{TixDiagnostic, TixDiagnosticKind};
-use lang_check::imports::import_errors_to_diagnostics;
-use lang_check::CheckResult;
+use lang_check::imports::{import_errors_to_diagnostics, resolve_import_types};
 #[cfg(test)]
 use lang_check::InferenceResult;
+use lang_check::{CheckResult, SyntaxBundle};
 use lang_ty::OutputTy;
 use smol_str::SmolStr;
 
@@ -148,6 +148,151 @@ pub fn build_file_analysis(inputs: LspInferenceInputs, check_result: CheckResult
     }
 }
 
+// ==============================================================================
+// LspSyntaxProvider: reads .nix files from disk for demand-driven inference
+// ==============================================================================
+//
+// When the LSP needs to infer a file that isn't open (e.g. an import target),
+// this provider reads the file from disk, parses it via its own RootDatabase
+// (separate from the main LSP DB — no deadlock risk), and returns the syntax
+// bundle needed by `InferenceCoordinator::demand_file()`.
+
+/// Syntax provider for the LSP's demand-driven import resolution.
+/// Reads .nix files from disk using an independent Salsa database.
+pub struct LspSyntaxProvider {
+    db: parking_lot::Mutex<RootDatabase>,
+    registry: Arc<TypeAliasRegistry>,
+    deadline_secs: u64,
+}
+
+impl LspSyntaxProvider {
+    pub fn new(registry: Arc<TypeAliasRegistry>, deadline_secs: u64) -> Self {
+        Self {
+            db: parking_lot::Mutex::new(RootDatabase::default()),
+            registry,
+            deadline_secs,
+        }
+    }
+}
+
+impl SyntaxProvider for LspSyntaxProvider {
+    fn syntax_for_file(&self, path: &Path) -> Option<SyntaxBundle> {
+        let db = self.db.lock();
+        let nix_file = db.read_file(path.to_path_buf()).ok()?;
+        let (module, _source_map) = lang_ast::module_and_source_maps(&*db, nix_file);
+        let module_indices = lang_ast::module_indices(&*db, nix_file);
+        let name_res = lang_ast::name_resolution(&*db, nix_file);
+        let grouped_defs = lang_ast::group_def(&*db, nix_file);
+        Some(SyntaxBundle {
+            path: path.to_path_buf(),
+            module,
+            module_indices,
+            name_res,
+            grouped_defs,
+            registry: Arc::clone(&self.registry),
+            context_args: Arc::default(),
+            deadline_secs: Some(self.deadline_secs),
+        })
+    }
+}
+
+// ==============================================================================
+// resolve_imports_phase_b: demand-driven import resolution (free function)
+// ==============================================================================
+
+/// Phase B import resolution with demand-driven inference for unopened files.
+///
+/// Uses the coordinator cache first (fast path for already-analyzed files),
+/// then falls back to `demand_file()` which reads from disk and infers on
+/// demand. This function does NOT require the analysis state lock.
+pub fn resolve_imports_phase_b(
+    coordinator: &InferenceCoordinator,
+    syntax_provider: Option<&LspSyntaxProvider>,
+    intermediate: &SyntaxIntermediate,
+    cancel_flag: Option<Arc<AtomicBool>>,
+) -> (
+    LspInferenceInputs,
+    HashMap<ExprId, PathBuf>,
+    HashMap<NameId, PathBuf>,
+    Duration,
+) {
+    let t0 = Instant::now();
+
+    let base_dir = intermediate
+        .path
+        .parent()
+        .unwrap_or(std::path::Path::new("/"));
+
+    // Resolve imports using demand-driven lookup: try cache first, then
+    // infer from disk via demand_file().
+    let import_resolution = resolve_import_types(
+        &intermediate.module,
+        &intermediate.name_res,
+        base_dir,
+        |dep_path| {
+            // Fast path: already in the coordinator cache.
+            if let Some(ty) = coordinator.get_signature(dep_path) {
+                return Some(ty);
+            }
+            // Demand-driven: parse + infer the dependency from disk.
+            let provider = syntax_provider?;
+            let result = coordinator.demand_file(dep_path, provider, cancel_flag.clone())?;
+            result.signature.map(|s| s.root_ty)
+        },
+    );
+
+    let import_diagnostics = import_errors_to_diagnostics(&import_resolution.errors);
+
+    let import_targets = import_resolution.targets;
+
+    // Build name→import mapping.
+    let file_dir = intermediate.path.parent().map(|p| p.to_path_buf());
+    let mut name_to_import = HashMap::new();
+    for group in intermediate.grouped_defs.iter() {
+        for typedef in group {
+            let target = chase_import_target(&intermediate.module, &import_targets, typedef.expr())
+                .or_else(|| {
+                    let dir = file_dir.as_deref()?;
+                    find_path_literal_target(&intermediate.module, typedef.expr(), dir)
+                });
+            if let Some(path) = target {
+                name_to_import.insert(typedef.name(), path);
+            }
+        }
+    }
+
+    let import_duration = t0.elapsed();
+
+    let inference_inputs = LspInferenceInputs {
+        core: lang_check::InferenceInputs {
+            module: intermediate.module.clone(),
+            module_indices: intermediate.module_indices.clone(),
+            name_res: intermediate.name_res.clone(),
+            grouped_defs: intermediate.grouped_defs.clone(),
+            registry: intermediate.registry.clone(),
+            import_types: import_resolution.types,
+            import_diagnostics,
+            context_args: intermediate.context_args.clone(),
+            deadline_secs: Some(intermediate.deadline_secs),
+        },
+        nix_file: intermediate.nix_file,
+        line_index: intermediate.line_index.clone(),
+        parsed: intermediate.parsed.clone(),
+        source_map: intermediate.source_map.clone(),
+        scopes: intermediate.scopes.clone(),
+        import_targets: import_targets.clone(),
+        name_to_import: name_to_import.clone(),
+        context_arg_types: intermediate.context_arg_types.clone(),
+    };
+
+    (
+        inference_inputs,
+        import_targets,
+        name_to_import,
+        import_duration,
+    )
+}
+
 impl FileAnalysis {
     /// Convert a FileAnalysis into a FileSnapshot. Used by tests and the
     /// transitional period where both representations coexist.
@@ -250,7 +395,10 @@ pub struct AnalysisState {
     /// tracks import dependencies, and handles invalidation cascading.
     /// Replaces the previous ephemeral_stubs / import_dependents / import_forward
     /// fields with a unified interface shared with the CLI.
-    pub coordinator: InferenceCoordinator,
+    ///
+    /// Wrapped in `Arc` so the analysis loop can use it outside the state lock
+    /// for demand-driven import resolution.
+    pub coordinator: Arc<InferenceCoordinator>,
 }
 
 impl AnalysisState {
@@ -262,7 +410,7 @@ impl AnalysisState {
             project_config: None,
             config_dir: None,
             deadline_secs: 10,
-            coordinator: InferenceCoordinator::new(),
+            coordinator: Arc::new(InferenceCoordinator::new()),
         }
     }
 
@@ -565,10 +713,13 @@ impl AnalysisState {
         (syntax_data, intermediate, syntax_duration)
     }
 
-    /// Phase B: Import resolution (stubs-based, O(1) lookup).
+    /// Phase B: Import resolution (passive, cache-only lookup).
     ///
-    /// Uses ephemeral stubs instead of recursive inference. No side-channel
-    /// limits needed — stub lookup is instant.
+    /// Uses the coordinator's cache only — does NOT demand-infer unopened files.
+    /// Kept for `update_file_inner` (used by unit tests). The production analysis
+    /// loop uses the free function `resolve_imports_phase_b()` which adds
+    /// demand-driven inference.
+    #[cfg(test)]
     pub fn update_syntax_phase_b(
         &mut self,
         intermediate: &SyntaxIntermediate,

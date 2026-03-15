@@ -92,6 +92,11 @@ impl TixLanguageServer {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let analysis_state = AnalysisState::new(registry);
 
+        // Clone the coordinator Arc before moving analysis_state into the Mutex.
+        // The analysis loop uses it outside the state lock for demand-driven
+        // import resolution.
+        let coordinator = Arc::clone(&analysis_state.coordinator);
+
         let state = Arc::new(Mutex::new(analysis_state));
         let pending_text = Arc::new(Mutex::new(HashMap::new()));
         let cancel_flag = Arc::new(AtomicBool::new(false));
@@ -112,6 +117,7 @@ impl TixLanguageServer {
             snapshots.clone(),
             background_queue.clone(),
             diag_config.clone(),
+            coordinator,
         );
 
         Self {
@@ -230,11 +236,20 @@ fn spawn_analysis_loop(
     _snapshots: Arc<DashMap<PathBuf, FileSnapshot>>,
     background_queue: Arc<Mutex<VecDeque<(PathBuf, String)>>>,
     diag_config: Arc<Mutex<DiagnosticsConfig>>,
+    coordinator: Arc<lang_check::coordinator::InferenceCoordinator>,
 ) {
     tokio::spawn(async move {
         // Pending diagnostics waiting for quiescence, keyed by path.
         let mut pending_diags: HashMap<PathBuf, Vec<Diagnostic>> = HashMap::new();
         let mut diag_timer: Option<Pin<Box<tokio::time::Sleep>>> = None;
+
+        // LspSyntaxProvider for demand-driven import resolution. Reads .nix
+        // files from disk using its own Salsa DB, independent of the main LSP DB.
+        // Recreated when the registry changes (stubs reload).
+        let lsp_syntax_provider = {
+            let st = state.lock();
+            crate::state::LspSyntaxProvider::new(Arc::clone(&st.registry), st.deadline_secs)
+        };
 
         loop {
             // ── Phase 1: Wait for event or diagnostic timer ──
@@ -422,13 +437,16 @@ fn spawn_analysis_loop(
                     continue;
                 }
 
-                // Phase B: Import resolution (mutex re-acquired, bounded by
-                // deadline/cancel/cap). Side-channel limits are set on the DB.
-                let (inference_inputs, import_targets, name_to_import, import_duration) = {
-                    let mut st = state.lock();
-                    st.update_syntax_phase_b(&intermediate)
-                };
-                // mutex released here
+                // Phase B: Import resolution with demand-driven inference.
+                // No state lock needed — uses the coordinator Arc directly.
+                // Unopened imported files are inferred from disk on demand.
+                let (inference_inputs, import_targets, name_to_import, import_duration) =
+                    crate::state::resolve_imports_phase_b(
+                        &coordinator,
+                        Some(&lsp_syntax_provider),
+                        &intermediate,
+                        Some(cancel_flag.clone()),
+                    );
 
                 // Update DashMap with import data from Phase B.
                 if let Some(mut snap) = _snapshots.get_mut(path) {

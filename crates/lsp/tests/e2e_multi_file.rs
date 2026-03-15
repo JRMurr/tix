@@ -111,6 +111,112 @@ async fn cross_file_hover_updates_after_edit() {
     h.shutdown().await;
 }
 
+/// Demand-driven import: only open B.nix (which imports A.nix on disk),
+/// hover shows real types from A via demand_file inference.
+#[tokio::test]
+async fn demand_driven_import_hover() {
+    let mut h = LspTestHarness::new(&[
+        ("a.nix", "{ x = 42; y = \"hello\"; }"),
+        (
+            "b.nix",
+            indoc! {"
+                let a = import ./a.nix;
+                in a.x
+                #    ^1
+            "},
+        ),
+    ])
+    .await;
+
+    // Only open B — A.nix exists on disk but is NOT opened.
+    h.open("b.nix").await;
+    let _ = h.wait_for_diagnostics("b.nix", TIMEOUT).await;
+
+    // Hover on a.x should show int, not ? (demand-driven resolved A's type).
+    let m = h.markers("b.nix");
+    let hover = h
+        .hover("b.nix", m[&1].line, m[&1].character)
+        .await
+        .expect("hover on imported field");
+
+    let HoverContents::Markup(content) = &hover.contents else {
+        panic!("expected MarkupContent, got {:?}", hover.contents);
+    };
+    assert!(
+        content.value.contains("int"),
+        "hover on imported x should show 'int' via demand-driven import, got: {}",
+        content.value,
+    );
+
+    h.shutdown().await;
+}
+
+/// Transitive demand-driven imports: C.nix → B.nix → A.nix, only C opened.
+#[tokio::test]
+async fn demand_driven_transitive_import() {
+    let mut h = LspTestHarness::new(&[
+        ("a.nix", "{ val = 42; }"),
+        ("b.nix", "import ./a.nix"),
+        (
+            "c.nix",
+            indoc! {"
+                let b = import ./b.nix;
+                in b.val
+                #    ^1
+            "},
+        ),
+    ])
+    .await;
+
+    // Only open C — neither A.nix nor B.nix are opened.
+    h.open("c.nix").await;
+    let _ = h.wait_for_diagnostics("c.nix", TIMEOUT).await;
+
+    let m = h.markers("c.nix");
+    let hover = h
+        .hover("c.nix", m[&1].line, m[&1].character)
+        .await
+        .expect("hover on transitive import field");
+
+    let HoverContents::Markup(content) = &hover.contents else {
+        panic!("expected MarkupContent, got {:?}", hover.contents);
+    };
+    assert!(
+        content.value.contains("int"),
+        "hover on transitive import val should show 'int', got: {}",
+        content.value,
+    );
+
+    h.shutdown().await;
+}
+
+/// Demand-driven import should NOT produce E013 (ImportUnresolved) diagnostics
+/// for files that exist on disk and were successfully demand-resolved.
+#[tokio::test]
+async fn demand_driven_no_e013_for_resolved_imports() {
+    let mut h = LspTestHarness::new(&[("a.nix", "{ x = 1; }"), ("b.nix", "import ./a.nix")]).await;
+
+    // Only open B — A exists on disk.
+    h.open("b.nix").await;
+    let diags = h.wait_for_diagnostics("b.nix", TIMEOUT).await;
+
+    // Should have no E013 (ImportUnresolved) diagnostics.
+    if let Some(diag_params) = diags {
+        let import_unresolved: Vec<_> = diag_params
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == Some(NumberOrString::String("E013".to_string())))
+            .collect();
+        assert!(
+            import_unresolved.is_empty(),
+            "demand-resolved imports should not produce E013, got: {:?}",
+            import_unresolved,
+        );
+    }
+
+    h.shutdown().await;
+}
+
 /// Multiple files can be open simultaneously without interference.
 #[tokio::test]
 async fn multiple_files_independent() {
