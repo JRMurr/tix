@@ -808,23 +808,69 @@ fn run_check(
 
     let (module, source_map) = module_and_source_maps(&db, file);
     let name_res = name_resolution(&db, file);
+    let module_indices = lang_ast::module_indices(&db, file);
+    let grouped_defs = lang_ast::group_def(&db, file);
     timer.mark("parse+lower+nameres");
 
     let base_dir = file_path.parent().unwrap_or(std::path::Path::new("/"));
 
-    // CLI uses stubs-only model: no recursive import inference. Imports
-    // without stubs default to ⊤ (generic import :: a -> b). Users add
-    // .tix stubs for more precision.
+    // Demand-driven import resolution: use the coordinator to recursively
+    // infer imported files so cross-file types are available.
+    let registry = Arc::new(registry);
+    let coordinator = lang_check::coordinator::InferenceCoordinator::new();
+
+    // Build a syntax provider that wraps the DB for transitive imports.
+    struct SingleFileSyntaxProvider {
+        db: parking_lot::Mutex<RootDatabase>,
+        registry: Arc<lang_check::aliases::TypeAliasRegistry>,
+        context_args: Arc<HashMap<smol_str::SmolStr, comment_parser::ParsedTy>>,
+        deadline_secs: Option<u64>,
+    }
+    impl lang_check::coordinator::SyntaxProvider for SingleFileSyntaxProvider {
+        fn syntax_for_file(&self, path: &std::path::Path) -> Option<lang_check::SyntaxBundle> {
+            let db = self.db.lock();
+            let nix_file = db.read_file(path.to_path_buf()).ok()?;
+            let (module, _) = module_and_source_maps(&*db, nix_file);
+            let module_indices = lang_ast::module_indices(&*db, nix_file);
+            let name_res = name_resolution(&*db, nix_file);
+            let grouped_defs = lang_ast::group_def(&*db, nix_file);
+            Some(lang_check::SyntaxBundle {
+                path: path.to_path_buf(),
+                module,
+                module_indices,
+                name_res,
+                grouped_defs,
+                registry: Arc::clone(&self.registry),
+                context_args: Arc::clone(&self.context_args),
+                deadline_secs: self.deadline_secs,
+            })
+        }
+    }
+
+    let syntax_provider = SingleFileSyntaxProvider {
+        db: parking_lot::Mutex::new(db),
+        registry: Arc::clone(&registry),
+        context_args: context_args.clone(),
+        deadline_secs: None,
+    };
+
+    // Resolve imports using the coordinator (demand-driven).
     let import_resolution =
-        resolve_import_types_from_stubs(&module, &name_res, base_dir, &HashMap::new());
+        lang_check::imports::resolve_import_types(&module, &name_res, base_dir, |dep_path| {
+            // Demand the dependency's type from the coordinator.
+            let result = coordinator.demand_file(dep_path, &syntax_provider, None)?;
+            result.signature.map(|s| s.root_ty)
+        });
 
     let import_diagnostics = import_errors_to_diagnostics(&import_resolution.errors);
     timer.mark("import-resolution");
 
-    let mut result = lang_check::CheckBuilder::from_db(
-        &db,
-        file,
-        Arc::new(registry),
+    let mut result = lang_check::CheckBuilder::from_precomputed(
+        module.clone(),
+        name_res,
+        module_indices,
+        grouped_defs,
+        registry,
         import_resolution.types,
         context_args,
     )
