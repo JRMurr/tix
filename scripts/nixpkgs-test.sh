@@ -220,22 +220,27 @@ fi
 # Point at repo stubs so lib functions resolve.
 export TIX_BUILTIN_STUBS="${TIX_BUILTIN_STUBS:-$REPO_ROOT/stubs}"
 
+LOG_FILE="/tmp/nixpkgs-test-$(date +%Y%m%d-%H%M%S).log"
+
 echo "Memory limit: ${MEM_LIMIT_GB} GB"
 echo "Running: tix ${CHECK_ARGS[*]}"
+echo "Log file: $LOG_FILE"
 echo "---"
 
 # tix check exits 1 on type errors (expected), only treat signals/crashes
 # (exit >= 2, excluding 1) as failures.
 # Enforce memory limit via cgroups (kernel OOM-kills on exceed, no hanging).
 set +e
-systemd-run --user --scope -q -p MemoryMax="${MEM_LIMIT_GB}G" -p MemorySwapMax=0 "$TIX_CLI" "${CHECK_ARGS[@]}"
-rc=$?
+systemd-run --user --scope -q -p MemoryMax="${MEM_LIMIT_GB}G" -p MemorySwapMax=0 "$TIX_CLI" "${CHECK_ARGS[@]}" 2>&1 | tee "$LOG_FILE"
+rc=${PIPESTATUS[0]}
 set -e
 
 if [[ $rc -ge 2 ]]; then
     echo ""
     echo "tix check crashed (exit $rc)"
+    echo "Full log: $LOG_FILE"
     exit 1
 fi
 
+echo "Full log: $LOG_FILE"
 exit 0
