@@ -6730,8 +6730,21 @@ fn intersection_annotation_in_stub_produces_concrete_inter() {
         in { name = p.name; age = p.age; }
     "#};
 
-    let (_, inference) = check_str_with_aliases(nix_src, &registry);
-    inference.expect("inference should succeed with intersection annotation");
+    let (module, inference) = check_str_with_aliases(nix_src, &registry);
+    let inference = inference.expect("inference should succeed with intersection annotation");
+    let root_ty = inference
+        .expr_ty_map
+        .get(module.entry_expr)
+        .expect("root type should exist");
+    let formatted = format!("{root_ty}");
+    assert!(
+        formatted.contains("name") && formatted.contains("string"),
+        "expected `name: string` in output, got: {formatted}"
+    );
+    assert!(
+        formatted.contains("age") && formatted.contains("int"),
+        "expected `age: int` in output, got: {formatted}"
+    );
 }
 
 /// Regression test: extrusion of structurally-shared concrete types should be
@@ -6753,6 +6766,13 @@ fn extrude_caches_changed_concrete_types() {
         .get(module.entry_expr)
         .expect("root type should exist");
     let formatted = format!("{root_ty}");
+    // All three fields should be present with [int] type.
+    for field in ["a", "b", "c"] {
+        assert!(
+            formatted.contains(field),
+            "expected field `{field}` in output, got: {formatted}"
+        );
+    }
     assert!(
         formatted.contains("int"),
         "expected int in fields, got: {formatted}"

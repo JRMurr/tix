@@ -339,22 +339,6 @@ pub fn suggest_similar<'a>(
 // InferenceError → TixDiagnostic conversion
 // ==============================================================================
 
-/// Canonicalize a `Ty<TyId>` into an `OutputTy` for display purposes.
-/// Uses positive polarity (output position) since error messages show types
-/// as "what was produced" rather than "what was expected as input".
-fn canonicalize_error_ty(ty: &lang_ty::Ty<TyId>, table: &TypeStorage) -> OutputTy {
-    // If the Ty is concrete, we need to find its TyId in the table to
-    // canonicalize it. For simple cases (primitives), we can convert directly.
-    match ty {
-        lang_ty::Ty::Primitive(p) => OutputTy::Primitive(*p),
-        _ => {
-            // For structural types, allocate into a temporary storage isn't
-            // practical. Instead, recursively convert children.
-            canonicalize_ty_structural(ty, table)
-        }
-    }
-}
-
 /// Recursively convert a Ty<TyId> to OutputTy by canonicalizing children.
 fn canonicalize_ty_structural(ty: &lang_ty::Ty<TyId>, table: &TypeStorage) -> OutputTy {
     match ty {
@@ -416,8 +400,8 @@ fn canonicalize_ty_structural(ty: &lang_ty::Ty<TyId>, table: &TypeStorage) -> Ou
 fn error_to_diagnostic(error: &LocatedError, table: &TypeStorage) -> TixDiagnostic {
     let kind = match &error.payload {
         InferenceError::TypeMismatch(pair) => {
-            let actual = canonicalize_error_ty(&pair.0, table);
-            let expected = canonicalize_error_ty(&pair.1, table);
+            let actual = canonicalize_ty_structural(&pair.0, table);
+            let expected = canonicalize_ty_structural(&pair.1, table);
             TixDiagnosticKind::TypeMismatch { expected, actual }
         }
         InferenceError::MissingField { field, available } => {
@@ -429,8 +413,8 @@ fn error_to_diagnostic(error: &LocatedError, table: &TypeStorage) -> TixDiagnost
             }
         }
         InferenceError::InvalidBinOp(triple) => {
-            let lhs_ty = canonicalize_error_ty(&triple.1, table);
-            let rhs_ty = canonicalize_error_ty(&triple.2, table);
+            let lhs_ty = canonicalize_ty_structural(&triple.1, table);
+            let rhs_ty = canonicalize_ty_structural(&triple.2, table);
             TixDiagnosticKind::InvalidBinOp {
                 op: triple.0,
                 lhs_ty,
@@ -438,8 +422,8 @@ fn error_to_diagnostic(error: &LocatedError, table: &TypeStorage) -> TixDiagnost
             }
         }
         InferenceError::InvalidAttrMerge(pair) => {
-            let lhs_ty = canonicalize_error_ty(&pair.0, table);
-            let rhs_ty = canonicalize_error_ty(&pair.1, table);
+            let lhs_ty = canonicalize_ty_structural(&pair.0, table);
+            let rhs_ty = canonicalize_ty_structural(&pair.1, table);
             TixDiagnosticKind::InvalidAttrMerge { lhs_ty, rhs_ty }
         }
     };

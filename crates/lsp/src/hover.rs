@@ -163,91 +163,19 @@ pub fn hover(
     try_attrpath_key_hover(analysis, &token, docs)
 }
 
-/// Hover on an attrpath key inside an attrset definition.
-///
-/// For `{ programs.steam.enable = true; }` in a NixOS module, hovering on
-/// `steam` should show the type of `config.programs.steam` and any field-level
-/// docs from the stubs.
-fn try_attrpath_key_hover(
-    analysis: &FileSnapshot,
-    token: &rowan::SyntaxToken<rnix::NixLanguage>,
-    docs: &DocIndex,
-) -> Option<Hover> {
-    use crate::ty_nav::{
-        collect_attrpath_segments, collect_parent_attrpath_context, extract_alias_name,
-        get_module_config_type, resolve_through_segments,
-    };
-
-    let inference = analysis.inference_result()?;
-    let node = token.parent()?;
-
-    // The token must be inside an Attrpath → AttrpathValue (not a Select).
-    let attrpath_node = node.ancestors().find_map(rnix::ast::Attrpath::cast)?;
-    let parent = attrpath_node.syntax().parent()?;
-    if rnix::ast::Select::can_cast(parent.kind()) {
-        return None;
-    }
-    let _apv = rnix::ast::AttrpathValue::cast(parent)?;
-
-    // Find the enclosing AttrSet.
-    let attrset_node = _apv.syntax().parent().and_then(rnix::ast::AttrSet::cast)?;
-
-    // Collect all segments from this attrpath, up to and including the
-    // hovered token.
-    let current_segments =
-        collect_attrpath_segments(&attrpath_node, token.text_range().end(), true);
-
-    // Collect parent context from enclosing nesting.
-    let parent_segments = collect_parent_attrpath_context(&attrset_node);
-
-    // Full path = parent context + current segments.
-    let mut full_path = parent_segments;
-    full_path.extend(current_segments);
-
-    if full_path.is_empty() {
-        return None;
-    }
-
-    // Find the config type from the root lambda's pattern.
-    let first_segment = full_path.first()?;
-    let config_ty = get_module_config_type(
-        analysis,
-        inference,
-        first_segment,
-        &analysis.syntax.context_arg_types,
-    )?;
-
-    let alias = extract_alias_name(&config_ty).cloned();
-
-    // Resolve the type at the full path.
-    let resolved_ty = resolve_through_segments(&config_ty, &full_path)?;
-
-    // Look up field doc.
-    let doc = alias.as_ref().and_then(|a| {
-        docs.field_doc(a.as_str(), &full_path)
-            .map(|d| d.to_string())
-    });
-
-    // Show the last segment name and its type, plus any docs.
-    let last_segment = full_path.last()?;
-    let range = analysis.syntax.line_index.range(token.text_range());
-
-    let dc = lang_ty::DisplayConfig::hover();
-    let type_display = format!("{last_segment} :: {}", resolved_ty.display_truncated(&dc));
-
-    Some(make_hover(type_display, doc.as_deref(), range))
+/// Resolved attrpath key context — shared between hover and field doc lookups.
+struct AttrpathKeyResolution {
+    full_path: Vec<smol_str::SmolStr>,
+    alias_name: Option<smol_str::SmolStr>,
+    config_ty: OutputTy,
 }
 
-/// Look up field-level docs for a token that's an attrpath key in an attrset
-/// definition (e.g. `steam` in `{ programs.steam.enable = true; }`).
-///
-/// Builds the full path from parent context + attrpath segments, finds the
-/// module config type, and queries the DocIndex for field docs at that path.
-fn try_attrpath_key_field_doc(
+/// Resolve an attrpath key token to its config type, full path, and alias name.
+/// Shared by `try_attrpath_key_hover` and `try_attrpath_key_field_doc`.
+fn resolve_attrpath_key(
     analysis: &FileSnapshot,
     token: &rowan::SyntaxToken<rnix::NixLanguage>,
-    docs: &DocIndex,
-) -> Option<String> {
+) -> Option<AttrpathKeyResolution> {
     use crate::ty_nav::{
         collect_attrpath_segments, collect_parent_attrpath_context, extract_alias_name,
         get_module_config_type,
@@ -268,10 +196,14 @@ fn try_attrpath_key_field_doc(
 
     let current_segments =
         collect_attrpath_segments(&attrpath_node, token.text_range().end(), true);
-
     let parent_segments = collect_parent_attrpath_context(&attrset_node);
+
     let mut full_path = parent_segments;
     full_path.extend(current_segments);
+
+    if full_path.is_empty() {
+        return None;
+    }
 
     let first_segment = full_path.first()?;
     let config_ty = get_module_config_type(
@@ -280,9 +212,53 @@ fn try_attrpath_key_field_doc(
         first_segment,
         &analysis.syntax.context_arg_types,
     )?;
-    let alias = extract_alias_name(&config_ty)?;
+    let alias_name = extract_alias_name(&config_ty).cloned();
 
-    docs.field_doc(alias.as_str(), &full_path)
+    Some(AttrpathKeyResolution {
+        full_path,
+        alias_name,
+        config_ty,
+    })
+}
+
+/// Hover on an attrpath key inside an attrset definition.
+///
+/// For `{ programs.steam.enable = true; }` in a NixOS module, hovering on
+/// `steam` should show the type of `config.programs.steam` and any field-level
+/// docs from the stubs.
+fn try_attrpath_key_hover(
+    analysis: &FileSnapshot,
+    token: &rowan::SyntaxToken<rnix::NixLanguage>,
+    docs: &DocIndex,
+) -> Option<Hover> {
+    use crate::ty_nav::resolve_through_segments;
+
+    let res = resolve_attrpath_key(analysis, token)?;
+    let resolved_ty = resolve_through_segments(&res.config_ty, &res.full_path)?;
+
+    let doc = res.alias_name.as_ref().and_then(|a| {
+        docs.field_doc(a.as_str(), &res.full_path)
+            .map(|d| d.to_string())
+    });
+
+    let last_segment = res.full_path.last()?;
+    let range = analysis.syntax.line_index.range(token.text_range());
+    let dc = lang_ty::DisplayConfig::hover();
+    let type_display = format!("{last_segment} :: {}", resolved_ty.display_truncated(&dc));
+
+    Some(make_hover(type_display, doc.as_deref(), range))
+}
+
+/// Look up field-level docs for a token that's an attrpath key in an attrset
+/// definition (e.g. `steam` in `{ programs.steam.enable = true; }`).
+fn try_attrpath_key_field_doc(
+    analysis: &FileSnapshot,
+    token: &rowan::SyntaxToken<rnix::NixLanguage>,
+    docs: &DocIndex,
+) -> Option<String> {
+    let res = resolve_attrpath_key(analysis, token)?;
+    let alias = res.alias_name.as_ref()?;
+    docs.field_doc(alias.as_str(), &res.full_path)
         .map(|d| d.to_string())
 }
 
@@ -337,21 +313,14 @@ fn try_select_field_doc(
                 // Found the base reference. Look up what type alias it might be.
                 // Expr::Reference stores the identifier text as SmolStr.
 
-                // Try to find the inferred type for the expression to extract
-                // the alias name. If the expression type display starts with an
-                // uppercase letter, it's likely a Named alias.
+                // Try to find the inferred type for the expression and extract
+                // the alias name directly from the Named variant.
                 let inference = analysis.inference_result()?;
-                if let Some(ty) = inference.expr_ty_map.get(current) {
-                    let ty_str = ty.to_string();
-                    if ty_str
-                        .chars()
-                        .next()
-                        .is_some_and(|c| c.is_ascii_uppercase())
-                    {
-                        let alias_name = ty_str.split_whitespace().next().unwrap_or(&ty_str);
-                        path.reverse();
-                        return docs.field_doc(alias_name, &path).map(|d| d.to_string());
-                    }
+                if let Some(OutputTy::Named(alias_name, _)) = inference.expr_ty_map.get(current) {
+                    path.reverse();
+                    return docs
+                        .field_doc(alias_name.as_str(), &path)
+                        .map(|d| d.to_string());
                 }
 
                 // Fallback: try capitalizing the base name as an alias name.

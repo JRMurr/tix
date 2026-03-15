@@ -34,6 +34,25 @@ use thiserror::Error;
 use tracing::instrument;
 use type_table::TypeTable;
 
+/// Load inline type aliases from doc comments, applying CoW on the registry.
+/// Most files have no inline aliases, so the Arc is shared without cloning.
+fn load_inline_aliases(
+    aliases: Arc<TypeAliasRegistry>,
+    module: &lang_ast::Module,
+) -> Arc<TypeAliasRegistry> {
+    if module.inline_type_aliases.is_empty() {
+        aliases
+    } else {
+        let mut cloned = (*aliases).clone();
+        for alias_source in &module.inline_type_aliases {
+            if let Some((name, body)) = comment_parser::parse_inline_type_alias(alias_source) {
+                cloned.load_inline_alias(name, body);
+            }
+        }
+        Arc::new(cloned)
+    }
+}
+
 #[instrument(level = "info", skip_all, name = "check_file")]
 #[salsa::tracked]
 pub fn check_file(db: &dyn AstDb, file: NixFile) -> Result<InferenceResult, Box<TixDiagnostic>> {
@@ -64,21 +83,7 @@ pub fn check_file_with_imports(
     let indices = lang_ast::module_indices(db, file);
     let grouped_defs = lang_ast::group_def(db, file);
 
-    // Load inline type aliases from doc comments before inference so they're
-    // available for annotation resolution. Inline aliases shadow stub aliases.
-    // CoW: only clone the registry when inline aliases need to be inserted.
-    // Most files have no inline aliases, so the Arc is shared without cloning.
-    let aliases = if module.inline_type_aliases.is_empty() {
-        aliases
-    } else {
-        let mut cloned = (*aliases).clone();
-        for alias_source in &module.inline_type_aliases {
-            if let Some((name, body)) = comment_parser::parse_inline_type_alias(alias_source) {
-                cloned.load_inline_alias(name, body);
-            }
-        }
-        Arc::new(cloned)
-    };
+    let aliases = load_inline_aliases(aliases, &module);
 
     let check = CheckCtx::new(
         &module,
@@ -402,20 +407,7 @@ pub fn check_file_collecting_with_cancel(
     let indices = lang_ast::module_indices(db, file);
     let grouped_defs = lang_ast::group_def(db, file);
 
-    // Load inline type aliases from doc comments before inference.
-    // CoW: only clone the registry when inline aliases need to be inserted.
-    // Most files have no inline aliases, so the Arc is shared without cloning.
-    let aliases = if module.inline_type_aliases.is_empty() {
-        aliases
-    } else {
-        let mut cloned = (*aliases).clone();
-        for alias_source in &module.inline_type_aliases {
-            if let Some((name, body)) = comment_parser::parse_inline_type_alias(alias_source) {
-                cloned.load_inline_alias(name, body);
-            }
-        }
-        Arc::new(cloned)
-    };
+    let aliases = load_inline_aliases(aliases, &module);
 
     let mut check = CheckCtx::new(
         &module,
@@ -462,20 +454,7 @@ pub fn check_with_precomputed(
     deadline: Option<Instant>,
     cancel_flag: Option<Arc<AtomicBool>>,
 ) -> CheckResult {
-    // Load inline type aliases from doc comments before inference.
-    // CoW: only clone the registry when inline aliases need to be inserted.
-    // Most files have no inline aliases, so the Arc is shared without cloning.
-    let aliases = if module.inline_type_aliases.is_empty() {
-        aliases
-    } else {
-        let mut cloned = (*aliases).clone();
-        for alias_source in &module.inline_type_aliases {
-            if let Some((name, body)) = comment_parser::parse_inline_type_alias(alias_source) {
-                cloned.load_inline_alias(name, body);
-            }
-        }
-        Arc::new(cloned)
-    };
+    let aliases = load_inline_aliases(aliases, module);
 
     let mut check = CheckCtx::new(
         module,
@@ -690,13 +669,19 @@ impl<'db> CheckCtx<'db> {
     }
 
     /// Check whether the inference deadline has been exceeded or cancellation
-    /// was requested externally.
-    fn past_deadline(&self) -> bool {
+    /// was requested externally. Caches a positive result in `deadline_exceeded`
+    /// so subsequent checks are O(1).
+    fn past_deadline(&mut self) -> bool {
+        if self.deadline_exceeded {
+            return true;
+        }
         if self.deadline.is_some_and(|d| Instant::now() > d) {
+            self.deadline_exceeded = true;
             return true;
         }
         if let Some(ref flag) = self.cancel_flag {
             if flag.load(Ordering::Relaxed) {
+                self.deadline_exceeded = true;
                 return true;
             }
         }

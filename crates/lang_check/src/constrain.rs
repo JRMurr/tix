@@ -60,17 +60,12 @@ impl CheckCtx<'_> {
 
     /// Record that `sub <: sup` — `sub` is a subtype of `sup`.
     pub fn constrain(&mut self, sub: TyId, sup: TyId) -> Result<(), InferenceError> {
-        // Bail out if inference deadline was exceeded. Returning Ok(()) is
-        // sound — we just stop adding constraints, producing incomplete (but
-        // not unsound) types.
-        if self.deadline_exceeded {
-            return Ok(());
-        }
-
         // Periodic deadline/cancellation check inside the constraint propagation
         // hotpath. This catches cases where a single infer_expr call triggers a
         // huge constrain() cascade (e.g. structural subtyping on large attrsets),
         // or when the LSP cancels analysis because a newer edit arrived.
+        // `past_deadline()` caches a positive result in `deadline_exceeded`, so
+        // the first check is O(1) for subsequent calls.
         if self.deadline.is_some() || self.cancel_flag.is_some() {
             self.op_counter = self.op_counter.wrapping_add(1);
             if self
@@ -84,9 +79,10 @@ impl CheckCtx<'_> {
                     self.types.constrain_cache.len(),
                     self.types.storage.len(),
                 );
-                self.deadline_exceeded = true;
                 return Ok(());
             }
+        } else if self.deadline_exceeded {
+            return Ok(());
         }
 
         // Reflexivity: identical ids are trivially subtypes.

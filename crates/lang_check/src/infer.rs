@@ -9,6 +9,20 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+/// Execute `$body`, measure wall-clock time, and run `$log` if elapsed exceeds
+/// `$threshold_ms`. `$log` receives `$elapsed` as a `Duration` binding.
+macro_rules! log_if_slow {
+    ($threshold_ms:expr, $body:expr, |$elapsed:ident| $log:expr) => {{
+        let __t = Instant::now();
+        let __result = $body;
+        let $elapsed = __t.elapsed();
+        if $elapsed.as_millis() > $threshold_ms {
+            $log;
+        }
+        __result
+    }};
+}
+
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::{CheckCtx, InferenceError, InferenceResult, LocatedError, Polarity, TyId};
@@ -99,7 +113,7 @@ impl CheckCtx<'_> {
             // Check deadline before each SCC group so a single file can't
             // block the LSP indefinitely. Partial results (types inferred
             // so far) are still returned.
-            if self.deadline_exceeded || self.past_deadline() {
+            if self.past_deadline() {
                 log::warn!("inference deadline exceeded after {i}/{n_groups} SCC groups");
                 break;
             }
@@ -107,37 +121,28 @@ impl CheckCtx<'_> {
                 .iter()
                 .map(|d| self.module[d.name()].text.as_str().to_owned())
                 .collect();
-            let t_group = Instant::now();
-            let err = self.infer_scc_group(group);
-            let elapsed = t_group.elapsed();
-            if elapsed.as_millis() > 50 {
-                log::info!(
-                    "SCC group {i}/{n_groups} ({}) took {:.1}ms (slots: {}, RSS: {:.0}MB)",
-                    group_names.join(", "),
-                    elapsed.as_secs_f64() * 1000.0,
-                    self.types.storage.len(),
-                    rss_mb(),
-                );
-            }
+            let err = log_if_slow!(50, self.infer_scc_group(group), |elapsed| log::info!(
+                "SCC group {i}/{n_groups} ({}) took {:.1}ms (slots: {}, RSS: {:.0}MB)",
+                group_names.join(", "),
+                elapsed.as_secs_f64() * 1000.0,
+                self.types.storage.len(),
+                rss_mb(),
+            ));
             if let Some(err) = err {
                 errors.push(err);
             }
         }
 
-        if !self.deadline_exceeded && !self.past_deadline() {
-            let t_root = Instant::now();
-            if let Err(err) = self.infer_root() {
+        if !self.past_deadline() {
+            let root_err = log_if_slow!(10, self.infer_root(), |elapsed| log::info!(
+                "infer_root took {:.1}ms (cache: {}, slots: {}, RSS: {:.0}MB)",
+                elapsed.as_secs_f64() * 1000.0,
+                self.types.constrain_cache.len(),
+                self.types.storage.len(),
+                rss_mb(),
+            ));
+            if let Err(err) = root_err {
                 errors.push(err);
-            }
-            let root_elapsed = t_root.elapsed();
-            if root_elapsed.as_millis() > 10 {
-                log::info!(
-                    "infer_root took {:.1}ms (cache: {}, slots: {}, RSS: {:.0}MB)",
-                    root_elapsed.as_secs_f64() * 1000.0,
-                    self.types.constrain_cache.len(),
-                    self.types.storage.len(),
-                    rss_mb(),
-                );
             }
         } else {
             log::warn!("skipping infer_root due to deadline");
@@ -150,47 +155,33 @@ impl CheckCtx<'_> {
         diagnostics.extend(diagnostic::warnings_to_diagnostics(&warnings));
 
         // Capture before self is moved into Collector.
-        let timed_out = self.deadline_exceeded || self.past_deadline();
+        let timed_out = self.past_deadline();
 
-        let t_canon = Instant::now();
         let mut collector = Collector::new(self);
-        let result = collector.finalize_inference();
-        let canon_elapsed = t_canon.elapsed();
-        if canon_elapsed.as_millis() > 50 {
-            log::info!(
-                "canonicalization took {:.1}ms (RSS: {:.0}MB)",
-                canon_elapsed.as_secs_f64() * 1000.0,
-                rss_mb(),
-            );
-        }
+        let result = log_if_slow!(50, collector.finalize_inference(), |elapsed| log::info!(
+            "canonicalization took {:.1}ms (RSS: {:.0}MB)",
+            elapsed.as_secs_f64() * 1000.0,
+            rss_mb(),
+        ));
         (result, diagnostics, timed_out)
     }
 
     fn infer_root(&mut self) -> Result<(), LocatedError> {
-        let t0 = Instant::now();
-        let expr_result = self.infer_expr(self.module.entry_expr);
-        let expr_elapsed = t0.elapsed();
-        if expr_elapsed.as_millis() > 50 {
+        let expr_result = log_if_slow!(50, self.infer_expr(self.module.entry_expr), |elapsed| {
             log::info!(
-                "infer_root: infer_expr {:.1}ms (ok={}, cache: {}, slots: {})",
-                expr_elapsed.as_secs_f64() * 1000.0,
-                expr_result.is_ok(),
+                "infer_root: infer_expr {:.1}ms (cache: {}, slots: {})",
+                elapsed.as_secs_f64() * 1000.0,
                 self.types.constrain_cache.len(),
                 self.types.storage.len(),
             );
-        }
+        });
         expr_result?;
-        let t1 = Instant::now();
-        self.resolve_pending()?;
-        let resolve_elapsed = t1.elapsed();
-        if resolve_elapsed.as_millis() > 50 {
-            log::info!(
-                "infer_root: resolve_pending {:.1}ms (cache: {}, slots: {})",
-                resolve_elapsed.as_secs_f64() * 1000.0,
-                self.types.constrain_cache.len(),
-                self.types.storage.len(),
-            );
-        }
+        log_if_slow!(50, self.resolve_pending()?, |elapsed| log::info!(
+            "infer_root: resolve_pending {:.1}ms (cache: {}, slots: {})",
+            elapsed.as_secs_f64() * 1000.0,
+            self.types.constrain_cache.len(),
+            self.types.storage.len(),
+        ));
         Ok(())
     }
 
@@ -413,7 +404,7 @@ impl CheckCtx<'_> {
         let infer_start = std::time::Instant::now();
 
         for def in group {
-            if self.deadline_exceeded || self.past_deadline() {
+            if self.past_deadline() {
                 break;
             }
 
@@ -856,7 +847,7 @@ impl CheckCtx<'_> {
         // Fixed-point loop: keep trying until no more progress.
         let mut iterations = 0;
         loop {
-            if self.deadline_exceeded || self.past_deadline() {
+            if self.past_deadline() {
                 break;
             }
 
@@ -1146,28 +1137,20 @@ impl CheckCtx<'_> {
         let lhs_concrete = self.types.find_concrete_through_inter(mg.lhs);
         let rhs_concrete = self.types.find_concrete_through_inter(mg.rhs);
 
-        match (&lhs_concrete, &rhs_concrete) {
-            (Some(Ty::AttrSet(_)), Some(Ty::AttrSet(_))) => {}
-            (Some(lhs), Some(rhs)) => {
-                return Err(InferenceError::InvalidAttrMerge(Box::new((
-                    lhs.clone(),
-                    rhs.clone(),
-                ))));
+        match (lhs_concrete, rhs_concrete) {
+            (Some(Ty::AttrSet(lhs_attr)), Some(Ty::AttrSet(rhs_attr))) => {
+                let merged = lhs_attr.merge(rhs_attr);
+                let merged_id = self.alloc_concrete(Ty::AttrSet(merged));
+                self.constrain(merged_id, mg.ret)?;
+                self.constrain(mg.ret, merged_id)?;
+                Ok(true)
             }
-            _ => return Ok(false),
+            (Some(lhs), Some(rhs)) => Err(InferenceError::InvalidAttrMerge(Box::new((
+                lhs.clone(),
+                rhs.clone(),
+            )))),
+            _ => Ok(false),
         }
-        // Both are AttrSets — safe to destructure after the guard above.
-        let (Some(Ty::AttrSet(lhs_attr)), Some(Ty::AttrSet(rhs_attr))) =
-            (lhs_concrete, rhs_concrete)
-        else {
-            unreachable!()
-        };
-
-        let merged = lhs_attr.clone().merge(rhs_attr.clone());
-        let merged_id = self.alloc_concrete(Ty::AttrSet(merged));
-        self.constrain(merged_id, mg.ret)?;
-        self.constrain(mg.ret, merged_id)?;
-        Ok(true)
     }
 
     /// Compact the bounds graph for an SCC group's type slots.

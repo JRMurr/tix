@@ -1,4 +1,5 @@
 use std::fmt;
+use std::ops::ControlFlow;
 use std::sync::{Arc, LazyLock};
 
 use derive_more::Debug;
@@ -223,35 +224,21 @@ impl OutputTy {
     /// Short-circuits on first hit — O(1) for concrete types, O(n) worst case.
     /// Uses a visited set to avoid exponential blowup on DAG-shaped types.
     pub fn has_type_vars(&self) -> bool {
-        let mut visited = FxHashSet::default();
-        self.has_type_vars_inner(&mut visited)
-    }
-
-    fn has_type_vars_inner(&self, visited: &mut FxHashSet<*const OutputTy>) -> bool {
-        if let OutputTy::TyVar(_) = self {
-            return true;
-        }
-        let mut found = false;
-        self.for_each_child_tyref(&mut |child| {
-            if !found && visited.insert(Arc::as_ptr(&child.0)) {
-                found = child.0.has_type_vars_inner(visited);
-            }
-        });
-        found
+        self.any_node_matches(|ty| matches!(ty, OutputTy::TyVar(_)))
     }
 
     /// Normalize all the ty vars to start from 0 instead
     /// of the "random" nums it has from solving.
     pub fn normalize_vars(&self) -> OutputTy {
+        let free_vars = self.free_type_vars();
+
         // Concrete types with no TyVar nodes are already normalized — skip the
         // full tree walk + rebuild. This is the common case for NixOS config
         // attrsets with hundreds of fields, avoiding ~7 GB of map_children
         // allocations in large stubs.
-        if !self.has_type_vars() {
+        if free_vars.is_empty() {
             return self.clone();
         }
-
-        let free_vars = self.free_type_vars();
 
         let subs: Substitutions = free_vars
             .iter()
@@ -321,100 +308,36 @@ impl OutputTy {
                 return true;
             }
         }
-        let mut found = false;
-        self.for_each_child_tyref(&mut |child| {
-            if !found && visited.insert(Arc::as_ptr(&child.0)) {
-                found = child.0.has_non_primitive_lambda_param_inner(visited);
+        self.try_for_each_child_tyref(&mut |child| {
+            if visited.insert(Arc::as_ptr(&child.0))
+                && child.0.has_non_primitive_lambda_param_inner(visited)
+            {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
             }
-        });
-        found
+        })
+        .is_break()
     }
 
     /// Returns true if this type or any of its children contains a Union or Intersection.
     pub fn contains_union_or_intersection(&self) -> bool {
-        let mut visited = FxHashSet::default();
-        self.contains_union_or_intersection_inner(&mut visited)
-    }
-
-    fn contains_union_or_intersection_inner(
-        &self,
-        visited: &mut FxHashSet<*const OutputTy>,
-    ) -> bool {
-        match self {
-            OutputTy::Union(_) | OutputTy::Intersection(_) => true,
-            _ => {
-                let mut found = false;
-                self.for_each_child_tyref(&mut |child| {
-                    if !found && visited.insert(Arc::as_ptr(&child.0)) {
-                        found = child.0.contains_union_or_intersection_inner(visited);
-                    }
-                });
-                found
-            }
-        }
+        self.any_node_matches(|ty| matches!(ty, OutputTy::Union(_) | OutputTy::Intersection(_)))
     }
 
     /// Returns true if this type or any of its children contains an Intersection.
     pub fn contains_intersection(&self) -> bool {
-        let mut visited = FxHashSet::default();
-        self.contains_intersection_inner(&mut visited)
-    }
-
-    fn contains_intersection_inner(&self, visited: &mut FxHashSet<*const OutputTy>) -> bool {
-        match self {
-            OutputTy::Intersection(_) => true,
-            _ => {
-                let mut found = false;
-                self.for_each_child_tyref(&mut |child| {
-                    if !found && visited.insert(Arc::as_ptr(&child.0)) {
-                        found = child.0.contains_intersection_inner(visited);
-                    }
-                });
-                found
-            }
-        }
+        self.any_node_matches(|ty| matches!(ty, OutputTy::Intersection(_)))
     }
 
     /// Returns true if this type or any of its children contains a Neg.
     pub fn contains_neg(&self) -> bool {
-        let mut visited = FxHashSet::default();
-        self.contains_neg_inner(&mut visited)
-    }
-
-    fn contains_neg_inner(&self, visited: &mut FxHashSet<*const OutputTy>) -> bool {
-        match self {
-            OutputTy::Neg(_) => true,
-            _ => {
-                let mut found = false;
-                self.for_each_child_tyref(&mut |child| {
-                    if !found && visited.insert(Arc::as_ptr(&child.0)) {
-                        found = child.0.contains_neg_inner(visited);
-                    }
-                });
-                found
-            }
-        }
+        self.any_node_matches(|ty| matches!(ty, OutputTy::Neg(_)))
     }
 
     /// Returns true if this type is or contains Top or Bottom.
     pub fn contains_top_or_bottom(&self) -> bool {
-        let mut visited = FxHashSet::default();
-        self.contains_top_or_bottom_inner(&mut visited)
-    }
-
-    fn contains_top_or_bottom_inner(&self, visited: &mut FxHashSet<*const OutputTy>) -> bool {
-        match self {
-            OutputTy::Top | OutputTy::Bottom => true,
-            _ => {
-                let mut found = false;
-                self.for_each_child_tyref(&mut |child| {
-                    if !found && visited.insert(Arc::as_ptr(&child.0)) {
-                        found = child.0.contains_top_or_bottom_inner(visited);
-                    }
-                });
-                found
-            }
-        }
+        self.any_node_matches(|ty| matches!(ty, OutputTy::Top | OutputTy::Bottom))
     }
 
     /// Returns true if this type is or contains a bare TyVar outside of Lambda params.
@@ -430,21 +353,19 @@ impl OutputTy {
             OutputTy::TyVar(_) => true,
             // Lambda params are allowed to have TyVar, so only check body
             OutputTy::Lambda { body, .. } => {
-                if visited.insert(Arc::as_ptr(&body.0)) {
-                    body.0.contains_bare_tyvar_inner(visited)
-                } else {
-                    false
-                }
+                visited.insert(Arc::as_ptr(&body.0)) && body.0.contains_bare_tyvar_inner(visited)
             }
-            _ => {
-                let mut found = false;
-                self.for_each_child_tyref(&mut |child| {
-                    if !found && visited.insert(Arc::as_ptr(&child.0)) {
-                        found = child.0.contains_bare_tyvar_inner(visited);
+            _ => self
+                .try_for_each_child_tyref(&mut |child| {
+                    if visited.insert(Arc::as_ptr(&child.0))
+                        && child.0.contains_bare_tyvar_inner(visited)
+                    {
+                        ControlFlow::Break(())
+                    } else {
+                        ControlFlow::Continue(())
                     }
-                });
-                found
-            }
+                })
+                .is_break(),
         }
     }
 
@@ -460,7 +381,10 @@ impl OutputTy {
         match self {
             OutputTy::Union(members) => {
                 let mut flat: Vec<TyRef> = Vec::new();
-                Self::flatten_union_cached(members, &mut flat, cache);
+                Self::flatten_set_op_cached(members, &mut flat, cache, |ty| match ty {
+                    OutputTy::Union(inner) => Some(inner),
+                    _ => None,
+                });
                 flat.sort();
                 flat.dedup();
                 if flat.len() == 1 {
@@ -470,7 +394,10 @@ impl OutputTy {
             }
             OutputTy::Intersection(members) => {
                 let mut flat: Vec<TyRef> = Vec::new();
-                Self::flatten_intersection_cached(members, &mut flat, cache);
+                Self::flatten_set_op_cached(members, &mut flat, cache, |ty| match ty {
+                    OutputTy::Intersection(inner) => Some(inner),
+                    _ => None,
+                });
                 flat.sort();
                 flat.dedup();
                 if flat.len() == 1 {
@@ -497,29 +424,19 @@ impl OutputTy {
         result
     }
 
-    fn flatten_union_cached(
+    /// Flatten members of a set operation (Union or Intersection), normalizing
+    /// each child and inlining nested instances of the same variant.
+    /// `extract` returns the inner members if the type matches the variant being
+    /// flattened (e.g. Union members for a Union flatten), or None otherwise.
+    fn flatten_set_op_cached(
         members: &[TyRef],
         out: &mut Vec<TyRef>,
         cache: &mut FxHashMap<*const OutputTy, TyRef>,
+        extract: fn(&OutputTy) -> Option<&Vec<TyRef>>,
     ) {
         for m in members {
             let normalized = m.0.normalize_set_ops_cached(cache);
-            if let OutputTy::Union(inner) = &normalized {
-                out.extend(inner.iter().cloned());
-            } else {
-                out.push(TyRef::from(normalized));
-            }
-        }
-    }
-
-    fn flatten_intersection_cached(
-        members: &[TyRef],
-        out: &mut Vec<TyRef>,
-        cache: &mut FxHashMap<*const OutputTy, TyRef>,
-    ) {
-        for m in members {
-            let normalized = m.0.normalize_set_ops_cached(cache);
-            if let OutputTy::Intersection(inner) = &normalized {
+            if let Some(inner) = extract(&normalized) {
                 out.extend(inner.iter().cloned());
             } else {
                 out.push(TyRef::from(normalized));
@@ -560,36 +477,30 @@ impl OutputTy {
                         && body.0.check_shared_lambda_param_tyvars(seen, visited))
             }
             OutputTy::TyVar(_) | OutputTy::Primitive(_) | OutputTy::Bottom | OutputTy::Top => false,
-            _ => {
-                let mut found = false;
-                self.for_each_child_tyref(&mut |child| {
-                    if !found && visited.insert(Arc::as_ptr(&child.0)) {
-                        found = child.0.check_shared_lambda_param_tyvars(seen, visited);
+            _ => self
+                .try_for_each_child_tyref(&mut |child| {
+                    if visited.insert(Arc::as_ptr(&child.0))
+                        && child.0.check_shared_lambda_param_tyvars(seen, visited)
+                    {
+                        ControlFlow::Break(())
+                    } else {
+                        ControlFlow::Continue(())
                     }
-                });
-                found
-            }
+                })
+                .is_break(),
         }
     }
 
     /// Returns true if this type contains a Named wrapper.
     pub fn contains_named(&self) -> bool {
-        let mut visited = FxHashSet::default();
-        self.contains_named_inner(&mut visited)
+        self.any_node_matches(|ty| matches!(ty, OutputTy::Named(..)))
     }
 
-    fn contains_named_inner(&self, visited: &mut FxHashSet<*const OutputTy>) -> bool {
+    /// Unwrap Named wrappers to get at the structural type.
+    pub fn unwrap_named(&self) -> &OutputTy {
         match self {
-            OutputTy::Named(..) => true,
-            _ => {
-                let mut found = false;
-                self.for_each_child_tyref(&mut |child| {
-                    if !found && visited.insert(Arc::as_ptr(&child.0)) {
-                        found = child.0.contains_named_inner(visited);
-                    }
-                });
-                found
-            }
+            OutputTy::Named(_, inner) => inner.0.unwrap_named(),
+            other => other,
         }
     }
 
@@ -613,7 +524,7 @@ impl OutputTy {
         result
     }
 
-    fn collect_free_type_vars(
+    pub(crate) fn collect_free_type_vars(
         &self,
         result: &mut Vec<u32>,
         seen: &mut rustc_hash::FxHashSet<u32>,
@@ -642,71 +553,6 @@ impl OutputTy {
     // variants only need one update site. These are intentionally shallow — they
     // apply `f` to each direct child but do NOT recurse; callers compose
     // recursion themselves.
-
-    /// Apply `f` to every direct child, producing a new OutputTy with the same
-    /// variant structure. Leaf variants (TyVar, Primitive) are returned as-is.
-    pub fn map_children(&self, f: &mut impl FnMut(&OutputTy) -> OutputTy) -> OutputTy {
-        match self {
-            OutputTy::TyVar(_) | OutputTy::Primitive(_) | OutputTy::Bottom | OutputTy::Top => {
-                self.clone()
-            }
-            OutputTy::List(inner) => OutputTy::List(f(&inner.0).into()),
-            OutputTy::Lambda { param, body } => OutputTy::Lambda {
-                param: f(&param.0).into(),
-                body: f(&body.0).into(),
-            },
-            OutputTy::AttrSet(attr) => {
-                let fields = attr
-                    .fields
-                    .iter()
-                    .map(|(k, v)| (k.clone(), f(&v.0).into()))
-                    .collect();
-                let dyn_ty = attr.dyn_ty.as_ref().map(|d| f(&d.0).into());
-                OutputTy::AttrSet(AttrSetTy {
-                    fields,
-                    dyn_ty,
-                    open: attr.open,
-                    optional_fields: attr.optional_fields.clone(),
-                })
-            }
-            OutputTy::Union(members) => {
-                OutputTy::Union(members.iter().map(|m| f(&m.0).into()).collect())
-            }
-            OutputTy::Intersection(members) => {
-                OutputTy::Intersection(members.iter().map(|m| f(&m.0).into()).collect())
-            }
-            OutputTy::Named(name, inner) => OutputTy::Named(name.clone(), f(&inner.0).into()),
-            OutputTy::Neg(inner) => OutputTy::Neg(f(&inner.0).into()),
-        }
-    }
-
-    /// Visit every direct child for read-only inspection. Leaf variants
-    /// (TyVar, Primitive) have no children, so `f` is never called on them.
-    pub fn for_each_child(&self, f: &mut impl FnMut(&OutputTy)) {
-        match self {
-            OutputTy::TyVar(_) | OutputTy::Primitive(_) | OutputTy::Bottom | OutputTy::Top => {}
-            OutputTy::List(inner) => f(&inner.0),
-            OutputTy::Lambda { param, body } => {
-                f(&param.0);
-                f(&body.0);
-            }
-            OutputTy::AttrSet(attr) => {
-                for v in attr.fields.values() {
-                    f(&v.0);
-                }
-                if let Some(dyn_ty) = &attr.dyn_ty {
-                    f(&dyn_ty.0);
-                }
-            }
-            OutputTy::Union(members) | OutputTy::Intersection(members) => {
-                for m in members {
-                    f(&m.0);
-                }
-            }
-            OutputTy::Named(_, inner) => f(&inner.0),
-            OutputTy::Neg(inner) => f(&inner.0),
-        }
-    }
 
     // ==========================================================================
     // TyRef-preserving child traversal helpers
@@ -775,6 +621,69 @@ impl OutputTy {
             OutputTy::Neg(inner) => f(inner),
         }
     }
+
+    /// Like `for_each_child_tyref` but supports early exit via `ControlFlow`.
+    /// Returns `Break(())` as soon as any call to `f` returns `Break`.
+    fn try_for_each_child_tyref(
+        &self,
+        f: &mut impl FnMut(&TyRef) -> ControlFlow<()>,
+    ) -> ControlFlow<()> {
+        match self {
+            OutputTy::TyVar(_) | OutputTy::Primitive(_) | OutputTy::Bottom | OutputTy::Top => {
+                ControlFlow::Continue(())
+            }
+            OutputTy::List(inner) => f(inner),
+            OutputTy::Lambda { param, body } => {
+                f(param)?;
+                f(body)
+            }
+            OutputTy::AttrSet(attr) => {
+                for v in attr.fields.values() {
+                    f(v)?;
+                }
+                if let Some(dyn_ty) = &attr.dyn_ty {
+                    f(dyn_ty)?;
+                }
+                ControlFlow::Continue(())
+            }
+            OutputTy::Union(members) | OutputTy::Intersection(members) => {
+                for m in members {
+                    f(m)?;
+                }
+                ControlFlow::Continue(())
+            }
+            OutputTy::Named(_, inner) => f(inner),
+            OutputTy::Neg(inner) => f(inner),
+        }
+    }
+
+    /// Returns true if any node in this type tree matches `pred`.
+    /// Short-circuits on first hit. Uses a visited set to avoid
+    /// exponential blowup on DAG-shaped types.
+    fn any_node_matches(&self, pred: impl Fn(&OutputTy) -> bool) -> bool {
+        let mut visited = FxHashSet::default();
+        self.any_node_matches_inner(&pred, &mut visited)
+    }
+
+    fn any_node_matches_inner(
+        &self,
+        pred: &impl Fn(&OutputTy) -> bool,
+        visited: &mut FxHashSet<*const OutputTy>,
+    ) -> bool {
+        if pred(self) {
+            return true;
+        }
+        self.try_for_each_child_tyref(&mut |child| {
+            if visited.insert(Arc::as_ptr(&child.0))
+                && child.0.any_node_matches_inner(pred, visited)
+            {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        })
+        .is_break()
+    }
 }
 
 // ==============================================================================
@@ -790,6 +699,34 @@ impl OutputTy {
 
 /// Sentinel index for type variables that should display as `?` (unknown type).
 const UNKNOWN_TYVAR: u32 = u32::MAX;
+
+// Parenthesization predicates — shared by `Display` and `write_truncated`.
+
+/// Lambda params need parens if they are themselves lambdas, unions, or intersections.
+fn needs_parens_in_lambda_param(ty: &OutputTy) -> bool {
+    matches!(
+        ty,
+        OutputTy::Lambda { .. } | OutputTy::Union(_) | OutputTy::Intersection(_)
+    )
+}
+
+/// Union members need parens if they are lambdas.
+fn needs_parens_in_union_member(ty: &OutputTy) -> bool {
+    matches!(ty, OutputTy::Lambda { .. })
+}
+
+/// Intersection members need parens if they are lambdas or unions.
+fn needs_parens_in_intersection_member(ty: &OutputTy) -> bool {
+    matches!(ty, OutputTy::Lambda { .. } | OutputTy::Union(_))
+}
+
+/// Negation operands need parens if they are unions, intersections, or lambdas.
+fn needs_parens_in_neg(ty: &OutputTy) -> bool {
+    matches!(
+        ty,
+        OutputTy::Union(_) | OutputTy::Intersection(_) | OutputTy::Lambda { .. }
+    )
+}
 
 /// Convert a type variable index to a letter-based name: 0→a, 1→b, ..., 25→z, 26→a1, ...
 /// The sentinel value `UNKNOWN_TYVAR` renders as `?`.
@@ -906,7 +843,7 @@ impl OutputTy {
         let mut buf = String::new();
         let mut state = TruncState {
             config,
-            chars_written: 0,
+            bytes_written: 0,
             budget_exceeded: false,
         };
         write_truncated(self, &mut buf, &mut state, 0);
@@ -916,7 +853,9 @@ impl OutputTy {
 
 struct TruncState<'a> {
     config: &'a DisplayConfig,
-    chars_written: usize,
+    /// Tracks bytes written, not characters. This is correct because all type
+    /// display output is ASCII (type names, operators, punctuation, letters).
+    bytes_written: usize,
     budget_exceeded: bool,
 }
 
@@ -925,26 +864,28 @@ impl TruncState<'_> {
         self.config.max_depth > 0 && depth >= self.config.max_depth
     }
 
-    /// Push a string fragment, enforcing the character budget.
+    /// Push a string fragment, enforcing the byte budget.
     /// Returns false if the budget was already exceeded before this call.
+    /// Note: `max_chars` in DisplayConfig is compared against byte length,
+    /// which is correct because type display output is ASCII-only.
     fn push(&mut self, buf: &mut String, s: &str) -> bool {
         if self.budget_exceeded {
             return false;
         }
         let max = self.config.max_chars;
-        if max > 0 && self.chars_written + s.len() > max {
+        if max > 0 && self.bytes_written + s.len() > max {
             // Exceeded — write what fits, then append "..."
-            let remaining = max.saturating_sub(self.chars_written);
+            let remaining = max.saturating_sub(self.bytes_written);
             if remaining > 0 {
                 buf.push_str(&s[..remaining]);
             }
             buf.push_str("...");
-            self.chars_written = max;
+            self.bytes_written = max;
             self.budget_exceeded = true;
             return false;
         }
         buf.push_str(s);
-        self.chars_written += s.len();
+        self.bytes_written += s.len();
         true
     }
 }
@@ -991,11 +932,7 @@ fn write_truncated(ty: &OutputTy, buf: &mut String, state: &mut TruncState<'_>, 
             if state.at_depth_limit(depth) {
                 state.push(buf, "... -> ...");
             } else {
-                let needs_parens = matches!(
-                    &*param.0,
-                    OutputTy::Lambda { .. } | OutputTy::Union(_) | OutputTy::Intersection(_)
-                );
-                if needs_parens {
+                if needs_parens_in_lambda_param(&param.0) {
                     state.push(buf, "(");
                     if !state.budget_exceeded {
                         write_truncated(&param.0, buf, state, depth + 1);
@@ -1075,22 +1012,18 @@ fn write_truncated(ty: &OutputTy, buf: &mut String, state: &mut TruncState<'_>, 
 
         OutputTy::Union(members) => {
             write_members_truncated(members, " | ", depth, buf, state, |m| {
-                matches!(&*m.0, OutputTy::Lambda { .. })
+                needs_parens_in_union_member(&m.0)
             });
         }
 
         OutputTy::Intersection(members) => {
             write_members_truncated(members, " & ", depth, buf, state, |m| {
-                matches!(&*m.0, OutputTy::Lambda { .. } | OutputTy::Union(_))
+                needs_parens_in_intersection_member(&m.0)
             });
         }
 
         OutputTy::Neg(inner) => {
-            let needs_parens = matches!(
-                &*inner.0,
-                OutputTy::Union(_) | OutputTy::Intersection(_) | OutputTy::Lambda { .. }
-            );
-            if needs_parens {
+            if needs_parens_in_neg(&inner.0) {
                 state.push(buf, "~(");
                 if !state.budget_exceeded {
                     write_truncated(&inner.0, buf, state, depth);
@@ -1156,13 +1089,7 @@ impl fmt::Display for OutputTy {
             OutputTy::Primitive(p) => write!(f, "{p}"),
             OutputTy::List(inner) => write!(f, "[{inner}]"),
             OutputTy::Lambda { param, body } => {
-                // Parenthesize the param if it's a lambda, union, or intersection
-                // to avoid ambiguity (-> is right-associative).
-                let needs_parens = matches!(
-                    &*param.0,
-                    OutputTy::Lambda { .. } | OutputTy::Union(_) | OutputTy::Intersection(_)
-                );
-                if needs_parens {
+                if needs_parens_in_lambda_param(&param.0) {
                     write!(f, "({param}) -> {body}")
                 } else {
                     write!(f, "{param} -> {body}")
@@ -1174,9 +1101,7 @@ impl fmt::Display for OutputTy {
                     if i > 0 {
                         write!(f, " | ")?;
                     }
-                    // Parenthesize lambdas inside unions to avoid ambiguity.
-                    let needs_parens = matches!(&*m.0, OutputTy::Lambda { .. });
-                    if needs_parens {
+                    if needs_parens_in_union_member(&m.0) {
                         write!(f, "({m})")?;
                     } else {
                         write!(f, "{m}")?;
@@ -1189,10 +1114,7 @@ impl fmt::Display for OutputTy {
                     if i > 0 {
                         write!(f, " & ")?;
                     }
-                    // Parenthesize lambdas and unions inside intersections.
-                    let needs_parens =
-                        matches!(&*m.0, OutputTy::Lambda { .. } | OutputTy::Union(_));
-                    if needs_parens {
+                    if needs_parens_in_intersection_member(&m.0) {
                         write!(f, "({m})")?;
                     } else {
                         write!(f, "{m}")?;
@@ -1202,12 +1124,7 @@ impl fmt::Display for OutputTy {
             }
             OutputTy::Named(name, _) => write!(f, "{name}"),
             OutputTy::Neg(inner) => {
-                // Parenthesize compound types inside negation for clarity.
-                let needs_parens = matches!(
-                    &*inner.0,
-                    OutputTy::Union(_) | OutputTy::Intersection(_) | OutputTy::Lambda { .. }
-                );
-                if needs_parens {
+                if needs_parens_in_neg(&inner.0) {
                     write!(f, "~({inner})")
                 } else {
                     write!(f, "~{inner}")
@@ -1282,22 +1199,19 @@ impl fmt::Display for AttrSetTy<TyRef> {
 
 impl AttrSetTy<TyRef> {
     /// Collect free type variables in order of first appearance, deduplicated.
+    /// Shares a single visited set across all fields so Arc-shared subtrees
+    /// are only traversed once.
     pub fn free_type_vars(&self) -> Vec<u32> {
         let mut result = Vec::new();
         let mut seen = rustc_hash::FxHashSet::default();
+        let mut visited = FxHashSet::default();
         for v in self.fields.values() {
-            for var in v.0.free_type_vars() {
-                if seen.insert(var) {
-                    result.push(var);
-                }
-            }
+            v.0.collect_free_type_vars(&mut result, &mut seen, &mut visited);
         }
         if let Some(dyn_ty) = &self.dyn_ty {
-            for var in dyn_ty.0.free_type_vars() {
-                if seen.insert(var) {
-                    result.push(var);
-                }
-            }
+            dyn_ty
+                .0
+                .collect_free_type_vars(&mut result, &mut seen, &mut visited);
         }
         result
     }

@@ -191,7 +191,7 @@ fn collect_param_types(ty: &OutputTy, max_params: usize) -> Vec<OutputTy> {
     let mut current = ty.clone();
 
     for _ in 0..max_params {
-        match unwrap_named(&current) {
+        match current.unwrap_named() {
             OutputTy::Lambda { param, body } => {
                 params.push((*param.0).clone());
                 current = (*body.0).clone();
@@ -201,14 +201,6 @@ fn collect_param_types(ty: &OutputTy, max_params: usize) -> Vec<OutputTy> {
     }
 
     params
-}
-
-/// Unwrap Named wrappers to get at the structural type.
-fn unwrap_named(ty: &OutputTy) -> OutputTy {
-    match ty {
-        OutputTy::Named(_, inner) => unwrap_named(&inner.0),
-        other => other.clone(),
-    }
 }
 
 /// Format the signature label and parameter labels for display.
@@ -248,7 +240,7 @@ fn format_signature(
 /// For other types, uses the standard display.
 fn format_param_type(ty: &OutputTy) -> String {
     let dc = lang_ty::DisplayConfig::hover();
-    match unwrap_named_ref(ty) {
+    match ty.unwrap_named() {
         OutputTy::AttrSet(ref attr) => {
             // Show field names with types for pattern parameters.
             let mut parts = Vec::new();
@@ -273,7 +265,7 @@ fn format_param_type(ty: &OutputTy) -> String {
 /// Get documentation for a parameter type (e.g. listing pattern fields).
 fn format_param_doc(ty: &OutputTy) -> Option<String> {
     let dc = lang_ty::DisplayConfig::hover();
-    match unwrap_named_ref(ty) {
+    match ty.unwrap_named() {
         OutputTy::AttrSet(ref attr) if !attr.fields.is_empty() => {
             let mut lines = vec!["**Fields:**".to_string()];
             for (name, field_ty) in &attr.fields {
@@ -296,19 +288,11 @@ fn format_param_doc(ty: &OutputTy) -> Option<String> {
     }
 }
 
-/// Unwrap Named wrappers, returning a reference to the structural type.
-fn unwrap_named_ref(ty: &OutputTy) -> &OutputTy {
-    match ty {
-        OutputTy::Named(_, inner) => unwrap_named_ref(&inner.0),
-        other => other,
-    }
-}
-
 /// Peel off `n` Lambda layers from a type and return the resulting return type.
 fn peel_lambdas(ty: &OutputTy, n: usize) -> OutputTy {
     let mut current = ty.clone();
     for _ in 0..n {
-        match unwrap_named(&current) {
+        match current.unwrap_named() {
             OutputTy::Lambda { body, .. } => {
                 current = (*body.0).clone();
             }
