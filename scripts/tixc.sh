@@ -108,6 +108,5 @@ if [[ "$USE_TIME" -eq 1 ]]; then
 fi
 CMD+=("$TIX_CLI" "$FILE" "${TIX_ARGS[@]}")
 
-# Apply memory limit (ulimit -v takes KB; run in subshell so it only affects tix).
-MEM_LIMIT_KB=$((MEM_LIMIT_GB * 1024 * 1024))
-(ulimit -v "$MEM_LIMIT_KB"; exec "${CMD[@]}")
+# Enforce memory limit via cgroups (kernel OOM-kills on exceed, no hanging).
+exec systemd-run --user --scope -q -p MemoryMax="${MEM_LIMIT_GB}G" "${CMD[@]}"

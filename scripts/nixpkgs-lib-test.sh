@@ -118,16 +118,15 @@ TOML
     # Point at repo stubs so lib functions resolve.
     export TIX_BUILTIN_STUBS="${TIX_BUILTIN_STUBS:-$REPO_ROOT/stubs}"
 
-    MEM_LIMIT_KB=$((MEM_LIMIT_GB * 1024 * 1024))
     echo "Memory limit: ${MEM_LIMIT_GB} GB"
     echo "Running: tix ${CHECK_ARGS[*]}"
     echo "---"
 
     # tix check exits 1 on type errors (expected), only treat signals/crashes
     # (exit >= 2, excluding 1) as failures.
-    # ulimit -v in a subshell so the limit only applies to tix.
+    # Enforce memory limit via cgroups (kernel OOM-kills on exceed, no hanging).
     set +e
-    (ulimit -v "$MEM_LIMIT_KB"; exec "$TIX_CLI" "${CHECK_ARGS[@]}")
+    systemd-run --user --scope -q -p MemoryMax="${MEM_LIMIT_GB}G" "$TIX_CLI" "${CHECK_ARGS[@]}"
     rc=$?
     set -e
 
@@ -152,8 +151,6 @@ mapfile -t NIX_FILES < <(
     | sort
 )
 
-MEM_LIMIT_KB=$((MEM_LIMIT_GB * 1024 * 1024))
-
 echo "Found ${#NIX_FILES[@]} .nix files in $LIB_DIR"
 echo "Timeout: ${TIMEOUT}s per file"
 echo "Memory limit: ${MEM_LIMIT_GB} GB"
@@ -169,9 +166,10 @@ for f in "${NIX_FILES[@]}"; do
     rel="${f#"$NIXPKGS_SRC/"}"
 
     # Run tix with timeout and memory limit; capture exit code.
-    # ulimit -v in a subshell so the limit only applies to tix.
+    # Enforce memory limit via cgroups (kernel OOM-kills on exceed, no hanging).
     set +e
-    (ulimit -v "$MEM_LIMIT_KB"; exec timeout "${TIMEOUT}s" "$TIX_CLI" "$f" >/dev/null 2>&1)
+    systemd-run --user --scope -q -p MemoryMax="${MEM_LIMIT_GB}G" \
+        timeout "${TIMEOUT}s" "$TIX_CLI" "$f" >/dev/null 2>&1
     rc=$?
     set -e
 
