@@ -9,6 +9,7 @@
     "froms",
     "indoc",
     "nameres",
+    "nixos",
     "petgraph",
     "preorder",
     "proptest",

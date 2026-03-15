@@ -25,16 +25,26 @@ let
   # they clutter stderr and confuse users who see them during `nix build`.
   # We override lib.warn and friends with no-ops so builtins.trace is never
   # called for warning-level messages.
-  quietLib = lib.extend (_self: _super: {
-    warn = _msg: x: x;
-    warnIf = _cond: _msg: x: x;
-    warnIfNot = _cond: _msg: x: x;
-    trivial = _super.trivial // {
+  quietLib = lib.extend (
+    _self: _super: {
       warn = _msg: x: x;
-      warnIf = _cond: _msg: x: x;
-      warnIfNot = _cond: _msg: x: x;
-    };
-  });
+      warnIf =
+        _cond: _msg: x:
+        x;
+      warnIfNot =
+        _cond: _msg: x:
+        x;
+      trivial = _super.trivial // {
+        warn = _msg: x: x;
+        warnIf =
+          _cond: _msg: x:
+          x;
+        warnIfNot =
+          _cond: _msg: x:
+          x;
+      };
+    }
+  );
 
   # ============================================================================
   # NixOS option tree extraction (evaluated at Nix eval time)
@@ -42,11 +52,12 @@ let
 
   # eval-config.nix defaults to builtins.currentSystem which isn't available
   # in pure flake evaluation, so we pass system explicitly from pkgs.
-  nixosOptions = (import (pkgs.path + "/nixos/lib/eval-config.nix") {
-    lib = quietLib;
-    system = pkgs.stdenv.hostPlatform.system;
-    modules = [{ _module.check = false; }];
-  }).options;
+  nixosOptions =
+    (import (pkgs.path + "/nixos/lib/eval-config.nix") {
+      lib = quietLib;
+      system = pkgs.stdenv.hostPlatform.system;
+      modules = [ { _module.check = false; } ];
+    }).options;
 
   nixosOptionsJson = builtins.toJSON (
     import ../tools/extract-options.nix {
@@ -71,13 +82,15 @@ let
   };
 
   hmEval = extendedLib.evalModules {
-    modules = hmModuleList ++ [{
-      _module.check = false;
-      _module.args = {
-        inherit pkgs;
-        osConfig = {};
-      };
-    }];
+    modules = hmModuleList ++ [
+      {
+        _module.check = false;
+        _module.args = {
+          inherit pkgs;
+          osConfig = { };
+        };
+      }
+    ];
   };
 
   hmOptionsJson = builtins.toJSON (
@@ -102,61 +115,82 @@ let
   # types (derivation/attrset/function), not alias behavior.
   classifyPkgs = import pkgs.path {
     inherit (pkgs.stdenv.hostPlatform) system;
-    config = { allowAliases = false; };
+    config = {
+      allowAliases = false;
+    };
   };
 
-  classifySet = depth: attrset:
-    builtins.listToAttrs (builtins.concatMap (name:
-      let v = builtins.tryEval (builtins.getAttr name attrset);
-      in if !v.success then []
-      else let
-        ty = builtins.typeOf v.value;
-        isDrv = (builtins.tryEval ((v.value.type or null) == "derivation")).value or false;
-        shouldRecurse = !isDrv && ty == "set" && depth > 0
-          && ((builtins.tryEval (v.value.recurseForDerivations or false)).value or false);
-        children = if shouldRecurse then classifySet (depth - 1) v.value else null;
-        # Detect callable attrsets (e.g. fetchurl, mkShell) that have a __functor attribute.
-        hasFunctor = !isDrv && ty == "set"
-          && (builtins.tryEval (v.value ? __functor)).value or false;
-        # Extract parameter names and default-presence for lambdas.
-        funcArgs = if ty == "lambda"
-          then (builtins.tryEval (builtins.functionArgs v.value)).value or null
-          else null;
-      in [{
-        inherit name;
-        value = { type = ty; is_derivation = isDrv; }
-          // (if hasFunctor then { has_functor = true; } else {})
-          // (if funcArgs != null then { function_args = funcArgs; } else {})
-          // (if children != null then { inherit children; } else {});
-      }]
-    ) (builtins.attrNames attrset));
+  classifySet =
+    depth: attrset:
+    builtins.listToAttrs (
+      builtins.concatMap (
+        name:
+        let
+          v = builtins.tryEval (builtins.getAttr name attrset);
+        in
+        if !v.success then
+          [ ]
+        else
+          let
+            ty = builtins.typeOf v.value;
+            isDrv = (builtins.tryEval ((v.value.type or null) == "derivation")).value or false;
+            shouldRecurse =
+              !isDrv
+              && ty == "set"
+              && depth > 0
+              && ((builtins.tryEval (v.value.recurseForDerivations or false)).value or false);
+            children = if shouldRecurse then classifySet (depth - 1) v.value else null;
+            # Detect callable attrsets (e.g. fetchurl, mkShell) that have a __functor attribute.
+            hasFunctor = !isDrv && ty == "set" && (builtins.tryEval (v.value ? __functor)).value or false;
+            # Extract parameter names and default-presence for lambdas.
+            funcArgs =
+              if ty == "lambda" then (builtins.tryEval (builtins.functionArgs v.value)).value or null else null;
+          in
+          [
+            {
+              inherit name;
+              value = {
+                type = ty;
+                is_derivation = isDrv;
+              }
+              // (if hasFunctor then { has_functor = true; } else { })
+              // (if funcArgs != null then { function_args = funcArgs; } else { })
+              // (if children != null then { inherit children; } else { });
+            }
+          ]
+      ) (builtins.attrNames attrset)
+    );
 
   # Alias detection: for non-recursed attrsets where recurseForDerivations is
   # explicitly false (the dontRecurseIntoAttrs signature), find a recursed
   # sibling with identical attrNames. Only runs at the top level.
   namesOf = s: builtins.filter (n: n != "recurseForDerivations") (builtins.attrNames s);
 
-  detectAliases = tree: attrset:
+  detectAliases =
+    tree: attrset:
     let
-      recursedNames = builtins.filter (name:
-        (tree.${name} or {}) ? children
-      ) (builtins.attrNames tree);
-    in builtins.mapAttrs (name: entry:
-      if entry ? children || entry ? alias_of
-         || entry.is_derivation || entry.type != "set" then entry
-      else let
-        val = builtins.tryEval (builtins.getAttr name attrset);
-        hasExplicitFalse = val.success
-          && val.value ? recurseForDerivations
-          && val.value.recurseForDerivations == false;
-      in if !hasExplicitFalse then entry
-      else let
-        candNames = namesOf val.value;
-        match = builtins.filter (rName:
-          namesOf (builtins.getAttr rName attrset) == candNames
-        ) recursedNames;
-      in if match == [] then entry
-         else entry // { alias_of = builtins.head match; }
+      recursedNames = builtins.filter (name: (tree.${name} or { }) ? children) (builtins.attrNames tree);
+    in
+    builtins.mapAttrs (
+      name: entry:
+      if entry ? children || entry ? alias_of || entry.is_derivation || entry.type != "set" then
+        entry
+      else
+        let
+          val = builtins.tryEval (builtins.getAttr name attrset);
+          hasExplicitFalse =
+            val.success && val.value ? recurseForDerivations && val.value.recurseForDerivations == false;
+        in
+        if !hasExplicitFalse then
+          entry
+        else
+          let
+            candNames = namesOf val.value;
+            match = builtins.filter (
+              rName: namesOf (builtins.getAttr rName attrset) == candNames
+            ) recursedNames;
+          in
+          if match == [ ] then entry else entry // { alias_of = builtins.head match; }
     ) tree;
 
   pkgsClassificationJson = builtins.toJSON (detectAliases (classifySet 1 classifyPkgs) classifyPkgs);
@@ -169,12 +203,15 @@ let
   hmJsonFile = pkgs.writeText "hm-options.json" hmOptionsJson;
   pkgsJsonFile = pkgs.writeText "pkgs-classification.json" pkgsClassificationJson;
 
-in pkgs.runCommand "tix-stubs" {
-  nativeBuildInputs = [ tix ];
-} ''
-  mkdir -p $out
-  tix gen-stubs nixos --from-json ${nixosJsonFile} --descriptions -o $out/nixos.tix
-  tix gen-stubs home-manager --from-json ${hmJsonFile} --descriptions -o $out/home-manager.tix
-  tix gen-stubs pkgs --from-json ${pkgsJsonFile} -o $out/pkgs.tix
-  cp ${../stubs/lib.tix} $out/lib.tix
-''
+in
+pkgs.runCommand "tix-stubs"
+  {
+    nativeBuildInputs = [ tix ];
+  }
+  ''
+    mkdir -p $out
+    tix gen-stubs nixos --from-json ${nixosJsonFile} --descriptions -o $out/nixos.tix
+    tix gen-stubs home-manager --from-json ${hmJsonFile} --descriptions -o $out/home-manager.tix
+    tix gen-stubs pkgs --from-json ${pkgsJsonFile} -o $out/pkgs.tix
+    cp ${../stubs/lib.tix} $out/lib.tix
+  ''
