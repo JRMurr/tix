@@ -69,23 +69,28 @@ impl CheckCtx<'_> {
             return Ok(self.new_var());
         }
 
-        // Track the current expression so errors from constrain() and
-        // sub-calls are attributed to the correct source location.
-        self.current_expr = e;
+        // Guard against stack overflow: infer_expr recurses through the AST
+        // via infer_expr_inner, which can be very deep on large generated files
+        // (e.g. hackage-packages.nix with 769k lines).
+        stacker::maybe_grow(256 * 1024, 1024 * 1024, || {
+            // Track the current expression so errors from constrain() and
+            // sub-calls are attributed to the correct source location.
+            self.current_expr = e;
 
-        let ty = self.infer_expr_inner(e)?;
+            let ty = self.infer_expr_inner(e)?;
 
-        // Restore current_expr — infer_expr_inner may have moved it to a
-        // sub-expression. The slot-linking constraints below belong to `e`.
-        self.current_expr = e;
+            // Restore current_expr — infer_expr_inner may have moved it to a
+            // sub-expression. The slot-linking constraints below belong to `e`.
+            self.current_expr = e;
 
-        // Record the inferred type for this expression.
-        let expr_slot = self.ty_for_expr(e);
-        self.constrain_equal(ty, expr_slot)?;
-        // Named types flow through constrain_equal automatically —
-        // no manual provenance propagation needed.
+            // Record the inferred type for this expression.
+            let expr_slot = self.ty_for_expr(e);
+            self.constrain_equal(ty, expr_slot)?;
+            // Named types flow through constrain_equal automatically —
+            // no manual provenance propagation needed.
 
-        Ok(ty)
+            Ok(ty)
+        })
     }
 
     fn infer_expr_inner(&mut self, e: ExprId) -> Result<TyId, LocatedError> {

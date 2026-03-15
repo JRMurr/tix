@@ -71,12 +71,15 @@ pub fn run_check_project(
 ) -> Result<(), Box<dyn Error>> {
     let mut timer = timing::Timer::new(show_timing);
 
-    // Configure rayon thread pool if --jobs was specified.
-    if let Some(n) = jobs {
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(n)
-            .build_global()
-            .ok(); // Ignored if pool already initialized.
+    // Configure rayon thread pool. Use 16 MB stacks (matching the LSP) so
+    // deeply recursive inference on large generated files (e.g.
+    // hackage-packages.nix) doesn't blow the default 8 MB stack.
+    {
+        let mut builder = rayon::ThreadPoolBuilder::new().stack_size(16 * 1024 * 1024);
+        if let Some(n) = jobs {
+            builder = builder.num_threads(n);
+        }
+        builder.build_global().ok(); // Ignored if pool already initialized.
     }
 
     // Step 1: Find and load tix.toml.
