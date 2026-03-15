@@ -251,6 +251,17 @@ Intentional O(n^2) trade-offs, acceptable for typical Nix code sizes:
 - **Conservative union routing** (`constrain.rs`): when both union members are
   variables, constraints are routed to both. Sound but may create unnecessary bounds.
 
+### Cross-File Inference (InferenceCoordinator)
+
+- LSP Step 6 (demand-driven for unresolved imports) not yet wired: opening
+  file A that imports un-opened file B still gets ⊤ for B. The coordinator
+  infrastructure is in place (`demand_file`), but `update_syntax_phase_b` doesn't
+  call it yet for `NoStubAvailable` errors. This is the key remaining step for
+  "open one file, get full types".
+- E013 diagnostic still fires in LSP passive mode even though the coordinator
+  could resolve the import on-demand. Once Step 6 is wired, E013 should only
+  fire for files that genuinely can't be found/parsed.
+
 ### DX Audit: Untracked Items
 
 - **No incremental/cached CLI mode.** Salsa only used by LSP.
