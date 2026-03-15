@@ -8,10 +8,15 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::{error::Error, path::PathBuf};
 
+/// Maximum number of diagnostics to render before truncating.
+/// Rendering thousands of miette reports against a large source file is
+/// expensive (each report re-scans line boundaries). Capping keeps the
+/// CLI responsive on huge files like nixpkgs all-packages.nix.
+const MAX_RENDERED_DIAGNOSTICS: usize = 200;
+
 use clap::{Parser, Subcommand};
 use lang_ast::{module_and_source_maps, name_resolution, RootDatabase};
 use lang_check::aliases::TypeAliasRegistry;
-use lang_check::check_file_collecting;
 use lang_check::diagnostic::{TixDiagnostic, TixDiagnosticKind};
 use lang_check::imports::{import_errors_to_diagnostics, resolve_import_types_from_stubs};
 use lang_ty::OutputTy;
@@ -814,7 +819,7 @@ fn run_check(
     let import_diagnostics = import_errors_to_diagnostics(&import_resolution.errors);
     timer.mark("import-resolution");
 
-    let mut result = check_file_collecting(
+    let mut result = lang_check::check_file_collecting(
         &db,
         file,
         Arc::new(registry),
@@ -942,6 +947,14 @@ fn render_diagnostics(
     let mut error_count = 0;
     let mut warning_count = 0;
 
+    // Share the source text across all diagnostics instead of cloning per
+    // report. Each NamedSource previously copied the entire file, which for
+    // a 12k-line file × 2000 diagnostics meant ~400MB of allocations and
+    // redundant line-boundary scans in miette.
+    let shared_source: Arc<NamedSource<String>> =
+        Arc::new(NamedSource::new(filename, source_text.to_string()));
+
+    let mut rendered = 0;
     for diag in diagnostics {
         let is_warning = diag.kind.is_warning();
         if is_warning {
@@ -949,6 +962,12 @@ fn render_diagnostics(
         } else {
             error_count += 1;
         }
+
+        // After MAX_RENDERED_DIAGNOSTICS, still count but skip rendering.
+        if rendered >= MAX_RENDERED_DIAGNOSTICS {
+            continue;
+        }
+        rendered += 1;
 
         // DuplicateKey carries its own AstPtr spans; other diagnostics
         // resolve ExprId → source span via the ModuleSourceMap.
@@ -1002,9 +1021,16 @@ fn render_diagnostics(
             builder = builder.with_severity(miette::Severity::Warning);
         }
 
-        let report = miette::Report::new(builder)
-            .with_source_code(NamedSource::new(filename.clone(), source_text.to_string()));
+        let report = miette::Report::new(builder).with_source_code(shared_source.clone());
         eprintln!("{:?}", report);
+    }
+
+    let suppressed = diagnostics.len().saturating_sub(MAX_RENDERED_DIAGNOSTICS);
+    if suppressed > 0 {
+        eprintln!(
+            "... and {suppressed} more diagnostic{} (showing first {MAX_RENDERED_DIAGNOSTICS})",
+            if suppressed == 1 { "" } else { "s" }
+        );
     }
 
     (error_count, warning_count)

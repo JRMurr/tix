@@ -6238,13 +6238,14 @@ fn collect_diagnostics_with_deadline(
     deadline: Option<std::time::Instant>,
 ) -> Vec<TixDiagnostic> {
     let (db, file) = TestDatabase::single_file(src).unwrap();
-    let result = crate::check_file_collecting_with_deadline(
+    let result = crate::check_file_collecting_with_cancel(
         &db,
         file,
         Arc::new(TypeAliasRegistry::default()),
         HashMap::new(),
         Arc::default(),
         deadline,
+        None,
     );
     result.diagnostics
 }

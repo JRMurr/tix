@@ -364,35 +364,13 @@ pub fn check_file_collecting(
     import_types: HashMap<ExprId, OutputTy>,
     context_args: Arc<HashMap<smol_str::SmolStr, ParsedTy>>,
 ) -> CheckResult {
-    check_file_collecting_with_deadline(db, file, aliases, import_types, context_args, None)
+    check_file_collecting_with_cancel(db, file, aliases, import_types, context_args, None, None)
 }
 
-/// Like `check_file_collecting` but with an optional deadline. When the
-/// deadline is exceeded, inference bails out with partial results rather
-/// than running indefinitely.
-pub fn check_file_collecting_with_deadline(
-    db: &dyn AstDb,
-    file: NixFile,
-    aliases: Arc<TypeAliasRegistry>,
-    import_types: HashMap<ExprId, OutputTy>,
-    context_args: Arc<HashMap<smol_str::SmolStr, ParsedTy>>,
-    deadline: Option<Instant>,
-) -> CheckResult {
-    check_file_collecting_with_cancel(
-        db,
-        file,
-        aliases,
-        import_types,
-        context_args,
-        deadline,
-        None,
-    )
-}
-
-/// Like `check_file_collecting_with_deadline` but with an additional external
-/// cancellation flag. When the flag is set to `true` (e.g. because the LSP
-/// received a newer edit for the same file), inference bails out with partial
-/// results just like a deadline expiry.
+/// Like `check_file_collecting` but with an optional deadline and cancellation
+/// flag. When the deadline is exceeded or flag set, inference bails out with
+/// partial results.
+#[allow(clippy::too_many_arguments)]
 pub fn check_file_collecting_with_cancel(
     db: &dyn AstDb,
     file: NixFile,
@@ -425,7 +403,6 @@ pub fn check_file_collecting_with_cancel(
     }
     let (inference, mut diagnostics, timed_out) = check.infer_prog_partial(grouped_defs);
 
-    // Include diagnostics from the lowering phase (e.g. duplicate keys).
     let lower_diags =
         diagnostic::lower_diagnostics_to_tix(&module.lower_diagnostics, module.entry_expr);
     diagnostics.extend(lower_diags);

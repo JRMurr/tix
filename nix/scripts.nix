@@ -110,6 +110,7 @@ in
       RELEASE=0
       TIMEOUT=""
       USE_TIME=0
+      LOG_FILE=""
 
       while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -130,6 +131,15 @@ in
           --time)
             USE_TIME=1
             shift
+            ;;
+          --log)
+            if [[ $# -ge 2 && "$2" != -* ]]; then
+              LOG_FILE="$2"
+              shift 2
+            else
+              LOG_FILE="/tmp/tixc-$(date +%Y%m%d-%H%M%S).log"
+              shift
+            fi
             ;;
           *)
             if [[ -z "$INPUT" && "$1" != -* ]]; then
@@ -183,7 +193,12 @@ in
       fi
       CMD+=("$TIX_CLI" "$FILE" "''${TIX_ARGS[@]}")
 
-      run_with_mem_limit "$MEM_LIMIT_GB" "''${CMD[@]}"
+      if [[ -n "$LOG_FILE" ]]; then
+        echo "Log file: $LOG_FILE" >&2
+        run_with_mem_limit "$MEM_LIMIT_GB" "''${CMD[@]}" 2>&1 | tee "$LOG_FILE"
+      else
+        run_with_mem_limit "$MEM_LIMIT_GB" "''${CMD[@]}"
+      fi
     '';
   };
 
