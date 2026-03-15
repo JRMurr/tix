@@ -172,15 +172,27 @@ EXCLUDE_PATTERNS=(
     "**/tests/**"
     "**/test/**"
     "**/deprecated/**"
-    # Auto-generated giant package sets (hundreds of thousands of lines,
-    # not useful to type-check). See SESSION.md.
+    # Auto-generated giant package sets — not useful to type-check and
+    # they blow up memory during whole-nixpkgs runs.
     "**/haskell-modules/hackage-packages.nix"
     "**/lisp-modules/imported.nix"
     "**/tex/texlive/tlpdb.nix"
+    "**/tex/texlive/fixed-hashes.nix"
     "**/top-level/perl-packages.nix"
     "**/top-level/python-packages.nix"
     "**/top-level/all-packages.nix"
     "**/node-packages/node-packages.nix"
+    "**/vim/plugins/generated.nix"
+    "**/vim/plugins/nvim-treesitter/generated.nix"
+    "**/elisp-packages/elpa-generated.nix"
+    "**/elisp-packages/elpa-devel-generated.nix"
+    "**/elisp-packages/nongnu-generated.nix"
+    "**/elisp-packages/nongnu-devel-generated.nix"
+    "**/lua-modules/generated-packages.nix"
+    "**/home-assistant/component-packages.nix"
+    "**/maintainers/maintainer-list.nix"
+    "**/gitlab/rubyEnv/gemset.nix"
+    "**/mastodon/gemset.nix"
 )
 
 {
