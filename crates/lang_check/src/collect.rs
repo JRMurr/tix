@@ -164,6 +164,25 @@ impl<'a> Canonicalizer<'a> {
     /// checks for atom-only upper bounds — `ret <: Number` becomes `number`
     /// rather than a bare type variable.
     fn expand_bounds(&mut self, bounds: &[TyId], var_id: TyId, polarity: Polarity) -> OutputTy {
+        // 0. Dedup TyId bounds before canonicalization. Different TyIds can
+        //    canonicalize to the same OutputTy, but duplicate TyIds always do.
+        //    Deduping here (cheap u32 comparison) is much faster than deduping
+        //    OutputTy values later (structural tree comparison). The bounds
+        //    lists are usually small and mostly pre-deduped by compact_scc_graph,
+        //    but infer_root can add duplicates after the last compact pass.
+        let bounds = if bounds.len() > 16 {
+            let mut seen = FxHashSet::with_capacity_and_hasher(bounds.len(), Default::default());
+            let deduped: Vec<TyId> = bounds
+                .iter()
+                .copied()
+                .filter(|id| seen.insert(*id))
+                .collect();
+            deduped
+        } else {
+            bounds.to_vec()
+        };
+        let bounds = &bounds;
+
         // 1. Canonicalize each bound at the given polarity.
         // `bounds` is a slice from the caller's local variable (already cloned
         // from storage), so no borrow conflict with `&mut self`.
@@ -756,10 +775,26 @@ fn has_type_contradiction(members: &[OutputTy]) -> bool {
 
     // Also check for mutually disjoint positives: String ∧ Int = ⊥
     // because String and Int have no overlap.
-    for i in 0..positives.len() {
-        for j in (i + 1)..positives.len() {
-            if are_output_types_disjoint(positives[i], positives[j]) {
-                return true;
+    //
+    // Optimization: disjointness is determined by constructor shape (Primitive,
+    // AttrSet, List, Lambda, Opaque). Two non-primitive types with the same
+    // shape are never disjoint, so if all positives share one non-primitive
+    // shape, skip the O(n²) pairwise check entirely. This matters for files
+    // like hackage-packages.nix where callPackage creates 19K+ Lambda
+    // intersection members — all same shape, zero disjoint pairs.
+    if positives.len() > 1 {
+        let all_same_non_primitive = positives
+            .windows(2)
+            .all(|w| std::mem::discriminant(w[0]) == std::mem::discriminant(w[1]))
+            && !matches!(positives[0], OutputTy::Primitive(_));
+
+        if !all_same_non_primitive {
+            for i in 0..positives.len() {
+                for j in (i + 1)..positives.len() {
+                    if are_output_types_disjoint(positives[i], positives[j]) {
+                        return true;
+                    }
+                }
             }
         }
     }
@@ -909,6 +944,18 @@ fn flatten_composite(
     members: Vec<OutputTy>,
     extract_nested: fn(&OutputTy) -> Option<&Vec<TyRef>>,
 ) -> Vec<OutputTy> {
+    // Fast path: when no member is a nested composite, flattening is a no-op.
+    // With large member counts (e.g. hackage-packages.nix: 19K+ intersection
+    // members from callPackage), the linear contains() dedup becomes O(n²)
+    // and dominates inference time. Since expand_bounds already TyId-dedups
+    // its bounds, duplicates in the non-flattened case are rare (only when
+    // different TyIds canonicalize to structurally equal OutputTy), so we
+    // can safely skip the expensive OutputTy-level dedup for large N.
+    let needs_flatten = members.iter().any(|m| extract_nested(m).is_some());
+    if !needs_flatten && members.len() > 64 {
+        return members;
+    }
+
     let mut result: SmallVec<[OutputTy; 8]> = SmallVec::new();
     for m in members {
         if let Some(inner) = extract_nested(&m) {
