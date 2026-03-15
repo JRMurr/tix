@@ -180,6 +180,7 @@ EXCLUDE_PATTERNS=(
     "**/top-level/perl-packages.nix"
     "**/top-level/python-packages.nix"
     "**/top-level/all-packages.nix"
+    "**/node-packages/node-packages.nix"
 )
 
 {
