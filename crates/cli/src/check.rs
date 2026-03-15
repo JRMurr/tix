@@ -10,7 +10,6 @@
 //      resolution across files
 //   3. Sequential Render  — deterministic diagnostic output in file order
 
-use std::collections::HashMap;
 use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -20,7 +19,6 @@ use lang_ast::classify::{classify_nix_file, NixFileKind};
 use lang_ast::{module_and_source_maps, name_resolution, ModuleSourceMap, RootDatabase};
 use lang_check::coordinator::{InferenceCoordinator, SyntaxProvider};
 use lang_check::SyntaxBundle;
-use parking_lot::Mutex;
 use rayon::prelude::*;
 
 use crate::config::{self, TixConfig};
@@ -39,41 +37,26 @@ use crate::{build_registry, load_stubs, render_diagnostics};
 /// Uses DashMap so bundles can be moved out (not cloned) as they're consumed.
 /// This is critical for memory: the old pipeline dropped per-file data inside
 /// the par_iter closure, and we need to match that behavior.
+///
+/// Only serves pre-extracted bundles — no on-demand Salsa fallback. Files
+/// outside the project set return None (⊤ in the importer). This avoids
+/// serialized Salsa parsing during parallel inference.
 struct CliSyntaxProvider {
     precomputed: DashMap<PathBuf, SyntaxBundle>,
-    db: Mutex<RootDatabase>,
-    registry: Arc<lang_check::aliases::TypeAliasRegistry>,
-    default_context_args: Arc<HashMap<smol_str::SmolStr, comment_parser::ParsedTy>>,
-    deadline_secs: Option<u64>,
 }
 
 impl SyntaxProvider for CliSyntaxProvider {
     fn syntax_for_file(&self, path: &Path) -> Option<SyntaxBundle> {
-        // Fast path: move out of precomputed (each file consumed at most once
-        // by the coordinator's demand_file, so we won't need it again).
-        if let Some((_, bundle)) = self.precomputed.remove(path) {
-            return Some(bundle);
-        }
-
-        // Fallback: read from disk and parse via Salsa (for transitive imports
-        // outside the project's file set).
-        let db = self.db.lock();
-        let nix_file = db.read_file(path.to_path_buf()).ok()?;
-        let (module, _source_map) = module_and_source_maps(&*db, nix_file);
-        let module_indices = lang_ast::module_indices(&*db, nix_file);
-        let name_res = name_resolution(&*db, nix_file);
-        let grouped_defs = lang_ast::group_def(&*db, nix_file);
-
-        Some(SyntaxBundle {
-            path: path.to_path_buf(),
-            module,
-            module_indices,
-            name_res,
-            grouped_defs,
-            registry: Arc::clone(&self.registry),
-            context_args: Arc::clone(&self.default_context_args),
-            deadline_secs: self.deadline_secs,
-        })
+        // Move out of precomputed (each file consumed at most once by the
+        // coordinator's demand_file, so we won't need it again).
+        //
+        // Files not in the precomputed set (transitive imports from outside
+        // the project) return None — they get ⊤ in the importer. This avoids
+        // serialized Salsa parsing during parallel inference, which would
+        // destroy throughput on large projects like nixpkgs (42K files).
+        // The single-file `tixc` command has its own SyntaxProvider that does
+        // on-demand parsing for transitive imports.
+        self.precomputed.remove(path).map(|(_, bundle)| bundle)
     }
 }
 
@@ -164,9 +147,20 @@ pub fn run_check_project(
     // Import resolution is deferred to the coordinator in Phase 2, which
     // resolves imports demand-driven across files.
 
+    // Intermediate data from Phase 1 before the registry is wrapped in Arc.
+    struct PrePreparedFile {
+        file_path: PathBuf,
+        source_text: String,
+        source_map: ModuleSourceMap,
+        module: lang_ast::Module,
+        module_indices: lang_ast::ModuleIndices,
+        name_res: lang_ast::NameResolution,
+        grouped_defs: lang_ast::GroupedDefs,
+        context_args: Arc<std::collections::HashMap<smol_str::SmolStr, comment_parser::ParsedTy>>,
+    }
+
     let db = RootDatabase::default();
-    let precomputed: DashMap<PathBuf, SyntaxBundle> = DashMap::with_capacity(files_count);
-    let mut metadata: Vec<FileMetadata> = Vec::with_capacity(files_count);
+    let mut pre_prepared: Vec<PrePreparedFile> = Vec::with_capacity(files_count);
     let mut config_warnings: Vec<String> = Vec::new();
 
     for file_path in &nix_files {
@@ -231,39 +225,47 @@ pub fn run_check_project(
         let module_indices = lang_ast::module_indices(&db, nix_file);
         let grouped_defs = lang_ast::group_def(&db, nix_file);
 
-        // Store rendering metadata separately from the SyntaxBundle.
-        metadata.push(FileMetadata {
+        pre_prepared.push(PrePreparedFile {
             file_path: file_path.clone(),
             source_text,
             source_map,
+            module,
+            module_indices,
+            name_res,
+            grouped_defs,
+            context_args,
         });
+    }
 
+    // Wrap registry in Arc now that all mutations (context resolution) are done.
+    // Each file shares a single ref-counted registry instead of deep-cloning it.
+    let registry = Arc::new(registry);
+
+    let precomputed: DashMap<PathBuf, SyntaxBundle> = DashMap::with_capacity(pre_prepared.len());
+    let mut metadata: Vec<FileMetadata> = Vec::with_capacity(pre_prepared.len());
+    for pp in pre_prepared {
+        metadata.push(FileMetadata {
+            file_path: pp.file_path.clone(),
+            source_text: pp.source_text,
+            source_map: pp.source_map,
+        });
         precomputed.insert(
-            file_path.clone(),
+            pp.file_path.clone(),
             SyntaxBundle {
-                path: file_path.clone(),
-                module,
-                module_indices,
-                name_res,
-                grouped_defs,
-                registry: Arc::new(registry.clone()),
-                context_args,
+                path: pp.file_path,
+                module: pp.module,
+                module_indices: pp.module_indices,
+                name_res: pp.name_res,
+                grouped_defs: pp.grouped_defs,
+                registry: Arc::clone(&registry),
+                context_args: pp.context_args,
                 deadline_secs: toml_config.deadline,
             },
         );
     }
     timer.mark("prepare (sequential)");
 
-    // Wrap registry in Arc for the syntax provider fallback.
-    let registry = Arc::new(registry);
-
-    let syntax_provider = CliSyntaxProvider {
-        precomputed,
-        db: Mutex::new(db),
-        registry,
-        default_context_args: Arc::default(),
-        deadline_secs: toml_config.deadline,
-    };
+    let syntax_provider = CliSyntaxProvider { precomputed };
 
     // =========================================================================
     // Phase 2 — Parallel Inference with demand-driven import resolution
@@ -303,6 +305,7 @@ pub fn run_check_project(
             }
         })
         .collect();
+    timer.mark("inference (parallel)");
 
     // =========================================================================
     // Phase 3 — Sequential Render
