@@ -26,6 +26,8 @@ mod type_def;
 mod workspace_symbols;
 
 use lang_check::aliases::TypeAliasRegistry;
+#[cfg(unix)]
+use rlimit::Resource;
 use tower_lsp::{LspService, Server};
 
 /// Load .tix files from a path. If the path is a file, load it directly.
@@ -97,6 +99,9 @@ async fn async_lsp_main() {
         std::process::id(),
     );
 
+    #[cfg(unix)]
+    apply_mem_limit();
+
     let mut registry = TypeAliasRegistry::with_builtins();
 
     // Allow overriding built-in context stubs via env var. When set, @nixos
@@ -120,4 +125,50 @@ async fn async_lsp_main() {
         LspService::new(|client| server::TixLanguageServer::new(client, registry));
 
     Server::new(stdin, stdout, socket).serve(service).await;
+}
+
+/// Apply a virtual address space limit via setrlimit(RLIMIT_AS) to prevent
+/// runaway memory usage from taking down the user's system. Reads
+/// `TIX_MEM_LIMIT` env var (in MiB); defaults to 4096 MiB (4 GiB).
+/// Set `TIX_MEM_LIMIT=0` to disable.
+#[cfg(unix)]
+fn apply_mem_limit() {
+    const DEFAULT_MIB: u64 = 4096;
+
+    let limit_mib = match std::env::var("TIX_MEM_LIMIT") {
+        Ok(val) => match val.parse::<u64>() {
+            Ok(0) => {
+                log::info!("TIX_MEM_LIMIT=0: memory limit disabled");
+                return;
+            }
+            Ok(mib) => mib,
+            Err(_) => {
+                log::warn!("Invalid TIX_MEM_LIMIT value '{val}', using default {DEFAULT_MIB} MiB");
+                DEFAULT_MIB
+            }
+        },
+        Err(_) => DEFAULT_MIB,
+    };
+
+    let limit_bytes = limit_mib * 1024 * 1024;
+
+    // Read the current hard limit so we don't try to exceed it (requires root).
+    let hard = match Resource::AS.get() {
+        Ok((_, hard)) => hard,
+        Err(e) => {
+            log::warn!("Failed to query RLIMIT_AS: {e}");
+            return;
+        }
+    };
+
+    let effective = if hard == rlimit::INFINITY {
+        limit_bytes
+    } else {
+        limit_bytes.min(hard)
+    };
+
+    match Resource::AS.set(effective, hard) {
+        Ok(()) => log::info!("Memory limit set to {} MiB", effective / (1024 * 1024)),
+        Err(e) => log::warn!("Failed to set memory limit to {limit_mib} MiB: {e}"),
+    }
 }

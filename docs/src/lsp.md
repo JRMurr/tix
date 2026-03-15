@@ -57,6 +57,17 @@ Code actions (quick fixes / refactorings) are offered based on diagnostics and c
 
 - **Remove unused binding** (quick fix): when a let-binding has no references in the file, offers to remove the entire `name = value;` line. Names starting with `_` are excluded (conventional "unused" prefix in Nix).
 
+## Memory limit
+
+The LSP sets a 4 GiB virtual address space limit (`RLIMIT_AS`) at startup to prevent runaway inference from consuming all system memory. Override with the `TIX_MEM_LIMIT` environment variable (value in MiB):
+
+```bash
+TIX_MEM_LIMIT=8192 tix lsp   # 8 GiB
+TIX_MEM_LIMIT=0 tix lsp      # no limit
+```
+
+When the limit is hit, allocations fail and the process exits. Your editor will typically offer to restart the server.
+
 ## Editor setup
 
 ### VS Code
