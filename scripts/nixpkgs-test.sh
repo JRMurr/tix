@@ -21,6 +21,7 @@ JOBS=""
 TIMING=0
 RELEASE=0
 VERBOSE=0
+MEM_LIMIT_GB=16
 DIRS=()
 
 while [[ $# -gt 0 ]]; do
@@ -45,6 +46,10 @@ while [[ $# -gt 0 ]]; do
             VERBOSE=1
             shift
             ;;
+        --mem-limit)
+            MEM_LIMIT_GB="$2"
+            shift 2
+            ;;
         --help|-h)
             echo "Usage: $0 [OPTIONS] [DIRS...]"
             echo ""
@@ -60,6 +65,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --timing            Print per-phase timing and memory usage"
             echo "  --release           Build tix in release mode"
             echo "  --verbose, -v       Print file classifications"
+            echo "  --mem-limit <GB>    Memory limit for tix process (default: 16)"
             echo "  --help, -h          Show this help"
             exit 0
             ;;
@@ -213,13 +219,16 @@ fi
 # Point at repo stubs so lib functions resolve.
 export TIX_BUILTIN_STUBS="${TIX_BUILTIN_STUBS:-$REPO_ROOT/stubs}"
 
+MEM_LIMIT_KB=$((MEM_LIMIT_GB * 1024 * 1024))
+echo "Memory limit: ${MEM_LIMIT_GB} GB"
 echo "Running: tix ${CHECK_ARGS[*]}"
 echo "---"
 
 # tix check exits 1 on type errors (expected), only treat signals/crashes
 # (exit >= 2, excluding 1) as failures.
+# ulimit -v in a subshell so the limit only applies to tix.
 set +e
-"$TIX_CLI" "${CHECK_ARGS[@]}"
+(ulimit -v "$MEM_LIMIT_KB"; exec "$TIX_CLI" "${CHECK_ARGS[@]}")
 rc=$?
 set -e
 

@@ -17,6 +17,7 @@ PARALLEL=0
 JOBS=""
 TIMING=0
 RELEASE=0
+MEM_LIMIT_GB=16
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -40,9 +41,13 @@ while [[ $# -gt 0 ]]; do
             RELEASE=1
             shift
             ;;
+        --mem-limit)
+            MEM_LIMIT_GB="$2"
+            shift 2
+            ;;
         *)
             echo "Unknown flag: $1" >&2
-            echo "Usage: $0 [--timeout <secs>] [--parallel] [--jobs N] [--timing] [--release]" >&2
+            echo "Usage: $0 [--timeout <secs>] [--parallel] [--jobs N] [--timing] [--release] [--mem-limit <GB>]" >&2
             exit 2
             ;;
     esac
@@ -113,13 +118,16 @@ TOML
     # Point at repo stubs so lib functions resolve.
     export TIX_BUILTIN_STUBS="${TIX_BUILTIN_STUBS:-$REPO_ROOT/stubs}"
 
+    MEM_LIMIT_KB=$((MEM_LIMIT_GB * 1024 * 1024))
+    echo "Memory limit: ${MEM_LIMIT_GB} GB"
     echo "Running: tix ${CHECK_ARGS[*]}"
     echo "---"
 
     # tix check exits 1 on type errors (expected), only treat signals/crashes
     # (exit >= 2, excluding 1) as failures.
+    # ulimit -v in a subshell so the limit only applies to tix.
     set +e
-    "$TIX_CLI" "${CHECK_ARGS[@]}"
+    (ulimit -v "$MEM_LIMIT_KB"; exec "$TIX_CLI" "${CHECK_ARGS[@]}")
     rc=$?
     set -e
 
@@ -144,8 +152,11 @@ mapfile -t NIX_FILES < <(
     | sort
 )
 
+MEM_LIMIT_KB=$((MEM_LIMIT_GB * 1024 * 1024))
+
 echo "Found ${#NIX_FILES[@]} .nix files in $LIB_DIR"
 echo "Timeout: ${TIMEOUT}s per file"
+echo "Memory limit: ${MEM_LIMIT_GB} GB"
 echo "---"
 
 pass=0
@@ -157,9 +168,10 @@ crash_files=()
 for f in "${NIX_FILES[@]}"; do
     rel="${f#"$NIXPKGS_SRC/"}"
 
-    # Run tix with timeout; capture exit code.
+    # Run tix with timeout and memory limit; capture exit code.
+    # ulimit -v in a subshell so the limit only applies to tix.
     set +e
-    timeout "${TIMEOUT}s" "$TIX_CLI" "$f" >/dev/null 2>&1
+    (ulimit -v "$MEM_LIMIT_KB"; exec timeout "${TIMEOUT}s" "$TIX_CLI" "$f" >/dev/null 2>&1)
     rc=$?
     set -e
 

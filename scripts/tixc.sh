@@ -7,6 +7,7 @@
 #   EOF
 #   ./scripts/tixc.sh test/basic.nix    # Check a local file
 #   ./scripts/tixc.sh nixpkgs:lib/fixed-points.nix  # Check a nixpkgs file
+#   ./scripts/tixc.sh --mem-limit 8 test/basic.nix  # Limit to 8 GB RSS
 
 set -euo pipefail
 
@@ -17,12 +18,21 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # First non-flag argument is the input source (file path, nixpkgs: ref, or omitted for stdin).
 INPUT=""
 TIX_ARGS=()
+MEM_LIMIT_GB=16
 
-for arg in "$@"; do
-    if [[ -z "$INPUT" && "$arg" != -* ]]; then
+ARGS=("$@")
+i=0
+while [[ $i -lt ${#ARGS[@]} ]]; do
+    arg="${ARGS[$i]}"
+    if [[ "$arg" == "--mem-limit" ]]; then
+        MEM_LIMIT_GB="${ARGS[$((i+1))]}"
+        i=$((i + 2))
+    elif [[ -z "$INPUT" && "$arg" != -* ]]; then
         INPUT="$arg"
+        i=$((i + 1))
     else
         TIX_ARGS+=("$arg")
+        i=$((i + 1))
     fi
 done
 
@@ -56,4 +66,6 @@ fi
 # lib.tix declarations during development (e.g. lib.id, mkDerivation).
 export TIX_BUILTIN_STUBS="${TIX_BUILTIN_STUBS:-$REPO_ROOT/stubs}"
 
-cargo run --bin tix -- "$FILE" "${TIX_ARGS[@]}"
+# Apply memory limit (ulimit -v takes KB; run in subshell so it only affects tix).
+MEM_LIMIT_KB=$((MEM_LIMIT_GB * 1024 * 1024))
+(ulimit -v "$MEM_LIMIT_KB"; exec cargo run --bin tix -- "$FILE" "${TIX_ARGS[@]}")
