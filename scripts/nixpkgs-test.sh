@@ -193,6 +193,8 @@ EXCLUDE_PATTERNS=(
     "**/maintainers/maintainer-list.nix"
     "**/gitlab/rubyEnv/gemset.nix"
     "**/mastodon/gemset.nix"
+    # Recursive self-binding causes canonicalization to loop. TODO: fix cycle detection.
+    "**/compilers/chicken/4/default.nix"
 )
 
 {
