@@ -90,6 +90,9 @@
                 (pkgs.cargo-tarpaulin.override ({ rustPlatform = rustAttrs.rustPlatform; }))
                 pkgs.cargo-nextest
                 tix-lsp-dev
+                scripts.tixc
+                scripts.nixpkgs-test
+                scripts.nixpkgs-lib-test
 
                 # common
                 pkgs.just

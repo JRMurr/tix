@@ -24,26 +24,26 @@ cargo clippy                         # Lint
 ./scripts/cov.sh                     # Coverage report (cargo-tarpaulin)
 cargo build --features dhat-heap      # Build with heap profiler
 nix build .#                         # Build with nix
-nix run .#tixc -- test/basic.nix             # Type-check a local .nix file
-nix run .#tixc -- nixpkgs:lib/strings.nix    # Type-check a nixpkgs file (requires nix)
-nix run .#tixc -- --release test/basic.nix   # Type-check with release build
-nix run .#tixc -- --release --time --timeout 120 nixpkgs:lib/strings.nix --timing  # Release + RSS tracking + deadline
-nix run .#nixpkgs-lib-test                   # Run tix on nixpkgs lib/ sequentially (requires nix)
-nix run .#nixpkgs-lib-test -- --parallel     # Parallel inference via `tix check` (requires nix)
-nix run .#nixpkgs-lib-test -- --parallel --timing -j 4  # With timing + thread limit
-nix run .#nixpkgs-lib-test -- --release      # Run with optimized release build
-nix run .#nixpkgs-lib-test -- --parallel --release --timing  # Parallel + release + timing
-nix run .#nixpkgs-test                                       # Run tix on ALL of nixpkgs (parallel, requires nix)
-nix run .#nixpkgs-test -- pkgs/                              # Check only pkgs/ subdirectory
-nix run .#nixpkgs-test -- --release --timing lib/ nixos/     # Check lib/ + nixos/ with timing
-nix run .#nixpkgs-test -- --deadline 10 -j 4                 # Custom deadline + thread limit
+tixc test/basic.nix             # Type-check a local .nix file
+tixc nixpkgs:lib/strings.nix    # Type-check a nixpkgs file (requires nix)
+tixc --release test/basic.nix   # Type-check with release build
+tixc --release --time --timeout 120 nixpkgs:lib/strings.nix --timing  # Release + RSS tracking + deadline
+nixpkgs-lib-test                              # Run tix on nixpkgs lib/ sequentially (requires nix)
+nixpkgs-lib-test --parallel                   # Parallel inference via `tix check` (requires nix)
+nixpkgs-lib-test --parallel --timing -j 4     # With timing + thread limit
+nixpkgs-lib-test --release                    # Run with optimized release build
+nixpkgs-lib-test --parallel --release --timing  # Parallel + release + timing
+nixpkgs-test                                  # Run tix on ALL of nixpkgs (parallel, requires nix)
+nixpkgs-test pkgs/                            # Check only pkgs/ subdirectory
+nixpkgs-test --release --timing lib/ nixos/   # Check lib/ + nixos/ with timing
+nixpkgs-test --deadline 10 -j 4              # Custom deadline + thread limit
 ```
 
 
-When debugging, always use `nix run .#tixc` — it is safe to run and does not need permission. All commands must start with `nix run .#tixc` so the Bash permission rule matches:
+When debugging, always use `tixc` (available in the nix devShell) — it is safe to run and does not need permission. All commands must start with `tixc` so the Bash permission rule matches:
 ```bash
-nix run .#tixc -- test/basic.nix         # local file
-nix run .#tixc -- nixpkgs:lib/strings.nix  # nixpkgs subpath
+tixc test/basic.nix             # local file
+tixc nixpkgs:lib/strings.nix    # nixpkgs subpath
 ```
 
 ### Profiling with stubs
@@ -55,8 +55,8 @@ nix build .#stubs
 export TIX_BUILTIN_STUBS="$(readlink result)"
 
 # Wall-clock timing + RSS per phase
-nix run .#tixc -- --timing test/basic.nix
-nix run .#tixc -- --timing nixpkgs:lib/strings.nix
+tixc --timing test/basic.nix
+tixc --timing nixpkgs:lib/strings.nix
 
 # Heap profiling (produces dhat-heap.json in cwd)
 cargo build --features dhat-heap
