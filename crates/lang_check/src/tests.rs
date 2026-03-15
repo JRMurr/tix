@@ -1411,13 +1411,14 @@ fn alias_with_union_in_param_skips_bidirectional_constraints() {
     "# };
 
     let (db, file) = TestDatabase::single_file(nix_src).unwrap();
-    let result = crate::check_file_collecting(
+    let result = crate::CheckBuilder::from_db(
         &db,
         file,
         Arc::new(registry.clone()),
         HashMap::new(),
         Arc::default(),
-    );
+    )
+    .run();
 
     // Inference should succeed — the union annotation (via alias) is skipped.
     let inference = result
@@ -1472,13 +1473,14 @@ fn nested_alias_with_union_in_param_skips_bidirectional_constraints() {
     "# };
 
     let (db, file) = TestDatabase::single_file(nix_src).unwrap();
-    let result = crate::check_file_collecting(
+    let result = crate::CheckBuilder::from_db(
         &db,
         file,
         Arc::new(registry.clone()),
         HashMap::new(),
         Arc::default(),
-    );
+    )
+    .run();
 
     let inference = result
         .inference
@@ -2571,13 +2573,14 @@ pub fn check_str_with_aliases_and_context(
 ) -> (Module, crate::CheckResult) {
     let (db, file) = TestDatabase::single_file(src).unwrap();
     let module = module(&db, file);
-    let result = crate::check_file_collecting(
+    let result = crate::CheckBuilder::from_db(
         &db,
         file,
         Arc::new(aliases.clone()),
         HashMap::new(),
         Arc::new(context_args),
-    );
+    )
+    .run();
     (module, result)
 }
 
@@ -2745,13 +2748,14 @@ fn doc_comment_context_on_inner_lambda() {
 
     let (db, file) = TestDatabase::single_file(nix_src).unwrap();
     let mod_ = module(&db, file);
-    let result = crate::check_file_collecting(
+    let result = crate::CheckBuilder::from_db(
         &db,
         file,
         Arc::new(TypeAliasRegistry::with_builtins()),
         HashMap::new(),
-        Arc::default(), // no file-level context
-    );
+        Arc::default(),
+    )
+    .run();
 
     let inference = result.inference.expect("inference should succeed");
 
@@ -2817,7 +2821,8 @@ fn context_args_preserve_alias_provenance() {
     let (db, file) = TestDatabase::single_file(nix_src).unwrap();
     let module = module(&db, file);
     let result =
-        crate::check_file_collecting(&db, file, Arc::new(registry.clone()), HashMap::new(), ctx);
+        crate::CheckBuilder::from_db(&db, file, Arc::new(registry.clone()), HashMap::new(), ctx)
+            .run();
     let inference = result.inference.expect("inference should succeed");
 
     // The `config` pattern field should be typed as Named("NixosConfig", ...)
@@ -2885,7 +2890,8 @@ fn callpackage_context_types_pkgs_parameter_as_alias() {
     let (db, file) = TestDatabase::single_file(nix_src).unwrap();
     let module = module(&db, file);
     let result =
-        crate::check_file_collecting(&db, file, Arc::new(registry.clone()), HashMap::new(), ctx);
+        crate::CheckBuilder::from_db(&db, file, Arc::new(registry.clone()), HashMap::new(), ctx)
+            .run();
     let inference = result.inference.expect("inference should succeed");
 
     // `pkgs` should be typed as Named("Pkgs", ...) via alias provenance.
@@ -2966,7 +2972,8 @@ fn callpackage_context_loads_pkgs_from_builtin_stubs_dir() {
     let (db, file) = TestDatabase::single_file(nix_src).unwrap();
     let module = module(&db, file);
     let result =
-        crate::check_file_collecting(&db, file, Arc::new(registry.clone()), HashMap::new(), ctx);
+        crate::CheckBuilder::from_db(&db, file, Arc::new(registry.clone()), HashMap::new(), ctx)
+            .run();
     let inference = result.inference.expect("inference should succeed");
 
     let root_ty = inference
@@ -4527,13 +4534,14 @@ fn annotation_arity_mismatch_skipped_with_warning() {
     " };
     let (db, file) = TestDatabase::single_file(nix_src).unwrap();
     let mod_ = module(&db, file);
-    let result = crate::check_file_collecting(
+    let result = crate::CheckBuilder::from_db(
         &db,
         file,
         Arc::new(TypeAliasRegistry::default()),
         HashMap::new(),
         Arc::default(),
-    );
+    )
+    .run();
 
     // Inference should succeed (the wrong-arity annotation is skipped).
     let inference = result
@@ -4599,13 +4607,14 @@ fn annotation_with_union_skipped() {
     "# };
     let (db, file) = TestDatabase::single_file(nix_src).unwrap();
     let mod_ = module(&db, file);
-    let result = crate::check_file_collecting(
+    let result = crate::CheckBuilder::from_db(
         &db,
         file,
         Arc::new(TypeAliasRegistry::default()),
         HashMap::new(),
         Arc::default(),
-    );
+    )
+    .run();
 
     // Inference should succeed — the union annotation is skipped.
     let inference = result
@@ -5045,13 +5054,14 @@ fn intersection_annotation_accepted() {
     " };
     let (db, file) = TestDatabase::single_file(nix_src).unwrap();
     let mod_ = module(&db, file);
-    let result = crate::check_file_collecting(
+    let result = crate::CheckBuilder::from_db(
         &db,
         file,
         Arc::new(TypeAliasRegistry::default()),
         HashMap::new(),
         Arc::default(),
-    );
+    )
+    .run();
 
     // Inference should succeed — the intersection annotation is accepted.
     let inference = result
@@ -5080,13 +5090,14 @@ fn intersection_annotation_warning_emitted() {
     " };
     let (db, file) = TestDatabase::single_file(nix_src).unwrap();
     let _mod_ = module(&db, file);
-    let result = crate::check_file_collecting(
+    let result = crate::CheckBuilder::from_db(
         &db,
         file,
         Arc::new(TypeAliasRegistry::default()),
         HashMap::new(),
         Arc::default(),
-    );
+    )
+    .run();
 
     result.inference.expect("inference should succeed");
 
@@ -5122,13 +5133,14 @@ fn non_lambda_intersection_falls_through() {
     " };
     let (db, file) = TestDatabase::single_file(nix_src).unwrap();
     let _mod_ = module(&db, file);
-    let result = crate::check_file_collecting(
+    let result = crate::CheckBuilder::from_db(
         &db,
         file,
         Arc::new(TypeAliasRegistry::default()),
         HashMap::new(),
         Arc::default(),
-    );
+    )
+    .run();
 
     // The intersection-of-lambda guard should NOT have fired, so there
     // should be no AnnotationUnchecked warning.
@@ -6227,7 +6239,7 @@ fn inline_alias_references_another() {
 // Duplicate Key Diagnostics
 // ==============================================================================
 
-/// Helper: type-check with check_file_collecting (which includes lowering
+/// Helper: type-check with CheckBuilder (which includes lowering
 /// diagnostics) and return just the diagnostics.
 fn collect_diagnostics(src: &str) -> Vec<TixDiagnostic> {
     collect_diagnostics_with_deadline(src, None)
@@ -6238,15 +6250,15 @@ fn collect_diagnostics_with_deadline(
     deadline: Option<std::time::Instant>,
 ) -> Vec<TixDiagnostic> {
     let (db, file) = TestDatabase::single_file(src).unwrap();
-    let result = crate::check_file_collecting_with_cancel(
+    let result = crate::CheckBuilder::from_db(
         &db,
         file,
         Arc::new(TypeAliasRegistry::default()),
         HashMap::new(),
         Arc::default(),
-        deadline,
-        None,
-    );
+    )
+    .deadline(deadline)
+    .run();
     result.diagnostics
 }
 
@@ -6348,13 +6360,14 @@ fn duplicate_key_multiple_duplicates() {
 fn duplicate_key_is_warning_not_error() {
     // Duplicate keys should produce a warning but still infer successfully.
     let (db, file) = TestDatabase::single_file("{ a = 1; a = 2; }").unwrap();
-    let result = crate::check_file_collecting(
+    let result = crate::CheckBuilder::from_db(
         &db,
         file,
         Arc::new(TypeAliasRegistry::default()),
         HashMap::new(),
         Arc::default(),
-    );
+    )
+    .run();
     // Inference should succeed despite the warning.
     assert!(result.inference.is_some());
     // The duplicate key diagnostic should be present.
@@ -6577,13 +6590,14 @@ fn function_union_annotation_still_skips() {
     "# };
 
     let (db, file) = TestDatabase::single_file(nix_src).unwrap();
-    let result = crate::check_file_collecting(
+    let result = crate::CheckBuilder::from_db(
         &db,
         file,
         Arc::new(registry.clone()),
         HashMap::new(),
         Arc::default(),
-    );
+    )
+    .run();
 
     // Inference should succeed — the union annotation is skipped for functions.
     let inference = result

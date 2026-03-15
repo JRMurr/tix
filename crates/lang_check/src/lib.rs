@@ -302,21 +302,9 @@ pub fn run_inference(
     inputs: &InferenceInputs,
     cancel_flag: Option<Arc<AtomicBool>>,
 ) -> CheckResult {
-    let deadline = inputs
-        .deadline_secs
-        .map(|secs| Instant::now() + std::time::Duration::from_secs(secs));
-
-    let mut check_result = check_with_precomputed(
-        &inputs.module,
-        &inputs.name_res,
-        &inputs.module_indices,
-        inputs.grouped_defs.clone(),
-        Arc::clone(&inputs.registry),
-        inputs.import_types.clone(),
-        Arc::clone(&inputs.context_args),
-        deadline,
-        cancel_flag,
-    );
+    let mut check_result = CheckBuilder::from_inputs(inputs)
+        .cancel_flag(cancel_flag)
+        .run();
 
     // Merge import diagnostics.
     check_result
@@ -353,111 +341,144 @@ pub fn run_inference(
     check_result
 }
 
-/// Type-check a file, collecting errors instead of aborting on the first one.
-/// Always returns partial inference results — even when errors occur, bindings
-/// that were successfully inferred before the error will have types available
-/// (e.g. for LSP hover).
-pub fn check_file_collecting(
-    db: &dyn AstDb,
-    file: NixFile,
-    aliases: Arc<TypeAliasRegistry>,
-    import_types: HashMap<ExprId, OutputTy>,
-    context_args: Arc<HashMap<smol_str::SmolStr, ParsedTy>>,
-) -> CheckResult {
-    check_file_collecting_with_cancel(db, file, aliases, import_types, context_args, None, None)
-}
+// ==============================================================================
+// CheckBuilder: extensible entry point for error-collecting type inference
+// ==============================================================================
+//
+// Replaces `check_file_collecting`, `check_file_collecting_with_cancel`, and
+// `check_with_precomputed` with a single builder type. Adding a new option
+// (e.g. ExprCanonMode) only requires adding one field + one setter method.
 
-/// Like `check_file_collecting` but with an optional deadline and cancellation
-/// flag. When the deadline is exceeded or flag set, inference bails out with
-/// partial results.
-#[allow(clippy::too_many_arguments)]
-pub fn check_file_collecting_with_cancel(
-    db: &dyn AstDb,
-    file: NixFile,
-    aliases: Arc<TypeAliasRegistry>,
-    import_types: HashMap<ExprId, OutputTy>,
-    context_args: Arc<HashMap<smol_str::SmolStr, ParsedTy>>,
-    deadline: Option<Instant>,
-    cancel_flag: Option<Arc<AtomicBool>>,
-) -> CheckResult {
-    let module = lang_ast::module(db, file);
-    let name_res = lang_ast::name_resolution(db, file);
-    let indices = lang_ast::module_indices(db, file);
-    let grouped_defs = lang_ast::group_def(db, file);
-
-    let aliases = load_inline_aliases(aliases, &module);
-
-    let mut check = CheckCtx::new(
-        &module,
-        &name_res,
-        &indices.binding_expr,
-        aliases,
-        import_types,
-        context_args,
-    );
-    if let Some(d) = deadline {
-        check = check.with_deadline(d);
-    }
-    if let Some(flag) = cancel_flag {
-        check = check.with_cancel_flag(flag);
-    }
-    let (inference, mut diagnostics, timed_out) = check.infer_prog_partial(grouped_defs);
-
-    let lower_diags =
-        diagnostic::lower_diagnostics_to_tix(&module.lower_diagnostics, module.entry_expr);
-    diagnostics.extend(lower_diags);
-
-    CheckResult {
-        inference: Some(inference),
-        diagnostics,
-        timed_out,
-    }
-}
-
-/// Like `check_file_collecting_with_cancel` but takes precomputed Salsa query
-/// results directly instead of `&dyn AstDb`. This allows the LSP to run
-/// inference without holding the Salsa database lock — the caller queries
-/// module/name_res/indices/grouped_defs under the lock, releases it, then
-/// calls this function.
-#[allow(clippy::too_many_arguments)]
-pub fn check_with_precomputed(
-    module: &Module,
-    name_res: &NameResolution,
-    indices: &lang_ast::ModuleIndices,
+/// Builder for error-collecting type inference. Always returns partial results
+/// — even when errors occur, bindings inferred before the error have types
+/// available (e.g. for LSP hover).
+pub struct CheckBuilder {
+    module: Module,
+    name_res: NameResolution,
+    indices: lang_ast::ModuleIndices,
     grouped_defs: lang_ast::GroupedDefs,
     aliases: Arc<TypeAliasRegistry>,
     import_types: HashMap<ExprId, OutputTy>,
     context_args: Arc<HashMap<smol_str::SmolStr, ParsedTy>>,
     deadline: Option<Instant>,
     cancel_flag: Option<Arc<AtomicBool>>,
-) -> CheckResult {
-    let aliases = load_inline_aliases(aliases, module);
+}
 
-    let mut check = CheckCtx::new(
-        module,
-        name_res,
-        &indices.binding_expr,
-        aliases,
-        import_types,
-        context_args,
-    );
-    if let Some(d) = deadline {
-        check = check.with_deadline(d);
+impl CheckBuilder {
+    /// Create a builder by querying Salsa for syntax-phase results.
+    pub fn from_db(
+        db: &dyn AstDb,
+        file: NixFile,
+        aliases: Arc<TypeAliasRegistry>,
+        import_types: HashMap<ExprId, OutputTy>,
+        context_args: Arc<HashMap<smol_str::SmolStr, ParsedTy>>,
+    ) -> Self {
+        Self {
+            module: lang_ast::module(db, file),
+            name_res: lang_ast::name_resolution(db, file),
+            indices: lang_ast::module_indices(db, file),
+            grouped_defs: lang_ast::group_def(db, file),
+            aliases,
+            import_types,
+            context_args,
+            deadline: None,
+            cancel_flag: None,
+        }
     }
-    if let Some(flag) = cancel_flag {
-        check = check.with_cancel_flag(flag);
+
+    /// Create a builder from precomputed Salsa query results. Useful when
+    /// the caller already holds owned copies (e.g. inference off the Salsa
+    /// database lock in the LSP).
+    pub fn from_precomputed(
+        module: Module,
+        name_res: NameResolution,
+        indices: lang_ast::ModuleIndices,
+        grouped_defs: lang_ast::GroupedDefs,
+        aliases: Arc<TypeAliasRegistry>,
+        import_types: HashMap<ExprId, OutputTy>,
+        context_args: Arc<HashMap<smol_str::SmolStr, ParsedTy>>,
+    ) -> Self {
+        Self {
+            module,
+            name_res,
+            indices,
+            grouped_defs,
+            aliases,
+            import_types,
+            context_args,
+            deadline: None,
+            cancel_flag: None,
+        }
     }
-    let (inference, mut diagnostics, timed_out) = check.infer_prog_partial(grouped_defs);
 
-    // Include diagnostics from the lowering phase (e.g. duplicate keys).
-    let lower_diags =
-        diagnostic::lower_diagnostics_to_tix(&module.lower_diagnostics, module.entry_expr);
-    diagnostics.extend(lower_diags);
+    /// Create a builder from an `InferenceInputs` bundle (used by
+    /// `run_inference`).
+    pub fn from_inputs(inputs: &InferenceInputs) -> Self {
+        let deadline = inputs
+            .deadline_secs
+            .map(|secs| Instant::now() + std::time::Duration::from_secs(secs));
+        Self {
+            module: inputs.module.clone(),
+            name_res: inputs.name_res.clone(),
+            indices: inputs.module_indices.clone(),
+            grouped_defs: inputs.grouped_defs.clone(),
+            aliases: Arc::clone(&inputs.registry),
+            import_types: inputs.import_types.clone(),
+            context_args: Arc::clone(&inputs.context_args),
+            deadline,
+            cancel_flag: None,
+        }
+    }
 
-    CheckResult {
-        inference: Some(inference),
-        diagnostics,
-        timed_out,
+    /// Set an optional inference deadline.
+    pub fn deadline(mut self, deadline: Option<Instant>) -> Self {
+        self.deadline = deadline;
+        self
+    }
+
+    /// Set a deadline as seconds from now.
+    pub fn deadline_secs(mut self, secs: u64) -> Self {
+        self.deadline = Some(Instant::now() + std::time::Duration::from_secs(secs));
+        self
+    }
+
+    /// Set an optional cancellation flag for cooperative early exit.
+    pub fn cancel_flag(mut self, flag: Option<Arc<AtomicBool>>) -> Self {
+        self.cancel_flag = flag;
+        self
+    }
+
+    /// Run type inference and return collected results + diagnostics.
+    pub fn run(self) -> CheckResult {
+        let aliases = load_inline_aliases(self.aliases, &self.module);
+
+        let mut check = CheckCtx::new(
+            &self.module,
+            &self.name_res,
+            &self.indices.binding_expr,
+            aliases,
+            self.import_types,
+            self.context_args,
+        );
+        if let Some(d) = self.deadline {
+            check = check.with_deadline(d);
+        }
+        if let Some(flag) = self.cancel_flag {
+            check = check.with_cancel_flag(flag);
+        }
+        let (inference, mut diagnostics, timed_out) = check.infer_prog_partial(self.grouped_defs);
+
+        let lower_diags = diagnostic::lower_diagnostics_to_tix(
+            &self.module.lower_diagnostics,
+            self.module.entry_expr,
+        );
+        diagnostics.extend(lower_diags);
+
+        CheckResult {
+            inference: Some(inference),
+            diagnostics,
+            timed_out,
+        }
     }
 }
 

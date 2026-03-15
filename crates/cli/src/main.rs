@@ -385,13 +385,14 @@ fn run_gen_stub(
     let import_resolution =
         resolve_import_types_from_stubs(&module, &name_res, base_dir, &HashMap::new());
 
-    let result = lang_check::check_file_collecting(
+    let result = lang_check::CheckBuilder::from_db(
         &db,
         file,
         Arc::new(registry),
         import_resolution.types,
         Arc::default(),
-    );
+    )
+    .run();
 
     let root_ty = result
         .inference
@@ -521,13 +522,14 @@ fn run_verify_stubs(
         resolve_import_types_from_stubs(&module, &name_res, base_dir, &HashMap::new());
 
     let registry = Arc::new(registry);
-    let result = lang_check::check_file_collecting(
+    let result = lang_check::CheckBuilder::from_db(
         &db,
         file,
         Arc::clone(&registry),
         import_resolution.types,
         Arc::default(),
-    );
+    )
+    .run();
 
     let root_ty = result
         .inference
@@ -819,13 +821,14 @@ fn run_check(
     let import_diagnostics = import_errors_to_diagnostics(&import_resolution.errors);
     timer.mark("import-resolution");
 
-    let mut result = lang_check::check_file_collecting(
+    let mut result = lang_check::CheckBuilder::from_db(
         &db,
         file,
         Arc::new(registry),
         import_resolution.types,
         context_args,
-    );
+    )
+    .run();
     timer.mark("inference+collect");
 
     // Merge import diagnostics into the check result.

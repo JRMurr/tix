@@ -405,15 +405,16 @@ impl AnalysisState {
         // this analysis.
         let t0 = Instant::now();
         let deadline = Some(Instant::now() + Duration::from_secs(self.deadline_secs));
-        let mut check_result = lang_check::check_file_collecting_with_cancel(
+        let mut check_result = lang_check::CheckBuilder::from_db(
             &self.db,
             nix_file,
             Arc::clone(&self.registry),
             import_resolution.types,
             context_args,
-            deadline,
-            cancel_flag,
-        );
+        )
+        .deadline(deadline)
+        .cancel_flag(cancel_flag)
+        .run();
         let t_check = t0.elapsed();
 
         // Merge import resolution diagnostics into the check result so they
