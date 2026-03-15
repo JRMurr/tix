@@ -109,4 +109,4 @@ fi
 CMD+=("$TIX_CLI" "$FILE" "${TIX_ARGS[@]}")
 
 # Enforce memory limit via cgroups (kernel OOM-kills on exceed, no hanging).
-exec systemd-run --user --scope -q -p MemoryMax="${MEM_LIMIT_GB}G" "${CMD[@]}"
+exec systemd-run --user --scope -q -p MemoryMax="${MEM_LIMIT_GB}G" -p MemorySwapMax=0 "${CMD[@]}"

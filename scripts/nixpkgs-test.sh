@@ -227,7 +227,7 @@ echo "---"
 # (exit >= 2, excluding 1) as failures.
 # Enforce memory limit via cgroups (kernel OOM-kills on exceed, no hanging).
 set +e
-systemd-run --user --scope -q -p MemoryMax="${MEM_LIMIT_GB}G" "$TIX_CLI" "${CHECK_ARGS[@]}"
+systemd-run --user --scope -q -p MemoryMax="${MEM_LIMIT_GB}G" -p MemorySwapMax=0 "$TIX_CLI" "${CHECK_ARGS[@]}"
 rc=$?
 set -e
 
