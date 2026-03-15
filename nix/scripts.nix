@@ -86,7 +86,8 @@ let
   ];
 
   # Format a list of strings as a TOML array literal.
-  tomlArray = items: "[${builtins.concatStringsSep ", " (map (i: ''"${i}"'') items)}]";
+  # Inner quotes are backslash-escaped so they survive bash's echo "...".
+  tomlArray = items: "[${builtins.concatStringsSep ", " (map (i: ''\"${i}\"'') items)}]";
 
   excludeToml = tomlArray nixpkgsExcludePatterns;
 in
