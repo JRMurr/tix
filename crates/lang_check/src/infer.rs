@@ -712,9 +712,18 @@ impl CheckCtx<'_> {
 
                             let result = self.alloc_concrete(Ty::Lambda { param: p, body: b });
 
-                            // Link placeholder to result.
-                            self.constrain(result, placeholder).expect("extrude link");
-                            self.constrain(placeholder, result).expect("extrude link");
+                            // Link placeholder to result. Cannot fail:
+                            // both sides are freshly allocated in the same
+                            // extrusion pass, so no type mismatch is possible.
+                            // Propagating Result would require changing
+                            // extrude_inner's signature (and all callers) from
+                            // TyId to Result<TyId, _>.
+                            self.constrain(result, placeholder).expect(
+                                "extrude placeholder link: fresh lambda and placeholder cannot conflict",
+                            );
+                            self.constrain(placeholder, result).expect(
+                                "extrude placeholder link: fresh lambda and placeholder cannot conflict",
+                            );
 
                             result
                         }
@@ -722,6 +731,15 @@ impl CheckCtx<'_> {
                             extrude_single!(elem, polarity, |e| Ty::List(e))
                         }
                         Ty::AttrSet(attr) => {
+                            // Insert a placeholder to handle self-referential
+                            // attrsets. After compact_scc_graph pins a variable
+                            // that appeared in a recursive `let self = { pkgs =
+                            // self // { ... }; }` pattern, the concrete type
+                            // references itself. Without a placeholder, extrusion
+                            // would infinite-loop. Same approach as Lambda above.
+                            let placeholder = self.new_var();
+                            cache.insert(ty_id, placeholder);
+
                             let mut changed = false;
                             let new_fields: std::collections::BTreeMap<smol_str::SmolStr, TyId> =
                                 attr.fields
@@ -744,12 +762,29 @@ impl CheckCtx<'_> {
                             if !changed {
                                 return self.extrude_reuse(ty_id, cache);
                             }
-                            self.alloc_concrete(Ty::AttrSet(AttrSetTy {
+                            let result = self.alloc_concrete(Ty::AttrSet(AttrSetTy {
                                 fields: new_fields,
                                 dyn_ty: new_dyn,
                                 open: attr.open,
                                 optional_fields: attr.optional_fields.clone(),
-                            }))
+                            }));
+
+                            // Link placeholder to result so any recursive
+                            // references through the placeholder resolve to
+                            // the actual extruded attrset. Cannot fail: both
+                            // sides are freshly allocated in the same extrusion
+                            // pass, so no type mismatch is possible. Propagating
+                            // Result would require changing extrude_inner's
+                            // signature (and all callers) from TyId to
+                            // Result<TyId, _>.
+                            self.constrain(result, placeholder).expect(
+                                "extrude placeholder link: fresh attrset and placeholder cannot conflict",
+                            );
+                            self.constrain(placeholder, result).expect(
+                                "extrude placeholder link: fresh attrset and placeholder cannot conflict",
+                            );
+
+                            result
                         }
                         // Primitives and TyVar are handled by the fast path above.
                         Ty::Primitive(_) | Ty::TyVar(_) => unreachable!(),

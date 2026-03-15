@@ -9,7 +9,7 @@
 # scripts does not force a full Rust build.
 {
   pkgs,
-  nixpkgs-src,  # string: store path to nixpkgs source
+  nixpkgs-src, # string: store path to nixpkgs source
 }:
 let
   # ==============================================================================
@@ -82,7 +82,6 @@ let
     "**/maintainers/maintainer-list.nix"
     "**/gitlab/rubyEnv/gemset.nix"
     "**/mastodon/gemset.nix"
-    "**/compilers/chicken/4/default.nix"
   ];
 
   # Format a list of strings as a TOML array literal.

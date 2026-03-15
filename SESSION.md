@@ -85,8 +85,9 @@ by design, or informational notes.
      - `chromium/common.nix` (976 lines, 278 let-bindings) — canonicalization
        of 278 names eats >32 GB. The types are enormous due to deep attrset
        nesting and conditional flags.
-     - `chicken/4/default.nix` (24 lines) — likely imports something that
-       produces huge types.
+     - `chicken/4/default.nix` (24 lines) — FIXED. Root cause was missing
+       extrusion cycle-break for self-referential concrete AttrSets (after
+       compact_scc_graph pinning). Added placeholder insertion like Lambda.
 
   Root cause: canonicalization and OutputTy construction have no memory budget.
   Possible mitigations: memory-bounded canonicalization (bail out if OutputTy

@@ -6778,3 +6778,51 @@ fn extrude_caches_changed_concrete_types() {
         "expected int in fields, got: {formatted}"
     );
 }
+
+// ==============================================================================
+// Regression: self-referential attrsets via recursive let + merge
+// ==============================================================================
+//
+// `let self = { pkgs = self // { ... }; }; in self` creates a self-referential
+// concrete type after compact_scc_graph pins the merge result variable. Extrusion
+// must handle this cycle (like it does for Lambda) or it infinite-loops into OOM.
+// See: chicken/4/default.nix in nixpkgs.
+
+#[test]
+fn recursive_self_merge_terminates() {
+    // Minimal reproducer: field = self // { extra field }.
+    let src = indoc! {"
+        let self = { pkgs = self // { }; }; in self
+    "};
+    // Must terminate without OOM or stack overflow.
+    let (_, result) = check_str(src);
+    assert!(result.is_ok(), "expected no type error, got: {result:?}");
+}
+
+#[test]
+fn recursive_self_merge_with_extra_field() {
+    let src = indoc! {"
+        let self = { pkgs = self // { extra = false; }; x = 1; }; in self
+    "};
+    let (_, result) = check_str(src);
+    assert!(result.is_ok(), "expected no type error, got: {result:?}");
+}
+
+#[test]
+fn chicken_4_pattern() {
+    // Pattern from nixpkgs compilers/chicken/4/default.nix:
+    // recursive self with self // { ... } in a field, plus field accesses on self.
+    let src = indoc! {"
+        let
+          callPackage = f: args: f args;
+          self = {
+            pkgs = self // { recurseForDerivations = false; };
+            fetchegg = callPackage (x: x) { };
+            chicken = callPackage (x: x) { };
+          };
+        in
+        self
+    "};
+    let (_, result) = check_str(src);
+    assert!(result.is_ok(), "expected no type error, got: {result:?}");
+}
