@@ -225,6 +225,10 @@ fn is_removable_var_member(
 }
 
 /// Apply the substitution + removal to produce a simplified type.
+// TODO: apply_simplification has the same DAG→tree explosion risk as
+// normalize_vars had. It rebuilds the tree with fresh allocations at every
+// node. Memoize by Arc pointer identity (like normalize_inner_cached) if
+// this becomes a bottleneck on large types.
 fn apply_simplification(
     ty: &OutputTy,
     substitution: &FxHashMap<u32, u32>,

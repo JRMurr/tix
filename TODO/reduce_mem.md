@@ -1,5 +1,45 @@
 # Reducing Canonicalization Memory Blowup
 
+## Concrete Case Study: chromium/common.nix OOM
+
+**File:** `nixpkgs:pkgs/applications/networking/browsers/chromium/common.nix`
+
+Profiling this file reveals a surprising failure mode — the OOM is **not** in
+inference or in the core canonicalization walk, but in `normalize_vars()`:
+
+```
+Inference:    48 SCC groups, <1ms total, 4445 type slots, 9MB RSS
+Canonicalize: name 'cpu' → canon=0.4ms, then normalize_vars()=3089ms, 9MB → 7081MB
+              (allocates ~7GB in 3 seconds rebuilding the OutputTy tree)
+Expr canon:   starts at 7081MB, OOM-killed within 100 exprs
+```
+
+**Root cause:** `normalize_vars()` (`arc_ty.rs:241`) calls `map_children()`
+which **deep-clones the entire OutputTy tree** with fresh Arc allocations at
+every node. When the canonical type for `'cpu'` is a massive tree (likely the
+nixpkgs platform/system attrset structure), the rebuild allocates gigabytes
+even though the logical type is the same.
+
+**Key insight:** The canonicalization cache (`(TyId, Polarity) → OutputTy`)
+produces compact results, but `normalize_vars()` destroys all sharing by
+rebuilding the tree from scratch. A type that's a DAG of shared `TyRef`/`Arc`
+nodes becomes a full tree when `map_children` clones each child.
+
+This changes the priority of approaches — **normalize_vars is a separate,
+critical bottleneck** independent of extrusion-induced variable multiplication.
+
+### Immediate fix: make normalize_vars share-aware
+
+`normalize_vars()` should detect and preserve structural sharing. Options:
+1. **Skip normalize_vars when the type has no TyVars** — already done
+   (`has_type_vars()` check, `arc_ty.rs:246`), but the check itself walks the
+   tree, and the culprit type likely DOES have vars.
+2. **Memoize normalize_inner by Arc pointer** — cache `Arc<OutputTy> → Arc<OutputTy>`
+   so shared subtrees are only rebuilt once. This preserves the DAG structure.
+3. **Use in-place TyVar renumbering** instead of tree rebuild — maintain a
+   mapping and apply it lazily during display, not eagerly via clone.
+
+
 ## Problem Statement
 
 Canonicalization (`lang_check/src/collect.rs`) can exhibit exponential memory
@@ -73,6 +113,53 @@ gigabytes of RSS.
 ## Proposed Approaches
 
 Listed in recommended implementation order (smallest-first stacking strategy).
+
+---
+
+### E: Fix normalize_vars tree explosion (HIGHEST PRIORITY) ✅ IMPLEMENTED
+
+**Effort:** ~0.5-1 day. Only touches `arc_ty.rs`.
+
+**Idea:** `normalize_vars()` currently calls `map_children()` which rebuilds
+the entire OutputTy tree with fresh allocations. When shared subtrees
+(via `Arc<OutputTy>`) exist, this converts a compact DAG into an exponentially
+larger tree.
+
+Fix by memoizing `normalize_inner()` with an `Arc`-pointer-keyed cache:
+
+```rust
+pub fn normalize_vars(&self) -> OutputTy {
+    if !self.has_type_vars() { return self.clone(); }
+    let free_vars = self.free_type_vars();
+    let subs: Substitutions = free_vars.iter().enumerate()
+        .map(|(i, var)| (*var, i as u32)).collect();
+    let mut cache: FxHashMap<*const OutputTy, TyRef> = FxHashMap::default();
+    self.normalize_inner_cached(&subs, &mut cache)
+}
+
+fn normalize_inner_cached(
+    &self,
+    free: &Substitutions,
+    cache: &mut FxHashMap<*const OutputTy, TyRef>,
+) -> OutputTy {
+    let ptr = self as *const OutputTy;
+    if let Some(cached) = cache.get(&ptr) {
+        return (*cached.0).clone();
+    }
+    // ... existing normalize_inner logic ...
+    // cache.insert(ptr, TyRef::from(result.clone()));
+}
+```
+
+**Why this is #1 priority:** The chromium/common.nix OOM is caused entirely by
+`normalize_vars()` on the `'cpu'` name (3.1s, 7GB allocation). The actual
+canonicalization walk produces a compact type in 0.4ms. This single fix would
+likely eliminate the OOM for this file and others with large shared types from
+nixpkgs platform definitions.
+
+**Note:** `free_type_vars()` and `has_type_vars()` also walk the full tree and
+could benefit from the same Arc-pointer memoization, but they return small
+values (Vec<u32>, bool) so the allocation overhead is less critical.
 
 ---
 
@@ -274,19 +361,28 @@ Instantiation at a use site:
 
 ## Stacking Strategy
 
-Implement in order C -> D -> B -> A:
+Implement in order E -> C -> D -> B -> A:
 
-1. **C** is a ~1-day canonicalization-only change that immediately reduces memory
-   for the common case of duplicated variables. No inference changes.
+1. **E** (normalize_vars fix) is the **highest priority**. ~0.5-1 day, fixes
+   the concrete chromium OOM caused by tree explosion in normalize_vars. This
+   is a pure OutputTy-level fix — no inference changes needed.
 
-2. **D** cuts inference-time cost of extrusion. Variables that get immediately
+2. **C** is a ~1-day canonicalization-only change that reduces memory for the
+   common case of duplicated variables. No inference changes.
+
+3. **D** cuts inference-time cost of extrusion. Variables that get immediately
    pinned skip the expensive bounds-copying step entirely.
 
-3. **B** if C+D aren't enough. More surgical than A, preserves the SimpleSub
-   architecture.
+4. **B** if C+D aren't enough. More surgical than A, preserves the SimpleSub
+   architecture. Also helps canonicalization directly (proxies → cache hits).
 
-4. **A** for a cleaner long-term design if the incremental approaches hit
+5. **A** for a cleaner long-term design if the incremental approaches hit
    diminishing returns.
+
+Note: the `structural-dedup-canonicalization` branch adds an intern table that
+deduplicates OutputTy values at the Arc level. This is complementary to all
+approaches above — it reduces allocation count but doesn't address normalize_vars
+tree explosion (E) or inference-time variable multiplication (C/D/B/A).
 
 
 ## Background: How Extrusion Works Today

@@ -2,7 +2,7 @@ use std::fmt;
 use std::sync::{Arc, LazyLock};
 
 use derive_more::Debug;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use smol_str::SmolStr;
 
@@ -221,19 +221,23 @@ pub type Substitutions = FxHashMap<u32, u32>;
 impl OutputTy {
     /// Returns true if this type or any of its children contains a TyVar.
     /// Short-circuits on first hit — O(1) for concrete types, O(n) worst case.
+    /// Uses a visited set to avoid exponential blowup on DAG-shaped types.
     pub fn has_type_vars(&self) -> bool {
-        match self {
-            OutputTy::TyVar(_) => true,
-            _ => {
-                let mut found = false;
-                self.for_each_child(&mut |child| {
-                    if !found {
-                        found = child.has_type_vars();
-                    }
-                });
-                found
-            }
+        let mut visited = FxHashSet::default();
+        self.has_type_vars_inner(&mut visited)
+    }
+
+    fn has_type_vars_inner(&self, visited: &mut FxHashSet<*const OutputTy>) -> bool {
+        if let OutputTy::TyVar(_) = self {
+            return true;
         }
+        let mut found = false;
+        self.for_each_child_tyref(&mut |child| {
+            if !found && visited.insert(Arc::as_ptr(&child.0)) {
+                found = child.0.has_type_vars_inner(visited);
+            }
+        });
+        found
     }
 
     /// Normalize all the ty vars to start from 0 instead
@@ -255,19 +259,48 @@ impl OutputTy {
             .map(|(i, var)| (*var, i as u32))
             .collect();
 
-        self.normalize_inner(&subs)
+        // Handle root TyVar directly (no need to wrap in Arc).
+        if let OutputTy::TyVar(x) = self {
+            return OutputTy::TyVar(*subs.get(x).unwrap());
+        }
+        let mut cache = FxHashMap::default();
+        self.map_children_tyref(&mut |child| Self::normalize_inner_cached(child, &subs, &mut cache))
     }
 
-    pub fn normalize_inner(&self, free: &Substitutions) -> OutputTy {
-        // TyVar is the only leaf that transforms (renumbering); handle it
-        // explicitly, then delegate structural recursion to map_children.
-        if let OutputTy::TyVar(x) = self {
-            let new_idx = free.get(x).unwrap();
-            return OutputTy::TyVar(*new_idx);
+    /// Memoized normalize_inner that caches by Arc pointer identity.
+    /// When the same `Arc<OutputTy>` subtree is encountered via a different
+    /// parent, the cached result is returned (Arc refcount bump) instead of
+    /// re-traversing and re-allocating. This prevents DAG-to-tree explosion.
+    fn normalize_inner_cached(
+        tyref: &TyRef,
+        free: &Substitutions,
+        cache: &mut FxHashMap<*const OutputTy, TyRef>,
+    ) -> TyRef {
+        let ptr = Arc::as_ptr(&tyref.0);
+        if let Some(cached) = cache.get(&ptr) {
+            return cached.clone();
         }
-        stacker::maybe_grow(256 * 1024, 1024 * 1024, || {
-            self.map_children(&mut |child| child.normalize_inner(free))
-        })
+        let result =
+            stacker::maybe_grow(256 * 1024, 1024 * 1024, || {
+                if let OutputTy::TyVar(x) = &*tyref.0 {
+                    return TyRef::from(OutputTy::TyVar(*free.get(x).unwrap()));
+                }
+                TyRef::from(tyref.0.map_children_tyref(&mut |child| {
+                    Self::normalize_inner_cached(child, free, cache)
+                }))
+            });
+        cache.insert(ptr, result.clone());
+        result
+    }
+
+    /// Public normalize_inner for callers (e.g. PBT arbitrary) that already
+    /// have a substitution map. Delegates to the cached version.
+    pub fn normalize_inner(&self, free: &Substitutions) -> OutputTy {
+        if let OutputTy::TyVar(x) = self {
+            return OutputTy::TyVar(*free.get(x).unwrap());
+        }
+        let mut cache = FxHashMap::default();
+        self.map_children_tyref(&mut |child| Self::normalize_inner_cached(child, free, &mut cache))
     }
 
     /// Returns true if any Lambda in this type has a non-primitive param type.
@@ -275,16 +308,23 @@ impl OutputTy {
     /// code generation pattern doesn't fully constrain non-primitive params in
     /// SimpleSub's polarity-aware canonicalization.
     pub fn has_non_primitive_lambda_param(&self) -> bool {
-        // Lambda has a special check on the param type before recursing.
+        let mut visited = FxHashSet::default();
+        self.has_non_primitive_lambda_param_inner(&mut visited)
+    }
+
+    fn has_non_primitive_lambda_param_inner(
+        &self,
+        visited: &mut FxHashSet<*const OutputTy>,
+    ) -> bool {
         if let OutputTy::Lambda { param, .. } = self {
             if !matches!(&*param.0, OutputTy::Primitive(_) | OutputTy::TyVar(_)) {
                 return true;
             }
         }
         let mut found = false;
-        self.for_each_child(&mut |child| {
-            if !found {
-                found = child.has_non_primitive_lambda_param();
+        self.for_each_child_tyref(&mut |child| {
+            if !found && visited.insert(Arc::as_ptr(&child.0)) {
+                found = child.0.has_non_primitive_lambda_param_inner(visited);
             }
         });
         found
@@ -292,13 +332,21 @@ impl OutputTy {
 
     /// Returns true if this type or any of its children contains a Union or Intersection.
     pub fn contains_union_or_intersection(&self) -> bool {
+        let mut visited = FxHashSet::default();
+        self.contains_union_or_intersection_inner(&mut visited)
+    }
+
+    fn contains_union_or_intersection_inner(
+        &self,
+        visited: &mut FxHashSet<*const OutputTy>,
+    ) -> bool {
         match self {
             OutputTy::Union(_) | OutputTy::Intersection(_) => true,
             _ => {
                 let mut found = false;
-                self.for_each_child(&mut |child| {
-                    if !found {
-                        found = child.contains_union_or_intersection();
+                self.for_each_child_tyref(&mut |child| {
+                    if !found && visited.insert(Arc::as_ptr(&child.0)) {
+                        found = child.0.contains_union_or_intersection_inner(visited);
                     }
                 });
                 found
@@ -308,13 +356,18 @@ impl OutputTy {
 
     /// Returns true if this type or any of its children contains an Intersection.
     pub fn contains_intersection(&self) -> bool {
+        let mut visited = FxHashSet::default();
+        self.contains_intersection_inner(&mut visited)
+    }
+
+    fn contains_intersection_inner(&self, visited: &mut FxHashSet<*const OutputTy>) -> bool {
         match self {
             OutputTy::Intersection(_) => true,
             _ => {
                 let mut found = false;
-                self.for_each_child(&mut |child| {
-                    if !found {
-                        found = child.contains_intersection();
+                self.for_each_child_tyref(&mut |child| {
+                    if !found && visited.insert(Arc::as_ptr(&child.0)) {
+                        found = child.0.contains_intersection_inner(visited);
                     }
                 });
                 found
@@ -324,13 +377,18 @@ impl OutputTy {
 
     /// Returns true if this type or any of its children contains a Neg.
     pub fn contains_neg(&self) -> bool {
+        let mut visited = FxHashSet::default();
+        self.contains_neg_inner(&mut visited)
+    }
+
+    fn contains_neg_inner(&self, visited: &mut FxHashSet<*const OutputTy>) -> bool {
         match self {
             OutputTy::Neg(_) => true,
             _ => {
                 let mut found = false;
-                self.for_each_child(&mut |child| {
-                    if !found {
-                        found = child.contains_neg();
+                self.for_each_child_tyref(&mut |child| {
+                    if !found && visited.insert(Arc::as_ptr(&child.0)) {
+                        found = child.0.contains_neg_inner(visited);
                     }
                 });
                 found
@@ -340,13 +398,18 @@ impl OutputTy {
 
     /// Returns true if this type is or contains Top or Bottom.
     pub fn contains_top_or_bottom(&self) -> bool {
+        let mut visited = FxHashSet::default();
+        self.contains_top_or_bottom_inner(&mut visited)
+    }
+
+    fn contains_top_or_bottom_inner(&self, visited: &mut FxHashSet<*const OutputTy>) -> bool {
         match self {
             OutputTy::Top | OutputTy::Bottom => true,
             _ => {
                 let mut found = false;
-                self.for_each_child(&mut |child| {
-                    if !found {
-                        found = child.contains_top_or_bottom();
+                self.for_each_child_tyref(&mut |child| {
+                    if !found && visited.insert(Arc::as_ptr(&child.0)) {
+                        found = child.0.contains_top_or_bottom_inner(visited);
                     }
                 });
                 found
@@ -358,15 +421,26 @@ impl OutputTy {
     /// TyVar is fine inside Lambda params (represents generic params), but can't be
     /// generated as standalone Nix code.
     pub fn contains_bare_tyvar(&self) -> bool {
+        let mut visited = FxHashSet::default();
+        self.contains_bare_tyvar_inner(&mut visited)
+    }
+
+    fn contains_bare_tyvar_inner(&self, visited: &mut FxHashSet<*const OutputTy>) -> bool {
         match self {
             OutputTy::TyVar(_) => true,
             // Lambda params are allowed to have TyVar, so only check body
-            OutputTy::Lambda { body, .. } => body.0.contains_bare_tyvar(),
+            OutputTy::Lambda { body, .. } => {
+                if visited.insert(Arc::as_ptr(&body.0)) {
+                    body.0.contains_bare_tyvar_inner(visited)
+                } else {
+                    false
+                }
+            }
             _ => {
                 let mut found = false;
-                self.for_each_child(&mut |child| {
-                    if !found {
-                        found = child.contains_bare_tyvar();
+                self.for_each_child_tyref(&mut |child| {
+                    if !found && visited.insert(Arc::as_ptr(&child.0)) {
+                        found = child.0.contains_bare_tyvar_inner(visited);
                     }
                 });
                 found
@@ -378,10 +452,15 @@ impl OutputTy {
     /// for order-insensitive comparison. The type checker flattens nested
     /// unions and may reorder/deduplicate members during canonicalization.
     pub fn normalize_set_ops(&self) -> OutputTy {
+        let mut cache = FxHashMap::default();
+        self.normalize_set_ops_cached(&mut cache)
+    }
+
+    fn normalize_set_ops_cached(&self, cache: &mut FxHashMap<*const OutputTy, TyRef>) -> OutputTy {
         match self {
             OutputTy::Union(members) => {
                 let mut flat: Vec<TyRef> = Vec::new();
-                Self::flatten_union(members, &mut flat);
+                Self::flatten_union_cached(members, &mut flat, cache);
                 flat.sort();
                 flat.dedup();
                 if flat.len() == 1 {
@@ -391,7 +470,7 @@ impl OutputTy {
             }
             OutputTy::Intersection(members) => {
                 let mut flat: Vec<TyRef> = Vec::new();
-                Self::flatten_intersection(members, &mut flat);
+                Self::flatten_intersection_cached(members, &mut flat, cache);
                 flat.sort();
                 flat.dedup();
                 if flat.len() == 1 {
@@ -399,15 +478,33 @@ impl OutputTy {
                 }
                 OutputTy::Intersection(flat)
             }
-            _ => self.map_children(&mut |child| child.normalize_set_ops()),
+            _ => self.map_children_tyref(&mut |child| {
+                Self::normalize_set_ops_tyref_cached(child, cache)
+            }),
         }
     }
 
-    fn flatten_union(members: &[TyRef], out: &mut Vec<TyRef>) {
+    fn normalize_set_ops_tyref_cached(
+        tyref: &TyRef,
+        cache: &mut FxHashMap<*const OutputTy, TyRef>,
+    ) -> TyRef {
+        let ptr = Arc::as_ptr(&tyref.0);
+        if let Some(cached) = cache.get(&ptr) {
+            return cached.clone();
+        }
+        let result = TyRef::from(tyref.0.normalize_set_ops_cached(cache));
+        cache.insert(ptr, result.clone());
+        result
+    }
+
+    fn flatten_union_cached(
+        members: &[TyRef],
+        out: &mut Vec<TyRef>,
+        cache: &mut FxHashMap<*const OutputTy, TyRef>,
+    ) {
         for m in members {
-            let normalized = m.0.normalize_set_ops();
+            let normalized = m.0.normalize_set_ops_cached(cache);
             if let OutputTy::Union(inner) = &normalized {
-                // Already normalized, so inner members are flat
                 out.extend(inner.iter().cloned());
             } else {
                 out.push(TyRef::from(normalized));
@@ -415,9 +512,13 @@ impl OutputTy {
         }
     }
 
-    fn flatten_intersection(members: &[TyRef], out: &mut Vec<TyRef>) {
+    fn flatten_intersection_cached(
+        members: &[TyRef],
+        out: &mut Vec<TyRef>,
+        cache: &mut FxHashMap<*const OutputTy, TyRef>,
+    ) {
         for m in members {
-            let normalized = m.0.normalize_set_ops();
+            let normalized = m.0.normalize_set_ops_cached(cache);
             if let OutputTy::Intersection(inner) = &normalized {
                 out.extend(inner.iter().cloned());
             } else {
@@ -433,15 +534,19 @@ impl OutputTy {
     /// variables where the type expects shared ones.
     pub fn has_shared_tyvar_across_lambda_params(&self) -> bool {
         let mut seen = rustc_hash::FxHashSet::default();
-        self.check_shared_lambda_param_tyvars(&mut seen)
+        let mut visited = FxHashSet::default();
+        self.check_shared_lambda_param_tyvars(&mut seen, &mut visited)
     }
 
     /// Walk the type tree collecting TyVar indices from Lambda param positions.
     /// Returns true as soon as a duplicate is found.
-    fn check_shared_lambda_param_tyvars(&self, seen: &mut rustc_hash::FxHashSet<u32>) -> bool {
+    fn check_shared_lambda_param_tyvars(
+        &self,
+        seen: &mut rustc_hash::FxHashSet<u32>,
+        visited: &mut FxHashSet<*const OutputTy>,
+    ) -> bool {
         match self {
             OutputTy::Lambda { param, body } => {
-                // Collect TyVar indices directly in this param position.
                 if let OutputTy::TyVar(idx) = &*param.0 {
                     if !seen.insert(*idx) {
                         return true;
@@ -449,15 +554,17 @@ impl OutputTy {
                 }
                 // Recurse into param (for nested lambdas in param position)
                 // and body (for chained lambdas like `a -> b -> c`).
-                param.0.check_shared_lambda_param_tyvars(seen)
-                    || body.0.check_shared_lambda_param_tyvars(seen)
+                (visited.insert(Arc::as_ptr(&param.0))
+                    && param.0.check_shared_lambda_param_tyvars(seen, visited))
+                    || (visited.insert(Arc::as_ptr(&body.0))
+                        && body.0.check_shared_lambda_param_tyvars(seen, visited))
             }
             OutputTy::TyVar(_) | OutputTy::Primitive(_) | OutputTy::Bottom | OutputTy::Top => false,
             _ => {
                 let mut found = false;
-                self.for_each_child(&mut |child| {
-                    if !found {
-                        found = child.check_shared_lambda_param_tyvars(seen);
+                self.for_each_child_tyref(&mut |child| {
+                    if !found && visited.insert(Arc::as_ptr(&child.0)) {
+                        found = child.0.check_shared_lambda_param_tyvars(seen, visited);
                     }
                 });
                 found
@@ -467,13 +574,18 @@ impl OutputTy {
 
     /// Returns true if this type contains a Named wrapper.
     pub fn contains_named(&self) -> bool {
+        let mut visited = FxHashSet::default();
+        self.contains_named_inner(&mut visited)
+    }
+
+    fn contains_named_inner(&self, visited: &mut FxHashSet<*const OutputTy>) -> bool {
         match self {
             OutputTy::Named(..) => true,
             _ => {
                 let mut found = false;
-                self.for_each_child(&mut |child| {
-                    if !found {
-                        found = child.contains_named();
+                self.for_each_child_tyref(&mut |child| {
+                    if !found && visited.insert(Arc::as_ptr(&child.0)) {
+                        found = child.0.contains_named_inner(visited);
                     }
                 });
                 found
@@ -496,11 +608,17 @@ impl OutputTy {
     pub fn free_type_vars(&self) -> Vec<u32> {
         let mut result = Vec::new();
         let mut seen = rustc_hash::FxHashSet::default();
-        self.collect_free_type_vars(&mut result, &mut seen);
+        let mut visited = FxHashSet::default();
+        self.collect_free_type_vars(&mut result, &mut seen, &mut visited);
         result
     }
 
-    fn collect_free_type_vars(&self, result: &mut Vec<u32>, seen: &mut rustc_hash::FxHashSet<u32>) {
+    fn collect_free_type_vars(
+        &self,
+        result: &mut Vec<u32>,
+        seen: &mut rustc_hash::FxHashSet<u32>,
+        visited: &mut FxHashSet<*const OutputTy>,
+    ) {
         if let OutputTy::TyVar(x) = self {
             if seen.insert(*x) {
                 result.push(*x);
@@ -508,7 +626,11 @@ impl OutputTy {
             return;
         }
         stacker::maybe_grow(256 * 1024, 1024 * 1024, || {
-            self.for_each_child(&mut |child| child.collect_free_type_vars(result, seen));
+            self.for_each_child_tyref(&mut |child| {
+                if visited.insert(Arc::as_ptr(&child.0)) {
+                    child.0.collect_free_type_vars(result, seen, visited);
+                }
+            });
         });
     }
 
@@ -583,6 +705,74 @@ impl OutputTy {
             }
             OutputTy::Named(_, inner) => f(&inner.0),
             OutputTy::Neg(inner) => f(&inner.0),
+        }
+    }
+
+    // ==========================================================================
+    // TyRef-preserving child traversal helpers
+    // ==========================================================================
+    //
+    // Like map_children/for_each_child but pass `&TyRef` instead of `&OutputTy`.
+    // This preserves Arc identity so callers can use Arc::as_ptr for cache keys,
+    // which is essential for memoizing DAG walks without exponential blowup.
+
+    /// Apply `f` to every direct child TyRef, producing a new OutputTy with the
+    /// same variant structure. `f` receives and returns `TyRef`, preserving Arc
+    /// identity for cache-based memoization.
+    fn map_children_tyref(&self, f: &mut impl FnMut(&TyRef) -> TyRef) -> OutputTy {
+        match self {
+            OutputTy::TyVar(_) | OutputTy::Primitive(_) | OutputTy::Bottom | OutputTy::Top => {
+                self.clone()
+            }
+            OutputTy::List(inner) => OutputTy::List(f(inner)),
+            OutputTy::Lambda { param, body } => OutputTy::Lambda {
+                param: f(param),
+                body: f(body),
+            },
+            OutputTy::AttrSet(attr) => {
+                let fields = attr.fields.iter().map(|(k, v)| (k.clone(), f(v))).collect();
+                let dyn_ty = attr.dyn_ty.as_ref().map(f);
+                OutputTy::AttrSet(AttrSetTy {
+                    fields,
+                    dyn_ty,
+                    open: attr.open,
+                    optional_fields: attr.optional_fields.clone(),
+                })
+            }
+            OutputTy::Union(members) => OutputTy::Union(members.iter().map(f).collect()),
+            OutputTy::Intersection(members) => {
+                OutputTy::Intersection(members.iter().map(f).collect())
+            }
+            OutputTy::Named(name, inner) => OutputTy::Named(name.clone(), f(inner)),
+            OutputTy::Neg(inner) => OutputTy::Neg(f(inner)),
+        }
+    }
+
+    /// Visit every direct child TyRef for read-only inspection. Like
+    /// `for_each_child` but preserves Arc identity.
+    fn for_each_child_tyref(&self, f: &mut impl FnMut(&TyRef)) {
+        match self {
+            OutputTy::TyVar(_) | OutputTy::Primitive(_) | OutputTy::Bottom | OutputTy::Top => {}
+            OutputTy::List(inner) => f(inner),
+            OutputTy::Lambda { param, body } => {
+                f(param);
+                f(body);
+            }
+            OutputTy::AttrSet(attr) => {
+                for v in attr.fields.values() {
+                    f(v);
+                }
+                if let Some(dyn_ty) = &attr.dyn_ty {
+                    f(dyn_ty);
+                }
+            }
+            OutputTy::Union(members) | OutputTy::Intersection(members) => {
+                for m in members {
+                    f(m);
+                }
+            }
+            OutputTy::Named(_, inner) => f(inner),
+            OutputTy::Neg(inner) => f(inner),
         }
     }
 }
@@ -905,6 +1095,84 @@ mod tests {
         };
         let ty = OutputTy::List(inner.into());
         assert!(ty.has_shared_tyvar_across_lambda_params());
+    }
+
+    #[test]
+    fn normalize_vars_preserves_dag_sharing() {
+        // Build a DAG: 30 levels of Lambda { param: shared, body: shared }.
+        // 2^30 paths but only 31 unique nodes.
+        // Without memoization: OOM. With memoization: instant.
+        let leaf = TyRef::from(OutputTy::TyVar(99));
+        let mut current = leaf;
+        for _ in 0..30 {
+            current = TyRef::from(OutputTy::Lambda {
+                param: current.clone(),
+                body: current.clone(),
+            });
+        }
+        let result = current.0.normalize_vars();
+        // Check the innermost leaf was renumbered to 0.
+        fn extract_leaf(ty: &OutputTy) -> Option<u32> {
+            match ty {
+                OutputTy::TyVar(x) => Some(*x),
+                OutputTy::Lambda { param, .. } => extract_leaf(&param.0),
+                _ => None,
+            }
+        }
+        assert_eq!(extract_leaf(&result), Some(0));
+        // Verify sharing is preserved: the result should also be a DAG.
+        // The root Lambda's param and body should point to the same Arc.
+        if let OutputTy::Lambda { param, body } = &result {
+            assert!(
+                Arc::ptr_eq(&param.0, &body.0),
+                "normalize_vars should preserve DAG sharing"
+            );
+        } else {
+            panic!("expected Lambda at root");
+        }
+    }
+
+    #[test]
+    fn read_only_predicates_handle_deep_dag() {
+        let leaf = TyRef::from(OutputTy::TyVar(42));
+        let mut current = leaf;
+        for _ in 0..30 {
+            current = TyRef::from(OutputTy::Lambda {
+                param: current.clone(),
+                body: current.clone(),
+            });
+        }
+        assert!(current.0.has_type_vars());
+        assert_eq!(current.0.free_type_vars(), vec![42]);
+        // These should complete without exponential blowup.
+        assert!(!current.0.contains_union_or_intersection());
+        assert!(!current.0.contains_neg());
+        assert!(!current.0.contains_top_or_bottom());
+        assert!(current.0.contains_bare_tyvar());
+    }
+
+    #[test]
+    fn normalize_set_ops_handles_deep_dag() {
+        // normalize_set_ops should not explode on a shared DAG.
+        // Completing without OOM is the main assertion.
+        let leaf = TyRef::from(OutputTy::Primitive(PrimitiveTy::Int));
+        let mut current = leaf;
+        for _ in 0..30 {
+            current = TyRef::from(OutputTy::Lambda {
+                param: current.clone(),
+                body: current.clone(),
+            });
+        }
+        let result = current.0.normalize_set_ops();
+        // Verify sharing is preserved in the output.
+        if let OutputTy::Lambda { param, body } = &result {
+            assert!(
+                Arc::ptr_eq(&param.0, &body.0),
+                "normalize_set_ops should preserve DAG sharing"
+            );
+        } else {
+            panic!("expected Lambda at root");
+        }
     }
 
     mod pbt {
