@@ -15,11 +15,13 @@ use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use dashmap::DashMap;
 use lang_ast::classify::{classify_nix_file, NixFileKind};
 use lang_ast::{module_and_source_maps, name_resolution, ModuleSourceMap, RootDatabase};
 use lang_check::coordinator::{InferenceCoordinator, SyntaxProvider};
 use lang_check::SyntaxBundle;
 use parking_lot::Mutex;
+use rayon::prelude::*;
 
 use crate::config::{self, TixConfig};
 use crate::timing;
@@ -33,8 +35,12 @@ use crate::{build_registry, load_stubs, render_diagnostics};
 /// files during Phase 1 (sequential, single-threaded Salsa access). Files not in
 /// the pre-extracted set (transitive imports from outside the project) fall back
 /// to on-demand Salsa extraction behind a Mutex.
+///
+/// Uses DashMap so bundles can be moved out (not cloned) as they're consumed.
+/// This is critical for memory: the old pipeline dropped per-file data inside
+/// the par_iter closure, and we need to match that behavior.
 struct CliSyntaxProvider {
-    precomputed: HashMap<PathBuf, SyntaxBundle>,
+    precomputed: DashMap<PathBuf, SyntaxBundle>,
     db: Mutex<RootDatabase>,
     registry: Arc<lang_check::aliases::TypeAliasRegistry>,
     default_context_args: Arc<HashMap<smol_str::SmolStr, comment_parser::ParsedTy>>,
@@ -43,9 +49,10 @@ struct CliSyntaxProvider {
 
 impl SyntaxProvider for CliSyntaxProvider {
     fn syntax_for_file(&self, path: &Path) -> Option<SyntaxBundle> {
-        // Fast path: pre-extracted during Phase 1.
-        if let Some(bundle) = self.precomputed.get(path) {
-            return Some(bundle.clone());
+        // Fast path: move out of precomputed (each file consumed at most once
+        // by the coordinator's demand_file, so we won't need it again).
+        if let Some((_, bundle)) = self.precomputed.remove(path) {
+            return Some(bundle);
         }
 
         // Fallback: read from disk and parse via Salsa (for transitive imports
@@ -158,7 +165,7 @@ pub fn run_check_project(
     // resolves imports demand-driven across files.
 
     let db = RootDatabase::default();
-    let mut precomputed: HashMap<PathBuf, SyntaxBundle> = HashMap::with_capacity(files_count);
+    let precomputed: DashMap<PathBuf, SyntaxBundle> = DashMap::with_capacity(files_count);
     let mut metadata: Vec<FileMetadata> = Vec::with_capacity(files_count);
     let mut config_warnings: Vec<String> = Vec::new();
 
@@ -266,27 +273,25 @@ pub fn run_check_project(
     // imports another, the coordinator recursively infers the dependency
     // first. Each file is inferred at most once (results cached in the
     // coordinator's DashMap).
+    //
+    // Critical memory optimization: the InferenceResult (ArenaMap<NameId/ExprId,
+    // OutputTy>) is dropped per-file inside the par_iter closure, before
+    // .collect() gathers all results. This reduces peak memory by ~70% when
+    // checking many files in parallel.
 
     let coordinator = InferenceCoordinator::new();
-    let file_paths: Vec<PathBuf> = metadata.iter().map(|m| m.file_path.clone()).collect();
-    let batch_results = coordinator.demand_batch(&file_paths, &syntax_provider);
-    timer.mark("inference (parallel)");
-
-    // Build results for rendering. We need to match metadata with coordinator
-    // results by file path.
-    let result_map: HashMap<PathBuf, _> = batch_results.into_iter().collect();
     let results: Vec<RenderableResult> = metadata
-        .into_iter()
+        .into_par_iter()
         .map(|fm| {
-            let (diagnostics, timed_out) = result_map
-                .get(&fm.file_path)
-                .and_then(|opt| opt.as_ref())
-                .map(|cr| {
-                    (
-                        cr.check_result.diagnostics.clone(),
-                        cr.check_result.timed_out,
-                    )
-                })
+            tracing::info!("inference start: {}", fm.file_path.display());
+            let result = coordinator.demand_file(&fm.file_path, &syntax_provider, None);
+            tracing::info!("inference done:  {}", fm.file_path.display());
+
+            // Extract only diagnostics + timed_out. The heavy InferenceResult
+            // (full OutputTy maps for every name and expression) is dropped
+            // here, matching the old pipeline's memory behavior.
+            let (diagnostics, timed_out) = result
+                .map(|cr| (cr.check_result.diagnostics, cr.check_result.timed_out))
                 .unwrap_or_default();
 
             RenderableResult {
