@@ -4,59 +4,90 @@
 //
 // Type-checks all .nix files in a project using tix.toml configuration.
 // The pipeline has three phases:
-//   1. Sequential Prepare — Salsa queries, classification, import resolution
-//   2. Parallel Inference — rayon par_iter over prepared files
+//   1. Sequential Prepare — Salsa queries, classification, context resolution,
+//      SyntaxBundle extraction (import resolution deferred to coordinator)
+//   2. Parallel Inference — coordinator.demand_batch with demand-driven import
+//      resolution across files
 //   3. Sequential Render  — deterministic diagnostic output in file order
 
 use std::collections::HashMap;
 use std::error::Error;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use lang_ast::classify::{classify_nix_file, NixFileKind};
 use lang_ast::{module_and_source_maps, name_resolution, ModuleSourceMap, RootDatabase};
-use lang_check::imports::{import_errors_to_diagnostics, resolve_import_types_from_stubs};
-use lang_check::InferenceInputs;
-use rayon::prelude::*;
+use lang_check::coordinator::{InferenceCoordinator, SyntaxProvider};
+use lang_check::SyntaxBundle;
+use parking_lot::Mutex;
 
 use crate::config::{self, TixConfig};
 use crate::timing;
 use crate::{build_registry, load_stubs, render_diagnostics};
 
-/// Intermediate data from Phase 1 before the registry is wrapped in Arc.
-struct PrePreparedFile {
-    file_path: PathBuf,
-    source_text: String,
-    source_map: ModuleSourceMap,
-    module: lang_ast::Module,
-    module_indices: lang_ast::ModuleIndices,
-    name_res: lang_ast::NameResolution,
-    grouped_defs: lang_ast::GroupedDefs,
-    import_types: HashMap<lang_ast::ExprId, lang_ty::OutputTy>,
-    import_diagnostics: Vec<lang_check::diagnostic::TixDiagnostic>,
-    context_args: Arc<HashMap<smol_str::SmolStr, comment_parser::ParsedTy>>,
+// ==============================================================================
+// CliSyntaxProvider: pre-extracted bundles with Salsa fallback
+// ==============================================================================
+
+/// Syntax provider for the CLI. Pre-extracts SyntaxBundles for all known project
+/// files during Phase 1 (sequential, single-threaded Salsa access). Files not in
+/// the pre-extracted set (transitive imports from outside the project) fall back
+/// to on-demand Salsa extraction behind a Mutex.
+struct CliSyntaxProvider {
+    precomputed: HashMap<PathBuf, SyntaxBundle>,
+    db: Mutex<RootDatabase>,
+    registry: Arc<lang_check::aliases::TypeAliasRegistry>,
+    default_context_args: Arc<HashMap<smol_str::SmolStr, comment_parser::ParsedTy>>,
+    deadline_secs: Option<u64>,
 }
 
-/// A file ready for type inference (produced by Phase 1).
-struct PreparedFile {
+impl SyntaxProvider for CliSyntaxProvider {
+    fn syntax_for_file(&self, path: &Path) -> Option<SyntaxBundle> {
+        // Fast path: pre-extracted during Phase 1.
+        if let Some(bundle) = self.precomputed.get(path) {
+            return Some(bundle.clone());
+        }
+
+        // Fallback: read from disk and parse via Salsa (for transitive imports
+        // outside the project's file set).
+        let db = self.db.lock();
+        let nix_file = db.read_file(path.to_path_buf()).ok()?;
+        let (module, _source_map) = module_and_source_maps(&*db, nix_file);
+        let module_indices = lang_ast::module_indices(&*db, nix_file);
+        let name_res = name_resolution(&*db, nix_file);
+        let grouped_defs = lang_ast::group_def(&*db, nix_file);
+
+        Some(SyntaxBundle {
+            path: path.to_path_buf(),
+            module,
+            module_indices,
+            name_res,
+            grouped_defs,
+            registry: Arc::clone(&self.registry),
+            context_args: Arc::clone(&self.default_context_args),
+            deadline_secs: self.deadline_secs,
+        })
+    }
+}
+
+// ==============================================================================
+// Phase 1 data: metadata retained for rendering (not part of SyntaxBundle)
+// ==============================================================================
+
+/// Per-file rendering metadata collected during Phase 1. SyntaxBundles go to
+/// the coordinator; this struct holds what Phase 3 needs for diagnostics.
+struct FileMetadata {
     file_path: PathBuf,
     source_text: String,
     source_map: ModuleSourceMap,
-    inputs: InferenceInputs,
 }
 
 /// Renderable result for a single file (produced by Phase 2).
-/// Contains only what Phase 3 (diagnostic rendering) needs — the heavy
-/// `InferenceResult` (ArenaMap<NameId, OutputTy> + ArenaMap<ExprId, OutputTy>)
-/// is dropped inside the par_iter closure, reducing peak memory by ~70% when
-/// checking many files in parallel.
 struct RenderableResult {
     file_path: PathBuf,
     source_text: String,
     source_map: ModuleSourceMap,
     diagnostics: Vec<lang_check::diagnostic::TixDiagnostic>,
-    /// Retained for future use (e.g. summary reporting). Timeout diagnostics
-    /// are already included in `diagnostics` by `run_inference`.
     #[allow(dead_code)]
     timed_out: bool,
 }
@@ -120,11 +151,15 @@ pub fn run_check_project(
     // =========================================================================
     //
     // Salsa queries (parse, lower, nameres, SCC grouping), classification,
-    // config validation, context resolution, and import resolution all run
-    // sequentially because the Salsa database is single-threaded.
+    // config validation, and context resolution all run sequentially because
+    // the Salsa database is single-threaded.
+    //
+    // Import resolution is deferred to the coordinator in Phase 2, which
+    // resolves imports demand-driven across files.
 
     let db = RootDatabase::default();
-    let mut pre_prepared: Vec<PrePreparedFile> = Vec::with_capacity(files_count);
+    let mut precomputed: HashMap<PathBuf, SyntaxBundle> = HashMap::with_capacity(files_count);
+    let mut metadata: Vec<FileMetadata> = Vec::with_capacity(files_count);
     let mut config_warnings: Vec<String> = Vec::new();
 
     for file_path in &nix_files {
@@ -185,88 +220,90 @@ pub fn run_check_project(
                     Arc::default()
                 });
 
-        // Resolve imports.
-        let base_dir = file_path.parent().unwrap_or(std::path::Path::new("/"));
-        let import_resolution =
-            resolve_import_types_from_stubs(&module, &name_res, base_dir, &HashMap::new());
-        let import_diagnostics = import_errors_to_diagnostics(&import_resolution.errors);
-
         // Remaining Salsa queries for inference.
         let module_indices = lang_ast::module_indices(&db, nix_file);
         let grouped_defs = lang_ast::group_def(&db, nix_file);
 
-        pre_prepared.push(PrePreparedFile {
+        // Store rendering metadata separately from the SyntaxBundle.
+        metadata.push(FileMetadata {
             file_path: file_path.clone(),
             source_text,
             source_map,
-            module,
-            module_indices,
-            name_res,
-            grouped_defs,
-            import_types: import_resolution.types,
-            import_diagnostics,
-            context_args,
         });
+
+        precomputed.insert(
+            file_path.clone(),
+            SyntaxBundle {
+                path: file_path.clone(),
+                module,
+                module_indices,
+                name_res,
+                grouped_defs,
+                registry: Arc::new(registry.clone()),
+                context_args,
+                deadline_secs: toml_config.deadline,
+            },
+        );
     }
     timer.mark("prepare (sequential)");
 
-    // Wrap registry in Arc now that all mutations (context resolution) are done.
-    // Each file shares a single ref-counted registry instead of deep-cloning it.
+    // Wrap registry in Arc for the syntax provider fallback.
     let registry = Arc::new(registry);
 
-    let prepared: Vec<PreparedFile> = pre_prepared
-        .into_iter()
-        .map(|pp| PreparedFile {
-            file_path: pp.file_path,
-            source_text: pp.source_text,
-            source_map: pp.source_map,
-            inputs: InferenceInputs {
-                module: pp.module,
-                module_indices: pp.module_indices,
-                name_res: pp.name_res,
-                grouped_defs: pp.grouped_defs,
-                registry: Arc::clone(&registry),
-                import_types: pp.import_types,
-                import_diagnostics: pp.import_diagnostics,
-                context_args: pp.context_args,
-                deadline_secs: toml_config.deadline,
-            },
-        })
-        .collect();
+    let syntax_provider = CliSyntaxProvider {
+        precomputed,
+        db: Mutex::new(db),
+        registry,
+        default_context_args: Arc::default(),
+        deadline_secs: toml_config.deadline,
+    };
 
     // =========================================================================
-    // Phase 2 — Parallel Inference
+    // Phase 2 — Parallel Inference with demand-driven import resolution
     // =========================================================================
     //
-    // Each file gets its own TypeStorage — no shared mutable state. The rayon
-    // par_iter distributes inference across the thread pool.
+    // The coordinator infers all files in parallel via rayon. When a file
+    // imports another, the coordinator recursively infers the dependency
+    // first. Each file is inferred at most once (results cached in the
+    // coordinator's DashMap).
 
-    let results: Vec<RenderableResult> = prepared
-        .into_par_iter()
-        .map(|pf| {
-            tracing::info!("inference start: {}", pf.file_path.display());
-            let check_result = lang_check::run_inference(&pf.inputs, None);
-            tracing::info!("inference done:  {}", pf.file_path.display());
-            // Extract only the fields Phase 3 needs. The InferenceResult
-            // (containing full OutputTy maps for every name and expression)
-            // is dropped here, before .collect() gathers all results.
+    let coordinator = InferenceCoordinator::new();
+    let file_paths: Vec<PathBuf> = metadata.iter().map(|m| m.file_path.clone()).collect();
+    let batch_results = coordinator.demand_batch(&file_paths, &syntax_provider);
+    timer.mark("inference (parallel)");
+
+    // Build results for rendering. We need to match metadata with coordinator
+    // results by file path.
+    let result_map: HashMap<PathBuf, _> = batch_results.into_iter().collect();
+    let results: Vec<RenderableResult> = metadata
+        .into_iter()
+        .map(|fm| {
+            let (diagnostics, timed_out) = result_map
+                .get(&fm.file_path)
+                .and_then(|opt| opt.as_ref())
+                .map(|cr| {
+                    (
+                        cr.check_result.diagnostics.clone(),
+                        cr.check_result.timed_out,
+                    )
+                })
+                .unwrap_or_default();
+
             RenderableResult {
-                file_path: pf.file_path,
-                source_text: pf.source_text,
-                source_map: pf.source_map,
-                diagnostics: check_result.diagnostics,
-                timed_out: check_result.timed_out,
+                file_path: fm.file_path,
+                source_text: fm.source_text,
+                source_map: fm.source_map,
+                diagnostics,
+                timed_out,
             }
         })
         .collect();
-    timer.mark("inference (parallel)");
 
     // =========================================================================
     // Phase 3 — Sequential Render
     // =========================================================================
     //
-    // Iterate results in file order (rayon::par_iter + collect preserves order)
-    // to produce deterministic diagnostic output.
+    // Iterate results in file order to produce deterministic diagnostic output.
 
     let mut total_errors = 0usize;
     let mut total_warnings = 0usize;

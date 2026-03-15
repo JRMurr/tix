@@ -288,6 +288,7 @@ pub struct FileSignature {
 /// Pre-import syntax data: everything needed for inference except resolved
 /// import types (which the coordinator provides from its cache). Produced by
 /// a `SyntaxProvider` implementation (CLI or LSP).
+#[derive(Clone)]
 pub struct SyntaxBundle {
     pub path: std::path::PathBuf,
     pub module: Module,
