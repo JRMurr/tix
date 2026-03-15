@@ -46,6 +46,8 @@ tixc test/basic.nix             # local file
 tixc nixpkgs:lib/strings.nix    # nixpkgs subpath
 ```
 
+**Note:** `tixc`, `nixpkgs-test`, and `nixpkgs-lib-test` are Nix-built scripts (defined in `nix/scripts.nix`). The devShell caches them, so if you edit `nix/scripts.nix`, use `nix run .#tixc -- <args>` to test your changes immediately without waiting for direnv to reload.
+
 ### Profiling with stubs
 
 To profile realistic workloads, build the full stubs from the flake and point `TIX_BUILTIN_STUBS` at them:
