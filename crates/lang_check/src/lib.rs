@@ -2,6 +2,7 @@ pub mod aliases;
 mod builtins;
 pub(crate) mod collect;
 mod constrain;
+pub mod coordinator;
 pub mod diagnostic;
 pub mod imports;
 mod infer;
@@ -270,6 +271,32 @@ pub struct CheckResult {
     /// Whether inference was aborted because the deadline was exceeded.
     /// Consumers can use this to emit a user-visible timeout diagnostic.
     pub timed_out: bool,
+}
+
+// ==============================================================================
+// Cross-file inference types
+// ==============================================================================
+
+/// The externally-visible type of a Nix file: its root expression's OutputTy.
+/// Stored in the `InferenceCoordinator` cache so that importers can resolve
+/// cross-file types without re-inferring the dependency.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileSignature {
+    pub root_ty: OutputTy,
+}
+
+/// Pre-import syntax data: everything needed for inference except resolved
+/// import types (which the coordinator provides from its cache). Produced by
+/// a `SyntaxProvider` implementation (CLI or LSP).
+pub struct SyntaxBundle {
+    pub path: std::path::PathBuf,
+    pub module: Module,
+    pub module_indices: lang_ast::ModuleIndices,
+    pub name_res: NameResolution,
+    pub grouped_defs: lang_ast::GroupedDefs,
+    pub registry: Arc<TypeAliasRegistry>,
+    pub context_args: Arc<HashMap<smol_str::SmolStr, ParsedTy>>,
+    pub deadline_secs: Option<u64>,
 }
 
 // ==============================================================================

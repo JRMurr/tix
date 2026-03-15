@@ -20,6 +20,8 @@ rnix = { workspace = true }
 
 salsa = { workspace = true }
 dashmap = "6.1.0"
+rayon = { workspace = true }
+parking_lot = "0.12"
 itertools = "0.14.0"
 indoc = "2.0.5"
 rustc-hash = "2.1.0"
@@ -30,6 +32,7 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
+tempfile = "3"
 lang_ast = { path = "../lang_ast", features = ["proptest_support"] }
 lang_ty = { path = "../lang_ty", features = ["proptest_support"] }
 

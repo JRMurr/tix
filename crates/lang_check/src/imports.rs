@@ -242,25 +242,27 @@ pub struct ImportResolution {
 }
 
 // ==============================================================================
-// Stubs-Based Import Resolution
+// Import Type Resolution
 // ==============================================================================
 
-/// Resolve import types using ephemeral stubs only (no recursive inference).
+/// Resolve import types using a caller-provided lookup function.
 ///
 /// For each scanned import target path:
 /// 1. Records navigation targets (for goto-def) regardless of type availability
-/// 2. Looks up type from `ephemeral_stubs` (inferred types of open/analyzed files)
+/// 2. Calls `lookup(canonicalized_path)` to get the imported file's root type
 /// 3. Falls through to ⊤ (no entry in result map → builtin `import :: a -> b`)
 ///
-/// Also builds the `import_targets` and `name_to_import` maps for navigation.
-/// This replaces the recursive `resolve_imports()` path: files are inferred
-/// independently, and cross-file types come from stubs or ephemeral stubs.
-pub fn resolve_import_types_from_stubs(
+/// The `lookup` closure abstracts over the type source — it can read from an
+/// `ephemeral_stubs` HashMap, an `InferenceCoordinator` cache, or anything else.
+pub fn resolve_import_types<F>(
     module: &Module,
     name_res: &NameResolution,
     base_dir: &Path,
-    ephemeral_stubs: &HashMap<PathBuf, OutputTy>,
-) -> ImportResolution {
+    lookup: F,
+) -> ImportResolution
+where
+    F: Fn(&Path) -> Option<OutputTy>,
+{
     let scanned = scan_literal_imports(module, name_res, base_dir);
     let callpackage_imports = scan_callpackage_imports(module, base_dir);
 
@@ -295,14 +297,13 @@ pub fn resolve_import_types_from_stubs(
         }
         targets.insert(apply_expr_id, target_path.clone());
 
-        // Look up ephemeral stub first — if found, use it regardless of
-        // whether the file exists on disk (the stub proves we've seen it).
-        if let Some(stub_ty) = ephemeral_stubs.get(&target_path) {
-            types.insert(apply_expr_id, stub_ty.clone());
+        // Look up type via the provided lookup function.
+        if let Some(stub_ty) = lookup(&target_path) {
+            types.insert(apply_expr_id, stub_ty);
             continue;
         }
 
-        // No stub available. If the file doesn't exist on disk either,
+        // No type available. If the file doesn't exist on disk either,
         // report FileNotFound. If it exists but hasn't been analyzed,
         // report ImportUnresolved as a hint.
         if !target_path.exists() {
@@ -339,14 +340,14 @@ pub fn resolve_import_types_from_stubs(
         targets.insert(outer_apply_id, target_path.clone());
         targets.insert(inner_apply_id, target_path.clone());
 
-        // Look up ephemeral stub first.
-        if let Some(stub_ty) = ephemeral_stubs.get(&target_path) {
+        // Look up type via the provided lookup function.
+        if let Some(stub_ty) = lookup(&target_path) {
             types.insert(inner_apply_id, stub_ty.clone());
-            types.insert(outer_apply_id, extract_return_type(stub_ty));
+            types.insert(outer_apply_id, extract_return_type(&stub_ty));
             continue;
         }
 
-        // No stub — report FileNotFound or ImportUnresolved.
+        // No type — report FileNotFound or ImportUnresolved.
         if !target_path.exists() {
             errors.push(ImportError {
                 kind: ImportErrorKind::FileNotFound(target_path),
@@ -365,6 +366,21 @@ pub fn resolve_import_types_from_stubs(
         errors,
         targets,
     }
+}
+
+/// Resolve import types from a pre-populated stubs HashMap.
+///
+/// Thin wrapper around `resolve_import_types` for backward compatibility with
+/// code that has a `HashMap<PathBuf, OutputTy>` of ephemeral stubs.
+pub fn resolve_import_types_from_stubs(
+    module: &Module,
+    name_res: &NameResolution,
+    base_dir: &Path,
+    ephemeral_stubs: &HashMap<PathBuf, OutputTy>,
+) -> ImportResolution {
+    resolve_import_types(module, name_res, base_dir, |p| {
+        ephemeral_stubs.get(p).cloned()
+    })
 }
 
 /// Convert import resolution errors into `TixDiagnostic`s for rendering in
