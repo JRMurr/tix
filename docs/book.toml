@@ -9,3 +9,9 @@ build-dir = "book"
 
 [output.html]
 git-repository-url = "https://github.com/JRMurr/tix"
+additional-js = ["mermaid.min.js", "mermaid-init.js"]
+
+[preprocessor]
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"
