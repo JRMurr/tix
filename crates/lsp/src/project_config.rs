@@ -244,8 +244,16 @@ fn walk_dir_matching(
             walk_dir_matching(&path, root, glob_set, seen, out);
         } else if path.is_file() && path.extension().is_some_and(|e| e == "nix") {
             let relative = path.strip_prefix(root).unwrap_or(&path);
-            if glob_set.is_match(relative) && seen.insert(path.clone()) {
-                out.push(path);
+            if glob_set.is_match(relative) {
+                // Canonicalize so background-queue paths match uri_to_path()
+                // (which also canonicalizes). Without this, symlinked dirs
+                // like /etc/nixos → /home/user/config produce different URIs
+                // for background vs user-triggered analysis, causing stale
+                // diagnostics that are never cleared.
+                let canonical = path.canonicalize().unwrap_or(path);
+                if seen.insert(canonical.clone()) {
+                    out.push(canonical);
+                }
             }
         }
     }
@@ -416,6 +424,35 @@ mod tests {
     fn diagnostics_section_defaults_to_none() {
         let config: ProjectConfig = toml::from_str("").expect("parse error");
         assert!(config.diagnostics.is_none());
+    }
+
+    /// Regression test: symlinked directories should produce canonical paths
+    /// so that background analysis diagnostics match uri_to_path() paths.
+    /// Without canonicalization, stale timeout diagnostics persist because
+    /// the editor sees two different URIs for the same file.
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_dir_returns_canonical_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        // Create actual directory with a .nix file.
+        let real_dir = dir.path().join("real");
+        std::fs::create_dir(&real_dir).unwrap();
+        std::fs::write(real_dir.join("config.nix"), "42").unwrap();
+        // Create a symlink pointing to the real directory.
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real_dir, &link).unwrap();
+
+        let config = config_with_analyze(vec!["*.nix"]);
+        // Resolve starting from the symlink path.
+        let result = resolve_analyze_globs(&config, &link);
+        assert_eq!(result.len(), 1);
+        // The returned path should be canonical (through real_dir, not link).
+        let canonical_real = real_dir.canonicalize().unwrap();
+        assert_eq!(
+            result[0],
+            canonical_real.join("config.nix"),
+            "paths should be canonicalized to match uri_to_path()"
+        );
     }
 
     #[test]
