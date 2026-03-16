@@ -122,7 +122,24 @@ Top-level `val` declarations (e.g. `val mkDerivation :: ...`) provide types for 
 
 ## Type theory background
 
-Tix implements [MLsub/SimpleSub](https://lptk.github.io/programming/2020/03/26/demystifying-mlsub.html) — an extension of Hindley-Milner with subtyping (ICFP 2020). It extends this with Boolean-Algebraic Subtyping (BAS) for negation types and type narrowing, following [Chau & Parreaux (POPL 2026)](https://github.com/fo5for/sebas).
+### What SimpleSub gives us
+
+Most type inference algorithms make you choose: you can have **subtyping** (like TypeScript, where `int` is assignable to `int | string`) or you can have **full inference** (like ML/Haskell, where the compiler figures out all the types). SimpleSub gets both.
+
+Concretely, tix's type system provides:
+
+- **Type inference** — types are inferred from usage, not declared. You write `x: !x` and tix infers `bool -> bool`.
+- **Subtyping** — a `{ name: string, age: int }` can be passed where `{ name: string, ... }` is expected. A function returning `int` can be used where `int | string` is expected. Types have a natural "is-a" relationship.
+- **Parametric polymorphism** — a function like `id = x: x` gets a generic type `a -> a` that works for any type, not a single concrete type.
+- **Let generalization** — each `let` binding gets its own polymorphic type, so `id` can be applied to both `int` and `string` in the same scope without conflict.
+- **Union and intersection types** — `if cond then 1 else "hi"` is `int | string` (a union). A function parameter constrained to be both a number and a string gets an intersection type, which simplifies to `never` (uninhabited) — indicating a type error.
+- **Row polymorphism** — `getName = x: x.name` accepts any attrset with a `name` field. The type is `{ name: a, ... } -> a` — the `...` means "other fields are allowed."
+
+The key insight of SimpleSub is that subtyping constraints can be recorded as bounds on type variables (lower bounds for what flows *in*, upper bounds for what flows *out*) and resolved lazily during canonicalization. This avoids the complexity of traditional constraint solvers while keeping inference complete.
+
+Tix extends SimpleSub with [Boolean-Algebraic Subtyping](https://github.com/fo5for/sebas) (BAS) from Chau & Parreaux (POPL 2026), which adds negation types (`~null`, `~string`) for type narrowing in conditional branches.
+
+For the full theory, see Parreaux's [The Simple Essence of Algebraic Subtyping](https://lptk.github.io/programming/2020/03/26/demystifying-mlsub.html) (ICFP 2020).
 
 ### Key design decisions
 
