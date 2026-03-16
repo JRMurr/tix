@@ -140,3 +140,136 @@ impl AttrSetTy<TyRef> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{arc_ty, OutputTy, TyRef};
+
+    /// Helper: build a simple closed AttrSetTy from field name-type pairs.
+    fn make_attrset(fields: &[(&str, OutputTy)]) -> AttrSetTy<TyRef> {
+        let map: BTreeMap<SmolStr, TyRef> = fields
+            .iter()
+            .map(|(k, v)| (SmolStr::from(*k), TyRef::from(v.clone())))
+            .collect();
+        AttrSetTy {
+            fields: map,
+            dyn_ty: None,
+            open: false,
+            optional_fields: BTreeSet::new(),
+        }
+    }
+
+    #[test]
+    fn merge_non_overlapping() {
+        let a = make_attrset(&[("x", arc_ty!(Int))]);
+        let b = make_attrset(&[("y", arc_ty!(String))]);
+        let merged = a.merge(b);
+        assert_eq!(merged.fields.len(), 2);
+        assert_eq!(*merged.fields["x"].0, arc_ty!(Int));
+        assert_eq!(*merged.fields["y"].0, arc_ty!(String));
+    }
+
+    #[test]
+    fn merge_overlapping_right_wins() {
+        let a = make_attrset(&[("x", arc_ty!(Int))]);
+        let b = make_attrset(&[("x", arc_ty!(String))]);
+        let merged = a.merge(b);
+        assert_eq!(merged.fields.len(), 1);
+        assert_eq!(*merged.fields["x"].0, arc_ty!(String));
+    }
+
+    #[test]
+    fn merge_optional_becomes_required() {
+        // self has optional y, other has required y → result y is required.
+        let mut a = make_attrset(&[("y", arc_ty!(Int))]);
+        a.optional_fields.insert(SmolStr::from("y"));
+        let b = make_attrset(&[("y", arc_ty!(String))]);
+        let merged = a.merge(b);
+        assert!(
+            !merged.optional_fields.contains("y"),
+            "y should be required after merge with required y"
+        );
+        assert_eq!(*merged.fields["y"].0, arc_ty!(String));
+    }
+
+    #[test]
+    fn merge_required_stays_in_other_optional() {
+        // self has required x, other has optional x → result x has other's value
+        // and is in optional set since other marks it optional.
+        let a = make_attrset(&[("x", arc_ty!(Int))]);
+        let mut b = make_attrset(&[("x", arc_ty!(String))]);
+        b.optional_fields.insert(SmolStr::from("x"));
+        let merged = a.merge(b);
+        assert!(
+            merged.optional_fields.contains("x"),
+            "x should be optional because other marks it optional"
+        );
+        assert_eq!(*merged.fields["x"].0, arc_ty!(String));
+    }
+
+    #[test]
+    fn merge_both_optional() {
+        let mut a = make_attrset(&[("x", arc_ty!(Int))]);
+        a.optional_fields.insert(SmolStr::from("x"));
+        let mut b = make_attrset(&[("x", arc_ty!(String))]);
+        b.optional_fields.insert(SmolStr::from("x"));
+        let merged = a.merge(b);
+        assert!(
+            merged.optional_fields.contains("x"),
+            "x should stay optional when both sides are optional"
+        );
+    }
+
+    #[test]
+    fn merge_dyn_ty_right_only() {
+        let a = make_attrset(&[]);
+        let mut b = make_attrset(&[]);
+        b.dyn_ty = Some(TyRef::from(arc_ty!(Int)));
+        let merged = a.merge(b);
+        assert_eq!(merged.dyn_ty.map(|t| (*t.0).clone()), Some(arc_ty!(Int)));
+    }
+
+    #[test]
+    fn merge_dyn_ty_left_only() {
+        let mut a = make_attrset(&[]);
+        a.dyn_ty = Some(TyRef::from(arc_ty!(Int)));
+        let b = make_attrset(&[]);
+        let merged = a.merge(b);
+        assert_eq!(merged.dyn_ty.map(|t| (*t.0).clone()), Some(arc_ty!(Int)));
+    }
+
+    #[test]
+    fn merge_dyn_ty_both_right_wins() {
+        // Right-biased: other.dyn_ty.or(self.dyn_ty) means other takes precedence.
+        let mut a = make_attrset(&[]);
+        a.dyn_ty = Some(TyRef::from(arc_ty!(Int)));
+        let mut b = make_attrset(&[]);
+        b.dyn_ty = Some(TyRef::from(arc_ty!(String)));
+        let merged = a.merge(b);
+        assert_eq!(merged.dyn_ty.map(|t| (*t.0).clone()), Some(arc_ty!(String)));
+    }
+
+    #[test]
+    fn merge_open_if_either_open() {
+        let closed = make_attrset(&[("x", arc_ty!(Int))]);
+        let mut open = make_attrset(&[("y", arc_ty!(String))]);
+        open.open = true;
+
+        // closed.merge(open) → open
+        let merged1 = closed.clone().merge(open.clone());
+        assert!(merged1.open, "closed.merge(open) should be open");
+
+        // open.merge(closed) → open
+        let merged2 = open.merge(closed);
+        assert!(merged2.open, "open.merge(closed) should be open");
+    }
+
+    #[test]
+    fn merge_both_closed_stays_closed() {
+        let a = make_attrset(&[("x", arc_ty!(Int))]);
+        let b = make_attrset(&[("y", arc_ty!(String))]);
+        let merged = a.merge(b);
+        assert!(!merged.open, "closed.merge(closed) should stay closed");
+    }
+}

@@ -6841,3 +6841,189 @@ fn chicken_4_pattern() {
     let (_, result) = check_str(src);
     assert!(result.is_ok(), "expected no type error, got: {result:?}");
 }
+
+// ==============================================================================
+// __functor edge cases
+// ==============================================================================
+
+/// A functor body can be polymorphic — separate calls infer different return types.
+#[test]
+fn functor_polymorphic_body() {
+    let nix = indoc! {"
+        let obj = { __functor = self: x: x; }; in { a = obj 1; b = obj \"hi\"; }
+    "};
+    let ty = get_inferred_root(nix);
+    match &ty {
+        OutputTy::AttrSet(attr) => {
+            assert_eq!(*attr.fields["a"].0, arc_ty!(Int));
+            assert_eq!(*attr.fields["b"].0, arc_ty!(String));
+        }
+        _ => panic!("expected attrset, got: {ty}"),
+    }
+}
+
+/// A functor that returns a curried function — chained application should work.
+#[test]
+fn functor_chained_call() {
+    let nix = indoc! {"
+        let obj = { __functor = self: x: y: x + y; }; in obj 1 2
+    "};
+    let ty = get_inferred_root(nix);
+    assert_eq!(ty, arc_ty!(Int));
+}
+
+// ==============================================================================
+// Timeout / partial results
+// ==============================================================================
+
+/// A past deadline causes timed_out=true.
+#[test]
+fn timeout_produces_partial_results() {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    let src = "let x = 1; y = 2; in x + y";
+    let (db, file) = lang_ast::tests::TestDatabase::single_file(src).unwrap();
+    let past = Instant::now() - Duration::from_secs(1);
+    let result = crate::CheckBuilder::from_db(
+        &db,
+        file,
+        Arc::new(TypeAliasRegistry::new()),
+        HashMap::new(),
+        Arc::new(HashMap::new()),
+    )
+    .deadline(Some(past))
+    .run();
+
+    assert!(
+        result.timed_out,
+        "should report timed_out with past deadline"
+    );
+}
+
+/// A pre-set cancel flag causes early exit.
+#[test]
+fn cancel_flag_stops_inference() {
+    use std::collections::HashMap;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+
+    let src = "let x = 1; y = 2; in x + y";
+    let (db, file) = lang_ast::tests::TestDatabase::single_file(src).unwrap();
+    let cancel = Arc::new(AtomicBool::new(true));
+    let result = crate::CheckBuilder::from_db(
+        &db,
+        file,
+        Arc::new(TypeAliasRegistry::new()),
+        HashMap::new(),
+        Arc::new(HashMap::new()),
+    )
+    .cancel_flag(Some(cancel))
+    .run();
+
+    assert!(
+        result.timed_out,
+        "pre-set cancel flag should cause timed_out"
+    );
+}
+
+/// Timeout diagnostic lists missing bindings when not all were inferred.
+#[test]
+fn timeout_diagnostic_lists_missing_bindings() {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    let src = "let a = 1; b = 2; c = 3; d = 4; e = 5; in a + b + c + d + e";
+    let (db, file) = lang_ast::tests::TestDatabase::single_file(src).unwrap();
+    let past = Instant::now() - Duration::from_secs(1);
+    let result = crate::CheckBuilder::from_db(
+        &db,
+        file,
+        Arc::new(TypeAliasRegistry::new()),
+        HashMap::new(),
+        Arc::new(HashMap::new()),
+    )
+    .deadline(Some(past))
+    .run();
+
+    assert!(result.timed_out, "should report timed_out");
+    // CheckBuilder.run() sets timed_out; the InferenceTimeout diagnostic is
+    // attached by the Salsa-level wrapper. Verify the flag is set.
+}
+
+// ==============================================================================
+// Nested `with` — polymorphic environment
+// ==============================================================================
+
+/// `with` a polymorphic (open) env: `x` resolves through the fallback to `f`,
+/// while `y` resolves to the concrete inner `with`.
+#[test]
+fn with_polymorphic_env() {
+    let nix = r#"f: with f; with { y = 1; }; { a = x; b = y; }"#;
+    let ty = get_inferred_root(nix);
+    // Should be a lambda — f is a parameter.
+    match &ty {
+        OutputTy::Lambda { body, .. } => {
+            match &*body.0 {
+                OutputTy::AttrSet(attr) => {
+                    assert!(attr.fields.contains_key("a"), "should have field a");
+                    assert!(attr.fields.contains_key("b"), "should have field b");
+                    // b should be int (from the inner with { y = 1; })
+                    assert_eq!(
+                        *attr.fields["b"].0,
+                        arc_ty!(Int),
+                        "y should resolve to int from inner with"
+                    );
+                }
+                other => panic!("expected attrset body, got: {other}"),
+            }
+        }
+        _ => panic!("expected lambda, got: {ty}"),
+    }
+}
+
+// ==============================================================================
+// constrain_lhs_inter both-variable path
+// ==============================================================================
+
+/// Doc-comment annotation `a & b` on a numeric value: both vars get int bounds,
+/// arithmetic works.
+#[test]
+fn inter_both_vars_arithmetic() {
+    let nix = indoc! {r#"
+        let
+          /** type: x :: a & b */
+          x = 1;
+        in x + 1
+    "#};
+    let ty = get_inferred_root(nix);
+    assert_eq!(ty, arc_ty!(Int));
+}
+
+/// Doc-comment annotation `a & b` on an attrset: field access works.
+#[test]
+fn inter_both_vars_field_access() {
+    let nix = indoc! {r#"
+        let
+          /** type: x :: a & b */
+          x = { name = "hi"; };
+        in x.name
+    "#};
+    let ty = get_inferred_root(nix);
+    assert_eq!(ty, arc_ty!(String));
+}
+
+/// Doc-comment annotation `a & b` on a lambda: application works.
+#[test]
+fn inter_both_vars_as_function() {
+    let nix = indoc! {r#"
+        let
+          /** type: f :: a & b */
+          f = x: x;
+        in f 1
+    "#};
+    let ty = get_inferred_root(nix);
+    assert_eq!(ty, arc_ty!(Int));
+}

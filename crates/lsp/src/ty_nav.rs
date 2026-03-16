@@ -315,3 +315,101 @@ pub(crate) fn collect_attrpath_segments(
 
     segments
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lang_ty::{arc_ty, OutputTy, TyRef};
+
+    #[test]
+    fn collect_fields_plain_attrset() {
+        let ty = arc_ty!({ "x": Int, "y": String });
+        let fields = collect_attrset_fields(&ty);
+        assert_eq!(fields.len(), 2);
+        assert_eq!(*fields["x"].0, arc_ty!(Int));
+        assert_eq!(*fields["y"].0, arc_ty!(String));
+    }
+
+    #[test]
+    fn collect_fields_named_wrapper() {
+        let ty = arc_ty!(named!("Foo", { "x": Int }));
+        let fields = collect_attrset_fields(&ty);
+        assert_eq!(fields.len(), 1);
+        assert_eq!(*fields["x"].0, arc_ty!(Int));
+    }
+
+    #[test]
+    fn collect_fields_intersection() {
+        let ty = arc_ty!(isect!({ "x": Int }, { "y": String }));
+        let fields = collect_attrset_fields(&ty);
+        assert_eq!(fields.len(), 2);
+        assert!(fields.contains_key("x"));
+        assert!(fields.contains_key("y"));
+    }
+
+    #[test]
+    fn collect_fields_union_common_only() {
+        let ty = arc_ty!(union!({ "x": Int, "y": String }, { "x": Int, "z": Bool }));
+        let fields = collect_attrset_fields(&ty);
+        assert_eq!(fields.len(), 1, "only common field x should remain");
+        assert!(fields.contains_key("x"));
+    }
+
+    #[test]
+    fn collect_fields_union_empty() {
+        // Non-attrset union members produce no fields.
+        let ty = arc_ty!(union!(Int, String));
+        let fields = collect_attrset_fields(&ty);
+        assert!(fields.is_empty());
+    }
+
+    #[test]
+    fn collect_fields_nested_named_inter() {
+        // Named("A", {x:int}) & {y:str} → {x:int, y:str}
+        let ty = OutputTy::Intersection(vec![
+            TyRef::from(arc_ty!(named!("A", { "x": Int }))),
+            TyRef::from(arc_ty!({ "y": String })),
+        ]);
+        let fields = collect_attrset_fields(&ty);
+        assert_eq!(fields.len(), 2);
+        assert!(fields.contains_key("x"));
+        assert!(fields.contains_key("y"));
+    }
+
+    fn make_lambda(param: OutputTy, body: OutputTy) -> OutputTy {
+        OutputTy::Lambda {
+            param: TyRef::from(param),
+            body: TyRef::from(body),
+        }
+    }
+
+    #[test]
+    fn extract_param_lambda() {
+        let ty = make_lambda(arc_ty!(Int), arc_ty!(String));
+        assert_eq!(extract_lambda_param(&ty), Some(arc_ty!(Int)));
+    }
+
+    #[test]
+    fn extract_param_named_lambda() {
+        let inner = make_lambda(arc_ty!(Int), arc_ty!(String));
+        let ty = OutputTy::Named(SmolStr::from("F"), TyRef::from(inner));
+        assert_eq!(extract_lambda_param(&ty), Some(arc_ty!(Int)));
+    }
+
+    #[test]
+    fn extract_param_intersection_of_lambdas() {
+        // First lambda match wins.
+        let lam1 = make_lambda(arc_ty!(Int), arc_ty!(String));
+        let lam2 = make_lambda(arc_ty!(Bool), arc_ty!(String));
+        let ty = OutputTy::Intersection(vec![TyRef::from(lam1), TyRef::from(lam2)]);
+        assert_eq!(extract_lambda_param(&ty), Some(arc_ty!(Int)));
+    }
+
+    #[test]
+    fn extract_param_union_of_lambdas() {
+        let lam1 = make_lambda(arc_ty!(Int), arc_ty!(String));
+        let lam2 = make_lambda(arc_ty!(Int), arc_ty!(Bool));
+        let ty = OutputTy::Union(vec![TyRef::from(lam1), TyRef::from(lam2)]);
+        assert_eq!(extract_lambda_param(&ty), Some(arc_ty!(Int)));
+    }
+}

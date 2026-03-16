@@ -1930,4 +1930,277 @@ mod tests {
             other => panic!("expected Union, got: {other:?}"),
         }
     }
+
+    // -- merge_attrset_intersection tests ------------------------------------
+
+    #[test]
+    fn merge_inter_non_overlapping_fields() {
+        // [{x:int}, {y:str}] → single {x:int, y:str}
+        let members = vec![arc_ty!({ "x": Int }), arc_ty!({ "y": String })];
+        let result = merge_attrset_intersection(members);
+        assert_eq!(result.len(), 1, "should merge into one attrset: {result:?}");
+        match &result[0] {
+            OutputTy::AttrSet(attr) => {
+                assert_eq!(attr.fields.len(), 2);
+                assert_eq!(*attr.fields["x"].0, arc_ty!(Int));
+                assert_eq!(*attr.fields["y"].0, arc_ty!(String));
+            }
+            other => panic!("expected AttrSet, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn merge_inter_overlapping_same_type() {
+        // [{x:int}, {x:int}] → {x:int} (no Intersection wrapper on field)
+        let members = vec![arc_ty!({ "x": Int }), arc_ty!({ "x": Int })];
+        let result = merge_attrset_intersection(members);
+        assert_eq!(result.len(), 1);
+        match &result[0] {
+            OutputTy::AttrSet(attr) => {
+                assert_eq!(*attr.fields["x"].0, arc_ty!(Int));
+            }
+            other => panic!("expected AttrSet, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn merge_inter_overlapping_different_type() {
+        // [{x:int}, {x:str}] → {x: int & str}
+        let members = vec![arc_ty!({ "x": Int }), arc_ty!({ "x": String })];
+        let result = merge_attrset_intersection(members);
+        assert_eq!(result.len(), 1);
+        match &result[0] {
+            OutputTy::AttrSet(attr) => {
+                assert!(
+                    matches!(&*attr.fields["x"].0, OutputTy::Intersection(parts) if parts.len() == 2),
+                    "x should be Intersection, got: {:?}",
+                    attr.fields["x"].0
+                );
+            }
+            other => panic!("expected AttrSet, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn merge_inter_tyvar_replaced_by_concrete() {
+        // [{x:TyVar(0)}, {x:int}] → {x:int} (TyVar replaced by concrete)
+        let members = vec![
+            OutputTy::AttrSet(lang_ty::AttrSetTy::from_internal(
+                [("x", OutputTy::TyVar(0))],
+                false,
+            )),
+            arc_ty!({ "x": Int }),
+        ];
+        let result = merge_attrset_intersection(members);
+        assert_eq!(result.len(), 1);
+        match &result[0] {
+            OutputTy::AttrSet(attr) => {
+                assert_eq!(*attr.fields["x"].0, arc_ty!(Int));
+            }
+            other => panic!("expected AttrSet, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn merge_inter_dyn_ty_intersection() {
+        // Two attrsets with different dyn_ty → dyn_ty = Intersection of both.
+        use lang_ty::AttrSetTy;
+        let mut a = AttrSetTy::<TyRef>::new();
+        a.dyn_ty = Some(TyRef::from(arc_ty!(Int)));
+        let mut b = AttrSetTy::<TyRef>::new();
+        b.dyn_ty = Some(TyRef::from(arc_ty!(String)));
+        let members = vec![OutputTy::AttrSet(a), OutputTy::AttrSet(b)];
+        let result = merge_attrset_intersection(members);
+        assert_eq!(result.len(), 1);
+        match &result[0] {
+            OutputTy::AttrSet(attr) => {
+                assert!(attr.dyn_ty.is_some(), "should have dyn_ty");
+                assert!(
+                    matches!(&*attr.dyn_ty.as_ref().unwrap().0, OutputTy::Intersection(parts) if parts.len() == 2),
+                    "dyn_ty should be Intersection, got: {:?}",
+                    attr.dyn_ty
+                );
+            }
+            other => panic!("expected AttrSet, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn merge_inter_open_all_open() {
+        // Two open → result open; one closed → result closed.
+        let open1 = arc_ty!({ "x": Int; ... });
+        let open2 = arc_ty!({ "y": String; ... });
+        let result_both_open = merge_attrset_intersection(vec![open1, open2]);
+        assert_eq!(result_both_open.len(), 1);
+        match &result_both_open[0] {
+            OutputTy::AttrSet(attr) => assert!(attr.open, "both open → result open"),
+            other => panic!("expected AttrSet, got: {other:?}"),
+        }
+
+        let open = arc_ty!({ "x": Int; ... });
+        let closed = arc_ty!({ "y": String });
+        let result_mixed = merge_attrset_intersection(vec![open, closed]);
+        assert_eq!(result_mixed.len(), 1);
+        match &result_mixed[0] {
+            OutputTy::AttrSet(attr) => assert!(!attr.open, "one closed → result closed"),
+            other => panic!("expected AttrSet, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn merge_inter_optional_all_agree() {
+        // Field optional in all attrsets containing it → optional; otherwise required.
+        use lang_ty::AttrSetTy;
+        use std::collections::BTreeSet;
+        let mut a = AttrSetTy::<TyRef>::from_internal([("x", arc_ty!(Int))], false);
+        a.optional_fields = BTreeSet::from([smol_str::SmolStr::from("x")]);
+        let mut b = AttrSetTy::<TyRef>::from_internal([("x", arc_ty!(Int))], false);
+        b.optional_fields = BTreeSet::from([smol_str::SmolStr::from("x")]);
+        let result = merge_attrset_intersection(vec![OutputTy::AttrSet(a), OutputTy::AttrSet(b)]);
+        match &result[0] {
+            OutputTy::AttrSet(attr) => {
+                assert!(
+                    attr.optional_fields.contains("x"),
+                    "x optional in all → optional in result"
+                );
+            }
+            other => panic!("expected AttrSet, got: {other:?}"),
+        }
+
+        // x optional in one, required in other → required.
+        let mut c = AttrSetTy::<TyRef>::from_internal([("x", arc_ty!(Int))], false);
+        c.optional_fields = BTreeSet::from([smol_str::SmolStr::from("x")]);
+        let d = AttrSetTy::<TyRef>::from_internal([("x", arc_ty!(Int))], false);
+        let result2 = merge_attrset_intersection(vec![OutputTy::AttrSet(c), OutputTy::AttrSet(d)]);
+        match &result2[0] {
+            OutputTy::AttrSet(attr) => {
+                assert!(
+                    !attr.optional_fields.contains("x"),
+                    "x required in one → required in result"
+                );
+            }
+            other => panic!("expected AttrSet, got: {other:?}"),
+        }
+    }
+
+    // -- flatten_composite tests (via flatten_union) --------------------------
+
+    #[test]
+    fn flatten_union_nested() {
+        // Union([a, Union([b, c])]) → [a, b, c]
+        let inner = OutputTy::Union(vec![
+            TyRef::from(arc_ty!(Bool)),
+            TyRef::from(arc_ty!(Float)),
+        ]);
+        let members = vec![arc_ty!(Int), inner];
+        let result = flatten_union(members);
+        assert_eq!(result.len(), 3);
+        assert!(result.contains(&arc_ty!(Int)));
+        assert!(result.contains(&arc_ty!(Bool)));
+        assert!(result.contains(&arc_ty!(Float)));
+    }
+
+    #[test]
+    fn flatten_union_dedup() {
+        // [a, b, a] → [a, b]
+        let members = vec![arc_ty!(Int), arc_ty!(String), arc_ty!(Int)];
+        let result = flatten_union(members);
+        assert_eq!(result.len(), 2, "duplicates should be removed: {result:?}");
+        assert_eq!(result[0], arc_ty!(Int));
+        assert_eq!(result[1], arc_ty!(String));
+    }
+
+    #[test]
+    fn flatten_large_n_no_nesting_skips_dedup() {
+        // >64 members, no nesting → returns input unchanged (fast path).
+        let members: Vec<OutputTy> = (0..70).map(|i| OutputTy::TyVar(i)).collect();
+        let result = flatten_union(members.clone());
+        assert_eq!(result.len(), 70, "fast path should return all members");
+        assert_eq!(result, members);
+    }
+
+    // -- factor_shared_from_intersection additional tests ---------------------
+
+    #[test]
+    fn factor_three_unions_partial_shared() {
+        // (a|b) & (b|c) & (a|b) — b is shared across all three.
+        let members = vec![
+            OutputTy::Union(vec![
+                TyRef::from(arc_ty!(Int)),
+                TyRef::from(arc_ty!(String)),
+            ]),
+            OutputTy::Union(vec![
+                TyRef::from(arc_ty!(String)),
+                TyRef::from(arc_ty!(Float)),
+            ]),
+            OutputTy::Union(vec![
+                TyRef::from(arc_ty!(Int)),
+                TyRef::from(arc_ty!(String)),
+            ]),
+        ];
+        let result = factor_shared_from_intersection(members);
+        // String is shared. After factoring, the remainders get intersected.
+        assert_eq!(result.len(), 1, "should produce single element: {result:?}");
+        match &result[0] {
+            OutputTy::Union(parts) => {
+                let has_string = parts.iter().any(|p| *p.0 == arc_ty!(String));
+                assert!(has_string, "string should be in shared set");
+            }
+            other => panic!("expected Union, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn factor_all_members_shared() {
+        // (a|b) & (a|b) → just a|b (all members shared, no remainder).
+        let members = vec![
+            OutputTy::Union(vec![
+                TyRef::from(arc_ty!(Int)),
+                TyRef::from(arc_ty!(String)),
+            ]),
+            OutputTy::Union(vec![
+                TyRef::from(arc_ty!(Int)),
+                TyRef::from(arc_ty!(String)),
+            ]),
+        ];
+        let result = factor_shared_from_intersection(members);
+        assert_eq!(result.len(), 1, "should produce single element: {result:?}");
+        match &result[0] {
+            OutputTy::Union(parts) => {
+                assert_eq!(parts.len(), 2, "should have both shared members");
+                let types: Vec<_> = parts.iter().map(|p| (*p.0).clone()).collect();
+                assert!(types.contains(&arc_ty!(Int)));
+                assert!(types.contains(&arc_ty!(String)));
+            }
+            other => panic!("expected Union, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn factor_single_element_remainders() {
+        // (a|b) & (b|c) — shared: b; remainder1: a, remainder2: c.
+        // Single-element remainders should be unwrapped (no Union wrapper).
+        let members = vec![
+            OutputTy::Union(vec![TyRef::from(arc_ty!(Int)), TyRef::from(arc_ty!(Bool))]),
+            OutputTy::Union(vec![
+                TyRef::from(arc_ty!(Bool)),
+                TyRef::from(arc_ty!(Float)),
+            ]),
+        ];
+        let result = factor_shared_from_intersection(members);
+        assert_eq!(result.len(), 1, "should produce single element: {result:?}");
+        match &result[0] {
+            OutputTy::Union(parts) => {
+                // Should contain: bool (shared), intersection(int, float) (remainders).
+                let has_bool = parts.iter().any(|p| *p.0 == arc_ty!(Bool));
+                assert!(has_bool, "shared bool should be present");
+                // The remainder should be an Intersection of int and float (single elements).
+                let has_isect = parts
+                    .iter()
+                    .any(|p| matches!(&*p.0, OutputTy::Intersection(inner) if inner.len() == 2));
+                assert!(has_isect, "remainders should be intersected: {parts:?}");
+            }
+            other => panic!("expected Union, got: {other:?}"),
+        }
+    }
 }
