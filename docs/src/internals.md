@@ -2,6 +2,132 @@
 
 This section covers implementation details for contributors and anyone curious about how tix works under the hood. None of this is needed to use tix effectively.
 
+## Workspace crates
+
+Six crates under `crates/`, listed in pipeline order:
+
+| Crate | Role |
+|-------|------|
+| `lang_ast` | Parse Nix via rnix, lower to Tix AST, name resolution, SCC grouping |
+| `lang_ty` | Type representation: `Ty<R, VarType>` during inference, `OutputTy` for display |
+| `comment_parser` | Parse type annotations from doc comments and `.tix` stub files |
+| `lang_check` | SimpleSub type inference engine — the core of the project |
+| `lsp` | LSP server: hover, completions, go-to-def, diagnostics, rename, etc. |
+| `cli` | CLI entry point, project-level batch checking |
+
+## Pipeline overview
+
+Type-checking a Nix file flows through six phases:
+
+```
+                         ┌──────────────────────────────────────────┐
+  Nix source             │              lang_ast                    │
+      │                  │                                          │
+      ▼                  │                                          │
+  ① Parse & lower ───────┤  rnix CST → Tix AST (Expr/Name arenas) │
+      │                  │  + source maps (AstPtr ↔ ExprId)        │
+      ▼                  │                                          │
+  ② Name resolution ─────┤  scope tree, reference → definition     │
+      │                  │                                          │
+      ▼                  │                                          │
+  ③ SCC grouping ────────┤  Tarjan's on binding dependency graph   │
+                         └──────────────────────────────────────────┘
+      │
+      ▼                  ┌──────────────────────────────────────────┐
+  ④ Type inference ──────┤              lang_check                  │
+      │                  │                                          │
+      │  a. Pre-allocate TyIds for every name and expression       │
+      │  b. Apply stub/annotation types to entry parameters        │
+      │  c. Per SCC group:                                         │
+      │     · infer_expr  — single-pass AST walk                   │
+      │     · constrain   — directional subtyping (bounds inline)  │
+      │     · resolve deferred overloads/merges                    │
+      │     · extrude     — level-based generalization             │
+      │  d. Infer root expression                                  │
+      │                  │                                          │
+      ▼                  │                                          │
+  ⑤ Canonicalize ────────┤  Ty<TyId> → OutputTy (polarity-aware)  │
+                         └──────────────────────────────────────────┘
+      │
+      ▼
+  ⑥ Output ──────────────  CLI prints types / LSP serves requests
+```
+
+### Phase 1: Parse & lower
+
+**Entry:** `lang_ast::module_and_source_maps(db, file)`
+
+Nix source is parsed by [rnix](https://github.com/nix-community/rnix-parser) into a Rowan CST, then lowered to Tix's own AST. The AST uses arena allocation — every expression and name gets an `ExprId` / `NameId` index into flat vectors. A bidirectional `ModuleSourceMap` links AST nodes back to source positions for LSP features and error reporting. Doc comments are gathered during lowering and inline type aliases (`type Foo = ...;`) are extracted.
+
+### Phase 2: Name resolution
+
+**Entry:** `lang_ast::name_resolution(db, file)`
+
+Two sub-phases:
+
+1. **Scope building** — walks the AST to create a scope tree. Each `let`, recursive attrset, and lambda introduces a scope with its defined names. `with` expressions create special scopes that defer lookup to the environment value.
+2. **Reference resolution** — for each `Expr::Reference`, looks up the name through ancestor scopes. Results are one of: a local definition (`NameId`), a builtin (e.g. `null`, `map`), a `with`-environment lookup, or unresolved. A reverse index (`NameId → Vec<ExprId>`) is also built for find-references / rename.
+
+### Phase 3: SCC grouping
+
+**Entry:** `lang_ast::group_def(db, file)`
+
+Builds a dependency graph between bindings (which name references which other name) and runs Tarjan's algorithm to compute strongly connected components. Each SCC becomes a `DependentGroup` — a set of mutually-recursive definitions that must be inferred together. Non-recursive bindings get their own single-element group. Groups are topologically sorted so each group is inferred only after its dependencies.
+
+### Phase 4: Type inference
+
+**Entry:** `lang_check::check_file(db, file)`
+
+This is where SimpleSub runs. The main orchestrator (`CheckCtx::infer_prog_partial`) proceeds in stages:
+
+**Pre-allocation.** A fresh `TyId` is allocated for every name and expression in the module upfront. This lets recursive definitions reference types before they're fully inferred.
+
+**Stub application.** If the entry expression is a lambda with doc-comment annotations (e.g. `/** type: lib :: Lib */`), those types are applied to the parameter slots before inference begins, so they flow into all downstream bindings.
+
+**Per-SCC iteration.** For each group:
+
+1. **Enter a new binding level** for let-polymorphism.
+2. **Infer each definition** via `infer_expr` — a single-pass walk over the AST that allocates type variables and calls `constrain(sub, sup)` inline as it discovers subtyping relationships.
+3. **Resolve deferred constraints** — overloaded operators (`+`, `*`, etc.), `with`-environment lookups, and attrset merges are resolved once enough type information has accumulated.
+4. **Extrude and generalize** — variables created at this level are copied to fresh variables at the parent level with bounds linked via constraints. This is SimpleSub's replacement for the traditional HM generalize/instantiate pair.
+
+**Root inference.** The module's entry expression is inferred and any remaining pending constraints are resolved.
+
+### Phase 5: Canonicalization
+
+**Entry:** `Collector::finalize_inference()`
+
+Converts the internal bounds-based representation (`Ty<TyId>`) to a display-ready `OutputTy` tree. This is polarity-aware:
+
+- **Positive positions** (outputs, covariant) — a variable expands to the union of its lower bounds. A variable bounded by `{int, string}` becomes `int | string`.
+- **Negative positions** (inputs, contravariant) — a variable expands to the intersection of its upper bounds.
+
+Negation types are normalized using Boolean algebra (De Morgan, double-negation elimination, contradiction/tautology detection). The result is an `InferenceResult` mapping every `NameId` and `ExprId` to its `OutputTy`.
+
+### Phase 6: Output
+
+The CLI prints binding types and the root expression type. The LSP serves the `InferenceResult` to power hover, completions, diagnostics, inlay hints, and other features.
+
+## Cross-file inference
+
+When a file contains `import ./other.nix`, tix resolves it demand-driven:
+
+1. **Import scanning** — `scan_literal_imports()` finds literal `import <path>` patterns. Dynamic imports (where the path is computed) remain unconstrained.
+2. **Demand-driven analysis** — an `InferenceCoordinator` manages concurrent file inference. When file A imports file B, B is inferred first (with cycle detection). The coordinator handles parallelism via rayon for batch project checking (`tix check`).
+3. **Type integration** — the imported file's root `OutputTy` is used as the type of the `import` expression. For `callPackage ./file.nix {}` patterns, tix recognizes the convention and peels the outer lambda layer.
+
+Files outside the project scope (e.g. transitive nixpkgs imports) get `⊤` — inference stays local to the project boundary.
+
+## Stub integration
+
+`.tix` stub files provide types for code that can't be inferred (nixpkgs lib, etc.). The `TypeAliasRegistry` in `aliases.rs` loads stubs from three sources:
+
+1. **Built-in stubs** (`stubs/lib.tix`) — shipped with tix, covering core nixpkgs lib functions.
+2. **Project stubs** — loaded from `--stubs` CLI flags or `tix.toml` config.
+3. **Inline aliases** — `type Foo = ...;` declarations in doc comments, merged into the registry during inference.
+
+Top-level `val` declarations (e.g. `val mkDerivation :: ...`) provide types for unresolved names automatically — no annotation needed. Module blocks (`module lib { ... }`) auto-generate a capitalized type alias (`Lib`) for use in doc-comment annotations.
+
 ## Type theory background
 
 Tix implements [MLsub/SimpleSub](https://lptk.github.io/programming/2020/03/26/demystifying-mlsub.html) — an extension of Hindley-Milner with subtyping (ICFP 2020). It extends this with Boolean-Algebraic Subtyping (BAS) for negation types and type narrowing, following [Chau & Parreaux (POPL 2026)](https://github.com/fo5for/sebas).
@@ -62,15 +188,22 @@ When a new edit arrives for a file that's currently being analyzed, the in-fligh
 
 | File | Role |
 |------|------|
+| `lang_ast/src/lib.rs` | Module, Expr, AST arena types |
+| `lang_ast/src/lower.rs` | rnix CST → Tix AST lowering |
+| `lang_ast/src/nameres.rs` | Scope analysis, name resolution, SCC grouping |
+| `lang_ast/src/narrow.rs` | Guard recognition, NarrowPredicate enum |
+| `lang_ty/src/lib.rs` | `Ty<R, VarType>` and `OutputTy` type definitions |
+| `comment_parser/src/tix_decl.pest` | `.tix` file grammar |
+| `lang_check/src/lib.rs` | `check_file` entry point, `InferenceResult` |
 | `lang_check/src/infer.rs` | Orchestration, SCC iteration, extrude, generalization |
 | `lang_check/src/infer_expr.rs` | Single-pass AST inference walk |
 | `lang_check/src/constrain.rs` | Core subtyping constraint function |
 | `lang_check/src/collect.rs` | Canonicalization from bounds to OutputTy |
 | `lang_check/src/storage.rs` | Bounds-based type variable storage |
 | `lang_check/src/builtins.rs` | Nix builtin type synthesis |
-| `lang_ast/src/narrow.rs` | Guard recognition, NarrowPredicate enum |
-| `comment_parser/src/tix_decl.pest` | `.tix` file grammar |
 | `lang_check/src/aliases.rs` | TypeAliasRegistry (loads stubs, resolves aliases) |
+| `lang_check/src/imports.rs` | Import scanning, demand-driven cross-file resolution |
+| `lang_check/src/coordinator.rs` | Concurrent multi-file inference coordinator |
 
 ## References
 
