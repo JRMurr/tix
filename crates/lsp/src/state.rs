@@ -292,21 +292,13 @@ pub fn resolve_imports_phase_b(
 
     let import_targets = import_resolution.targets;
 
-    // Build name→import mapping.
     let file_dir = intermediate.path.parent().map(|p| p.to_path_buf());
-    let mut name_to_import = HashMap::new();
-    for group in intermediate.grouped_defs.iter() {
-        for typedef in group {
-            let target = chase_import_target(&intermediate.module, &import_targets, typedef.expr())
-                .or_else(|| {
-                    let dir = file_dir.as_deref()?;
-                    find_path_literal_target(&intermediate.module, typedef.expr(), dir)
-                });
-            if let Some(path) = target {
-                name_to_import.insert(typedef.name(), path);
-            }
-        }
-    }
+    let name_to_import = build_name_to_import(
+        &intermediate.module,
+        &import_targets,
+        &intermediate.grouped_defs,
+        file_dir.as_deref(),
+    );
 
     let import_duration = t0.elapsed();
 
@@ -468,6 +460,12 @@ impl AnalysisState {
 
     /// Update file contents and re-run analysis. Returns the cached analysis
     /// and a timing breakdown of each pipeline phase.
+    ///
+    /// Uses cache-only import resolution (no demand-driven inference) — imported
+    /// files must already be in the coordinator cache for their types to be
+    /// available. The production analysis loop in `server.rs` uses
+    /// `resolve_imports_phase_b()` instead, which adds demand-driven inference
+    /// for unopened dependencies.
     pub fn update_file(
         &mut self,
         path: PathBuf,
@@ -526,37 +524,9 @@ impl AnalysisState {
 
         let import_targets = import_resolution.targets;
 
-        // Build name→import mapping: for each let-binding or attrset field
-        // whose value expression is a resolved import, record the name→path link.
-        // This powers Select-through-import navigation (e.g. `x.child` where
-        // `x = import ./foo.nix` jumps to `child` in foo.nix).
-        //
-        // We chase through Apply chains because `import ./foo.nix { ... }` desugars
-        // to Apply(Apply(import, ./foo.nix), { ... }) — the outer Apply isn't in
-        // import_targets, but its inner function is.
         let file_dir = path.parent().map(|p| p.to_path_buf());
-        let mut name_to_import = HashMap::new();
-        for group in grouped.iter() {
-            for typedef in group {
-                // First try the recognized `import ./path` pattern via Apply chain.
-                let target = chase_import_target(&module, &import_targets, typedef.expr())
-                    // Fallback: scan the binding's expression subtree for a path literal.
-                    // This covers patterns like `pkgs.callPackage ./foo.nix { }` where the
-                    // path literal appears as an argument but isn't a direct `import`.
-                    .or_else(|| {
-                        let dir = file_dir.as_deref()?;
-                        find_path_literal_target(&module, typedef.expr(), dir)
-                    });
-                if let Some(path) = target {
-                    log::debug!(
-                        "name_to_import: {} -> {}",
-                        module[typedef.name()].text,
-                        path.display()
-                    );
-                    name_to_import.insert(typedef.name(), path);
-                }
-            }
-        }
+        let name_to_import =
+            build_name_to_import(&module, &import_targets, &grouped, file_dir.as_deref());
 
         // Resolve context args for this file from the project's tix.toml.
         let context_args: Arc<HashMap<SmolStr, comment_parser::ParsedTy>> =
@@ -799,22 +769,13 @@ impl AnalysisState {
 
         let import_targets = import_resolution.targets;
 
-        // Build name→import mapping.
         let file_dir = intermediate.path.parent().map(|p| p.to_path_buf());
-        let mut name_to_import = HashMap::new();
-        for group in intermediate.grouped_defs.iter() {
-            for typedef in group {
-                let target =
-                    chase_import_target(&intermediate.module, &import_targets, typedef.expr())
-                        .or_else(|| {
-                            let dir = file_dir.as_deref()?;
-                            find_path_literal_target(&intermediate.module, typedef.expr(), dir)
-                        });
-                if let Some(path) = target {
-                    name_to_import.insert(typedef.name(), path);
-                }
-            }
-        }
+        let name_to_import = build_name_to_import(
+            &intermediate.module,
+            &import_targets,
+            &intermediate.grouped_defs,
+            file_dir.as_deref(),
+        );
 
         let import_duration = t0.elapsed();
 
@@ -892,6 +853,34 @@ impl AnalysisState {
             log::info!("re-analyzed {}: {timing}", path.display());
         }
     }
+}
+
+/// Build a name→import-path mapping from grouped definitions and import targets.
+///
+/// For each let-binding or attrset field whose value expression is a resolved
+/// import, records the name→path link. This powers Select-through-import
+/// navigation (e.g. `x.child` where `x = import ./foo.nix` jumps to `child`
+/// in foo.nix).
+fn build_name_to_import(
+    module: &Module,
+    import_targets: &HashMap<ExprId, PathBuf>,
+    grouped_defs: &GroupedDefs,
+    file_dir: Option<&Path>,
+) -> HashMap<NameId, PathBuf> {
+    let mut name_to_import = HashMap::new();
+    for group in grouped_defs.iter() {
+        for typedef in group {
+            let target =
+                chase_import_target(module, import_targets, typedef.expr()).or_else(|| {
+                    let dir = file_dir?;
+                    find_path_literal_target(module, typedef.expr(), dir)
+                });
+            if let Some(path) = target {
+                name_to_import.insert(typedef.name(), path);
+            }
+        }
+    }
+    name_to_import
 }
 
 /// Chase through Apply chains to find an import target.

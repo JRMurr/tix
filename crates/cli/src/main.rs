@@ -825,10 +825,14 @@ fn run_check(
     let coordinator = lang_check::coordinator::InferenceCoordinator::new();
 
     // Build a syntax provider that wraps the DB for transitive imports.
+    // Unlike the root file (whose context_args are resolved above), transitive
+    // imports need per-file context resolution from tix.toml so each file gets
+    // the correct parameter typing (e.g. NixOS modules vs home-manager files).
     struct SingleFileSyntaxProvider {
         db: parking_lot::Mutex<RootDatabase>,
-        registry: Arc<lang_check::aliases::TypeAliasRegistry>,
-        context_args: Arc<HashMap<smol_str::SmolStr, comment_parser::ParsedTy>>,
+        registry: parking_lot::Mutex<Arc<lang_check::aliases::TypeAliasRegistry>>,
+        /// tix.toml config + directory, used to resolve per-file context_args.
+        config: Option<(config::TixConfig, std::path::PathBuf)>,
         deadline_secs: Option<u64>,
     }
     impl lang_check::coordinator::SyntaxProvider for SingleFileSyntaxProvider {
@@ -839,14 +843,28 @@ fn run_check(
             let module_indices = lang_ast::module_indices(&*db, nix_file);
             let name_res = name_resolution(&*db, nix_file);
             let grouped_defs = lang_ast::group_def(&*db, nix_file);
+
+            // Resolve context_args from tix.toml for this specific file,
+            // so transitive imports get their own context (not the root's).
+            let (context_args, registry) = {
+                let mut reg = self.registry.lock();
+                let context_args = if let Some((ref cfg, ref dir)) = self.config {
+                    config::resolve_context_for_file(path, cfg, dir, Arc::make_mut(&mut reg))
+                        .unwrap_or_default()
+                } else {
+                    Arc::default()
+                };
+                (context_args, Arc::clone(&reg))
+            };
+
             Some(lang_check::SyntaxBundle {
                 path: path.to_path_buf(),
                 module,
                 module_indices,
                 name_res,
                 grouped_defs,
-                registry: Arc::clone(&self.registry),
-                context_args: Arc::clone(&self.context_args),
+                registry,
+                context_args,
                 deadline_secs: self.deadline_secs,
             })
         }
@@ -854,8 +872,11 @@ fn run_check(
 
     let syntax_provider = SingleFileSyntaxProvider {
         db: parking_lot::Mutex::new(db),
-        registry: Arc::clone(&registry),
-        context_args: context_args.clone(),
+        registry: parking_lot::Mutex::new(Arc::clone(&registry)),
+        config: toml_config
+            .as_ref()
+            .zip(config_dir.as_ref())
+            .map(|(cfg, dir)| (cfg.clone(), dir.clone())),
         deadline_secs: None,
     };
 

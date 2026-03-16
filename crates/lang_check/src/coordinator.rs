@@ -27,10 +27,7 @@ use dashmap::DashMap;
 use parking_lot::{Condvar, Mutex};
 use rayon::prelude::*;
 
-use crate::imports::{
-    import_errors_to_diagnostics, resolve_import_types, scan_callpackage_imports,
-    scan_literal_imports,
-};
+use crate::imports::{import_errors_to_diagnostics, resolve_import_types};
 use crate::{run_inference, CheckResult, FileSignature, InferenceInputs, SyntaxBundle};
 use lang_ty::OutputTy;
 
@@ -113,6 +110,20 @@ impl InferenceCoordinator {
         }
     }
 
+    /// Build a cache-hit result: no inference was run, just returning the
+    /// previously computed signature.
+    fn cached_result(sig: &Option<FileSignature>) -> CoordinatedResult {
+        CoordinatedResult {
+            check_result: CheckResult {
+                inference: None,
+                diagnostics: vec![],
+                timed_out: false,
+            },
+            signature: sig.clone(),
+            import_paths: vec![],
+        }
+    }
+
     // =========================================================================
     // Active mode: demand-driven inference
     // =========================================================================
@@ -122,6 +133,13 @@ impl InferenceCoordinator {
     /// If the file is already cached, returns the cached signature immediately.
     /// If another thread is computing the same file, blocks and waits for the
     /// result. Import cycles on the same thread are detected and broken with ⊤.
+    ///
+    /// **Blocking behavior:** When waiting for another thread, this blocks the
+    /// current rayon worker on a Condvar. Deep import chains (A→B→C→D→...)
+    /// serialize inference for those files, and each blocked worker is
+    /// unavailable for other rayon work items. The thread pool must be larger
+    /// than the maximum import chain depth to avoid starvation. In batch mode
+    /// this is mitigated by the typically flat structure of most Nix projects.
     pub fn demand_file(
         &self,
         path: &Path,
@@ -131,15 +149,7 @@ impl InferenceCoordinator {
         // Fast path: already computed.
         if let Some(entry) = self.cache.get(path) {
             if let FileSlot::Ready(ref sig) = *entry {
-                return Some(CoordinatedResult {
-                    check_result: CheckResult {
-                        inference: None,
-                        diagnostics: vec![],
-                        timed_out: false,
-                    },
-                    signature: sig.clone(),
-                    import_paths: vec![],
-                });
+                return Some(Self::cached_result(sig));
             }
         }
 
@@ -164,15 +174,7 @@ impl InferenceCoordinator {
             match &*entry {
                 FileSlot::Ready(sig) => {
                     // Another thread finished between our check and entry.
-                    let result = CoordinatedResult {
-                        check_result: CheckResult {
-                            inference: None,
-                            diagnostics: vec![],
-                            timed_out: false,
-                        },
-                        signature: sig.clone(),
-                        import_paths: vec![],
-                    };
+                    let result = Self::cached_result(sig);
                     IN_PROGRESS.with(|s| s.borrow_mut().remove(path));
                     return Some(result);
                 }
@@ -197,15 +199,7 @@ impl InferenceCoordinator {
                         IN_PROGRESS.with(|s| s.borrow_mut().remove(path));
                         if let Some(entry) = self.cache.get(path) {
                             if let FileSlot::Ready(ref sig) = *entry {
-                                return Some(CoordinatedResult {
-                                    check_result: CheckResult {
-                                        inference: None,
-                                        diagnostics: vec![],
-                                        timed_out: false,
-                                    },
-                                    signature: sig.clone(),
-                                    import_paths: vec![],
-                                });
+                                return Some(Self::cached_result(sig));
                             }
                         }
                         return None;
@@ -223,8 +217,18 @@ impl InferenceCoordinator {
         let result = self.compute_file(path, syntax_provider, cancel_flag);
 
         // Store result and notify waiters.
-        let sig = result.as_ref().and_then(|r| r.signature.clone());
-        self.cache.insert(path.to_path_buf(), FileSlot::Ready(sig));
+        // Only cache successful results — failed files (provider returned None)
+        // should not be cached permanently, since the file may become available
+        // later (e.g. created on disk, or temporarily unreadable).
+        match &result {
+            Some(r) => {
+                self.cache
+                    .insert(path.to_path_buf(), FileSlot::Ready(r.signature.clone()));
+            }
+            None => {
+                self.cache.remove(path);
+            }
+        }
         let (lock, cvar) = &*notify;
         *lock.lock() = true;
         cvar.notify_all();
@@ -277,19 +281,9 @@ impl InferenceCoordinator {
 
         let import_diagnostics = import_errors_to_diagnostics(&import_resolution.errors);
 
-        // Collect discovered import paths for dependency tracking.
-        let scanned = scan_literal_imports(&bundle.module, &bundle.name_res, base_dir);
-        let callpackage = scan_callpackage_imports(&bundle.module, base_dir);
-        let import_paths: Vec<PathBuf> = scanned
-            .resolved
-            .iter()
-            .map(|(_, p)| p.canonicalize().unwrap_or_else(|_| p.clone()))
-            .chain(
-                callpackage
-                    .iter()
-                    .map(|(_, _, _, p)| p.canonicalize().unwrap_or_else(|_| p.clone())),
-            )
-            .collect();
+        // Use the resolved paths from import resolution (already computed during
+        // scanning) instead of re-scanning the AST.
+        let import_paths = import_resolution.resolved_paths;
 
         // Record dependencies for invalidation.
         self.record_deps(path, &import_paths);
@@ -400,24 +394,30 @@ impl InferenceCoordinator {
     /// of paths that were evicted (excluding the root path itself).
     pub fn invalidate(&self, path: &Path) -> Vec<PathBuf> {
         let mut evicted = Vec::new();
-        self.invalidate_recursive(path, &mut evicted);
+        let mut visited = HashSet::new();
+        // Snapshot reverse_deps once to avoid multiple lock acquisitions
+        // during recursion and to prevent TOCTOU races with concurrent
+        // cache modifications.
+        let reverse_deps = self.reverse_deps.lock().clone();
+        self.invalidate_inner(path, &reverse_deps, &mut visited, &mut evicted);
         evicted
     }
 
-    fn invalidate_recursive(&self, path: &Path, evicted: &mut Vec<PathBuf>) {
+    fn invalidate_inner(
+        &self,
+        path: &Path,
+        reverse_deps: &HashMap<PathBuf, HashSet<PathBuf>>,
+        visited: &mut HashSet<PathBuf>,
+        evicted: &mut Vec<PathBuf>,
+    ) {
+        if !visited.insert(path.to_path_buf()) {
+            return;
+        }
         self.cache.remove(path);
-
-        let dependents: Vec<PathBuf> = self
-            .reverse_deps
-            .lock()
-            .get(path)
-            .map(|set| set.iter().cloned().collect())
-            .unwrap_or_default();
-
-        for dep in dependents {
-            if self.cache.contains_key(&dep) {
+        if let Some(dependents) = reverse_deps.get(path) {
+            for dep in dependents {
                 evicted.push(dep.clone());
-                self.invalidate_recursive(&dep, evicted);
+                self.invalidate_inner(dep, reverse_deps, visited, evicted);
             }
         }
     }
@@ -678,5 +678,126 @@ mod tests {
         coord.clear();
         assert!(coord.get_signature(&path).is_none());
         assert!(coord.get_dependents(&path).is_empty());
+    }
+
+    /// Regression: invalidation with cycles in the reverse_deps graph must
+    /// not loop infinitely. The visited set (W1) prevents re-entering nodes.
+    #[test]
+    fn invalidation_with_cycle_in_deps() {
+        let coord = InferenceCoordinator::new();
+        let a = PathBuf::from("/cycle_a.nix");
+        let b = PathBuf::from("/cycle_b.nix");
+
+        let sig = FileSignature {
+            root_ty: OutputTy::Primitive(lang_ty::PrimitiveTy::Int),
+        };
+        coord.set_signature(&a, sig.clone());
+        coord.set_signature(&b, sig);
+
+        // Create a cycle: a→b and b→a in reverse deps.
+        coord.record_deps(&a, &[b.clone()]);
+        coord.record_deps(&b, &[a.clone()]);
+
+        // Should not infinite-loop.
+        let evicted = coord.invalidate(&a);
+        // b should be evicted (it depends on a).
+        assert!(evicted.contains(&b));
+        assert!(coord.get_signature(&a).is_none());
+        assert!(coord.get_signature(&b).is_none());
+    }
+
+    /// After invalidating a dependency and re-demanding the importer, the
+    /// importer should be re-inferred with fresh dependency types.
+    #[test]
+    fn invalidation_then_re_demand() {
+        let dir = tempfile::tempdir().unwrap();
+        let b_path = write_nix(dir.path(), "b.nix", "42");
+        let a_contents = format!("import {}", b_path.display());
+        let a_path = write_nix(dir.path(), "a.nix", &a_contents);
+
+        let provider = TestSyntaxProvider::new();
+        let coord = InferenceCoordinator::new();
+
+        // First demand: infer A (which imports B).
+        let result = coord.demand_file(&a_path, &provider, None);
+        assert!(result.is_some());
+        assert!(coord.get_signature(&b_path).is_some());
+
+        // Invalidate B → should cascade to A.
+        let evicted = coord.invalidate(&b_path);
+        assert!(evicted.contains(&a_path));
+        assert!(coord.get_signature(&a_path).is_none());
+        assert!(coord.get_signature(&b_path).is_none());
+
+        // Re-demand A → should re-infer with fresh B.
+        let result2 = coord.demand_file(&a_path, &provider, None);
+        assert!(result2.is_some());
+        assert!(coord.get_signature(&b_path).is_some());
+    }
+
+    /// Two threads demanding the same file concurrently: exactly one computes,
+    /// the other waits. Both should get a valid result.
+    #[test]
+    fn concurrent_demand_same_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let a_path = write_nix(dir.path(), "a.nix", "1 + 2");
+
+        let provider = Arc::new(TestSyntaxProvider::new());
+        let coord = Arc::new(InferenceCoordinator::new());
+
+        let coord1 = Arc::clone(&coord);
+        let coord2 = Arc::clone(&coord);
+        let provider1 = Arc::clone(&provider);
+        let provider2 = Arc::clone(&provider);
+        let path1 = a_path.clone();
+        let path2 = a_path.clone();
+
+        let t1 = std::thread::spawn(move || coord1.demand_file(&path1, &*provider1, None));
+        let t2 = std::thread::spawn(move || coord2.demand_file(&path2, &*provider2, None));
+
+        let r1 = t1.join().unwrap();
+        let r2 = t2.join().unwrap();
+
+        // Both threads should get a result.
+        assert!(r1.is_some());
+        assert!(r2.is_some());
+    }
+
+    /// When the syntax provider returns None for a file in an import chain,
+    /// the importer should still get a result (the unavailable import maps to ⊤).
+    #[test]
+    fn provider_returns_none_mid_chain() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Create a.nix that imports a nonexistent path — the provider will
+        // return None for the missing dependency.
+        let missing = dir.path().join("nonexistent.nix");
+        let a_contents = format!("import {}", missing.display());
+        let a_path = write_nix(dir.path(), "a.nix", &a_contents);
+
+        let provider = TestSyntaxProvider::new();
+        let coord = InferenceCoordinator::new();
+
+        // Should still produce a result for a.nix despite the missing dep.
+        let result = coord.demand_file(&a_path, &provider, None);
+        assert!(result.is_some());
+    }
+
+    /// Failed files (provider returns None) should not be cached permanently,
+    /// allowing re-inference when the file becomes available.
+    #[test]
+    fn failed_file_not_cached() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing.nix");
+
+        let provider = TestSyntaxProvider::new();
+        let coord = InferenceCoordinator::new();
+
+        // File doesn't exist → provider returns None.
+        let result = coord.demand_file(&path, &provider, None);
+        assert!(result.is_none());
+
+        // Should NOT be cached as Ready(None).
+        assert!(!coord.cache.contains_key(&path));
     }
 }

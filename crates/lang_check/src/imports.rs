@@ -239,6 +239,10 @@ pub struct ImportResolution {
     /// to the resolved target path. Used by the LSP for jump-to-definition
     /// on `import ./foo.nix` expressions.
     pub targets: HashMap<ExprId, PathBuf>,
+    /// Canonical import paths discovered during scanning. Populated from the
+    /// scan results that `resolve_import_types` already computes, so callers
+    /// don't need to re-scan to get the dependency list.
+    pub resolved_paths: Vec<PathBuf>,
 }
 
 // ==============================================================================
@@ -272,6 +276,20 @@ where
         .resolved
         .iter()
         .filter_map(|(_, p)| p.canonicalize().ok())
+        .collect();
+
+    // Pre-collect canonical import paths from both scan results before the
+    // for loops consume the vectors. This populates resolved_paths so callers
+    // (e.g. compute_file) don't need to re-scan.
+    let resolved_paths: Vec<PathBuf> = scanned
+        .resolved
+        .iter()
+        .map(|(_, p)| p.canonicalize().unwrap_or_else(|_| p.clone()))
+        .chain(
+            callpackage_imports
+                .iter()
+                .map(|(_, _, _, p)| p.canonicalize().unwrap_or_else(|_| p.clone())),
+        )
         .collect();
 
     let mut types = HashMap::new();
@@ -365,6 +383,7 @@ where
         types,
         errors,
         targets,
+        resolved_paths,
     }
 }
 

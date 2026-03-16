@@ -385,7 +385,10 @@ fn spawn_analysis_loop(
                 // guard that stops processing before we even start).
                 let rss_limit = state.lock().rss_limit_mb;
                 if let Some(limit) = rss_limit {
-                    let bg_threshold = limit * 1.875; // 75% of mem limit (limit is 40%)
+                    // rss_limit_mb is 40% of RLIMIT_AS. Background queue uses a higher
+                    // threshold (75% of RLIMIT_AS) to stop scheduling new files before
+                    // inference-level limits kick in. Back-compute: 0.75 / 0.40 = 1.875.
+                    let bg_threshold = limit * 1.875;
                     let rss = lang_check::rss_mb();
                     if rss > bg_threshold {
                         let remaining = background_queue.lock().len();
