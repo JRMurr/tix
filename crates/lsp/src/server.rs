@@ -85,6 +85,9 @@ pub struct TixLanguageServer {
     /// Shared diagnostics config — the analysis loop reads this to determine
     /// what diagnostics to emit. Updated by `did_change_configuration`.
     diag_config: Arc<Mutex<DiagnosticsConfig>>,
+    /// Shared syntax provider for demand-driven import resolution. Shared so
+    /// `initialize()` can update its project config after discovering tix.toml.
+    syntax_provider: Arc<crate::state::LspSyntaxProvider>,
 }
 
 impl TixLanguageServer {
@@ -96,6 +99,11 @@ impl TixLanguageServer {
         // The analysis loop uses it outside the state lock for demand-driven
         // import resolution.
         let coordinator = Arc::clone(&analysis_state.coordinator);
+
+        let syntax_provider = Arc::new(crate::state::LspSyntaxProvider::new(
+            Arc::clone(&analysis_state.registry),
+            analysis_state.deadline_secs,
+        ));
 
         let state = Arc::new(Mutex::new(analysis_state));
         let pending_text = Arc::new(Mutex::new(HashMap::new()));
@@ -118,6 +126,7 @@ impl TixLanguageServer {
             background_queue.clone(),
             diag_config.clone(),
             coordinator,
+            syntax_provider.clone(),
         );
 
         Self {
@@ -130,6 +139,7 @@ impl TixLanguageServer {
             snapshots,
             background_queue,
             diag_config,
+            syntax_provider,
         }
     }
 
@@ -237,24 +247,12 @@ fn spawn_analysis_loop(
     background_queue: Arc<Mutex<VecDeque<(PathBuf, String)>>>,
     diag_config: Arc<Mutex<DiagnosticsConfig>>,
     coordinator: Arc<lang_check::coordinator::InferenceCoordinator>,
+    lsp_syntax_provider: Arc<crate::state::LspSyntaxProvider>,
 ) {
     tokio::spawn(async move {
         // Pending diagnostics waiting for quiescence, keyed by path.
         let mut pending_diags: HashMap<PathBuf, Vec<Diagnostic>> = HashMap::new();
         let mut diag_timer: Option<Pin<Box<tokio::time::Sleep>>> = None;
-
-        // LspSyntaxProvider for demand-driven import resolution. Reads .nix
-        // files from disk using its own Salsa DB, independent of the main LSP DB.
-        // Recreated when the registry changes (stubs reload).
-        let lsp_syntax_provider = {
-            let st = state.lock();
-            crate::state::LspSyntaxProvider::new(
-                Arc::clone(&st.registry),
-                st.project_config.clone(),
-                st.config_dir.clone(),
-                st.deadline_secs,
-            )
-        };
 
         loop {
             // ── Phase 1: Wait for event or diagnostic timer ──
@@ -448,7 +446,7 @@ fn spawn_analysis_loop(
                 let (inference_inputs, import_targets, name_to_import, import_duration) =
                     crate::state::resolve_imports_phase_b(
                         &coordinator,
-                        Some(&lsp_syntax_provider),
+                        Some(&*lsp_syntax_provider),
                         &intermediate,
                         Some(cancel_flag.clone()),
                     );
@@ -686,9 +684,14 @@ impl LanguageServer for TixLanguageServer {
                                 &config_dir,
                             );
 
-                            state.project_config = Some(project_cfg);
-                            state.config_dir = Some(config_dir);
+                            state.project_config = Some(project_cfg.clone());
+                            state.config_dir = Some(config_dir.clone());
                             drop(state); // release lock before file I/O
+
+                            // Update the demand-driven syntax provider so it
+                            // resolves context_args for files inferred from disk.
+                            self.syntax_provider
+                                .update_config(Some(project_cfg), Some(config_dir));
 
                             // Queue background analysis for [project] analyze files.
                             // These go into a separate low-priority queue — the analysis

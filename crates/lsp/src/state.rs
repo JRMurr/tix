@@ -164,29 +164,40 @@ pub fn build_file_analysis(inputs: LspInferenceInputs, check_result: CheckResult
 /// context_args resolved from tix.toml (e.g. `@callpackage` context for
 /// files matching `pkgs/**/*.nix`). Without this, function parameters in
 /// callPackage targets are unconstrained and return types resolve to `?`.
+///
+/// Config fields are behind a Mutex because the provider is created eagerly
+/// (before `initialize()` sets the project config). Call `update_config()`
+/// when the project config becomes available or changes.
 pub struct LspSyntaxProvider {
     db: parking_lot::Mutex<RootDatabase>,
     /// Behind a Mutex so we can call `Arc::make_mut` for lazy context loading.
     registry: parking_lot::Mutex<Arc<TypeAliasRegistry>>,
-    project_config: Option<crate::project_config::ProjectConfig>,
-    config_dir: Option<PathBuf>,
+    /// Project config + config dir, updated via `update_config()` after
+    /// `initialize()` discovers tix.toml.
+    config: parking_lot::Mutex<(
+        Option<crate::project_config::ProjectConfig>,
+        Option<PathBuf>,
+    )>,
     deadline_secs: u64,
 }
 
 impl LspSyntaxProvider {
-    pub fn new(
-        registry: Arc<TypeAliasRegistry>,
-        project_config: Option<crate::project_config::ProjectConfig>,
-        config_dir: Option<PathBuf>,
-        deadline_secs: u64,
-    ) -> Self {
+    pub fn new(registry: Arc<TypeAliasRegistry>, deadline_secs: u64) -> Self {
         Self {
             db: parking_lot::Mutex::new(RootDatabase::default()),
             registry: parking_lot::Mutex::new(registry),
-            project_config,
-            config_dir,
+            config: parking_lot::Mutex::new((None, None)),
             deadline_secs,
         }
+    }
+
+    /// Update the project config after `initialize()` discovers tix.toml.
+    pub fn update_config(
+        &self,
+        project_config: Option<crate::project_config::ProjectConfig>,
+        config_dir: Option<PathBuf>,
+    ) {
+        *self.config.lock() = (project_config, config_dir);
     }
 }
 
@@ -203,18 +214,18 @@ impl SyntaxProvider for LspSyntaxProvider {
         // get the same parameter typing as files opened in the editor.
         let (context_args, registry) = {
             let mut reg = self.registry.lock();
-            let context_args =
-                if let (Some(ref cfg), Some(ref dir)) = (&self.project_config, &self.config_dir) {
-                    crate::project_config::resolve_context_for_file(
-                        path,
-                        cfg,
-                        dir,
-                        Arc::make_mut(&mut reg),
-                    )
-                    .unwrap_or_default()
-                } else {
-                    Arc::default()
-                };
+            let cfg = self.config.lock();
+            let context_args = if let (Some(ref project_cfg), Some(ref dir)) = (&cfg.0, &cfg.1) {
+                crate::project_config::resolve_context_for_file(
+                    path,
+                    project_cfg,
+                    dir,
+                    Arc::make_mut(&mut reg),
+                )
+                .unwrap_or_default()
+            } else {
+                Arc::default()
+            };
             (context_args, Arc::clone(&reg))
         };
 
