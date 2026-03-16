@@ -217,6 +217,74 @@ async fn demand_driven_no_e013_for_resolved_imports() {
     h.shutdown().await;
 }
 
+/// Demand-driven inference should resolve context_args from tix.toml for
+/// files that aren't open in the editor. Without this, callPackage targets
+/// inferred from disk have unconstrained parameter types and return `?`.
+///
+/// Reproduces: open default.nix (uses callPackage ./pkg.nix {}), all attrs
+/// unknown. Open pkg.nix → type resolves. Close pkg.nix → reverts to unknown.
+#[tokio::test]
+async fn demand_driven_import_with_callpackage_context() {
+    let mut h = LspTestHarness::with_options(
+        &[
+            (
+                "tix.toml",
+                indoc! {"
+                    [context.callpackage]
+                    paths = [\"pkgs/**/*.nix\"]
+                    stubs = [\"@callpackage\"]
+                "},
+            ),
+            // A callPackage-style package file: takes { lib, ... } and uses
+            // lib.id. With @callpackage context, `lib` is typed as `Lib` so
+            // `lib.id 42` returns `int`. Without context, `lib` is unconstrained
+            // so `lib.id 42` returns `?`.
+            (
+                "pkgs/pkg.nix",
+                indoc! {"
+                    { lib, ... }:
+                    lib.id 42
+                "},
+            ),
+            // Imports pkg.nix via callPackage. Only this file is opened.
+            (
+                "default.nix",
+                indoc! {"
+                    let
+                      callPackage = f: overrides: f overrides;
+                      result = callPackage ./pkgs/pkg.nix {};
+                    in result
+                    #  ^1
+                "},
+            ),
+        ],
+        false, // load built-in stubs (needed for @callpackage context)
+    )
+    .await;
+
+    // Only open default.nix — pkg.nix exists on disk but is NOT opened.
+    // Demand-driven inference should resolve pkg.nix with context_args.
+    h.open("default.nix").await;
+    let _ = h.wait_for_diagnostics("default.nix", TIMEOUT).await;
+
+    let m = h.markers("default.nix");
+    let hover = h
+        .hover("default.nix", m[&1].line, m[&1].character)
+        .await
+        .expect("hover on callPackage result field");
+
+    let HoverContents::Markup(content) = &hover.contents else {
+        panic!("expected MarkupContent, got {:?}", hover.contents);
+    };
+    assert!(
+        content.value.contains("int"),
+        "hover on result should show 'int' via demand-driven callPackage import with context, got: {}",
+        content.value,
+    );
+
+    h.shutdown().await;
+}
+
 /// Multiple files can be open simultaneously without interference.
 #[tokio::test]
 async fn multiple_files_independent() {

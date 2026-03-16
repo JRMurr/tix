@@ -15,7 +15,7 @@ use serde::Deserialize;
 use smol_str::SmolStr;
 
 /// Top-level `tix.toml` configuration.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct ProjectConfig {
     /// Global stub file paths or directories (relative to tix.toml).
     #[serde(default)]

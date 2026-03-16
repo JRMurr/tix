@@ -248,7 +248,12 @@ fn spawn_analysis_loop(
         // Recreated when the registry changes (stubs reload).
         let lsp_syntax_provider = {
             let st = state.lock();
-            crate::state::LspSyntaxProvider::new(Arc::clone(&st.registry), st.deadline_secs)
+            crate::state::LspSyntaxProvider::new(
+                Arc::clone(&st.registry),
+                st.project_config.clone(),
+                st.config_dir.clone(),
+                st.deadline_secs,
+            )
         };
 
         loop {

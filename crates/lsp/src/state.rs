@@ -159,17 +159,32 @@ pub fn build_file_analysis(inputs: LspInferenceInputs, check_result: CheckResult
 
 /// Syntax provider for the LSP's demand-driven import resolution.
 /// Reads .nix files from disk using an independent Salsa database.
+///
+/// Includes optional project config so that demand-inferred files get their
+/// context_args resolved from tix.toml (e.g. `@callpackage` context for
+/// files matching `pkgs/**/*.nix`). Without this, function parameters in
+/// callPackage targets are unconstrained and return types resolve to `?`.
 pub struct LspSyntaxProvider {
     db: parking_lot::Mutex<RootDatabase>,
-    registry: Arc<TypeAliasRegistry>,
+    /// Behind a Mutex so we can call `Arc::make_mut` for lazy context loading.
+    registry: parking_lot::Mutex<Arc<TypeAliasRegistry>>,
+    project_config: Option<crate::project_config::ProjectConfig>,
+    config_dir: Option<PathBuf>,
     deadline_secs: u64,
 }
 
 impl LspSyntaxProvider {
-    pub fn new(registry: Arc<TypeAliasRegistry>, deadline_secs: u64) -> Self {
+    pub fn new(
+        registry: Arc<TypeAliasRegistry>,
+        project_config: Option<crate::project_config::ProjectConfig>,
+        config_dir: Option<PathBuf>,
+        deadline_secs: u64,
+    ) -> Self {
         Self {
             db: parking_lot::Mutex::new(RootDatabase::default()),
-            registry,
+            registry: parking_lot::Mutex::new(registry),
+            project_config,
+            config_dir,
             deadline_secs,
         }
     }
@@ -183,14 +198,34 @@ impl SyntaxProvider for LspSyntaxProvider {
         let module_indices = lang_ast::module_indices(&*db, nix_file);
         let name_res = lang_ast::name_resolution(&*db, nix_file);
         let grouped_defs = lang_ast::group_def(&*db, nix_file);
+
+        // Resolve context_args from tix.toml so demand-inferred files
+        // get the same parameter typing as files opened in the editor.
+        let (context_args, registry) = {
+            let mut reg = self.registry.lock();
+            let context_args =
+                if let (Some(ref cfg), Some(ref dir)) = (&self.project_config, &self.config_dir) {
+                    crate::project_config::resolve_context_for_file(
+                        path,
+                        cfg,
+                        dir,
+                        Arc::make_mut(&mut reg),
+                    )
+                    .unwrap_or_default()
+                } else {
+                    Arc::default()
+                };
+            (context_args, Arc::clone(&reg))
+        };
+
         Some(SyntaxBundle {
             path: path.to_path_buf(),
             module,
             module_indices,
             name_res,
             grouped_defs,
-            registry: Arc::clone(&self.registry),
-            context_args: Arc::default(),
+            registry,
+            context_args,
             deadline_secs: Some(self.deadline_secs),
         })
     }
