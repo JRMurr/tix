@@ -51,7 +51,14 @@ const DIAGNOSTIC_QUIESCENCE_MS: u64 = 200;
 /// channel.
 enum AnalysisEvent {
     /// File contents changed (didChange or didOpen).
-    FileChanged { path: PathBuf, text: String },
+    FileChanged {
+        path: PathBuf,
+        text: String,
+        /// LSP document version from the editor. `None` for background-queue
+        /// files that aren't open. Used in `publishDiagnostics` so editors
+        /// that check versions (e.g. Helix) don't discard fresh diagnostics.
+        version: Option<i32>,
+    },
     /// File closed (didClose). Clears pending diagnostics for this file.
     FileClosed { path: PathBuf },
     /// Re-analyze a file because one of its imports' ephemeral stub changed.
@@ -148,7 +155,7 @@ impl TixLanguageServer {
     /// `pending_text` so that request handlers (e.g. completion) can re-parse
     /// it on the fly, then an event is sent to the analysis loop which will
     /// coalesce it with any other pending edits.
-    fn schedule_analysis(&self, uri: Url, text: String) {
+    fn schedule_analysis(&self, uri: Url, text: String, version: Option<i32>) {
         let path = match uri_to_path(&uri) {
             Some(p) => p,
             None => return,
@@ -162,7 +169,11 @@ impl TixLanguageServer {
 
         // Send to analysis loop — it will drain and coalesce.
         self.event_tx
-            .send(AnalysisEvent::FileChanged { path, text })
+            .send(AnalysisEvent::FileChanged {
+                path,
+                text,
+                version,
+            })
             .ok();
     }
 
@@ -254,6 +265,10 @@ fn spawn_analysis_loop(
         // Pending diagnostics waiting for quiescence, keyed by path.
         let mut pending_diags: HashMap<PathBuf, Vec<Diagnostic>> = HashMap::new();
         let mut diag_timer: Option<Pin<Box<tokio::time::Sleep>>> = None;
+        // Track the latest document version per file. Used when publishing
+        // diagnostics so editors that check versions (e.g. Helix) don't
+        // discard fresh diagnostics for open files.
+        let mut file_versions: HashMap<PathBuf, i32> = HashMap::new();
 
         loop {
             // ── Phase 1: Wait for event or diagnostic timer ──
@@ -268,7 +283,8 @@ fn spawn_analysis_loop(
                         // Quiescence reached — publish all pending diagnostics.
                         for (path, diags) in pending_diags.drain() {
                             if let Ok(uri) = Url::from_file_path(&path) {
-                                client.publish_diagnostics(uri, diags, None).await;
+                                let version = file_versions.get(&path).copied();
+                                client.publish_diagnostics(uri, diags, version).await;
                             }
                         }
                         diag_timer = None;
@@ -320,7 +336,14 @@ fn spawn_analysis_loop(
             // Process the first event (None when the background queue woke us).
             if let Some(first_event) = first_event {
                 match first_event {
-                    AnalysisEvent::FileChanged { path, text } => {
+                    AnalysisEvent::FileChanged {
+                        path,
+                        text,
+                        version,
+                    } => {
+                        if let Some(v) = version {
+                            file_versions.insert(path.clone(), v);
+                        }
                         changes.insert(path, text);
                     }
                     AnalysisEvent::FileClosed { path } => {
@@ -346,7 +369,14 @@ fn spawn_analysis_loop(
             // Drain remaining (like RA's coalesce loop).
             while let Ok(event) = rx.try_recv() {
                 match event {
-                    AnalysisEvent::FileChanged { path, text } => {
+                    AnalysisEvent::FileChanged {
+                        path,
+                        text,
+                        version,
+                    } => {
+                        if let Some(v) = version {
+                            file_versions.insert(path.clone(), v);
+                        }
                         changes.insert(path, text);
                     }
                     AnalysisEvent::FileClosed { path } => {
@@ -369,9 +399,11 @@ fn spawn_analysis_loop(
                 }
             }
 
-            // Handle closed files: remove from pending diagnostics and ephemeral stubs.
+            // Handle closed files: remove from pending diagnostics, versions,
+            // and ephemeral stubs.
             for path in &closed {
                 pending_diags.remove(path);
+                file_versions.remove(path);
                 let dependents = state.lock().remove_ephemeral_stub(path);
                 // Schedule re-analysis for files that depended on the closed file's type.
                 for dep_path in dependents {
@@ -827,13 +859,19 @@ impl LanguageServer for TixLanguageServer {
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
-        self.schedule_analysis(params.text_document.uri, params.text_document.text);
+        let version = params.text_document.version;
+        self.schedule_analysis(
+            params.text_document.uri,
+            params.text_document.text,
+            Some(version),
+        );
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         // With FULL sync, there's exactly one content change containing the full text.
+        let version = params.text_document.version;
         if let Some(change) = params.content_changes.into_iter().next() {
-            self.schedule_analysis(params.text_document.uri, change.text);
+            self.schedule_analysis(params.text_document.uri, change.text, Some(version));
         }
     }
 
