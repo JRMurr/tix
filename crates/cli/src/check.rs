@@ -332,6 +332,7 @@ pub fn run_check_project(
                 import_diagnostics,
                 context_args: bundle.context_args,
                 deadline_secs: bundle.deadline_secs,
+                rss_limit_mb: None,
             };
 
             let check_result = lang_check::run_inference(&inputs, None);

@@ -66,7 +66,7 @@ TIX_MEM_LIMIT=8192 tix lsp   # 8 GiB
 TIX_MEM_LIMIT=0 tix lsp      # no limit
 ```
 
-When the limit is hit, allocations fail and the process exits. Your editor will typically offer to restart the server.
+In addition to the hard `RLIMIT_AS` limit, the LSP monitors RSS (resident memory) and bails out of inference early when memory pressure is detected — returning partial results instead of crashing. This prevents the process from hitting the virtual address space limit (which would cause a hard SIGABRT). Background analysis of project files is also paused when RSS is high.
 
 ## Editor setup
 

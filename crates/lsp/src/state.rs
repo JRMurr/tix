@@ -97,6 +97,7 @@ pub struct SyntaxIntermediate {
     pub context_args: Arc<HashMap<SmolStr, comment_parser::ParsedTy>>,
     pub context_arg_types: HashMap<SmolStr, OutputTy>,
     pub deadline_secs: u64,
+    pub rss_limit_mb: Option<f64>,
 }
 
 /// LSP-specific inference inputs. Wraps the shared `lang_check::InferenceInputs`
@@ -320,6 +321,7 @@ pub fn resolve_imports_phase_b(
             import_diagnostics,
             context_args: intermediate.context_args.clone(),
             deadline_secs: Some(intermediate.deadline_secs),
+            rss_limit_mb: intermediate.rss_limit_mb,
         },
         nix_file: intermediate.nix_file,
         line_index: intermediate.line_index.clone(),
@@ -445,6 +447,9 @@ pub struct AnalysisState {
     /// Wrapped in `Arc` so the analysis loop can use it outside the state lock
     /// for demand-driven import resolution.
     pub coordinator: Arc<InferenceCoordinator>,
+    /// RSS limit in MB for inference. When process RSS exceeds this, inference
+    /// bails out with partial results to prevent OOM crashes from RLIMIT_AS.
+    pub rss_limit_mb: Option<f64>,
 }
 
 impl AnalysisState {
@@ -457,6 +462,7 @@ impl AnalysisState {
             config_dir: None,
             deadline_secs: 10,
             coordinator: Arc::new(InferenceCoordinator::new()),
+            rss_limit_mb: None,
         }
     }
 
@@ -598,6 +604,7 @@ impl AnalysisState {
         )
         .deadline(deadline)
         .cancel_flag(cancel_flag)
+        .rss_limit(self.rss_limit_mb)
         .run();
         let t_check = t0.elapsed();
 
@@ -739,6 +746,7 @@ impl AnalysisState {
             context_args,
             context_arg_types,
             deadline_secs: self.deadline_secs,
+            rss_limit_mb: self.rss_limit_mb,
         };
 
         // SyntaxData with empty import fields — handlers get fresh syntax
@@ -821,6 +829,7 @@ impl AnalysisState {
                 import_diagnostics,
                 context_args: intermediate.context_args.clone(),
                 deadline_secs: Some(intermediate.deadline_secs),
+                rss_limit_mb: intermediate.rss_limit_mb,
             },
             nix_file: intermediate.nix_file,
             line_index: intermediate.line_index.clone(),

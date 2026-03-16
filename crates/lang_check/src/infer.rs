@@ -40,7 +40,7 @@ use lang_ty::{AttrSetTy, PrimitiveTy, Ty};
 
 /// Read current process RSS from /proc/self/statm (Linux). Returns MB, or 0
 /// on non-Linux platforms.
-pub(crate) fn rss_mb() -> f64 {
+pub fn rss_mb() -> f64 {
     std::fs::read_to_string("/proc/self/statm")
         .ok()
         .and_then(|s| s.split_whitespace().nth(1)?.parse::<u64>().ok())
@@ -153,6 +153,26 @@ impl CheckCtx<'_> {
         let warnings = std::mem::take(&mut self.warnings);
         let mut diagnostics = diagnostic::errors_to_diagnostics(&errors, &self.types.storage);
         diagnostics.extend(diagnostic::warnings_to_diagnostics(&warnings));
+
+        // Check memory pressure before canonicalization. Canonicalization can
+        // easily double RSS (it creates OutputTy for every expression), so if
+        // we're already using a large fraction of the memory budget, force the
+        // deadline_exceeded path which skips expr-level canonicalization and
+        // degrades name-level types to cheap fallbacks.
+        if !self.deadline_exceeded {
+            if let Some(limit) = self.rss_limit_mb {
+                let rss = rss_mb();
+                if rss > limit {
+                    log::warn!(
+                        "memory pressure before canonicalization: {:.0}MB RSS > {:.0}MB limit, \
+                         skipping expr canonicalization",
+                        rss,
+                        limit,
+                    );
+                    self.deadline_exceeded = true;
+                }
+            }
+        }
 
         // Capture before self is moved into Collector.
         let timed_out = self.past_deadline();

@@ -91,9 +91,10 @@ pub struct TixLanguageServer {
 }
 
 impl TixLanguageServer {
-    pub fn new(client: Client, registry: TypeAliasRegistry) -> Self {
+    pub fn new(client: Client, registry: TypeAliasRegistry, rss_limit_mb: Option<f64>) -> Self {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
-        let analysis_state = AnalysisState::new(registry);
+        let mut analysis_state = AnalysisState::new(registry);
+        analysis_state.rss_limit_mb = rss_limit_mb;
 
         // Clone the coordinator Arc before moving analysis_state into the Mutex.
         // The analysis loop uses it outside the state lock for demand-driven
@@ -377,6 +378,28 @@ fn spawn_analysis_loop(
             // queue for project analyze files. Process one at a time so user
             // edits always take priority.
             if changes.is_empty() {
+                // Check RSS before dequeuing a background file. If memory
+                // pressure is high, skip background analysis to avoid OOM.
+                // Use 75% of the RLIMIT_AS-based RSS limit as the threshold
+                // (the inference-level check uses 40% — this is a coarser
+                // guard that stops processing before we even start).
+                let rss_limit = state.lock().rss_limit_mb;
+                if let Some(limit) = rss_limit {
+                    let bg_threshold = limit * 1.875; // 75% of mem limit (limit is 40%)
+                    let rss = lang_check::rss_mb();
+                    if rss > bg_threshold {
+                        let remaining = background_queue.lock().len();
+                        if remaining > 0 {
+                            log::warn!(
+                                "skipping {remaining} background files: RSS {:.0}MB > {:.0}MB threshold",
+                                rss,
+                                bg_threshold,
+                            );
+                            background_queue.lock().clear();
+                        }
+                        continue;
+                    }
+                }
                 if let Some((path, text)) = background_queue.lock().pop_front() {
                     log::debug!("background analysis: {}", path.display());
                     changes.insert(path, text);

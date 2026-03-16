@@ -305,6 +305,7 @@ impl InferenceCoordinator {
             import_diagnostics,
             context_args: bundle.context_args,
             deadline_secs: bundle.deadline_secs,
+            rss_limit_mb: None,
         };
 
         let check_result = run_inference(&inputs, cancel_flag);

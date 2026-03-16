@@ -6,6 +6,7 @@ pub mod coordinator;
 pub mod diagnostic;
 pub mod imports;
 mod infer;
+pub use infer::rss_mb;
 pub(crate) mod infer_expr;
 mod narrow;
 mod operators;
@@ -321,6 +322,10 @@ pub struct InferenceInputs {
     pub context_args: Arc<HashMap<smol_str::SmolStr, ParsedTy>>,
     /// Inference deadline in seconds. `None` means no deadline (CLI default).
     pub deadline_secs: Option<u64>,
+    /// RSS limit in MB. When process RSS exceeds this, inference bails out
+    /// with partial results to avoid OOM from RLIMIT_AS. `None` means no
+    /// RSS-based limit (CLI default).
+    pub rss_limit_mb: Option<f64>,
 }
 
 /// Run type inference using precomputed syntax data. Does not need the Salsa
@@ -390,6 +395,7 @@ pub struct CheckBuilder {
     context_args: Arc<HashMap<smol_str::SmolStr, ParsedTy>>,
     deadline: Option<Instant>,
     cancel_flag: Option<Arc<AtomicBool>>,
+    rss_limit_mb: Option<f64>,
 }
 
 impl CheckBuilder {
@@ -411,6 +417,7 @@ impl CheckBuilder {
             context_args,
             deadline: None,
             cancel_flag: None,
+            rss_limit_mb: None,
         }
     }
 
@@ -436,6 +443,7 @@ impl CheckBuilder {
             context_args,
             deadline: None,
             cancel_flag: None,
+            rss_limit_mb: None,
         }
     }
 
@@ -455,6 +463,7 @@ impl CheckBuilder {
             context_args: Arc::clone(&inputs.context_args),
             deadline,
             cancel_flag: None,
+            rss_limit_mb: inputs.rss_limit_mb,
         }
     }
 
@@ -476,6 +485,12 @@ impl CheckBuilder {
         self
     }
 
+    /// Set an RSS limit in MB for memory-pressure early exit.
+    pub fn rss_limit(mut self, limit_mb: Option<f64>) -> Self {
+        self.rss_limit_mb = limit_mb;
+        self
+    }
+
     /// Run type inference and return collected results + diagnostics.
     pub fn run(self) -> CheckResult {
         let aliases = load_inline_aliases(self.aliases, &self.module);
@@ -493,6 +508,9 @@ impl CheckBuilder {
         }
         if let Some(flag) = self.cancel_flag {
             check = check.with_cancel_flag(flag);
+        }
+        if let Some(limit) = self.rss_limit_mb {
+            check = check.with_rss_limit(limit);
         }
         let (inference, mut diagnostics, timed_out) = check.infer_prog_partial(self.grouped_defs);
 
@@ -620,6 +638,12 @@ pub struct CheckCtx<'db> {
     /// arrives for the same file, allowing in-flight inference to abort early.
     /// Checked alongside `deadline_exceeded` in the same hot paths.
     cancel_flag: Option<Arc<AtomicBool>>,
+
+    /// Optional RSS limit in MB. When set, `past_deadline()` periodically
+    /// checks the process RSS and triggers early exit if it exceeds this
+    /// threshold. This prevents OOM crashes from RLIMIT_AS by bailing out
+    /// before virtual address space is exhausted (virtual >> RSS).
+    rss_limit_mb: Option<f64>,
 }
 
 /// Count the function arity (number of arrows along the spine) of a ParsedTy.
@@ -677,6 +701,7 @@ impl<'db> CheckCtx<'db> {
             op_counter: 0,
             deadline_exceeded: false,
             cancel_flag: None,
+            rss_limit_mb: None,
         }
     }
 
@@ -694,9 +719,21 @@ impl<'db> CheckCtx<'db> {
         self
     }
 
-    /// Check whether the inference deadline has been exceeded or cancellation
-    /// was requested externally. Caches a positive result in `deadline_exceeded`
-    /// so subsequent checks are O(1).
+    /// Set an RSS limit in MB. When RSS exceeds this threshold, inference
+    /// bails out with partial results — the same behavior as deadline expiry.
+    /// Used by the LSP to prevent OOM crashes from RLIMIT_AS.
+    pub fn with_rss_limit(mut self, limit_mb: f64) -> Self {
+        self.rss_limit_mb = Some(limit_mb);
+        self
+    }
+
+    /// How often (in constrain ops) to check RSS. Less frequent than the
+    /// time-based deadline check because `/proc/self/statm` is a procfs read.
+    const RSS_CHECK_INTERVAL: u32 = 4096;
+
+    /// Check whether the inference deadline has been exceeded, cancellation
+    /// was requested externally, or RSS exceeds the memory limit. Caches a
+    /// positive result in `deadline_exceeded` so subsequent checks are O(1).
     fn past_deadline(&mut self) -> bool {
         if self.deadline_exceeded {
             return true;
@@ -709,6 +746,23 @@ impl<'db> CheckCtx<'db> {
             if flag.load(Ordering::Relaxed) {
                 self.deadline_exceeded = true;
                 return true;
+            }
+        }
+        // Periodic RSS check — less frequent than deadline to avoid
+        // excessive procfs reads. Checked when op_counter aligns with
+        // RSS_CHECK_INTERVAL (which is a multiple of DEADLINE_CHECK_INTERVAL).
+        if let Some(limit) = self.rss_limit_mb {
+            if self.op_counter.is_multiple_of(Self::RSS_CHECK_INTERVAL) {
+                let rss = infer::rss_mb();
+                if rss > limit {
+                    log::warn!(
+                        "RSS limit exceeded during inference: {:.0}MB > {:.0}MB limit, bailing out",
+                        rss,
+                        limit,
+                    );
+                    self.deadline_exceeded = true;
+                    return true;
+                }
             }
         }
         false

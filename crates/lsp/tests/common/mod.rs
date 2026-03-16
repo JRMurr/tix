@@ -68,7 +68,7 @@ impl LspTestHarness {
         };
 
         let (service, client_socket) =
-            LspService::new(|client| TixLanguageServer::new(client, registry));
+            LspService::new(|client| TixLanguageServer::new(client, registry, None));
 
         // Spawn a background task to continuously drain the ClientSocket
         // stream into an unbounded channel. Without this, `Client::publish_diagnostics()`
@@ -118,7 +118,7 @@ impl LspTestHarness {
         let registry = TypeAliasRegistry::with_builtins();
 
         let (service, client_socket) =
-            LspService::new(|client| TixLanguageServer::new(client, registry));
+            LspService::new(|client| TixLanguageServer::new(client, registry, None));
 
         let (notif_tx, notif_rx) = mpsc::unbounded_channel();
         tokio::spawn(async move {

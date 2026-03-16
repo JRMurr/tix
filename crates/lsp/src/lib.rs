@@ -100,7 +100,18 @@ async fn async_lsp_main() {
     );
 
     #[cfg(unix)]
-    apply_mem_limit();
+    let mem_limit_mib = apply_mem_limit();
+    #[cfg(not(unix))]
+    let mem_limit_mib: Option<u64> = None;
+
+    // Compute RSS limit for inference. Virtual address space (RLIMIT_AS) is
+    // typically 2-3x RSS due to allocator reservations, mmap regions, shared
+    // libraries, etc. Using 40% of the virtual limit as an RSS threshold
+    // prevents OOM crashes while leaving enough headroom for normal files.
+    let rss_limit_mb = mem_limit_mib.map(|mib| mib as f64 * 0.4);
+    if let Some(limit) = rss_limit_mb {
+        log::info!("RSS limit for inference: {:.0} MB", limit);
+    }
 
     let mut registry = TypeAliasRegistry::with_builtins();
 
@@ -122,7 +133,7 @@ async fn async_lsp_main() {
     let stdout = tokio::io::stdout();
 
     let (service, socket) =
-        LspService::new(|client| server::TixLanguageServer::new(client, registry));
+        LspService::new(|client| server::TixLanguageServer::new(client, registry, rss_limit_mb));
 
     Server::new(stdin, stdout, socket).serve(service).await;
 }
@@ -131,15 +142,18 @@ async fn async_lsp_main() {
 /// runaway memory usage from taking down the user's system. Reads
 /// `TIX_MEM_LIMIT` env var (in MiB); defaults to 4096 MiB (4 GiB).
 /// Set `TIX_MEM_LIMIT=0` to disable.
+///
+/// Returns the effective limit in MiB, or `None` if the limit was disabled
+/// or could not be applied.
 #[cfg(unix)]
-fn apply_mem_limit() {
+fn apply_mem_limit() -> Option<u64> {
     const DEFAULT_MIB: u64 = 4096;
 
     let limit_mib = match std::env::var("TIX_MEM_LIMIT") {
         Ok(val) => match val.parse::<u64>() {
             Ok(0) => {
                 log::info!("TIX_MEM_LIMIT=0: memory limit disabled");
-                return;
+                return None;
             }
             Ok(mib) => mib,
             Err(_) => {
@@ -157,7 +171,7 @@ fn apply_mem_limit() {
         Ok((_, hard)) => hard,
         Err(e) => {
             log::warn!("Failed to query RLIMIT_AS: {e}");
-            return;
+            return None;
         }
     };
 
@@ -168,7 +182,14 @@ fn apply_mem_limit() {
     };
 
     match Resource::AS.set(effective, hard) {
-        Ok(()) => log::info!("Memory limit set to {} MiB", effective / (1024 * 1024)),
-        Err(e) => log::warn!("Failed to set memory limit to {limit_mib} MiB: {e}"),
+        Ok(()) => {
+            let effective_mib = effective / (1024 * 1024);
+            log::info!("Memory limit set to {} MiB", effective_mib);
+            Some(effective_mib)
+        }
+        Err(e) => {
+            log::warn!("Failed to set memory limit to {limit_mib} MiB: {e}");
+            None
+        }
     }
 }
