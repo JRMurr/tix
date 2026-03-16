@@ -272,11 +272,9 @@ fn spawn_analysis_loop(
                             }
                         }
                         diag_timer = None;
-                        // Now block until next event.
-                        match rx.recv().await {
-                            Some(ev) => Some(ev),
-                            None => return,
-                        }
+                        // Don't block — fall through so the next iteration can
+                        // check the background queue.
+                        None
                     }
                     result = rx.recv() => match result {
                         Some(ev) => {
