@@ -74,7 +74,10 @@ pub fn load_stubs(
 /// `mem_limit_override`: if `Some(mib)`, use that value as the memory limit
 /// instead of reading `TIX_MEM_LIMIT` from the environment. `Some(0)` disables
 /// the limit entirely.
-pub fn run_lsp(mem_limit_override: Option<u64>) {
+/// `log_level_override`: if `Some(level)`, use that level for tix crates
+/// instead of the default "info". Common values: "debug", "trace", "warn".
+/// The RUST_LOG env var takes precedence if set.
+pub fn run_lsp(mem_limit_override: Option<u64>, log_level_override: Option<String>) {
     // Build a custom tokio runtime with 16MB worker thread stacks. The default
     // (~8MB on Linux) can overflow on deep import trees where file_root_type
     // recurses through many transitive imports, each allocating Module,
@@ -84,17 +87,18 @@ pub fn run_lsp(mem_limit_override: Option<u64>) {
         .thread_stack_size(16 * 1024 * 1024)
         .build()
         .expect("failed to build tokio runtime");
-    rt.block_on(async_lsp_main(mem_limit_override));
+    rt.block_on(async_lsp_main(mem_limit_override, log_level_override));
 }
 
-async fn async_lsp_main(mem_limit_override: Option<u64>) {
+async fn async_lsp_main(mem_limit_override: Option<u64>, log_level_override: Option<String>) {
     // Default to info-level for tix/lang crates, warn for everything else.
-    // RUST_LOG env var overrides this if set.
-    env_logger::Builder::from_env(
-        env_logger::Env::default()
-            .default_filter_or("warn,tix_lsp=info,lang_check=info,lang_ast=info"),
-    )
-    .init();
+    // RUST_LOG env var overrides this if set. The --log-level CLI flag
+    // changes the tix crate level (e.g. "debug" to see per-file analysis).
+    let tix_level = log_level_override.as_deref().unwrap_or("info");
+    let default_filter =
+        format!("warn,tix_lsp={tix_level},lang_check={tix_level},lang_ast={tix_level}");
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(&default_filter))
+        .init();
 
     log::info!(
         "tix lsp {} starting (pid {})",

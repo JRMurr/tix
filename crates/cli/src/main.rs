@@ -156,6 +156,11 @@ enum Command {
         /// Set to 0 to disable. Overrides TIX_MEM_LIMIT env var.
         #[arg(long, value_name = "MIB")]
         mem_limit: Option<u64>,
+
+        /// Log level for tix crates (default: info).
+        /// Overridden by the RUST_LOG env var if set.
+        #[arg(long, value_name = "LEVEL", default_value = "info")]
+        log_level: String,
     },
 }
 
@@ -312,8 +317,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
             Ok(())
         }
-        Some(Command::Lsp { mem_limit }) => {
-            tix_lsp::run_lsp(mem_limit);
+        Some(Command::Lsp {
+            mem_limit,
+            log_level,
+        }) => {
+            tix_lsp::run_lsp(mem_limit, Some(log_level));
             Ok(())
         }
         None => {

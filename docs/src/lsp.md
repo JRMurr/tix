@@ -57,7 +57,19 @@ Code actions (quick fixes / refactorings) are offered based on diagnostics and c
 
 - **Remove unused binding** (quick fix): when a let-binding has no references in the file, offers to remove the entire `name = value;` line. Names starting with `_` are excluded (conventional "unused" prefix in Nix).
 
-## Memory limit
+## CLI flags
+
+### `--log-level`
+
+Controls the log level for tix crates (default: `info`). Useful for debugging background analysis, import resolution, or inference behavior. The `RUST_LOG` environment variable takes precedence if set.
+
+```bash
+tix lsp --log-level debug    # see per-file background analysis, import details
+tix lsp --log-level warn     # quieter, only warnings and errors
+tix lsp --log-level trace    # maximum verbosity
+```
+
+### `--mem-limit`
 
 The LSP sets a 4 GiB virtual address space limit (`RLIMIT_AS`) at startup to prevent runaway inference from consuming all system memory. Override with the `--mem-limit` flag (value in MiB) or the `TIX_MEM_LIMIT` environment variable:
 
