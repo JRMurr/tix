@@ -19,38 +19,30 @@ Six crates under `crates/`, listed in pipeline order:
 
 Type-checking a Nix file flows through six phases:
 
-```
-                         ┌──────────────────────────────────────────┐
-  Nix source             │              lang_ast                    │
-      │                  │                                          │
-      ▼                  │                                          │
-  ① Parse & lower ───────┤  rnix CST → Tix AST (Expr/Name arenas) │
-      │                  │  + source maps (AstPtr ↔ ExprId)        │
-      ▼                  │                                          │
-  ② Name resolution ─────┤  scope tree, reference → definition     │
-      │                  │                                          │
-      ▼                  │                                          │
-  ③ SCC grouping ────────┤  Tarjan's on binding dependency graph   │
-                         └──────────────────────────────────────────┘
-      │
-      ▼                  ┌──────────────────────────────────────────┐
-  ④ Type inference ──────┤              lang_check                  │
-      │                  │                                          │
-      │  a. Pre-allocate TyIds for every name and expression       │
-      │  b. Apply stub/annotation types to entry parameters        │
-      │  c. Per SCC group:                                         │
-      │     · infer_expr  — single-pass AST walk                   │
-      │     · constrain   — directional subtyping (bounds inline)  │
-      │     · resolve deferred overloads/merges                    │
-      │     · extrude     — level-based generalization             │
-      │  d. Infer root expression                                  │
-      │                  │                                          │
-      ▼                  │                                          │
-  ⑤ Canonicalize ────────┤  Ty<TyId> → OutputTy (polarity-aware)  │
-                         └──────────────────────────────────────────┘
-      │
-      ▼
-  ⑥ Output ──────────────  CLI prints types / LSP serves requests
+```mermaid
+flowchart TD
+    subgraph lang_ast
+        A[Nix source] --> B["① Parse & lower
+        rnix CST → Tix AST (Expr/Name arenas)
+        + source maps (AstPtr ↔ ExprId)"]
+        B --> C["② Name resolution
+        scope tree, reference → definition"]
+        C --> D["③ SCC grouping
+        Tarjan's on binding dependency graph"]
+    end
+
+    subgraph lang_check
+        D --> E["④ Type inference
+        a. Pre-allocate TyIds for all names/exprs
+        b. Apply stub/annotation types
+        c. Per SCC: infer → constrain → extrude
+        d. Infer root expression"]
+        E --> F["⑤ Canonicalize
+        Ty‹TyId› → OutputTy (polarity-aware)"]
+    end
+
+    F --> G["⑥ Output
+    CLI prints types / LSP serves requests"]
 ```
 
 ### Phase 1: Parse & lower

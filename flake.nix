@@ -97,6 +97,7 @@
                 # common
                 pkgs.just
                 pkgs.mdbook
+                pkgs.mdbook-mermaid
               ];
             };
           };
@@ -110,8 +111,11 @@
             docs = pkgs.stdenv.mkDerivation {
               name = "tix-docs";
               src = ./docs;
-              nativeBuildInputs = [ pkgs.mdbook ];
-              buildPhase = "mdbook build -d $out";
+              nativeBuildInputs = [ pkgs.mdbook pkgs.mdbook-mermaid ];
+              buildPhase = ''
+                mdbook-mermaid install .
+                mdbook build -d $out
+              '';
               dontInstall = true;
             };
             # rust-docker = rustAttrs.docker;
