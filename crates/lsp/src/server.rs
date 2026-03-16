@@ -416,26 +416,23 @@ fn spawn_analysis_loop(
             // If no user-driven changes are pending, check the background
             // queue for project analyze files. Process one at a time so user
             // edits always take priority.
-            if changes.is_empty() {
+            let is_background = changes.is_empty();
+            if is_background {
                 // Check RSS before dequeuing a background file. If memory
                 // pressure is high, skip background analysis to avoid OOM.
-                // Use 75% of the RLIMIT_AS-based RSS limit as the threshold
-                // (the inference-level check uses 40% — this is a coarser
-                // guard that stops processing before we even start).
+                // Stop when RSS reaches the inference limit — any further
+                // files would bail out immediately anyway, just wasting
+                // memory on parsing without producing useful types.
                 let rss_limit = state.lock().rss_limit_mb;
                 if let Some(limit) = rss_limit {
-                    // rss_limit_mb is 40% of RLIMIT_AS. Background queue uses a higher
-                    // threshold (75% of RLIMIT_AS) to stop scheduling new files before
-                    // inference-level limits kick in. Back-compute: 0.75 / 0.40 = 1.875.
-                    let bg_threshold = limit * 1.875;
                     let rss = lang_check::rss_mb();
-                    if rss > bg_threshold {
+                    if rss > limit {
                         let remaining = background_queue.lock().len();
                         if remaining > 0 {
                             log::warn!(
-                                "skipping {remaining} background files: RSS {:.0}MB > {:.0}MB threshold",
+                                "skipping {remaining} background files: RSS {:.0}MB > {:.0}MB limit",
                                 rss,
-                                bg_threshold,
+                                limit,
                             );
                             background_queue.lock().clear();
                         }
@@ -523,6 +520,14 @@ fn spawn_analysis_loop(
                 }
 
                 // Phase C: Type inference (NO mutex held).
+                // For user-triggered files, skip the RSS limit so editing
+                // works even when RSS is high from background analysis.
+                // The RSS limit exists to prevent background processing
+                // from consuming unbounded memory, not to block active work.
+                let mut inference_inputs = inference_inputs;
+                if !is_background {
+                    inference_inputs.core.rss_limit_mb = None;
+                }
                 let (check_result, infer_duration) =
                     crate::state::run_inference(&inference_inputs, Some(cancel_flag.clone()));
 
