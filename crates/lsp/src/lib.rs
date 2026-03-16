@@ -71,7 +71,10 @@ pub fn load_stubs(
 /// and editor settings (`nix.serverSettings.stubs`). Built-in nixpkgs stubs
 /// are always included; use `TIX_BUILTIN_STUBS` env var to override the
 /// compiled-in context stubs with richer generated ones.
-pub fn run_lsp() {
+/// `mem_limit_override`: if `Some(mib)`, use that value as the memory limit
+/// instead of reading `TIX_MEM_LIMIT` from the environment. `Some(0)` disables
+/// the limit entirely.
+pub fn run_lsp(mem_limit_override: Option<u64>) {
     // Build a custom tokio runtime with 16MB worker thread stacks. The default
     // (~8MB on Linux) can overflow on deep import trees where file_root_type
     // recurses through many transitive imports, each allocating Module,
@@ -81,10 +84,10 @@ pub fn run_lsp() {
         .thread_stack_size(16 * 1024 * 1024)
         .build()
         .expect("failed to build tokio runtime");
-    rt.block_on(async_lsp_main());
+    rt.block_on(async_lsp_main(mem_limit_override));
 }
 
-async fn async_lsp_main() {
+async fn async_lsp_main(mem_limit_override: Option<u64>) {
     // Default to info-level for tix/lang crates, warn for everything else.
     // RUST_LOG env var overrides this if set.
     env_logger::Builder::from_env(
@@ -100,9 +103,12 @@ async fn async_lsp_main() {
     );
 
     #[cfg(unix)]
-    let mem_limit_mib = apply_mem_limit();
+    let mem_limit_mib = apply_mem_limit(mem_limit_override);
     #[cfg(not(unix))]
-    let mem_limit_mib: Option<u64> = None;
+    let mem_limit_mib: Option<u64> = {
+        let _ = mem_limit_override;
+        None
+    };
 
     // Compute RSS limit for inference. Virtual address space (RLIMIT_AS) is
     // typically 2-3x RSS due to allocator reservations, mmap regions, shared
@@ -139,29 +145,40 @@ async fn async_lsp_main() {
 }
 
 /// Apply a virtual address space limit via setrlimit(RLIMIT_AS) to prevent
-/// runaway memory usage from taking down the user's system. Reads
-/// `TIX_MEM_LIMIT` env var (in MiB); defaults to 4096 MiB (4 GiB).
-/// Set `TIX_MEM_LIMIT=0` to disable.
+/// runaway memory usage from taking down the user's system. CLI `--mem-limit`
+/// flag takes priority, then `TIX_MEM_LIMIT` env var, then defaults to
+/// 4096 MiB (4 GiB). Set to 0 to disable.
 ///
 /// Returns the effective limit in MiB, or `None` if the limit was disabled
 /// or could not be applied.
 #[cfg(unix)]
-fn apply_mem_limit() -> Option<u64> {
+fn apply_mem_limit(cli_override: Option<u64>) -> Option<u64> {
     const DEFAULT_MIB: u64 = 4096;
 
-    let limit_mib = match std::env::var("TIX_MEM_LIMIT") {
-        Ok(val) => match val.parse::<u64>() {
-            Ok(0) => {
-                log::info!("TIX_MEM_LIMIT=0: memory limit disabled");
-                return None;
-            }
-            Ok(mib) => mib,
-            Err(_) => {
-                log::warn!("Invalid TIX_MEM_LIMIT value '{val}', using default {DEFAULT_MIB} MiB");
-                DEFAULT_MIB
-            }
-        },
-        Err(_) => DEFAULT_MIB,
+    // CLI flag takes priority over env var.
+    let limit_mib = if let Some(mib) = cli_override {
+        if mib == 0 {
+            log::info!("--mem-limit 0: memory limit disabled");
+            return None;
+        }
+        mib
+    } else {
+        match std::env::var("TIX_MEM_LIMIT") {
+            Ok(val) => match val.parse::<u64>() {
+                Ok(0) => {
+                    log::info!("TIX_MEM_LIMIT=0: memory limit disabled");
+                    return None;
+                }
+                Ok(mib) => mib,
+                Err(_) => {
+                    log::warn!(
+                        "Invalid TIX_MEM_LIMIT value '{val}', using default {DEFAULT_MIB} MiB"
+                    );
+                    DEFAULT_MIB
+                }
+            },
+            Err(_) => DEFAULT_MIB,
+        }
     };
 
     let limit_bytes = limit_mib * 1024 * 1024;

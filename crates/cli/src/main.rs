@@ -151,7 +151,12 @@ enum Command {
     },
 
     /// Start the Language Server (LSP) on stdin/stdout
-    Lsp,
+    Lsp {
+        /// Virtual address space limit in MiB (default: 4096).
+        /// Set to 0 to disable. Overrides TIX_MEM_LIMIT env var.
+        #[arg(long, value_name = "MIB")]
+        mem_limit: Option<u64>,
+    },
 }
 
 /// Shared CLI arguments for all gen-stubs subcommands.
@@ -249,7 +254,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let args = Cli::parse();
 
     // The LSP sets up its own logger with custom filters, so skip here.
-    if !matches!(args.command, Some(Command::Lsp)) {
+    if !matches!(args.command, Some(Command::Lsp { .. })) {
         timing::init_tracing(args.timing);
     }
 
@@ -307,8 +312,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
             Ok(())
         }
-        Some(Command::Lsp) => {
-            tix_lsp::run_lsp();
+        Some(Command::Lsp { mem_limit }) => {
+            tix_lsp::run_lsp(mem_limit);
             Ok(())
         }
         None => {

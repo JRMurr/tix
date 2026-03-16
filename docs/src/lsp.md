@@ -59,11 +59,12 @@ Code actions (quick fixes / refactorings) are offered based on diagnostics and c
 
 ## Memory limit
 
-The LSP sets a 4 GiB virtual address space limit (`RLIMIT_AS`) at startup to prevent runaway inference from consuming all system memory. Override with the `TIX_MEM_LIMIT` environment variable (value in MiB):
+The LSP sets a 4 GiB virtual address space limit (`RLIMIT_AS`) at startup to prevent runaway inference from consuming all system memory. Override with the `--mem-limit` flag (value in MiB) or the `TIX_MEM_LIMIT` environment variable:
 
 ```bash
-TIX_MEM_LIMIT=8192 tix lsp   # 8 GiB
-TIX_MEM_LIMIT=0 tix lsp      # no limit
+tix lsp --mem-limit 8192     # 8 GiB
+tix lsp --mem-limit 0        # no limit
+TIX_MEM_LIMIT=8192 tix lsp   # 8 GiB (env var, lower priority than --mem-limit)
 ```
 
 In addition to the hard `RLIMIT_AS` limit, the LSP monitors RSS (resident memory) and bails out of inference early when memory pressure is detected — returning partial results instead of crashing. This prevents the process from hitting the virtual address space limit (which would cause a hard SIGABRT). Background analysis of project files is also paused when RSS is high.
