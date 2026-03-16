@@ -262,7 +262,7 @@ fn spawn_analysis_loop(
             // If we have pending diagnostics, race the quiescence timer against
             // new events. New events reset the timer (like RA discards stale
             // diagnostics when state changes).
-            let first_event = if let Some(ref mut timer) = diag_timer {
+            let first_event: Option<AnalysisEvent> = if let Some(ref mut timer) = diag_timer {
                 tokio::select! {
                     _ = &mut *timer => {
                         // Quiescence reached — publish all pending diagnostics.
@@ -274,7 +274,7 @@ fn spawn_analysis_loop(
                         diag_timer = None;
                         // Now block until next event.
                         match rx.recv().await {
-                            Some(ev) => ev,
+                            Some(ev) => Some(ev),
                             None => return,
                         }
                     }
@@ -292,14 +292,21 @@ fn spawn_analysis_loop(
                                 AnalysisEvent::FileClosed { .. } => {}
                             }
                             diag_timer = None;
-                            ev
+                            Some(ev)
                         }
                         None => return,
                     }
                 }
+            } else if !background_queue.lock().is_empty() {
+                // Background queue has items — don't block indefinitely.
+                // Try to receive a user event; if none, fall through to
+                // the background queue processing below with empty changes.
+                // Yield first so the runtime can process incoming LSP messages.
+                tokio::task::yield_now().await;
+                rx.try_recv().ok()
             } else {
                 match rx.recv().await {
-                    Some(ev) => ev,
+                    Some(ev) => Some(ev),
                     None => return,
                 }
             };
@@ -312,26 +319,28 @@ fn spawn_analysis_loop(
             let mut changes: HashMap<PathBuf, String> = HashMap::new();
             let mut closed: Vec<PathBuf> = Vec::new();
 
-            // Process the first event.
-            match first_event {
-                AnalysisEvent::FileChanged { path, text } => {
-                    changes.insert(path, text);
-                }
-                AnalysisEvent::FileClosed { path } => {
-                    closed.push(path);
-                }
-                AnalysisEvent::ReanalyzeFile { path } => {
-                    // Re-analysis: read the file's current text from the Salsa DB.
-                    let text = {
-                        let st = state.lock();
-                        st.files
-                            .get(&path)
-                            .map(|a| a.nix_file.contents(&st.db).to_owned())
-                    };
-                    if let Some(text) = text {
+            // Process the first event (None when the background queue woke us).
+            if let Some(first_event) = first_event {
+                match first_event {
+                    AnalysisEvent::FileChanged { path, text } => {
                         changes.insert(path, text);
-                    } else {
-                        log::debug!("ReanalyzeFile for {:?}: file not in DB, skipping", path);
+                    }
+                    AnalysisEvent::FileClosed { path } => {
+                        closed.push(path);
+                    }
+                    AnalysisEvent::ReanalyzeFile { path } => {
+                        // Re-analysis: read the file's current text from the Salsa DB.
+                        let text = {
+                            let st = state.lock();
+                            st.files
+                                .get(&path)
+                                .map(|a| a.nix_file.contents(&st.db).to_owned())
+                        };
+                        if let Some(text) = text {
+                            changes.insert(path, text);
+                        } else {
+                            log::debug!("ReanalyzeFile for {:?}: file not in DB, skipping", path);
+                        }
                     }
                 }
             }
