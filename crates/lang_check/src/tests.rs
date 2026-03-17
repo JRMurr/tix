@@ -2100,6 +2100,46 @@ mod import_tests {
         }
     }
 
+    // Import a function whose return type is a union with a shared type
+    // variable (`b` appears both in the union members and as a parameter).
+    // This exercises intern_output_ty's Union arm with shared TyVars.
+    // Regression: constrain() during interning would add spurious upper
+    // bounds on the shared variable, causing false positive type errors.
+    #[test]
+    fn import_union_with_shared_tyvar() {
+        // lib.nix type: a -> b -> { val: b } | { extra: b, val: ~null }
+        // The union members both contain `b`, which is shared with the param.
+        let ty = get_multifile_root(&[
+            (
+                "/main.nix",
+                r#"
+                let lib = import /lib.nix;
+                in (lib.wrap null "hello").val
+                "#,
+            ),
+            (
+                "/lib.nix",
+                r#"
+                {
+                    wrap = x: y:
+                        if builtins.isNull x
+                        then { val = y; }
+                        else { val = x; extra = y; };
+                }
+                "#,
+            ),
+        ]);
+        // The function returns a union, so .val is `string | ~null` (both
+        // branches contribute). The key assertion is no spurious TypeMismatch.
+        match &ty {
+            OutputTy::Union(members) => {
+                let has_string = members.iter().any(|m| *m.0 == arc_ty!(String));
+                assert!(has_string, "union should contain string, got: {ty}");
+            }
+            _ => panic!("expected union, got: {ty}"),
+        }
+    }
+
     // ======================================================================
     // Named / alias provenance tests
     // ======================================================================

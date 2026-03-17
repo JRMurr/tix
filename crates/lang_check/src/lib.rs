@@ -880,12 +880,14 @@ impl<'db> CheckCtx<'db> {
                 }))
             }
             // Union: create a fresh variable with each member as a lower bound.
+            // Record bounds directly without propagation — the OutputTy is
+            // already internally consistent, and constrain() would create
+            // spurious cross-links through shared type variables.
             OutputTy::Union(members) => {
                 let var = self.new_var();
                 for m in members {
                     let member_ty = self.intern_output_ty_inner(&m.0, var_map);
-                    self.constrain(member_ty, var)
-                        .expect("union import constraint should not fail");
+                    self.types.storage.add_lower_bound(var, member_ty);
                 }
                 var
             }
@@ -894,8 +896,7 @@ impl<'db> CheckCtx<'db> {
                 let var = self.new_var();
                 for m in members {
                     let member_ty = self.intern_output_ty_inner(&m.0, var_map);
-                    self.constrain(var, member_ty)
-                        .expect("intersection import constraint should not fail");
+                    self.types.storage.add_upper_bound(var, member_ty);
                 }
                 var
             }
