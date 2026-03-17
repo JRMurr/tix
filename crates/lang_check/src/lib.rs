@@ -900,10 +900,19 @@ impl<'db> CheckCtx<'db> {
                 }
                 var
             }
-            // Named: intern the inner type and wrap in Ty::Named.
+            // Named: if the alias registry has a definition for this name,
+            // re-instantiate from the alias definition (with fresh generic
+            // variables) instead of interning the potentially-monomorphized
+            // inner type from the exporting file. This prevents monomorphized
+            // generics in dep files from polluting the importing file's types.
             OutputTy::Named(name, inner) => {
-                let inner_id = self.intern_output_ty_inner(&inner.0, var_map);
-                self.alloc_concrete(Ty::Named(name.clone(), inner_id))
+                if let Some(alias_body) = self.type_aliases.get(name).cloned() {
+                    let fresh_inner = self.intern_fresh_ty(alias_body);
+                    self.alloc_concrete(Ty::Named(name.clone(), fresh_inner))
+                } else {
+                    let inner_id = self.intern_output_ty_inner(&inner.0, var_map);
+                    self.alloc_concrete(Ty::Named(name.clone(), inner_id))
+                }
             }
             // Negation: intern the inner type and wrap in Ty::Neg.
             OutputTy::Neg(inner) => {

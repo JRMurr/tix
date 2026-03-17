@@ -1573,7 +1573,7 @@ mod import_tests {
     use std::sync::Arc;
 
     use crate::aliases::TypeAliasRegistry;
-    use crate::check_file_with_imports;
+    use crate::diagnostic::TixDiagnostic;
     use crate::imports::resolve_import_types_from_stubs;
 
     /// Infer a multi-file project using the stubs-based model.
@@ -1582,7 +1582,9 @@ mod import_tests {
     /// and collect its root type into an ephemeral stubs map. Then we infer
     /// the entry file using those ephemeral stubs.
     fn check_multifile(files: &[(&str, &str)]) -> (OutputTy, Vec<crate::imports::ImportError>) {
-        check_multifile_with_aliases(files, &TypeAliasRegistry::default())
+        let (ty, errors, _diags) =
+            check_multifile_with_aliases(files, &TypeAliasRegistry::default());
+        (ty, errors)
     }
 
     fn get_multifile_root(files: &[(&str, &str)]) -> OutputTy {
@@ -1852,7 +1854,11 @@ mod import_tests {
     fn check_multifile_with_aliases(
         files: &[(&str, &str)],
         aliases: &TypeAliasRegistry,
-    ) -> (OutputTy, Vec<crate::imports::ImportError>) {
+    ) -> (
+        OutputTy,
+        Vec<crate::imports::ImportError>,
+        Vec<TixDiagnostic>,
+    ) {
         let (db, entry_file) = MultiFileTestDatabase::new(files);
 
         // Build ephemeral stubs by inferring all non-entry files first.
@@ -1873,15 +1879,23 @@ mod import_tests {
                     &ephemeral_stubs,
                 );
 
-                if let Ok(dep_result) = check_file_with_imports(
-                    &db,
-                    dep_file,
-                    Arc::new(aliases.clone()),
+                // Use partial inference (like the real coordinator) so that dep
+                // files with type errors still produce ephemeral stubs.
+                let dep_indices = lang_ast::module_indices(&db, dep_file);
+                let dep_groups = lang_ast::group_def(&db, dep_file);
+                let dep_aliases =
+                    crate::load_inline_aliases(Arc::new(aliases.clone()), &dep_module);
+                let dep_check = crate::CheckCtx::new(
+                    &dep_module,
+                    &dep_name_res,
+                    &dep_indices.binding_expr,
+                    dep_aliases,
                     dep_resolution.types,
-                ) {
-                    if let Some(root_ty) = dep_result.expr_ty_map.get(dep_module.entry_expr) {
-                        ephemeral_stubs.insert(dep_path, root_ty.clone());
-                    }
+                    Arc::default(),
+                );
+                let (dep_result, _diags, _timed_out) = dep_check.infer_prog_partial(dep_groups);
+                if let Some(root_ty) = dep_result.expr_ty_map.get(dep_module.entry_expr) {
+                    ephemeral_stubs.insert(dep_path, root_ty.clone());
                 }
             }
         }
@@ -1896,9 +1910,20 @@ mod import_tests {
             resolve_import_types_from_stubs(&module, &name_res, base_dir, &ephemeral_stubs);
         let errors = resolution.errors;
 
-        let result =
-            check_file_with_imports(&db, entry_file, Arc::new(aliases.clone()), resolution.types)
-                .expect("inference should succeed");
+        // Use partial inference for the entry file too, so tests can inspect
+        // the root type even when there are type errors (matches real coordinator).
+        let entry_indices = lang_ast::module_indices(&db, entry_file);
+        let entry_groups = lang_ast::group_def(&db, entry_file);
+        let entry_aliases = crate::load_inline_aliases(Arc::new(aliases.clone()), &module);
+        let entry_check = crate::CheckCtx::new(
+            &module,
+            &name_res,
+            &entry_indices.binding_expr,
+            entry_aliases,
+            resolution.types,
+            Arc::default(),
+        );
+        let (result, diagnostics, _timed_out) = entry_check.infer_prog_partial(entry_groups);
 
         let root_ty = result
             .expr_ty_map
@@ -1906,14 +1931,15 @@ mod import_tests {
             .expect("root expr should have a type")
             .clone();
 
-        (root_ty, errors)
+        (root_ty, errors, diagnostics)
     }
 
     fn get_multifile_root_with_aliases(
         files: &[(&str, &str)],
         aliases: &TypeAliasRegistry,
     ) -> OutputTy {
-        check_multifile_with_aliases(files, aliases).0
+        let (ty, _errors, _diags) = check_multifile_with_aliases(files, aliases);
+        ty
     }
 
     // ======================================================================
@@ -2232,6 +2258,73 @@ mod import_tests {
             arc_ty!(Int),
             "selecting .x from Named(Foo, {{ x: int }}) should produce int"
         );
+    }
+
+    // Regression: importing a file annotated with Pkgs that uses lib functions
+    // and string interpolation with derivations should not produce false
+    // positive type errors when the importing file also annotates its arg
+    // as Pkgs. Uses the exact bwrap.nix content from the real-world bug.
+    #[test]
+    fn import_pkgs_annotation_no_false_positive() {
+        let registry = TypeAliasRegistry::with_builtins();
+
+        let dep_nix = include_str!("../../../test/regress/bwrap_false_positive/bwrap.nix");
+        let network_nix = include_str!("../../../test/regress/bwrap_false_positive/network.nix");
+
+        let (ty, errors, diagnostics) = check_multifile_with_aliases(
+            &[
+                (
+                    "/main.nix",
+                    indoc::indoc! { r#"
+                        {
+                          # type: pkgs :: Pkgs
+                          pkgs,
+                        }:
+                        let
+                          result = import /dep.nix { inherit pkgs; };
+                        in
+                        result
+                    "# },
+                ),
+                ("/dep.nix", dep_nix),
+                ("/network.nix", network_nix),
+            ],
+            &registry,
+        );
+
+        assert!(
+            errors.is_empty(),
+            "should have no import errors, got: {errors:?}"
+        );
+
+        // No type errors should be reported for the entry file.
+        let type_errors: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| {
+                matches!(
+                    d.kind,
+                    crate::diagnostic::TixDiagnosticKind::TypeMismatch { .. }
+                )
+            })
+            .collect();
+        assert!(
+            type_errors.is_empty(),
+            "should have no type errors, got: {type_errors:?}"
+        );
+
+        // main.nix is { pkgs } -> result. Result should have bubblewrap_helper field.
+        match &ty {
+            OutputTy::Lambda { body, .. } => match body.0.as_ref() {
+                OutputTy::AttrSet(attr) => {
+                    assert!(
+                        attr.fields.contains_key("bubblewrap_helper"),
+                        "should have 'bubblewrap_helper' field, got: {ty}"
+                    );
+                }
+                _ => panic!("expected function returning attrset, got: {ty}"),
+            },
+            _ => panic!("expected function type, got: {ty}"),
+        }
     }
 
     // ======================================================================
