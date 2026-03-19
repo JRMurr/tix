@@ -91,6 +91,50 @@ enum Prec {
     _Atom,      // highest: primitives, parens, lists, attrsets
 }
 
+/// Collect all leaf (non-Union) members from a possibly nested union tree.
+fn flatten_union(members: &[NixosTypeInfo]) -> Vec<&NixosTypeInfo> {
+    fn flatten_one(ty: &NixosTypeInfo) -> Vec<&NixosTypeInfo> {
+        match ty {
+            NixosTypeInfo::Union { members } => members.iter().flat_map(flatten_one).collect(),
+            // NullOr is sugar for `elem | null` — count the inner elem and a
+            // null-carrier so the heuristic sees all the leaf types.
+            NixosTypeInfo::NullOr { elem } => {
+                let mut leaves = flatten_one(elem);
+                leaves.push(ty);
+                leaves
+            }
+            other => vec![other],
+        }
+    }
+    members.iter().flat_map(flatten_one).collect()
+}
+
+/// Detect "freeform value" unions produced by NixOS format types
+/// (pkgs.formats.json/yaml/toml). These are oneOf unions that list every
+/// possible Nix value kind: bool, int, float, string, path, attrsOf, listOf,
+/// null. Expanding them into a tix union causes false type errors on field
+/// access (e.g. `config.services.blocky.settings.ports` fails because `path`
+/// can't have fields). Collapse them to `{ ... }` (open attrset) instead.
+///
+/// Heuristic: a union is freeform if its flattened leaves (>= 4) include
+/// at least one `path` primitive, one `List`, and one `AttrsOf`/`Anything`.
+fn is_freeform_value_union(members: &[NixosTypeInfo]) -> bool {
+    let leaves = flatten_union(members);
+    if leaves.len() < 4 {
+        return false;
+    }
+    let has_path = leaves
+        .iter()
+        .any(|m| matches!(m, NixosTypeInfo::Primitive { value } if value == "path"));
+    let has_list = leaves
+        .iter()
+        .any(|m| matches!(m, NixosTypeInfo::List { .. }));
+    let has_attrs = leaves
+        .iter()
+        .any(|m| matches!(m, NixosTypeInfo::AttrsOf { .. } | NixosTypeInfo::Anything));
+    has_path && has_list && has_attrs
+}
+
 /// Convert a NixOS type to a .tix type expression string.
 pub fn type_to_tix(ty: &NixosTypeInfo) -> String {
     type_to_tix_prec(ty, Prec::Arrow)
@@ -123,7 +167,7 @@ fn type_to_tix_prec(ty: &NixosTypeInfo, ctx: Prec) -> String {
         }
 
         NixosTypeInfo::Union { members } => {
-            if members.is_empty() {
+            if members.is_empty() || is_freeform_value_union(members) {
                 "{ ... }".to_string()
             } else {
                 let parts: Vec<String> = members
@@ -1312,6 +1356,108 @@ mod tests {
     #[test]
     fn tix_anything() {
         assert_eq!(type_to_tix(&NixosTypeInfo::Anything), "{ ... }");
+    }
+
+    /// NixOS format types (pkgs.formats.json/yaml/toml) produce oneOf unions
+    /// containing path, list, attrsOf, null, and various primitives. These
+    /// represent "any valid JSON/YAML/TOML value" and should collapse to
+    /// `{ ... }` so that field access doesn't produce false type errors.
+    #[test]
+    fn tix_freeform_value_union_collapses() {
+        // Mimics the expanded type of `pkgs.formats.json {}.type`:
+        //   oneOf [bool int float str path (attrsOf valueType) (listOf valueType) null]
+        let ty = NixosTypeInfo::Union {
+            members: vec![
+                NixosTypeInfo::Primitive {
+                    value: "bool".into(),
+                },
+                NixosTypeInfo::Union {
+                    members: vec![
+                        NixosTypeInfo::Primitive {
+                            value: "int".into(),
+                        },
+                        NixosTypeInfo::Union {
+                            members: vec![
+                                NixosTypeInfo::Primitive {
+                                    value: "float".into(),
+                                },
+                                NixosTypeInfo::Union {
+                                    members: vec![
+                                        NixosTypeInfo::Primitive {
+                                            value: "string".into(),
+                                        },
+                                        NixosTypeInfo::Union {
+                                            members: vec![
+                                                NixosTypeInfo::Primitive {
+                                                    value: "path".into(),
+                                                },
+                                                NixosTypeInfo::Union {
+                                                    members: vec![
+                                                        NixosTypeInfo::AttrsOf {
+                                                            elem: Box::new(NixosTypeInfo::Anything),
+                                                        },
+                                                        NixosTypeInfo::Union {
+                                                            members: vec![
+                                                                NixosTypeInfo::List {
+                                                                    elem: Box::new(
+                                                                        NixosTypeInfo::Anything,
+                                                                    ),
+                                                                },
+                                                                NixosTypeInfo::NullOr {
+                                                                    elem: Box::new(
+                                                                        NixosTypeInfo::Anything,
+                                                                    ),
+                                                                },
+                                                            ],
+                                                        },
+                                                    ],
+                                                },
+                                            ],
+                                        },
+                                    ],
+                                },
+                            ],
+                        },
+                    ],
+                },
+            ],
+        };
+        assert_eq!(type_to_tix(&ty), "{ ... }");
+    }
+
+    /// A normal union like `string | int` should NOT be collapsed.
+    #[test]
+    fn tix_normal_union_preserved() {
+        let ty = NixosTypeInfo::Union {
+            members: vec![
+                NixosTypeInfo::Primitive {
+                    value: "string".into(),
+                },
+                NixosTypeInfo::Primitive {
+                    value: "int".into(),
+                },
+            ],
+        };
+        assert_eq!(type_to_tix(&ty), "string | int");
+    }
+
+    /// `either path attrs` (2 members) should NOT be collapsed — it's a
+    /// deliberate union, not a freeform value type.
+    #[test]
+    fn tix_path_or_attrs_preserved() {
+        let ty = NixosTypeInfo::Union {
+            members: vec![
+                NixosTypeInfo::Primitive {
+                    value: "path".into(),
+                },
+                NixosTypeInfo::AttrsOf {
+                    elem: Box::new(NixosTypeInfo::Primitive {
+                        value: "string".into(),
+                    }),
+                },
+            ],
+        };
+        assert_eq!(type_to_tix(&ty), "path | { _: string }");
     }
 
     #[test]
