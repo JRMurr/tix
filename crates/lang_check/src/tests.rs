@@ -1,5 +1,6 @@
 use indoc::indoc;
 use lang_ast::{module, tests::TestDatabase, Expr, Module};
+use lang_ty::arbitrary::{intern_raw, RawTy};
 use lang_ty::arena::TyRef;
 use lang_ty::{arc_ty, OutputTy, PrimitiveTy, TypeArena};
 use std::sync::Arc;
@@ -39,6 +40,25 @@ impl RootTy {
             ty: child,
             arena: self.arena.clone(),
         }
+    }
+
+    /// Clone the arena, normalize type variable numbering to 1..n.
+    pub fn normalize_vars(&self) -> RootTy {
+        let mut arena = (*self.arena).clone();
+        let ty = arena.normalize_vars(self.ty);
+        RootTy::new(ty, Arc::new(arena))
+    }
+
+    /// Clone the arena, normalize set operations, return a new RootTy.
+    pub fn normalize_set_ops(&self) -> RootTy {
+        let mut arena = (*self.arena).clone();
+        let ty = arena.normalize_set_ops(self.ty);
+        RootTy::new(ty, Arc::new(arena))
+    }
+
+    /// Delegate to the arena's contains_union_or_intersection.
+    pub fn contains_union_or_intersection(&self) -> bool {
+        self.arena.contains_union_or_intersection(self.ty)
     }
 }
 
@@ -128,6 +148,13 @@ impl PartialEq for RootTy {
     fn eq(&self, other: &Self) -> bool {
         ty_eq(&self.arena, self.ty, &other.arena, other.ty)
     }
+}
+
+/// Create a RootTy from a RawTy by interning into a fresh arena.
+pub fn raw_to_root(raw: &RawTy) -> RootTy {
+    let mut arena = TypeArena::new();
+    let ty = intern_raw(&mut arena, raw);
+    RootTy::new(ty, Arc::new(arena))
 }
 
 /// Build a RootTy from arc_ty! tokens using a fresh arena.
@@ -2836,7 +2863,7 @@ fn alias_provenance_survives_extrusion() {
                     return inference
                         .expr_ty_map
                         .get(expr_id)
-                        .map(|ty| format!("{ty:?}"));
+                        .map(|ty| format!("{}", inference.arena.display(*ty)));
                 }
             }
             None

@@ -352,7 +352,7 @@ impl TypeArena {
             OutputTy::Union(members) => {
                 let mut flat = Vec::new();
                 self.flatten_set_op_cached(&members.clone(), &mut flat, cache, true);
-                flat.sort();
+                flat.sort_by(|a, b| self[*a].cmp(&self[*b]));
                 flat.dedup();
                 if flat.len() == 1 {
                     flat[0]
@@ -363,7 +363,7 @@ impl TypeArena {
             OutputTy::Intersection(members) => {
                 let mut flat = Vec::new();
                 self.flatten_set_op_cached(&members.clone(), &mut flat, cache, false);
-                flat.sort();
+                flat.sort_by(|a, b| self[*a].cmp(&self[*b]));
                 flat.dedup();
                 if flat.len() == 1 {
                     flat[0]

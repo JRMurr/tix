@@ -30,8 +30,8 @@ use std::collections::{BTreeMap, HashSet};
 
 use lang_ast::{BoolBinOp, OverloadBinOp};
 use lang_ty::{
-    arbitrary::{arb_smol_str_ident, ArbitraryType, RecursiveParams},
-    AttrSetTy, OutputTy, PrimitiveTy, TyRef, TypeArena,
+    arbitrary::{arb_raw_ty, arb_smol_str_ident, raw_spread_free_vars, RawTy, RecursiveParams},
+    OutputTy, PrimitiveTy,
 };
 use proptest::prelude::{
     any, prop, prop_assert, prop_assert_eq, prop_compose, prop_oneof, proptest, BoxedStrategy,
@@ -39,7 +39,7 @@ use proptest::prelude::{
 };
 use smol_str::SmolStr;
 
-use crate::tests::{check_str, check_str_with_aliases, get_inferred_root, RootTy};
+use crate::tests::{check_str, check_str_with_aliases, get_inferred_root, raw_to_root};
 
 type NixTextStr = String;
 
@@ -170,19 +170,17 @@ fn non_type_modifying_transform(text: NixTextStr) -> impl Strategy<Value = NixTe
     ]
 }
 
-fn text_from_ty(ty: &OutputTy) -> impl Strategy<Value = NixTextStr> {
+fn text_from_raw_ty(ty: &RawTy) -> impl Strategy<Value = NixTextStr> {
     let inner = match ty {
-        OutputTy::Primitive(primitive_ty) => prim_ty_to_string(*primitive_ty).boxed(),
-        OutputTy::List(inner_ref) => {
-            let inner = text_from_ty(&inner_ref.0);
+        RawTy::Primitive(primitive_ty) => prim_ty_to_string(*primitive_ty).boxed(),
+        RawTy::List(inner) => {
+            let inner = text_from_raw_ty(inner);
             inner.prop_map(|elem| format!("[({elem})]")).boxed()
         }
-        OutputTy::Lambda { param, body } => {
-            let body = text_from_ty(&body.0);
-            match &*param.0 {
-                // Primitive param: use assertion builtin to constrain the param type
-                // via application contravariance.
-                OutputTy::Primitive(prim) => {
+        RawTy::Lambda { param, body } => {
+            let body = text_from_raw_ty(body);
+            match param.as_ref() {
+                RawTy::Primitive(prim) => {
                     let builtin = prim_assert_builtin(*prim);
                     body.prop_map(move |body| {
                         format!(
@@ -191,29 +189,25 @@ fn text_from_ty(ty: &OutputTy) -> impl Strategy<Value = NixTextStr> {
                     })
                     .boxed()
                 }
-                // Generic (TyVar) param: unused parameter, body is independent.
-                OutputTy::TyVar(_) => {
+                RawTy::TyVar(_) => {
                     body.prop_map(|body| format!("(__pbt_p: {body})")).boxed()
                 }
-                // arb_nix_text_from_ty filters out non-primitive, non-TyVar lambda params
-                // via has_non_primitive_lambda_param().
                 _ => unreachable!(
                     "non-primitive, non-TyVar lambda param should be filtered by arb_nix_text_from_ty"
                 ),
             }
         }
-        OutputTy::AttrSet(attr_set_ty) => {
-            let fields: Vec<_> = attr_set_ty
-                .fields
+        RawTy::AttrSet(fields) => {
+            let field_strats: Vec<_> = fields
                 .iter()
                 .map(|(key, val)| {
-                    let inner = text_from_ty(&val.0);
+                    let inner = text_from_raw_ty(val);
                     let key = key.clone();
                     inner.prop_map(move |x| format!("\"{key}\"=({x});")).boxed()
                 })
                 .collect();
 
-            fields
+            field_strats
                 .prop_shuffle()
                 .prop_map(|fields| {
                     let inner = fields.join(" ");
@@ -221,13 +215,12 @@ fn text_from_ty(ty: &OutputTy) -> impl Strategy<Value = NixTextStr> {
                 })
                 .boxed()
         }
-        OutputTy::TyVar(_) => unreachable!("bare TyVar should be filtered by arb_nix_text_from_ty"),
-        OutputTy::Union(members) => {
-            // Generate nested if-then-else: `if true then A else if true then B else C`.
-            // Members stay in order — then-branch is constrained first as lower bound,
-            // matching the collector's union member ordering.
-            let member_strats: Vec<BoxedStrategy<NixTextStr>> =
-                members.iter().map(|m| text_from_ty(&m.0).boxed()).collect();
+        RawTy::TyVar(_) => unreachable!("bare TyVar should be filtered by arb_nix_text_from_ty"),
+        RawTy::Union(members) => {
+            let member_strats: Vec<BoxedStrategy<NixTextStr>> = members
+                .iter()
+                .map(|m| text_from_raw_ty(m).boxed())
+                .collect();
             member_strats
                 .into_iter()
                 .rev()
@@ -239,22 +232,21 @@ fn text_from_ty(ty: &OutputTy) -> impl Strategy<Value = NixTextStr> {
                 .expect("union has at least 2 members")
                 .boxed()
         }
-        OutputTy::Intersection(_) => {
+        RawTy::Intersection(_) => {
             unreachable!("Intersection should be filtered by arb_nix_text_from_ty")
         }
-        OutputTy::Neg(_) => unreachable!("Neg should be filtered by arb_nix_text_from_ty"),
-        // Named is just a display wrapper — delegate to the inner type.
-        OutputTy::Named(_, inner) => text_from_ty(&inner.0).boxed(),
-        OutputTy::Bottom => unreachable!("Bottom should be filtered by arb_nix_text_from_ty"),
-        OutputTy::Top => unreachable!("Top should be filtered by arb_nix_text_from_ty"),
+        RawTy::Neg(_) => unreachable!("Neg should be filtered by arb_nix_text_from_ty"),
+        RawTy::Named(_, inner) => text_from_raw_ty(inner).boxed(),
+        RawTy::Bottom => unreachable!("Bottom should be filtered by arb_nix_text_from_ty"),
+        RawTy::Top => unreachable!("Top should be filtered by arb_nix_text_from_ty"),
     };
 
     inner.prop_flat_map(non_type_modifying_transform).boxed()
 }
 
 fn attr_strat(
-    inner: impl Strategy<Value = (TyRef, NixTextStr)>,
-) -> impl Strategy<Value = (OutputTy, NixTextStr)> {
+    inner: impl Strategy<Value = (RawTy, NixTextStr)>,
+) -> impl Strategy<Value = (RawTy, NixTextStr)> {
     let single_attr = prop::collection::vec((arb_smol_str_ident(), inner), 1..5).prop_filter_map(
         "duplicate ident names",
         |elems| {
@@ -264,12 +256,12 @@ fn attr_strat(
                 return None;
             }
 
-            let type_fields: BTreeMap<SmolStr, TyRef> = elems
+            let type_fields: BTreeMap<SmolStr, RawTy> = elems
                 .iter()
                 .map(|(key, (ty, _))| (key.clone(), ty.clone()))
                 .collect();
 
-            let ret_ty = AttrSetTy::from_fields(type_fields);
+            let spread = raw_spread_free_vars(&type_fields, &mut 0);
 
             let fields: Vec<_> = elems
                 .iter()
@@ -279,25 +271,25 @@ fn attr_strat(
                 })
                 .collect();
 
-            let fields = format!("({{{}}})", fields.join(" "));
+            let text = format!("({{{}}})", fields.join(" "));
 
-            Some((ret_ty.spread_free_vars(&mut 0), fields))
+            Some((spread, text))
         },
     );
 
     let merged_attrs = prop::collection::vec(single_attr, 1..3).prop_map(|children| {
         children
             .into_iter()
-            .reduce(|(acc_ty, acc_text), (ty, text)| {
-                (
-                    acc_ty.merge(ty).spread_free_vars(&mut 0),
-                    format!("{acc_text} // {text}"),
-                )
+            .reduce(|(acc_fields, acc_text), (fields, text)| {
+                let mut merged = acc_fields;
+                merged.extend(fields);
+                let spread = raw_spread_free_vars(&merged, &mut 0);
+                (spread, format!("{acc_text} // {text}"))
             })
             .expect("should have at least one elem in the children list for attr merging")
     });
 
-    merged_attrs.prop_map(|(ty, text)| (OutputTy::AttrSet(ty), text))
+    merged_attrs.prop_map(|(fields, text)| (RawTy::AttrSet(fields), text))
 }
 
 fn prim_assert_builtin(prim: PrimitiveTy) -> &'static str {
@@ -313,24 +305,20 @@ fn prim_assert_builtin(prim: PrimitiveTy) -> &'static str {
     }
 }
 
-fn func_strat<S: Strategy<Value = (TyRef, NixTextStr)> + Clone>(
+fn func_strat<S: Strategy<Value = (RawTy, NixTextStr)> + Clone>(
     inner: S,
-) -> impl Strategy<Value = (OutputTy, NixTextStr)> {
+) -> impl Strategy<Value = (RawTy, NixTextStr)> {
     // "fully_known" — param is a primitive, constrained via assertion builtin.
-    // Applying `__pbt_assert_<prim> __pbt_p` forces `__pbt_p <: prim` through
-    // application contravariance, reliably constraining the param type.
     let fully_known =
         (any::<PrimitiveTy>(), inner.clone()).prop_map(|(prim, (body_ty, body_text))| {
             let mut num_free_vars = 0;
 
-            let param_ty: TyRef = OutputTy::Primitive(prim)
-                .offset_free_vars(&mut num_free_vars)
-                .into();
-            let body_ty: TyRef = body_ty.0.offset_free_vars(&mut num_free_vars).into();
+            let param_ty = RawTy::Primitive(prim).offset_free_vars(&mut num_free_vars);
+            let body_ty = body_ty.offset_free_vars(&mut num_free_vars);
 
-            let ty = OutputTy::Lambda {
-                param: param_ty,
-                body: body_ty,
+            let ty = RawTy::Lambda {
+                param: Box::new(param_ty),
+                body: Box::new(body_ty),
             };
 
             let builtin = prim_assert_builtin(prim);
@@ -341,13 +329,13 @@ fn func_strat<S: Strategy<Value = (TyRef, NixTextStr)> + Clone>(
 
     // "generic" — unused param becomes a fresh type variable.
     let generic = inner.clone().prop_map(|(body_ty, body_text)| {
-        let num_free_vars = body_ty.0.free_type_vars().len();
+        let num_free_vars = body_ty.free_type_vars().len();
 
-        let param_ty = OutputTy::TyVar((num_free_vars + 1) as u32);
+        let param_ty = RawTy::TyVar((num_free_vars + 1) as u32);
 
-        let ty = OutputTy::Lambda {
-            param: param_ty.into(),
-            body: body_ty,
+        let ty = RawTy::Lambda {
+            param: Box::new(param_ty),
+            body: Box::new(body_ty),
         };
         let text = format!("(__pbt_p: {body_text})");
 
@@ -357,9 +345,9 @@ fn func_strat<S: Strategy<Value = (TyRef, NixTextStr)> + Clone>(
     prop_oneof![fully_known, generic]
 }
 
-fn arb_nix_text(args: RecursiveParams) -> impl Strategy<Value = (OutputTy, NixTextStr)> {
+fn arb_nix_text(args: RecursiveParams) -> impl Strategy<Value = (RawTy, NixTextStr)> {
     let leaf = any::<PrimitiveTy>()
-        .prop_flat_map(|prim| (Just(OutputTy::Primitive(prim)), prim_ty_to_string(prim)));
+        .prop_flat_map(|prim| (Just(RawTy::Primitive(prim)), prim_ty_to_string(prim)));
 
     leaf.prop_recursive(
         args.depth,
@@ -370,21 +358,14 @@ fn arb_nix_text(args: RecursiveParams) -> impl Strategy<Value = (OutputTy, NixTe
                 .clone()
                 .prop_flat_map(|(ty, text)| (Just(ty), non_type_modifying_transform(text)));
 
-            // all the wrapper types need a ty ref
-            let inner = inner.prop_map(|(ty, text)| (TyRef::from(ty), text));
-
             let list_strat = inner
                 .clone()
-                .prop_map(|(ty, text)| (OutputTy::List(ty), format!("[({text})]")));
+                .prop_map(|(ty, text)| (RawTy::List(Box::new(ty)), format!("[({text})]")));
 
             // Union of 2 branches via if-then-else
             let union_strat =
                 (inner.clone(), inner.clone()).prop_map(|((a_ty, a_text), (b_ty, b_text))| {
-                    // then-branch is constrained first, matching collector ordering
-                    let ty = OutputTy::Union(vec![
-                        TyRef::from(a_ty.0.as_ref().clone()),
-                        TyRef::from(b_ty.0.as_ref().clone()),
-                    ]);
+                    let ty = RawTy::Union(vec![a_ty, b_ty]);
                     let text = format!("(if true then ({a_text}) else ({b_text}))");
                     (ty, text)
                 });
@@ -400,8 +381,8 @@ fn arb_nix_text(args: RecursiveParams) -> impl Strategy<Value = (OutputTy, NixTe
     )
 }
 
-fn arb_nix_text_from_ty() -> impl Strategy<Value = (OutputTy, NixTextStr)> {
-    any::<OutputTy>()
+fn arb_nix_text_from_ty() -> impl Strategy<Value = (RawTy, NixTextStr)> {
+    arb_raw_ty(RecursiveParams::default())
         .prop_filter(
             "Skip types that can't be precisely generated as Nix code",
             |ty| {
@@ -414,7 +395,10 @@ fn arb_nix_text_from_ty() -> impl Strategy<Value = (OutputTy, NixTextStr)> {
                     && !ty.has_shared_tyvar_across_lambda_params()
             },
         )
-        .prop_flat_map(|ty| (Just(ty.clone()), text_from_ty(&ty)))
+        .prop_flat_map(|ty| {
+            let text = text_from_raw_ty(&ty);
+            (Just(ty), text)
+        })
 }
 
 // ==============================================================================
@@ -423,21 +407,20 @@ fn arb_nix_text_from_ty() -> impl Strategy<Value = (OutputTy, NixTextStr)> {
 
 /// Primitives with arithmetic/boolean operations, optionally wrapped in
 /// let-bindings or attrset field selection.
-fn arb_primitive() -> impl Strategy<Value = (OutputTy, NixTextStr)> {
+fn arb_primitive() -> impl Strategy<Value = (RawTy, NixTextStr)> {
     any::<PrimitiveTy>()
-        .prop_flat_map(|prim| (Just(OutputTy::Primitive(prim)), prim_ty_to_string(prim)))
+        .prop_flat_map(|prim| (Just(RawTy::Primitive(prim)), prim_ty_to_string(prim)))
         .prop_flat_map(|(ty, text)| (Just(ty), non_type_modifying_transform(text)))
 }
 
 /// Lists and attrsets of primitives, including `//` merging.
-fn arb_structural() -> impl Strategy<Value = (OutputTy, NixTextStr)> {
+fn arb_structural() -> impl Strategy<Value = (RawTy, NixTextStr)> {
     let leaf = any::<PrimitiveTy>()
-        .prop_flat_map(|prim| (Just(OutputTy::Primitive(prim)), prim_ty_to_string(prim)))
-        .prop_map(|(ty, text)| (TyRef::from(ty), text));
+        .prop_flat_map(|prim| (Just(RawTy::Primitive(prim)), prim_ty_to_string(prim)));
 
     let list_strat = leaf
         .clone()
-        .prop_map(|(ty, text)| (OutputTy::List(ty), format!("[({text})]")));
+        .prop_map(|(ty, text)| (RawTy::List(Box::new(ty)), format!("[({text})]")));
 
     prop_oneof![list_strat, attr_strat(leaf)]
         .prop_flat_map(|(ty, text)| (Just(ty), non_type_modifying_transform(text)))
@@ -445,18 +428,17 @@ fn arb_structural() -> impl Strategy<Value = (OutputTy, NixTextStr)> {
 
 /// Lambdas (assertion-constrained + generic) with primitive or structural
 /// bodies. Tests generalization, extrusion, and early canonicalization.
-fn arb_lambda() -> impl Strategy<Value = (OutputTy, NixTextStr)> {
+fn arb_lambda() -> impl Strategy<Value = (RawTy, NixTextStr)> {
     let leaf = any::<PrimitiveTy>()
-        .prop_flat_map(|prim| (Just(OutputTy::Primitive(prim)), prim_ty_to_string(prim)))
-        .prop_map(|(ty, text)| (TyRef::from(ty), text));
+        .prop_flat_map(|prim| (Just(RawTy::Primitive(prim)), prim_ty_to_string(prim)));
 
     // Bodies can be primitives, lists, or attrsets (one level deep).
     let body = {
         let prim_body = leaf.clone();
         let list_body = leaf
             .clone()
-            .prop_map(|(ty, text)| (TyRef::from(OutputTy::List(ty)), format!("[({text})]")));
-        let attr_body = attr_strat(leaf.clone()).prop_map(|(ty, text)| (TyRef::from(ty), text));
+            .prop_map(|(ty, text)| (RawTy::List(Box::new(ty)), format!("[({text})]")));
+        let attr_body = attr_strat(leaf.clone());
         prop_oneof![prim_body, list_body, attr_body]
     };
 
@@ -466,7 +448,7 @@ fn arb_lambda() -> impl Strategy<Value = (OutputTy, NixTextStr)> {
 /// Combined strategy: full recursive generation + type-directed generation +
 /// focused union generators. arb_nix_text and arb_nix_text_from_ty now both
 /// include union types via if-then-else generation.
-fn arb_combined() -> impl Strategy<Value = (OutputTy, NixTextStr)> {
+fn arb_combined() -> impl Strategy<Value = (RawTy, NixTextStr)> {
     prop_oneof![
         7 => arb_nix_text(RecursiveParams {
             depth: 8,
@@ -487,20 +469,23 @@ proptest! {
 
     #[test]
     fn test_primitive_typing((ty, text) in arb_primitive()) {
-        let root_ty = get_inferred_root(&text);
-        prop_assert_eq!(root_ty, ty.normalize_vars());
+        let root_ty = get_inferred_root(&text).normalize_vars();
+        let expected = raw_to_root(&ty.normalize_vars());
+        prop_assert_eq!(root_ty, expected);
     }
 
     #[test]
     fn test_structural_typing((ty, text) in arb_structural()) {
-        let root_ty = get_inferred_root(&text);
-        prop_assert_eq!(root_ty, ty.normalize_vars());
+        let root_ty = get_inferred_root(&text).normalize_vars();
+        let expected = raw_to_root(&ty.normalize_vars());
+        prop_assert_eq!(root_ty, expected);
     }
 
     #[test]
     fn test_lambda_typing((ty, text) in arb_lambda()) {
-        let root_ty = get_inferred_root(&text);
-        prop_assert_eq!(root_ty, ty.normalize_vars());
+        let root_ty = get_inferred_root(&text).normalize_vars();
+        let expected = raw_to_root(&ty.normalize_vars());
+        prop_assert_eq!(root_ty, expected);
     }
 }
 
@@ -514,8 +499,8 @@ proptest! {
     #[test]
     fn test_combined_typing((ty, text) in arb_combined()) {
         let root_ty = get_inferred_root(&text);
-        let expected = ty.normalize_vars().normalize_set_ops();
-        let actual = root_ty.normalize_set_ops();
+        let expected = raw_to_root(&ty.normalize_vars()).normalize_set_ops();
+        let actual = root_ty.normalize_vars().normalize_set_ops();
         // Intersection types can produce mismatches because the generator
         // doesn't model intersection constraint decomposition.
         // Union types can also mismatch when the generator creates unions
@@ -543,14 +528,11 @@ proptest! {
 // by generating higher-hit-rate union-specific expressions.
 
 /// Pick 2 distinct primitives and generate if-then-else, asserting exact union type.
-fn arb_union_prim_if_else() -> impl Strategy<Value = (OutputTy, NixTextStr)> {
+fn arb_union_prim_if_else() -> impl Strategy<Value = (RawTy, NixTextStr)> {
     (any::<PrimitiveTy>(), any::<PrimitiveTy>())
         .prop_filter("need distinct primitives", |(a, b)| a != b)
         .prop_flat_map(|(prim_a, prim_b)| {
-            let ty = OutputTy::Union(vec![
-                TyRef::from(OutputTy::Primitive(prim_a)),
-                TyRef::from(OutputTy::Primitive(prim_b)),
-            ]);
+            let ty = RawTy::Union(vec![RawTy::Primitive(prim_a), RawTy::Primitive(prim_b)]);
             let text = (prim_ty_to_string(prim_a), prim_ty_to_string(prim_b))
                 .prop_map(|(a, b)| format!("(if true then ({a}) else ({b}))"));
             (Just(ty), text)
@@ -558,7 +540,7 @@ fn arb_union_prim_if_else() -> impl Strategy<Value = (OutputTy, NixTextStr)> {
 }
 
 /// Pick 3 distinct primitives via nested if-then-else, asserting 3-member union.
-fn arb_union_three_way() -> impl Strategy<Value = (OutputTy, NixTextStr)> {
+fn arb_union_three_way() -> impl Strategy<Value = (RawTy, NixTextStr)> {
     (
         any::<PrimitiveTy>(),
         any::<PrimitiveTy>(),
@@ -568,10 +550,10 @@ fn arb_union_three_way() -> impl Strategy<Value = (OutputTy, NixTextStr)> {
             a != b && b != c && a != c
         })
         .prop_flat_map(|(pa, pb, pc)| {
-            let ty = OutputTy::Union(vec![
-                TyRef::from(OutputTy::Primitive(pa)),
-                TyRef::from(OutputTy::Primitive(pb)),
-                TyRef::from(OutputTy::Primitive(pc)),
+            let ty = RawTy::Union(vec![
+                RawTy::Primitive(pa),
+                RawTy::Primitive(pb),
+                RawTy::Primitive(pc),
             ]);
             let text = (
                 prim_ty_to_string(pa),
@@ -594,9 +576,10 @@ proptest! {
     #[test]
     fn test_union_prim_if_else((ty, text) in arb_union_prim_if_else()) {
         let root_ty = get_inferred_root(&text);
+        let expected = raw_to_root(&ty.normalize_vars()).normalize_set_ops();
         prop_assert_eq!(
-            root_ty.normalize_set_ops(),
-            ty.normalize_vars().normalize_set_ops()
+            root_ty.normalize_vars().normalize_set_ops(),
+            expected
         );
     }
 
@@ -604,9 +587,10 @@ proptest! {
     #[test]
     fn test_union_three_way((ty, text) in arb_union_three_way()) {
         let root_ty = get_inferred_root(&text);
+        let expected = raw_to_root(&ty.normalize_vars()).normalize_set_ops();
         prop_assert_eq!(
-            root_ty.normalize_set_ops(),
-            ty.normalize_vars().normalize_set_ops()
+            root_ty.normalize_vars().normalize_set_ops(),
+            expected
         );
     }
 }
@@ -691,8 +675,9 @@ proptest! {
     fn test_hasfield_conjunction_typing(text in arb_hasfield_conjunction()) {
         let root_ty = get_inferred_root(&text);
         // Root is a lambda, its body should be int
-        if let OutputTy::Lambda { body, .. } = &root_ty {
-            prop_assert_eq!(body.0.as_ref(), &OutputTy::Primitive(PrimitiveTy::Int));
+        if let OutputTy::Lambda { body, .. } = root_ty.output_ty() {
+            let body_ty = &root_ty.arena[*body];
+            prop_assert_eq!(body_ty, &OutputTy::Primitive(PrimitiveTy::Int));
         } else {
             prop_assert!(false, "expected lambda, got: {root_ty}");
         }
@@ -795,14 +780,16 @@ proptest! {
     #[test]
     fn test_optional_field_typing(text in arb_optional_field_pattern()) {
         let root_ty = get_inferred_root(&text);
-        prop_assert_eq!(root_ty, OutputTy::Primitive(PrimitiveTy::Int));
+        let expected = raw_to_root(&RawTy::Primitive(PrimitiveTy::Int));
+        prop_assert_eq!(root_ty, expected);
     }
 
     /// Optional fields provided: inference should also succeed and return Int.
     #[test]
     fn test_optional_field_all_provided(text in arb_optional_field_all_provided()) {
         let root_ty = get_inferred_root(&text);
-        prop_assert_eq!(root_ty, OutputTy::Primitive(PrimitiveTy::Int));
+        let expected = raw_to_root(&RawTy::Primitive(PrimitiveTy::Int));
+        prop_assert_eq!(root_ty, expected);
     }
 }
 
@@ -933,7 +920,8 @@ proptest! {
     #[test]
     fn test_narrowing_same_type_branches((prim, text) in arb_narrowing_same_type()) {
         let root_ty = get_inferred_root(&text);
-        prop_assert_eq!(root_ty, OutputTy::Primitive(prim));
+        let expected = raw_to_root(&RawTy::Primitive(prim));
+        prop_assert_eq!(root_ty, expected);
     }
 
     /// Early-canonicalization stability: a polymorphic let-binding's type
@@ -1408,7 +1396,7 @@ proptest! {
                         return inference
                             .expr_ty_map
                             .get(expr_id)
-                            .map(|ty| format!("{ty:?}"));
+                            .map(|ty| format!("{:?}", inference.arena[*ty]));
                     }
                 }
                 None
@@ -1457,7 +1445,7 @@ proptest! {
                     inference
                         .name_ty_map
                         .get(name_id)
-                        .map(|ty| format!("{ty:?}"))
+                        .map(|ty| format!("{:?}", inference.arena[*ty]))
                 } else {
                     None
                 }
@@ -1506,7 +1494,7 @@ proptest! {
                         return inference
                             .expr_ty_map
                             .get(expr_id)
-                            .map(|ty| format!("{ty:?}"));
+                            .map(|ty| format!("{:?}", inference.arena[*ty]));
                     }
                 }
                 None
@@ -1549,7 +1537,7 @@ proptest! {
                         return inference
                             .expr_ty_map
                             .get(expr_id)
-                            .map(|ty| format!("{ty:?}"));
+                            .map(|ty| format!("{:?}", inference.arena[*ty]));
                     }
                 }
                 None
