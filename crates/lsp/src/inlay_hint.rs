@@ -68,9 +68,12 @@ pub fn inlay_hints(analysis: &FileSnapshot, range: Range, root: &rnix::Root) -> 
         // All other bindings: replace single-occurrence TyVars with `?`.
         let dc = lang_ty::DisplayConfig::inlay();
         let ty_str = if matches!(name.kind, NameKind::Param | NameKind::PatField) {
-            ty.display_truncated(&dc)
+            inference.arena.display_truncated(*ty, &dc)
         } else {
-            ty.normalize_replacing_unknown().display_truncated(&dc)
+            // normalize_replacing_unknown requires &mut TypeArena, so clone locally.
+            let mut tmp = (*inference.arena).clone();
+            let normalized = tmp.normalize_replacing_unknown(*ty);
+            tmp.display_truncated(normalized, &dc)
         };
 
         hints.push(InlayHint {

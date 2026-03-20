@@ -10,7 +10,7 @@
 // show the expected fields.
 
 use lang_ast::AstPtr;
-use lang_ty::OutputTy;
+use lang_ty::{OutputTy, TyRef, TypeArena};
 use rowan::ast::AstNode;
 use tower_lsp::lsp_types::{
     Documentation, MarkupContent, MarkupKind, ParameterInformation, ParameterLabel, Position,
@@ -61,7 +61,7 @@ pub fn signature_help(
     let root_fun_expr_id = analysis.syntax.source_map.expr_for_node(root_fun_ptr)?;
 
     // Look up the function's inferred type.
-    let fun_ty = inference.expr_ty_map.get(root_fun_expr_id)?;
+    let fun_ty_ref = *inference.expr_ty_map.get(root_fun_expr_id)?;
 
     // Determine the active parameter by checking which argument range contains
     // the cursor.
@@ -76,7 +76,7 @@ pub fn signature_help(
         }
     }
 
-    build_signature_help(fun_ty, total_params, active_param)
+    build_signature_help(&inference.arena, fun_ty_ref, total_params, active_param)
 }
 
 /// Walk up from a syntax node through ancestors, collecting the outermost
@@ -139,22 +139,23 @@ fn flatten_apply_chain(outermost: &rnix::ast::Apply) -> Vec<(rnix::ast::Expr, rn
     stack
 }
 
-/// Build `SignatureHelp` from a function type, the number of parameters
-/// being applied, and the active parameter index.
+/// Build `SignatureHelp` from a function type (as arena + TyRef), the number
+/// of parameters being applied, and the active parameter index.
 fn build_signature_help(
-    fun_ty: &OutputTy,
+    arena: &TypeArena,
+    fun_ty: TyRef,
     num_params: usize,
     active_param: u32,
 ) -> Option<SignatureHelp> {
     // Collect the parameter types from the function type by peeling off
     // Lambda layers.
-    let param_types = collect_param_types(fun_ty, num_params);
+    let param_types = collect_param_types(arena, fun_ty, num_params);
     if param_types.is_empty() {
         return None;
     }
 
     // Build the signature label and parameter labels.
-    let (label, param_labels, param_docs) = format_signature(fun_ty, &param_types);
+    let (label, param_labels, param_docs) = format_signature(arena, fun_ty, &param_types);
 
     let parameters: Vec<ParameterInformation> = param_labels
         .into_iter()
@@ -184,17 +185,22 @@ fn build_signature_help(
     })
 }
 
-/// Peel off Lambda layers from a function type to extract parameter types.
+/// Peel off Lambda layers from a function type to extract parameter TyRefs.
 /// Stops after `max_params` or when the type is no longer a Lambda.
-fn collect_param_types(ty: &OutputTy, max_params: usize) -> Vec<OutputTy> {
+fn collect_param_types(arena: &TypeArena, ty: TyRef, max_params: usize) -> Vec<TyRef> {
     let mut params = Vec::new();
-    let mut current = ty.clone();
+    let mut current = ty;
 
     for _ in 0..max_params {
-        match current.unwrap_named() {
-            OutputTy::Lambda { param, body } => {
-                params.push((*param.0).clone());
-                current = (*body.0).clone();
+        // Unwrap Named wrappers to reach the structural type.
+        let inner = arena.unwrap_named(current);
+        match &arena[inner] {
+            OutputTy::Lambda { param, .. } => {
+                params.push(*param);
+                current = match &arena[inner] {
+                    OutputTy::Lambda { body, .. } => *body,
+                    _ => break,
+                };
             }
             _ => break,
         }
@@ -211,24 +217,25 @@ fn collect_param_types(ty: &OutputTy, max_params: usize) -> Vec<OutputTy> {
 /// For a pattern parameter (`{ name: string, src: path, ... } -> T`),
 /// the parameter label shows the field names.
 fn format_signature(
-    fun_ty: &OutputTy,
-    param_types: &[OutputTy],
+    arena: &TypeArena,
+    fun_ty: TyRef,
+    param_types: &[TyRef],
 ) -> (String, Vec<String>, Vec<Option<String>>) {
     let mut label_parts = Vec::new();
     let mut param_labels = Vec::new();
     let mut param_docs = Vec::new();
 
-    for param_ty in param_types {
-        let param_str = format_param_type(param_ty);
+    for &param_ty in param_types {
+        let param_str = format_param_type(arena, param_ty);
         label_parts.push(param_str.clone());
         param_labels.push(param_str);
-        param_docs.push(format_param_doc(param_ty));
+        param_docs.push(format_param_doc(arena, param_ty));
     }
 
     // Add the return type.
-    let return_ty = peel_lambdas(fun_ty, param_types.len());
+    let return_ty = peel_lambdas(arena, fun_ty, param_types.len());
     let dc = lang_ty::DisplayConfig::hover();
-    label_parts.push(return_ty.display_truncated(&dc));
+    label_parts.push(arena.display_truncated(return_ty, &dc));
 
     let label = label_parts.join(" -> ");
     (label, param_labels, param_docs)
@@ -238,14 +245,20 @@ fn format_signature(
 ///
 /// For attrset types (pattern parameters), shows a condensed field list.
 /// For other types, uses the standard display.
-fn format_param_type(ty: &OutputTy) -> String {
+fn format_param_type(arena: &TypeArena, ty: TyRef) -> String {
     let dc = lang_ty::DisplayConfig::hover();
-    match ty.unwrap_named() {
+    // Unwrap Named wrappers to reach the structural type for display decisions,
+    // but use the original TyRef for display so alias names are preserved.
+    let inner = arena.unwrap_named(ty);
+    match &arena[inner] {
         OutputTy::AttrSet(ref attr) => {
             // Show field names with types for pattern parameters.
             let mut parts = Vec::new();
-            for (name, field_ty) in &attr.fields {
-                parts.push(format!("{name}: {}", field_ty.display_truncated(&dc)));
+            for (name, &field_ty) in &attr.fields {
+                parts.push(format!(
+                    "{name}: {}",
+                    arena.display_truncated(field_ty, &dc)
+                ));
             }
             if attr.open {
                 parts.push("...".to_string());
@@ -253,22 +266,23 @@ fn format_param_type(ty: &OutputTy) -> String {
             format!("{{ {} }}", parts.join(", "))
         }
         // For lambda params, parenthesize to avoid ambiguity in the signature.
-        OutputTy::Lambda { .. } => format!("({})", ty.display_truncated(&dc)),
+        OutputTy::Lambda { .. } => format!("({})", arena.display_truncated(ty, &dc)),
         // For union/intersection params, parenthesize.
         OutputTy::Union(_) | OutputTy::Intersection(_) => {
-            format!("({})", ty.display_truncated(&dc))
+            format!("({})", arena.display_truncated(ty, &dc))
         }
-        _ => ty.display_truncated(&dc),
+        _ => arena.display_truncated(ty, &dc),
     }
 }
 
 /// Get documentation for a parameter type (e.g. listing pattern fields).
-fn format_param_doc(ty: &OutputTy) -> Option<String> {
+fn format_param_doc(arena: &TypeArena, ty: TyRef) -> Option<String> {
     let dc = lang_ty::DisplayConfig::hover();
-    match ty.unwrap_named() {
+    let inner = arena.unwrap_named(ty);
+    match &arena[inner] {
         OutputTy::AttrSet(ref attr) if !attr.fields.is_empty() => {
             let mut lines = vec!["**Fields:**".to_string()];
-            for (name, field_ty) in &attr.fields {
+            for (name, &field_ty) in &attr.fields {
                 let opt = if attr.optional_fields.contains(name) {
                     " (optional)"
                 } else {
@@ -276,7 +290,7 @@ fn format_param_doc(ty: &OutputTy) -> Option<String> {
                 };
                 lines.push(format!(
                     "- `{name}`: `{}`{opt}",
-                    field_ty.display_truncated(&dc)
+                    arena.display_truncated(field_ty, &dc)
                 ));
             }
             if attr.open {
@@ -288,13 +302,14 @@ fn format_param_doc(ty: &OutputTy) -> Option<String> {
     }
 }
 
-/// Peel off `n` Lambda layers from a type and return the resulting return type.
-fn peel_lambdas(ty: &OutputTy, n: usize) -> OutputTy {
-    let mut current = ty.clone();
+/// Peel off `n` Lambda layers from a type and return the resulting return TyRef.
+fn peel_lambdas(arena: &TypeArena, ty: TyRef, n: usize) -> TyRef {
+    let mut current = ty;
     for _ in 0..n {
-        match current.unwrap_named() {
+        let inner = arena.unwrap_named(current);
+        match &arena[inner] {
             OutputTy::Lambda { body, .. } => {
-                current = (*body.0).clone();
+                current = *body;
             }
             _ => break,
         }

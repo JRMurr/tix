@@ -131,10 +131,10 @@ pub fn unknown_type_diagnostics(
 
     let mut diags = Vec::new();
 
-    for (name_id, ty) in inference.name_ty_map.iter() {
+    for (name_id, &ty_ref) in inference.name_ty_map.iter() {
         // Only bare type variables (unconstrained) — compound types like
         // `a -> a` are genuinely polymorphic, not unknown.
-        if !matches!(ty, OutputTy::TyVar(_)) {
+        if !matches!(inference.arena[ty_ref], OutputTy::TyVar(_)) {
             continue;
         }
 

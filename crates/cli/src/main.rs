@@ -19,7 +19,7 @@ use lang_ast::{module_and_source_maps, name_resolution, RootDatabase};
 use lang_check::aliases::TypeAliasRegistry;
 use lang_check::diagnostic::{TixDiagnostic, TixDiagnosticKind};
 use lang_check::imports::{import_errors_to_diagnostics, resolve_import_types_from_stubs};
-use lang_ty::OutputTy;
+use lang_ty::{OutputTy, TypeArena};
 use miette::{LabeledSpan, NamedSource};
 use rowan::ast::AstNode;
 
@@ -407,11 +407,15 @@ fn run_gen_stub(
     )
     .run();
 
-    let root_ty = result
+    let (arena, root_ty) = result
         .inference
         .as_ref()
-        .and_then(|inf| inf.expr_ty_map.get(module.entry_expr))
-        .cloned()
+        .and_then(|inf| {
+            inf.expr_ty_map
+                .get(module.entry_expr)
+                .copied()
+                .map(|ty| (inf.arena.clone(), ty))
+        })
         .ok_or("Failed to infer root type for file")?;
 
     // Format as a .tix val declaration.
@@ -421,7 +425,7 @@ fn run_gen_stub(
         .and_then(|s| s.to_str())
         .unwrap_or("_");
 
-    let root_ty_str = format!("{root_ty}");
+    let root_ty_str = format!("{}", arena.display(root_ty));
     let tix_output = format!("val {decl_name} :: {root_ty_str};\n");
 
     match output {
@@ -544,11 +548,15 @@ fn run_verify_stubs(
     )
     .run();
 
-    let root_ty = result
+    let (inf_arena, root_ty) = result
         .inference
         .as_ref()
-        .and_then(|inf| inf.expr_ty_map.get(module.entry_expr))
-        .cloned()
+        .and_then(|inf| {
+            inf.expr_ty_map
+                .get(module.entry_expr)
+                .copied()
+                .map(|ty| (inf.arena.clone(), ty))
+        })
         .ok_or(VerifyStubsError::NoRootType {
             path: file_path.clone(),
         })?;
@@ -559,18 +567,22 @@ fn run_verify_stubs(
     let mut mismatches = Vec::new();
 
     for (name, declared_ty, &(span_start, span_end)) in &val_decls {
-        let declared_output = parsed_ty_to_output_ty(declared_ty, &registry, 0);
+        let mut decl_arena = TypeArena::new();
+        let declared_output = parsed_ty_to_output_ty(declared_ty, &registry, &mut decl_arena, 0);
+        let declared_root = decl_arena.intern(declared_output);
         let mut diffs = Vec::new();
         compare_types(
-            &root_ty,
-            &declared_output,
+            &inf_arena,
+            root_ty,
+            &decl_arena,
+            declared_root,
             &format!("val {name}"),
             &mut diffs,
         );
         if !diffs.is_empty() {
             mismatches.push(VerifyMismatch {
                 val_name: name.to_string(),
-                inferred: format!("{root_ty}"),
+                inferred: format!("{}", inf_arena.display(root_ty)),
                 src: NamedSource::new(stub_filename.clone(), stub_source.clone()),
                 span: (span_start, span_end - span_start).into(),
             });
@@ -586,26 +598,48 @@ use lang_check::aliases::parsed_ty_to_output_ty;
 /// as human-readable strings. This is a best-effort check — it catches
 /// missing fields, type kind mismatches, and primitive type mismatches.
 /// Type variables in the stub are treated as wildcards (match anything).
+///
+/// Each side carries its own arena since inferred and declared types live in
+/// separate arenas. All TyRef children are looked up in their respective arena.
 fn compare_types(
-    inferred: &OutputTy,
-    declared: &OutputTy,
+    inf_arena: &TypeArena,
+    inferred: lang_ty::TyRef,
+    decl_arena: &TypeArena,
+    declared: lang_ty::TyRef,
     path: &str,
     mismatches: &mut Vec<String>,
 ) {
+    let inf_node = &inf_arena[inferred];
+    let decl_node = &decl_arena[declared];
+
     // Type variables in the declared type are wildcards — any inferred type matches.
-    if matches!(declared, OutputTy::TyVar(_) | OutputTy::Top) {
+    if matches!(decl_node, OutputTy::TyVar(_) | OutputTy::Top) {
         return;
     }
 
-    match (inferred, declared) {
+    match (inf_node, decl_node) {
         // Attrset comparison: check that all declared fields exist with compatible types.
         (OutputTy::AttrSet(inf_attr), OutputTy::AttrSet(decl_attr)) => {
-            for (field_name, decl_field_ty) in &decl_attr.fields {
-                match inf_attr.fields.get(field_name) {
-                    Some(inf_field_ty) => {
+            // Clone the field maps to avoid holding borrows into the arenas
+            // across recursive calls that also borrow the arenas.
+            let inf_fields: Vec<_> = inf_attr
+                .fields
+                .iter()
+                .map(|(k, v)| (k.clone(), *v))
+                .collect();
+            let decl_fields: Vec<_> = decl_attr
+                .fields
+                .iter()
+                .map(|(k, v)| (k.clone(), *v))
+                .collect();
+            for (field_name, decl_field_ref) in &decl_fields {
+                match inf_fields.iter().find(|(k, _)| k == field_name) {
+                    Some((_, inf_field_ref)) => {
                         compare_types(
-                            &inf_field_ty.0,
-                            &decl_field_ty.0,
+                            inf_arena,
+                            *inf_field_ref,
+                            decl_arena,
+                            *decl_field_ref,
                             &format!("{path}.{field_name}"),
                             mismatches,
                         );
@@ -630,15 +664,33 @@ fn compare_types(
                 body: decl_b,
             },
         ) => {
-            compare_types(&inf_p.0, &decl_p.0, &format!("{path} (param)"), mismatches);
-            compare_types(&inf_b.0, &decl_b.0, &format!("{path} (return)"), mismatches);
+            let (inf_p, inf_b, decl_p, decl_b) = (*inf_p, *inf_b, *decl_p, *decl_b);
+            compare_types(
+                inf_arena,
+                inf_p,
+                decl_arena,
+                decl_p,
+                &format!("{path} (param)"),
+                mismatches,
+            );
+            compare_types(
+                inf_arena,
+                inf_b,
+                decl_arena,
+                decl_b,
+                &format!("{path} (return)"),
+                mismatches,
+            );
         }
 
         // List comparison.
         (OutputTy::List(inf_inner), OutputTy::List(decl_inner)) => {
+            let (inf_inner, decl_inner) = (*inf_inner, *decl_inner);
             compare_types(
-                &inf_inner.0,
-                &decl_inner.0,
+                inf_arena,
+                inf_inner,
+                decl_arena,
+                decl_inner,
                 &format!("{path} (list element)"),
                 mismatches,
             );
@@ -650,22 +702,22 @@ fn compare_types(
         // Union comparison: each declared member must be compatible with at
         // least one inferred member (or the whole inferred type if it isn't a union).
         (OutputTy::Union(inf_members), OutputTy::Union(decl_members)) => {
-            for decl_m in decl_members {
-                let mut member_mismatches = Vec::new();
+            let inf_members: Vec<_> = inf_members.to_vec();
+            let decl_members: Vec<_> = decl_members.to_vec();
+            for decl_m in &decl_members {
                 let mut any_match = false;
-                for inf_m in inf_members {
+                for inf_m in &inf_members {
                     let mut trial = Vec::new();
-                    compare_types(&inf_m.0, &decl_m.0, path, &mut trial);
+                    compare_types(inf_arena, *inf_m, decl_arena, *decl_m, path, &mut trial);
                     if trial.is_empty() {
                         any_match = true;
                         break;
                     }
-                    member_mismatches.extend(trial);
                 }
                 if !any_match {
                     mismatches.push(format!(
                         "{path}: stub declares union member `{}` but no matching inferred member found",
-                        decl_m.0
+                        decl_arena.display(*decl_m)
                     ));
                 }
             }
@@ -674,16 +726,18 @@ fn compare_types(
         // Intersection comparison: each declared member must be compatible
         // with the inferred type.
         (_, OutputTy::Intersection(decl_members)) => {
-            for decl_m in decl_members {
-                compare_types(inferred, &decl_m.0, path, mismatches);
+            let decl_members: Vec<_> = decl_members.to_vec();
+            for decl_m in &decl_members {
+                compare_types(inf_arena, inferred, decl_arena, *decl_m, path, mismatches);
             }
         }
         (OutputTy::Intersection(inf_members), _) => {
             // If inferred is an intersection, any member matching suffices.
+            let inf_members: Vec<_> = inf_members.to_vec();
             let mut any_match = false;
-            for inf_m in inf_members {
+            for inf_m in &inf_members {
                 let mut trial = Vec::new();
-                compare_types(&inf_m.0, declared, path, &mut trial);
+                compare_types(inf_arena, *inf_m, decl_arena, declared, path, &mut trial);
                 if trial.is_empty() {
                     any_match = true;
                     break;
@@ -691,7 +745,9 @@ fn compare_types(
             }
             if !any_match {
                 mismatches.push(format!(
-                    "{path}: stub declares `{declared}` but implementation infers `{inferred}`"
+                    "{path}: stub declares `{}` but implementation infers `{}`",
+                    decl_arena.display(declared),
+                    inf_arena.display(inferred),
                 ));
             }
         }
@@ -699,10 +755,11 @@ fn compare_types(
         // Single inferred type vs declared union: inferred must match at least
         // one declared member.
         (_, OutputTy::Union(decl_members)) => {
+            let decl_members: Vec<_> = decl_members.to_vec();
             let mut any_match = false;
-            for decl_m in decl_members {
+            for decl_m in &decl_members {
                 let mut trial = Vec::new();
-                compare_types(inferred, &decl_m.0, path, &mut trial);
+                compare_types(inf_arena, inferred, decl_arena, *decl_m, path, &mut trial);
                 if trial.is_empty() {
                     any_match = true;
                     break;
@@ -710,23 +767,31 @@ fn compare_types(
             }
             if !any_match {
                 mismatches.push(format!(
-                    "{path}: stub declares `{declared}` but implementation infers `{inferred}`"
+                    "{path}: stub declares `{}` but implementation infers `{}`",
+                    decl_arena.display(declared),
+                    inf_arena.display(inferred),
                 ));
             }
         }
 
         // Named types: unwrap and compare inner.
         (OutputTy::Named(_, inf_inner), _) => {
-            compare_types(&inf_inner.0, declared, path, mismatches);
+            let inf_inner = *inf_inner;
+            compare_types(inf_arena, inf_inner, decl_arena, declared, path, mismatches);
         }
         (_, OutputTy::Named(_, decl_inner)) => {
-            compare_types(inferred, &decl_inner.0, path, mismatches);
+            let decl_inner = *decl_inner;
+            compare_types(
+                inf_arena, inferred, decl_arena, decl_inner, path, mismatches,
+            );
         }
 
         // Type kind mismatch.
         _ => {
             mismatches.push(format!(
-                "{path}: stub declares `{declared}` but implementation infers `{inferred}`"
+                "{path}: stub declares `{}` but implementation infers `{}`",
+                decl_arena.display(declared),
+                inf_arena.display(inferred),
             ));
         }
     }
@@ -959,29 +1024,30 @@ fn run_check(
         // (e.g. a lambda pattern field `config` and a return attrset key `config`).
         // Prefer definitions (PatField, Param, LetIn) over PlainAttrset keys,
         // then prefer types without unions/intersections (cleaner early-canonical form).
-        let mut seen = std::collections::BTreeMap::<String, (lang_ast::NameKind, OutputTy)>::new();
+        let mut seen =
+            std::collections::BTreeMap::<String, (lang_ast::NameKind, lang_ty::TyRef)>::new();
         for (name_id, name) in module.names() {
-            if let Some(ty) = inference.name_ty_map.get(name_id) {
+            if let Some(ty) = inference.name_ty_map.get(name_id).copied() {
                 seen.entry(name.text.to_string())
                     .and_modify(|(existing_kind, existing_ty)| {
                         // Prefer definitions over plain attrset keys.
                         if !existing_kind.is_definition() && name.kind.is_definition() {
                             *existing_kind = name.kind;
-                            *existing_ty = ty.clone();
+                            *existing_ty = ty;
                         } else if existing_kind.is_definition() && !name.kind.is_definition() {
                             // Keep the existing definition type.
-                        } else if ty.contains_union_or_intersection()
-                            && !existing_ty.contains_union_or_intersection()
+                        } else if inference.arena.contains_union_or_intersection(ty)
+                            && !inference.arena.contains_union_or_intersection(*existing_ty)
                         {
                             // Keep the existing (cleaner) one.
-                        } else if !ty.contains_union_or_intersection()
-                            && existing_ty.contains_union_or_intersection()
+                        } else if !inference.arena.contains_union_or_intersection(ty)
+                            && inference.arena.contains_union_or_intersection(*existing_ty)
                         {
                             *existing_kind = name.kind;
-                            *existing_ty = ty.clone();
+                            *existing_ty = ty;
                         }
                     })
-                    .or_insert((name.kind, ty.clone()));
+                    .or_insert((name.kind, ty));
             }
         }
 
@@ -993,14 +1059,17 @@ fn run_check(
 
         println!("Bindings:");
         for (name, (_kind, ty)) in &seen {
-            println!("  {name} :: {}", ty.display_truncated(&display_config));
+            println!(
+                "  {name} :: {}",
+                inference.arena.display_truncated(*ty, &display_config)
+            );
         }
 
         // Print the root expression type.
-        match inference.expr_ty_map.get(module.entry_expr) {
+        match inference.expr_ty_map.get(module.entry_expr).copied() {
             Some(root_ty) => println!(
                 "\nRoot type:\n  {}",
-                root_ty.display_truncated(&display_config)
+                inference.arena.display_truncated(root_ty, &display_config)
             ),
             None => {
                 eprintln!("error: could not infer type for root expression");
@@ -1186,7 +1255,15 @@ fn load_single_stub(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lang_ty::{AttrSetTy, PrimitiveTy, TyRef};
+    use lang_ty::{AttrSetTy, PrimitiveTy, TypeArena};
+
+    // Build a single-node arena containing the given OutputTy and return
+    // (arena, root_ref). Used by compare_types tests which need an arena context.
+    fn make_arena(ty: OutputTy) -> (TypeArena, lang_ty::TyRef) {
+        let mut arena = TypeArena::new();
+        let root = arena.intern(ty);
+        (arena, root)
+    }
 
     fn oty_int() -> OutputTy {
         OutputTy::Primitive(PrimitiveTy::Int)
@@ -1202,79 +1279,107 @@ mod tests {
 
     #[test]
     fn compare_types_same_primitive_ok() {
+        let (ia, ir) = make_arena(oty_int());
+        let (da, dr) = make_arena(oty_int());
         let mut m = Vec::new();
-        compare_types(&oty_int(), &oty_int(), "root", &mut m);
+        compare_types(&ia, ir, &da, dr, "root", &mut m);
         assert!(m.is_empty(), "same primitives should match");
     }
 
     #[test]
     fn compare_types_different_primitive_mismatch() {
+        let (ia, ir) = make_arena(oty_int());
+        let (da, dr) = make_arena(oty_string());
         let mut m = Vec::new();
-        compare_types(&oty_int(), &oty_string(), "root", &mut m);
+        compare_types(&ia, ir, &da, dr, "root", &mut m);
         assert_eq!(m.len(), 1, "different primitives should mismatch");
         assert!(m[0].contains("root"));
     }
 
     #[test]
     fn compare_types_tyvar_declared_is_wildcard() {
+        let (ia, ir) = make_arena(oty_int());
+        let (da, dr) = make_arena(OutputTy::TyVar(0));
         let mut m = Vec::new();
-        compare_types(&oty_int(), &OutputTy::TyVar(0), "root", &mut m);
+        compare_types(&ia, ir, &da, dr, "root", &mut m);
         assert!(m.is_empty(), "TyVar in declared should match anything");
     }
 
     #[test]
     fn compare_types_top_declared_is_wildcard() {
+        let (ia, ir) = make_arena(oty_int());
+        let (da, dr) = make_arena(OutputTy::Top);
         let mut m = Vec::new();
-        compare_types(&oty_int(), &OutputTy::Top, "root", &mut m);
+        compare_types(&ia, ir, &da, dr, "root", &mut m);
         assert!(m.is_empty(), "Top in declared should match anything");
     }
 
     #[test]
     fn compare_types_attrset_missing_field() {
-        let inf = OutputTy::AttrSet(AttrSetTy {
+        let (ia, ir) = make_arena(OutputTy::AttrSet(AttrSetTy {
             fields: std::collections::BTreeMap::new(),
             dyn_ty: None,
             open: false,
             optional_fields: std::collections::BTreeSet::new(),
-        });
+        }));
+        let mut decl_arena = TypeArena::new();
+        let x_int = decl_arena.intern(oty_int());
         let mut decl_fields = std::collections::BTreeMap::new();
-        decl_fields.insert(smol_str::SmolStr::from("x"), TyRef::from(oty_int()));
-        let decl = OutputTy::AttrSet(AttrSetTy {
+        decl_fields.insert(smol_str::SmolStr::from("x"), x_int);
+        let dr = decl_arena.intern(OutputTy::AttrSet(AttrSetTy {
             fields: decl_fields,
             dyn_ty: None,
             open: false,
             optional_fields: std::collections::BTreeSet::new(),
-        });
+        }));
         let mut m = Vec::new();
-        compare_types(&inf, &decl, "root", &mut m);
+        compare_types(&ia, ir, &decl_arena, dr, "root", &mut m);
         assert_eq!(m.len(), 1, "missing field should produce mismatch");
         assert!(m[0].contains("x"));
     }
 
     #[test]
     fn compare_types_union_match() {
-        let inf = OutputTy::Union(vec![TyRef::from(oty_int()), TyRef::from(oty_string())]);
-        let decl = OutputTy::Union(vec![TyRef::from(oty_int()), TyRef::from(oty_string())]);
+        let mut ia = TypeArena::new();
+        let ii = ia.intern(oty_int());
+        let is = ia.intern(oty_string());
+        let ir = ia.intern(OutputTy::Union(vec![ii, is]));
+
+        let mut da = TypeArena::new();
+        let di = da.intern(oty_int());
+        let ds = da.intern(oty_string());
+        let dr = da.intern(OutputTy::Union(vec![di, ds]));
+
         let mut m = Vec::new();
-        compare_types(&inf, &decl, "root", &mut m);
+        compare_types(&ia, ir, &da, dr, "root", &mut m);
         assert!(m.is_empty(), "matching unions should be compatible");
     }
 
     #[test]
     fn compare_types_union_mismatch() {
-        let inf = OutputTy::Union(vec![TyRef::from(oty_int())]);
-        let decl = OutputTy::Union(vec![TyRef::from(oty_string())]);
+        let mut ia = TypeArena::new();
+        let ii = ia.intern(oty_int());
+        let ir = ia.intern(OutputTy::Union(vec![ii]));
+
+        let mut da = TypeArena::new();
+        let ds = da.intern(oty_string());
+        let dr = da.intern(OutputTy::Union(vec![ds]));
+
         let mut m = Vec::new();
-        compare_types(&inf, &decl, "root", &mut m);
+        compare_types(&ia, ir, &da, dr, "root", &mut m);
         assert!(!m.is_empty(), "non-matching unions should mismatch");
     }
 
     #[test]
     fn compare_types_intersection_declared() {
-        let inf = oty_int();
-        let decl = OutputTy::Intersection(vec![TyRef::from(oty_int())]);
+        let (ia, ir) = make_arena(oty_int());
+
+        let mut da = TypeArena::new();
+        let di = da.intern(oty_int());
+        let dr = da.intern(OutputTy::Intersection(vec![di]));
+
         let mut m = Vec::new();
-        compare_types(&inf, &decl, "root", &mut m);
+        compare_types(&ia, ir, &da, dr, "root", &mut m);
         assert!(
             m.is_empty(),
             "inferred matching all intersection members should pass"
@@ -1283,16 +1388,24 @@ mod tests {
 
     #[test]
     fn compare_types_lambda_match() {
-        let inf = OutputTy::Lambda {
-            param: TyRef::from(oty_int()),
-            body: TyRef::from(oty_string()),
-        };
-        let decl = OutputTy::Lambda {
-            param: TyRef::from(oty_int()),
-            body: TyRef::from(oty_string()),
-        };
+        let mut ia = TypeArena::new();
+        let ip = ia.intern(oty_int());
+        let ib = ia.intern(oty_string());
+        let ir = ia.intern(OutputTy::Lambda {
+            param: ip,
+            body: ib,
+        });
+
+        let mut da = TypeArena::new();
+        let dp = da.intern(oty_int());
+        let db = da.intern(oty_string());
+        let dr = da.intern(OutputTy::Lambda {
+            param: dp,
+            body: db,
+        });
+
         let mut m = Vec::new();
-        compare_types(&inf, &decl, "root", &mut m);
+        compare_types(&ia, ir, &da, dr, "root", &mut m);
         assert!(m.is_empty(), "matching lambdas should be compatible");
     }
 

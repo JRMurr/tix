@@ -384,13 +384,14 @@ pub fn run_check_project(
         let check_result = lang_check::run_inference(&inputs, None);
 
         // Cache this file's signature for subsequent layers.
-        if let Some(root_ty) = check_result
-            .inference
-            .as_ref()
-            .and_then(|inf| inf.expr_ty_map.get(inputs.module.entry_expr))
-            .cloned()
-        {
-            coordinator.set_signature(&fm.file_path, lang_check::FileSignature { root_ty });
+        // Build an OwnedTy (compacted arena + root index) for cross-file type flow.
+        if let Some(owned) = check_result.inference.as_ref().and_then(|inf| {
+            inf.expr_ty_map
+                .get(inputs.module.entry_expr)
+                .copied()
+                .map(|root_ref| lang_ty::OwnedTy::new(inf.arena.clone(), root_ref).compact())
+        }) {
+            coordinator.set_signature(&fm.file_path, lang_check::FileSignature { root_ty: owned });
         }
 
         tracing::info!("inference done:  {}", fm.file_path.display());

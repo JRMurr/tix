@@ -53,6 +53,10 @@ pub struct SyntaxData {
     pub import_targets: HashMap<ExprId, PathBuf>,
     pub name_to_import: HashMap<NameId, PathBuf>,
     pub context_arg_types: HashMap<SmolStr, OutputTy>,
+    /// Arena that owns all TyRef indices inside `context_arg_types`. These two
+    /// fields must always be kept in sync — TyRef values from context_arg_types
+    /// are only valid when indexed against this arena.
+    pub context_arg_arena: Arc<lang_ty::TypeArena>,
 }
 
 /// Type inference results from a completed analysis pass.
@@ -96,6 +100,7 @@ pub struct SyntaxIntermediate {
     pub registry: Arc<TypeAliasRegistry>,
     pub context_args: Arc<HashMap<SmolStr, comment_parser::ParsedTy>>,
     pub context_arg_types: HashMap<SmolStr, OutputTy>,
+    pub context_arg_arena: Arc<lang_ty::TypeArena>,
     pub deadline_secs: u64,
     pub rss_limit_mb: Option<f64>,
 }
@@ -113,6 +118,7 @@ pub struct LspInferenceInputs {
     pub import_targets: HashMap<ExprId, PathBuf>,
     pub name_to_import: HashMap<NameId, PathBuf>,
     pub context_arg_types: HashMap<SmolStr, OutputTy>,
+    pub context_arg_arena: Arc<lang_ty::TypeArena>,
 }
 
 /// Run type inference using precomputed syntax data. Does not need the Salsa
@@ -146,6 +152,7 @@ pub fn build_file_analysis(inputs: LspInferenceInputs, check_result: CheckResult
         import_targets: inputs.import_targets,
         name_to_import: inputs.name_to_import,
         context_arg_types: inputs.context_arg_types,
+        context_arg_arena: inputs.context_arg_arena,
     }
 }
 
@@ -323,6 +330,7 @@ pub fn resolve_imports_phase_b(
         import_targets: import_targets.clone(),
         name_to_import: name_to_import.clone(),
         context_arg_types: intermediate.context_arg_types.clone(),
+        context_arg_arena: Arc::clone(&intermediate.context_arg_arena),
     };
 
     (
@@ -349,6 +357,7 @@ impl FileAnalysis {
                 import_targets: self.import_targets.clone(),
                 name_to_import: self.name_to_import.clone(),
                 context_arg_types: self.context_arg_types.clone(),
+                context_arg_arena: Arc::clone(&self.context_arg_arena),
             },
             inference: Some(InferenceData {
                 check_result: self.check_result.clone(),
@@ -383,6 +392,8 @@ pub struct FileAnalysis {
     /// without `config` — the `config :: NixosConfig` context arg still
     /// provides field information for attrpath key hover/completion).
     pub context_arg_types: HashMap<SmolStr, OutputTy>,
+    /// Arena owning all TyRef indices embedded in `context_arg_types`.
+    pub context_arg_arena: Arc<lang_ty::TypeArena>,
 }
 
 impl FileAnalysis {
@@ -546,14 +557,22 @@ impl AnalysisState {
             };
 
         // Pre-convert context args to OutputTy for the LSP to use as a fallback
-        // when the root lambda doesn't explicitly destructure a name.
+        // when the root lambda doesn't explicitly destructure a name. All entries
+        // share one arena so TyRef children remain valid when traversed together.
+        let mut context_arena = lang_ty::TypeArena::new();
         let context_arg_types: HashMap<SmolStr, OutputTy> = context_args
             .iter()
             .map(|(name, parsed_ty)| {
-                let output_ty = crate::ty_nav::parsed_ty_to_output_ty(parsed_ty, &self.registry, 0);
+                let output_ty = crate::ty_nav::parsed_ty_to_output_ty(
+                    parsed_ty,
+                    &self.registry,
+                    &mut context_arena,
+                    0,
+                );
                 (name.clone(), output_ty)
             })
             .collect();
+        let context_arg_arena = Arc::new(context_arena);
         let t_imports = t0.elapsed();
 
         // -- Phase 4: Type inference --
@@ -626,6 +645,7 @@ impl AnalysisState {
                 import_targets,
                 name_to_import,
                 context_arg_types,
+                context_arg_arena,
             },
         );
 
@@ -688,13 +708,22 @@ impl AnalysisState {
                 Arc::default()
             };
 
+        // All context arg types share a single arena so their TyRef children
+        // remain valid when navigated together in get_module_config_type.
+        let mut context_arena = lang_ty::TypeArena::new();
         let context_arg_types: HashMap<SmolStr, OutputTy> = context_args
             .iter()
             .map(|(name, parsed_ty)| {
-                let output_ty = crate::ty_nav::parsed_ty_to_output_ty(parsed_ty, &self.registry, 0);
+                let output_ty = crate::ty_nav::parsed_ty_to_output_ty(
+                    parsed_ty,
+                    &self.registry,
+                    &mut context_arena,
+                    0,
+                );
                 (name.clone(), output_ty)
             })
             .collect();
+        let context_arg_arena = Arc::new(context_arena);
 
         let syntax_duration = t0.elapsed();
 
@@ -715,6 +744,7 @@ impl AnalysisState {
             registry: Arc::clone(&self.registry),
             context_args,
             context_arg_types,
+            context_arg_arena,
             deadline_secs: self.deadline_secs,
             rss_limit_mb: self.rss_limit_mb,
         };
@@ -732,6 +762,7 @@ impl AnalysisState {
             import_targets: HashMap::new(),
             name_to_import: HashMap::new(),
             context_arg_types: intermediate.context_arg_types.clone(),
+            context_arg_arena: Arc::clone(&intermediate.context_arg_arena),
         };
 
         (syntax_data, intermediate, syntax_duration)
@@ -800,6 +831,7 @@ impl AnalysisState {
             import_targets: import_targets.clone(),
             name_to_import: name_to_import.clone(),
             context_arg_types: intermediate.context_arg_types.clone(),
+            context_arg_arena: Arc::clone(&intermediate.context_arg_arena),
         };
 
         (
@@ -813,7 +845,7 @@ impl AnalysisState {
     /// Store or update the file signature in the coordinator cache.
     /// Returns `true` if the type actually changed (callers use this to decide
     /// whether to trigger dependent re-analysis).
-    pub fn update_ephemeral_stub(&mut self, path: &Path, root_ty: OutputTy) -> bool {
+    pub fn update_ephemeral_stub(&mut self, path: &Path, root_ty: lang_ty::OwnedTy) -> bool {
         self.coordinator
             .set_signature(path, lang_check::FileSignature { root_ty })
     }
@@ -1229,12 +1261,19 @@ mod tests {
         );
     }
 
+    /// Helper: create an OwnedTy from a primitive OutputTy for tests.
+    fn make_owned_ty(output_ty: OutputTy) -> lang_ty::OwnedTy {
+        let mut arena = lang_ty::TypeArena::new();
+        let root = arena.intern(output_ty);
+        lang_ty::OwnedTy::new(Arc::new(arena), root)
+    }
+
     #[test]
     fn update_ephemeral_stub_returns_changed() {
         let mut state = AnalysisState::new(TypeAliasRegistry::default());
         let path = PathBuf::from("/test.nix");
-        let ty_int = OutputTy::Primitive(lang_ty::PrimitiveTy::Int);
-        let ty_string = OutputTy::Primitive(lang_ty::PrimitiveTy::String);
+        let ty_int = make_owned_ty(OutputTy::Primitive(lang_ty::PrimitiveTy::Int));
+        let ty_string = make_owned_ty(OutputTy::Primitive(lang_ty::PrimitiveTy::String));
 
         // First insertion: new type, should return true.
         assert!(
@@ -1260,7 +1299,7 @@ mod tests {
         let mut state = AnalysisState::new(TypeAliasRegistry::default());
         let a = PathBuf::from("/a.nix");
         let b = PathBuf::from("/b.nix");
-        let ty_int = OutputTy::Primitive(lang_ty::PrimitiveTy::Int);
+        let ty_int = make_owned_ty(OutputTy::Primitive(lang_ty::PrimitiveTy::Int));
 
         // A imports B, B has an ephemeral stub.
         state.record_import_deps(&a, &[b.clone()]);

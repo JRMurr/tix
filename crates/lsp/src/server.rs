@@ -569,20 +569,27 @@ fn spawn_analysis_loop(
 
                 // Extract root type and update ephemeral stub. If the stub
                 // changed, schedule re-analysis for all dependents.
-                let root_ty = file_analysis
+                // Build an OwnedTy from the TyRef + the inference arena so the
+                // type is self-contained (valid across file boundaries).
+                let root_ty: Option<lang_ty::OwnedTy> = file_analysis
                     .check_result
                     .inference
                     .as_ref()
-                    .and_then(|inf| inf.expr_ty_map.get(file_analysis.module.entry_expr))
-                    .cloned();
+                    .and_then(|inf| {
+                        inf.expr_ty_map
+                            .get(file_analysis.module.entry_expr)
+                            .map(|&ty_ref| {
+                                lang_ty::OwnedTy::new(std::sync::Arc::clone(&inf.arena), ty_ref)
+                            })
+                    });
 
                 let mut reanalyze_paths = Vec::new();
                 {
                     let mut st = state.lock();
                     st.files.insert(path.clone(), file_analysis);
                     st.record_import_deps(path, &import_paths);
-                    if let Some(ty) = root_ty {
-                        if st.update_ephemeral_stub(path, ty) {
+                    if let Some(owned_ty) = root_ty {
+                        if st.update_ephemeral_stub(path, owned_ty) {
                             reanalyze_paths = st.get_dependents(path);
                         }
                     }

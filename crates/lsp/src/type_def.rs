@@ -48,15 +48,19 @@ pub fn goto_type_definition(
 
         // Check for a name binding first.
         if let Some(name_id) = analysis.syntax.source_map.name_for_node(ptr) {
-            if let Some(ty) = inference.name_ty_map.get(name_id) {
-                return resolve_decl_locations(extract_alias_name(ty), registry);
+            if let Some(&ty_ref) = inference.name_ty_map.get(name_id) {
+                return resolve_decl_locations(
+                    extract_alias_name(&inference.arena[ty_ref]),
+                    registry,
+                );
             }
         }
 
         // Then check for an expression.
         if let Some(expr_id) = analysis.syntax.source_map.expr_for_node(ptr) {
-            if let Some(ty) = inference.expr_ty_map.get(expr_id) {
-                let locs = resolve_decl_locations(extract_alias_name(ty), registry);
+            if let Some(&ty_ref) = inference.expr_ty_map.get(expr_id) {
+                let locs =
+                    resolve_decl_locations(extract_alias_name(&inference.arena[ty_ref]), registry);
                 if !locs.is_empty() {
                     return locs;
                 }
