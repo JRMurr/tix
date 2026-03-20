@@ -61,8 +61,8 @@ pub(crate) fn resolve_through_segments(
 /// given segment. On success, returns `(config_ty, is_from_context)`:
 /// - `is_from_context = false`: the type lives in `inference.arena`.
 /// - `is_from_context = true`: the type lives in `context_arg_arena`.
-/// Callers must use the matching arena for all subsequent navigation of the
-/// returned type.
+///   Callers must use the matching arena for all subsequent navigation of the
+///   returned type.
 pub(crate) fn get_module_config_type(
     analysis: &FileSnapshot,
     inference: &lang_check::InferenceResult,
