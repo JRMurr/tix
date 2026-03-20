@@ -1,3 +1,10 @@
+## Arena-Interned OutputTy Migration (In Progress)
+
+Phase 1 (lang_ty foundation) done. Phase 2-3 (lang_check) partially done.
+Main remaining work: collect.rs Canonicalizer rewrite, infer.rs simplify/
+canonicalize calls, all tests, PBT, comment_parser/tix_collect, CLI, LSP.
+See git log for details.
+
 ## Known Issues & Future Work
 
 Items not tracked in backlog — either too small for a task, known limitations
