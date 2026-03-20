@@ -3,13 +3,15 @@
 // ==============================================================================
 //
 // Type-checks all .nix files in a project using tix.toml configuration.
-// The pipeline has three phases:
-//   1. Sequential Prepare — Salsa queries, classification, context resolution,
-//      SyntaxBundle extraction (import resolution deferred to coordinator)
-//   2. Parallel Inference — coordinator.demand_batch with demand-driven import
-//      resolution across files
-//   3. Sequential Render  — deterministic diagnostic output in file order
+// The pipeline has four phases:
+//   1.   Sequential Prepare — Salsa queries, classification, context resolution,
+//        SyntaxBundle extraction, import scanning
+//   1.5  Dependency Graph   — SCC computation + topological layering
+//   2.   Layered Inference  — layer-by-layer parallel inference with cross-file
+//        type flow and reference-counted signature eviction
+//   3.   Sequential Render  — deterministic diagnostic output in file order
 
+use std::collections::HashMap;
 use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -157,6 +159,8 @@ pub fn run_check_project(
         name_res: lang_ast::NameResolution,
         grouped_defs: lang_ast::GroupedDefs,
         context_args: Arc<std::collections::HashMap<smol_str::SmolStr, comment_parser::ParsedTy>>,
+        /// Import targets discovered during Phase 1 (for dependency graph).
+        import_targets: Vec<PathBuf>,
     }
 
     let db = RootDatabase::default();
@@ -221,6 +225,11 @@ pub fn run_check_project(
                     Arc::default()
                 });
 
+        // Scan imports for the file-level dependency graph (Phase 1.5).
+        let base_dir = file_path.parent().unwrap_or(std::path::Path::new("/"));
+        let import_targets =
+            lang_check::imports::scan_all_import_paths(&module, &name_res, base_dir);
+
         // Remaining Salsa queries for inference.
         let module_indices = lang_ast::module_indices(&db, nix_file);
         let grouped_defs = lang_ast::group_def(&db, nix_file);
@@ -234,6 +243,7 @@ pub fn run_check_project(
             name_res,
             grouped_defs,
             context_args,
+            import_targets,
         });
     }
 
@@ -242,7 +252,13 @@ pub fn run_check_project(
     let registry = Arc::new(registry);
 
     let precomputed: DashMap<PathBuf, SyntaxBundle> = DashMap::with_capacity(pre_prepared.len());
-    let mut metadata: Vec<FileMetadata> = Vec::with_capacity(pre_prepared.len());
+    let metadata_map: DashMap<PathBuf, FileMetadata> = DashMap::with_capacity(pre_prepared.len());
+    let mut import_edges: HashMap<PathBuf, Vec<PathBuf>> =
+        HashMap::with_capacity(pre_prepared.len());
+
+    // Track original discovery order for deterministic Phase 3 output.
+    let mut file_order: Vec<PathBuf> = Vec::with_capacity(pre_prepared.len());
+
     for pp in pre_prepared {
         // Canonicalize the key so it matches the canonical paths that
         // resolve_import_types produces when looking up import targets.
@@ -251,11 +267,16 @@ pub fn run_check_project(
         let canonical_path =
             std::fs::canonicalize(&pp.file_path).unwrap_or_else(|_| pp.file_path.clone());
 
-        metadata.push(FileMetadata {
-            file_path: canonical_path.clone(),
-            source_text: pp.source_text,
-            source_map: pp.source_map,
-        });
+        file_order.push(canonical_path.clone());
+        import_edges.insert(canonical_path.clone(), pp.import_targets);
+        metadata_map.insert(
+            canonical_path.clone(),
+            FileMetadata {
+                file_path: canonical_path.clone(),
+                source_text: pp.source_text,
+                source_map: pp.source_map,
+            },
+        );
         precomputed.insert(
             canonical_path.clone(),
             SyntaxBundle {
@@ -272,93 +293,143 @@ pub fn run_check_project(
     }
     timer.mark("prepare (sequential)");
 
+    // =========================================================================
+    // Phase 1.5 — Build file-level dependency graph and layers
+    // =========================================================================
+    //
+    // Compute SCCs on the file import graph and topologically sort into layers.
+    // Layer 0 = leaf files with no in-project dependencies (inferred first).
+    // Each subsequent layer's dependencies are guaranteed to be cached from
+    // prior layers.
+
+    let layers = lang_check::file_graph::build_file_layers(&import_edges);
+    let mut importer_counts = lang_check::file_graph::compute_importer_counts(&import_edges);
+    timer.mark("dependency graph");
+
     let syntax_provider = CliSyntaxProvider { precomputed };
 
     // =========================================================================
-    // Phase 2 — Parallel Inference with opportunistic cross-file resolution
+    // Phase 2 — Layered Parallel Inference with cross-file type flow
     // =========================================================================
     //
-    // Each file is inferred independently in parallel. Import types are resolved
-    // from the coordinator cache: if file B was already inferred by another
-    // rayon thread before file A starts, A gets B's real type. Otherwise the
-    // import falls through to ⊤ (same as before). After inference, each file's
-    // root type is stored in the coordinator cache for subsequent files to use.
+    // Files are inferred layer-by-layer. Within each layer, files run in
+    // parallel via rayon. Dependencies from prior layers have their signatures
+    // cached in the coordinator, so import resolution gets real types instead
+    // of ⊤.
     //
-    // This is "opportunistic" rather than demand-driven: we don't recursively
-    // chase imports (which would serialize on deep import chains), but files
-    // processed earlier naturally feed types to files processed later.
+    // Memory optimization: reference-counted eviction drops signatures whose
+    // importers have all been processed, keeping the live set bounded to the
+    // "frontier" rather than the entire project.
     //
-    // Critical memory optimization: the InferenceResult (ArenaMap<NameId/ExprId,
-    // OutputTy>) is dropped per-file inside the par_iter closure, before
-    // .collect() gathers all results. This reduces peak memory by ~70%.
+    // Files within the same SCC layer get ⊤ for intra-SCC imports (their
+    // signatures aren't cached yet when peers run in parallel). All acyclic
+    // imports get real types.
 
     let coordinator = InferenceCoordinator::new();
-    let results: Vec<RenderableResult> = metadata
-        .into_par_iter()
-        .map(|fm| {
-            tracing::info!("inference start: {}", fm.file_path.display());
+    let mut all_results: Vec<RenderableResult> = Vec::with_capacity(files_count);
 
-            // Consume the pre-extracted SyntaxBundle from the DashMap.
-            let bundle = match syntax_provider.syntax_for_file(&fm.file_path) {
-                Some(b) => b,
-                None => {
-                    return RenderableResult {
-                        file_path: fm.file_path,
-                        source_text: fm.source_text,
-                        source_map: fm.source_map,
-                        diagnostics: vec![],
-                        timed_out: false,
-                    };
+    for layer in &layers {
+        let layer_results: Vec<RenderableResult> = layer
+            .par_iter()
+            .filter_map(|path| {
+                let (_, fm) = metadata_map.remove(path)?;
+
+                tracing::info!("inference start: {}", fm.file_path.display());
+
+                // Consume the pre-extracted SyntaxBundle from the DashMap.
+                let bundle = match syntax_provider.syntax_for_file(&fm.file_path) {
+                    Some(b) => b,
+                    None => {
+                        return Some(RenderableResult {
+                            file_path: fm.file_path,
+                            source_text: fm.source_text,
+                            source_map: fm.source_map,
+                            diagnostics: vec![],
+                            timed_out: false,
+                        });
+                    }
+                };
+
+                let base_dir = fm.file_path.parent().unwrap_or(std::path::Path::new("/"));
+
+                // Resolve imports from the coordinator cache. Prior layers'
+                // signatures are available; intra-SCC imports get ⊤.
+                let import_resolution =
+                    coordinator.resolve_imports(&bundle.module, &bundle.name_res, base_dir);
+                let import_diagnostics =
+                    lang_check::imports::import_errors_to_diagnostics(&import_resolution.errors);
+
+                // Build InferenceInputs and run inference.
+                let inputs = lang_check::InferenceInputs {
+                    module: bundle.module,
+                    module_indices: bundle.module_indices,
+                    name_res: bundle.name_res,
+                    grouped_defs: bundle.grouped_defs,
+                    registry: bundle.registry,
+                    import_types: import_resolution.types,
+                    import_diagnostics,
+                    context_args: bundle.context_args,
+                    deadline_secs: bundle.deadline_secs,
+                    rss_limit_mb: None,
+                };
+
+                let check_result = lang_check::run_inference(&inputs, None);
+
+                // Cache this file's signature for subsequent layers.
+                if let Some(root_ty) = check_result
+                    .inference
+                    .as_ref()
+                    .and_then(|inf| inf.expr_ty_map.get(inputs.module.entry_expr))
+                    .cloned()
+                {
+                    coordinator.set_signature(&fm.file_path, lang_check::FileSignature { root_ty });
                 }
-            };
 
-            let base_dir = fm.file_path.parent().unwrap_or(std::path::Path::new("/"));
+                tracing::info!("inference done:  {}", fm.file_path.display());
 
-            // Resolve imports from whatever is already in the coordinator cache.
-            // No recursive demand — just read what's available.
-            let import_resolution =
-                coordinator.resolve_imports(&bundle.module, &bundle.name_res, base_dir);
-            let import_diagnostics =
-                lang_check::imports::import_errors_to_diagnostics(&import_resolution.errors);
+                // Extract only diagnostics + timed_out. The heavy InferenceResult
+                // is dropped here, keeping memory bounded.
+                Some(RenderableResult {
+                    file_path: fm.file_path,
+                    source_text: fm.source_text,
+                    source_map: fm.source_map,
+                    diagnostics: check_result.diagnostics,
+                    timed_out: check_result.timed_out,
+                })
+            })
+            .collect();
 
-            // Build InferenceInputs and run inference.
-            let inputs = lang_check::InferenceInputs {
-                module: bundle.module,
-                module_indices: bundle.module_indices,
-                name_res: bundle.name_res,
-                grouped_defs: bundle.grouped_defs,
-                registry: bundle.registry,
-                import_types: import_resolution.types,
-                import_diagnostics,
-                context_args: bundle.context_args,
-                deadline_secs: bundle.deadline_secs,
-                rss_limit_mb: None,
-            };
+        all_results.extend(layer_results);
 
-            let check_result = lang_check::run_inference(&inputs, None);
-
-            // NOTE: We intentionally do NOT store root types in the coordinator
-            // cache during batch mode. Accumulating OutputTy for 40k+ files
-            // causes OOM (OutputTy is a recursive Arc tree — attrsets with
-            // hundreds of fields are common in nixpkgs). The "opportunistic"
-            // cross-file resolution via resolve_imports above will read from
-            // the cache if anything is there, but we don't populate it.
-            // TODO: add memory-budgeted caching for cross-file types in batch mode
-
-            tracing::info!("inference done:  {}", fm.file_path.display());
-
-            // Extract only diagnostics + timed_out. The heavy InferenceResult
-            // is dropped here, matching the old pipeline's memory behavior.
-            RenderableResult {
-                file_path: fm.file_path,
-                source_text: fm.source_text,
-                source_map: fm.source_map,
-                diagnostics: check_result.diagnostics,
-                timed_out: check_result.timed_out,
+        // Reference-counted eviction: decrement importer counts for each
+        // dependency of files in this layer. Evict signatures whose count
+        // reaches 0 (all importers have been processed).
+        let mut to_evict = Vec::new();
+        for file in layer {
+            if let Some(deps) = import_edges.get(file) {
+                for dep in deps {
+                    if let Some(count) = importer_counts.get_mut(dep) {
+                        *count -= 1;
+                        if *count == 0 {
+                            to_evict.push(dep.clone());
+                        }
+                    }
+                }
             }
-        })
-        .collect();
-    timer.mark("inference (parallel)");
+        }
+        if !to_evict.is_empty() {
+            coordinator.remove_signatures_batch(&to_evict);
+        }
+    }
+
+    // Sort results back into original file discovery order for deterministic
+    // Phase 3 output.
+    let order_index: HashMap<&PathBuf, usize> =
+        file_order.iter().enumerate().map(|(i, p)| (p, i)).collect();
+    all_results.sort_by_key(|r| order_index.get(&r.file_path).copied().unwrap_or(usize::MAX));
+
+    let results = all_results;
+    timer.mark("inference (layered)");
 
     // =========================================================================
     // Phase 3 — Sequential Render

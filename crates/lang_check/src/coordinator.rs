@@ -431,6 +431,15 @@ impl InferenceCoordinator {
             .unwrap_or_default()
     }
 
+    /// Remove signatures for a batch of files. Used by the CLI's
+    /// reference-counted eviction to drop signatures whose importers
+    /// have all been processed.
+    pub fn remove_signatures_batch(&self, paths: &[PathBuf]) {
+        for path in paths {
+            self.cache.remove(path.as_path());
+        }
+    }
+
     /// Remove a file's signature and return its dependents (for didClose).
     pub fn remove_signature(&self, path: &Path) -> Vec<PathBuf> {
         self.cache.remove(path);
@@ -799,5 +808,145 @@ mod tests {
 
         // Should NOT be cached as Ready(None).
         assert!(!coord.cache.contains_key(&path));
+    }
+
+    // =========================================================================
+    // Layered inference integration tests
+    // =========================================================================
+
+    /// End-to-end test: cross-file type flow via layered inference.
+    /// b.nix = 42, a.nix = import ./b.nix → a.nix should get type `int`.
+    #[test]
+    fn layered_cross_file_type_flow() {
+        use crate::file_graph;
+
+        let dir = tempfile::tempdir().unwrap();
+        let b_path = write_nix(dir.path(), "b.nix", "42");
+        let a_contents = format!("import {}", b_path.display());
+        let a_path = write_nix(dir.path(), "a.nix", &a_contents);
+
+        // Build the import edge map.
+        let mut import_edges = HashMap::new();
+        import_edges.insert(a_path.clone(), vec![b_path.clone()]);
+        import_edges.insert(b_path.clone(), vec![]);
+
+        // Build layers.
+        let layers = file_graph::build_file_layers(&import_edges);
+        assert_eq!(layers.len(), 2);
+
+        let provider = TestSyntaxProvider::new();
+        let coord = InferenceCoordinator::new();
+
+        // Infer layer by layer.
+        for layer in &layers {
+            for path in layer {
+                let result = coord
+                    .demand_file(path, &provider, None)
+                    .expect("inference should succeed");
+
+                // Cache the signature for subsequent layers.
+                if let Some(sig) = result.signature {
+                    coord.set_signature(path, sig);
+                }
+            }
+        }
+
+        // a.nix should have type `int` (from b.nix), not ⊤.
+        let a_ty = coord
+            .get_signature(&a_path)
+            .expect("a.nix should be cached");
+        assert_eq!(a_ty, OutputTy::Primitive(lang_ty::PrimitiveTy::Int));
+    }
+
+    /// Diamond dependency: shared dep inferred once, type flows correctly
+    /// through both paths.
+    #[test]
+    fn layered_diamond_dependency() {
+        use crate::file_graph;
+
+        let dir = tempfile::tempdir().unwrap();
+        let d_path = write_nix(dir.path(), "d.nix", "\"hello\"");
+        let b_contents = format!("import {}", d_path.display());
+        let b_path = write_nix(dir.path(), "b.nix", &b_contents);
+        let c_contents = format!("import {}", d_path.display());
+        let c_path = write_nix(dir.path(), "c.nix", &c_contents);
+        let a_contents = format!(
+            "let b = import {}; c = import {}; in {{ inherit b c; }}",
+            b_path.display(),
+            c_path.display()
+        );
+        let a_path = write_nix(dir.path(), "a.nix", &a_contents);
+
+        let mut import_edges = HashMap::new();
+        import_edges.insert(d_path.clone(), vec![]);
+        import_edges.insert(b_path.clone(), vec![d_path.clone()]);
+        import_edges.insert(c_path.clone(), vec![d_path.clone()]);
+        import_edges.insert(a_path.clone(), vec![b_path.clone(), c_path.clone()]);
+
+        let layers = file_graph::build_file_layers(&import_edges);
+        assert_eq!(layers.len(), 3);
+
+        let provider = TestSyntaxProvider::new();
+        let coord = InferenceCoordinator::new();
+
+        for layer in &layers {
+            layer.iter().for_each(|path| {
+                let result = coord
+                    .demand_file(path, &provider, None)
+                    .expect("inference should succeed");
+                if let Some(sig) = result.signature {
+                    coord.set_signature(path, sig);
+                }
+            });
+        }
+
+        // b.nix and c.nix should both be `string` (from d.nix).
+        let b_ty = coord.get_signature(&b_path).expect("b.nix cached");
+        assert_eq!(b_ty, OutputTy::Primitive(lang_ty::PrimitiveTy::String));
+        let c_ty = coord.get_signature(&c_path).expect("c.nix cached");
+        assert_eq!(c_ty, OutputTy::Primitive(lang_ty::PrimitiveTy::String));
+    }
+
+    /// Cycle: A ↔ B doesn't deadlock. Files complete with ⊤ for back-edges.
+    #[test]
+    fn layered_cycle_no_deadlock() {
+        use crate::file_graph;
+
+        let dir = tempfile::tempdir().unwrap();
+        let a_path_raw = dir.path().join("a.nix");
+        let b_path_raw = dir.path().join("b.nix");
+
+        std::fs::write(&b_path_raw, format!("import {}", a_path_raw.display())).unwrap();
+        std::fs::write(&a_path_raw, format!("import {}", b_path_raw.display())).unwrap();
+
+        let a_path = a_path_raw.canonicalize().unwrap();
+        let b_path = b_path_raw.canonicalize().unwrap();
+
+        let mut import_edges = HashMap::new();
+        import_edges.insert(a_path.clone(), vec![b_path.clone()]);
+        import_edges.insert(b_path.clone(), vec![a_path.clone()]);
+
+        let layers = file_graph::build_file_layers(&import_edges);
+        // Both should be in the same SCC layer.
+        assert_eq!(layers.len(), 1);
+        assert_eq!(layers[0].len(), 2);
+
+        let provider = TestSyntaxProvider::new();
+        let coord = InferenceCoordinator::new();
+
+        // Should not deadlock.
+        for path in &layers[0] {
+            let result = coord.demand_file(path, &provider, None);
+            assert!(
+                result.is_some(),
+                "inference should succeed for {}",
+                path.display()
+            );
+            if let Some(r) = result {
+                if let Some(sig) = r.signature {
+                    coord.set_signature(path, sig);
+                }
+            }
+        }
     }
 }

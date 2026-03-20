@@ -948,6 +948,7 @@ dependencies = [
  "log",
  "miette",
  "parking_lot",
+ "petgraph",
  "proptest",
  "rayon",
  "rnix",

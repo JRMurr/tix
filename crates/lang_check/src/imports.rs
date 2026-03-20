@@ -187,6 +187,50 @@ pub(crate) fn extract_return_type(ty: &OutputTy) -> OutputTy {
     }
 }
 
+// ==============================================================================
+// Bulk Import Path Scanning (for dependency graph construction)
+// ==============================================================================
+
+/// Scan a module for all import paths without resolving types.
+///
+/// Combines `scan_literal_imports` and `scan_callpackage_imports`, canonicalizes
+/// paths, applies directory → `default.nix` resolution, and deduplicates.
+/// Returns only canonical paths — no ExprIds, no types. Used by `tix check`
+/// to build the file-level dependency graph before inference begins.
+pub fn scan_all_import_paths(
+    module: &Module,
+    name_res: &NameResolution,
+    base_dir: &Path,
+) -> Vec<PathBuf> {
+    let literal = scan_literal_imports(module, name_res, base_dir);
+    let callpackage = scan_callpackage_imports(module, base_dir);
+
+    let mut seen = HashSet::new();
+    let mut result = Vec::new();
+
+    let all_paths = literal
+        .resolved
+        .iter()
+        .map(|(_, p)| p.clone())
+        .chain(callpackage.iter().map(|(_, _, _, p)| p.clone()));
+
+    for path in all_paths {
+        let canonical = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+
+        // Apply directory → default.nix resolution.
+        let resolved = match resolve_directory_path(canonical) {
+            Some(p) => p,
+            None => continue, // Directory with no default.nix.
+        };
+
+        if seen.insert(resolved.clone()) {
+            result.push(resolved);
+        }
+    }
+
+    result
+}
+
 /// Resolve a path that may point to a directory, applying Nix's convention
 /// of loading `default.nix` from directories.
 ///

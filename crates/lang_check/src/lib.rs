@@ -4,6 +4,7 @@ pub(crate) mod collect;
 mod constrain;
 pub mod coordinator;
 pub mod diagnostic;
+pub mod file_graph;
 pub mod imports;
 mod infer;
 pub use infer::rss_mb;
