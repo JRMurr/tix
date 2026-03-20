@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use comment_parser::{ParsedTy, ParsedTyRef, TixDeclFile, TixDeclaration};
-use lang_ty::AttrSetTy;
+use lang_ty::{AttrSetTy, TypeArena};
 use smol_str::SmolStr;
 
 const BUILTIN_STUBS: &str = include_str!("../../../stubs/lib.tix");
@@ -789,15 +789,19 @@ fn collect_references_inner(ty: &ParsedTy, refs: &mut Vec<SmolStr>) {
 /// Convert a `ParsedTy` to `OutputTy`, resolving type alias references through
 /// a `TypeAliasRegistry`. Shared by CLI and LSP code paths.
 ///
+/// `arena` is used to intern child `TyRef` nodes. All `TyRef` values in the
+/// returned `OutputTy` are valid indices into the same arena.
+///
 /// `depth` guards against infinite recursion on self-referential aliases.
 /// Generic type variables and unresolved references become `OutputTy::TyVar(0)`.
 pub fn parsed_ty_to_output_ty(
     ty: &ParsedTy,
     registry: &TypeAliasRegistry,
+    arena: &mut TypeArena,
     depth: usize,
 ) -> lang_ty::OutputTy {
     use comment_parser::TypeVarValue;
-    use lang_ty::{OutputTy, TyRef};
+    use lang_ty::OutputTy;
 
     if depth > 20 {
         return OutputTy::TyVar(0);
@@ -807,37 +811,39 @@ pub fn parsed_ty_to_output_ty(
         ParsedTy::Primitive(p) => OutputTy::Primitive(*p),
         ParsedTy::TyVar(TypeVarValue::Reference(name)) => {
             if let Some(alias_body) = registry.get(name) {
-                let inner = parsed_ty_to_output_ty(alias_body, registry, depth + 1);
-                OutputTy::Named(name.clone(), TyRef::from(inner))
+                let inner = parsed_ty_to_output_ty(alias_body, registry, arena, depth + 1);
+                let inner_ref = arena.intern(inner);
+                OutputTy::Named(name.clone(), inner_ref)
             } else {
                 OutputTy::TyVar(0)
             }
         }
         ParsedTy::TyVar(TypeVarValue::Generic(_)) => OutputTy::TyVar(0),
-        ParsedTy::List(inner) => OutputTy::List(TyRef::from(parsed_ty_to_output_ty(
-            &inner.0,
-            registry,
-            depth + 1,
-        ))),
-        ParsedTy::Lambda { param, body } => OutputTy::Lambda {
-            param: TyRef::from(parsed_ty_to_output_ty(&param.0, registry, depth + 1)),
-            body: TyRef::from(parsed_ty_to_output_ty(&body.0, registry, depth + 1)),
-        },
+        ParsedTy::List(inner) => {
+            let inner_ty = parsed_ty_to_output_ty(&inner.0, registry, arena, depth + 1);
+            OutputTy::List(arena.intern(inner_ty))
+        }
+        ParsedTy::Lambda { param, body } => {
+            let param_ty = parsed_ty_to_output_ty(&param.0, registry, arena, depth + 1);
+            let body_ty = parsed_ty_to_output_ty(&body.0, registry, arena, depth + 1);
+            OutputTy::Lambda {
+                param: arena.intern(param_ty),
+                body: arena.intern(body_ty),
+            }
+        }
         ParsedTy::AttrSet(attr) => {
             let fields = attr
                 .fields
                 .iter()
                 .map(|(k, v)| {
-                    (
-                        k.clone(),
-                        TyRef::from(parsed_ty_to_output_ty(&v.0, registry, depth + 1)),
-                    )
+                    let field_ty = parsed_ty_to_output_ty(&v.0, registry, arena, depth + 1);
+                    (k.clone(), arena.intern(field_ty))
                 })
                 .collect();
-            let dyn_ty = attr
-                .dyn_ty
-                .as_ref()
-                .map(|d| TyRef::from(parsed_ty_to_output_ty(&d.0, registry, depth + 1)));
+            let dyn_ty = attr.dyn_ty.as_ref().map(|d| {
+                let d_ty = parsed_ty_to_output_ty(&d.0, registry, arena, depth + 1);
+                arena.intern(d_ty)
+            });
             OutputTy::AttrSet(AttrSetTy {
                 fields,
                 dyn_ty,
@@ -848,13 +854,19 @@ pub fn parsed_ty_to_output_ty(
         ParsedTy::Union(members) => OutputTy::Union(
             members
                 .iter()
-                .map(|m| TyRef::from(parsed_ty_to_output_ty(&m.0, registry, depth + 1)))
+                .map(|m| {
+                    let m_ty = parsed_ty_to_output_ty(&m.0, registry, arena, depth + 1);
+                    arena.intern(m_ty)
+                })
                 .collect(),
         ),
         ParsedTy::Intersection(members) => OutputTy::Intersection(
             members
                 .iter()
-                .map(|m| TyRef::from(parsed_ty_to_output_ty(&m.0, registry, depth + 1)))
+                .map(|m| {
+                    let m_ty = parsed_ty_to_output_ty(&m.0, registry, arena, depth + 1);
+                    arena.intern(m_ty)
+                })
                 .collect(),
         ),
         ParsedTy::Top => OutputTy::Top,

@@ -8,6 +8,7 @@ lang_ast = { path = "../lang_ast" }
 derive_more = { workspace = true, features = ["debug", "from"] }
 smol_str = { workspace = true }
 rustc-hash = { workspace = true }
+la-arena = { workspace = true }
 stacker = "0.1"
 
 proptest = { workspace = true, optional = true }

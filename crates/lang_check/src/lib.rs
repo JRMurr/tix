@@ -27,7 +27,7 @@ use diagnostic::TixDiagnostic;
 use infer_expr::{PendingHasField, PendingMerge, PendingOverload, PendingWithFallback};
 use la_arena::ArenaMap;
 use lang_ast::{AstDb, Expr, ExprId, Module, NameId, NameResolution, NixFile, OverloadBinOp};
-use lang_ty::{OutputTy, PrimitiveTy, Ty};
+use lang_ty::{OutputTy, OwnedTy, PrimitiveTy, Ty, TyRef, TypeArena};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -79,7 +79,7 @@ pub fn check_file_with_imports(
     db: &dyn AstDb,
     file: NixFile,
     aliases: Arc<TypeAliasRegistry>,
-    import_types: HashMap<ExprId, OutputTy>,
+    import_types: HashMap<ExprId, OwnedTy>,
 ) -> Result<InferenceResult, Box<TixDiagnostic>> {
     let module = lang_ast::module(db, file);
     let name_res = lang_ast::name_resolution(db, file);
@@ -156,19 +156,29 @@ impl From<TyId> for usize {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct InferenceResult {
-    pub name_ty_map: ArenaMap<NameId, OutputTy>,
-    pub expr_ty_map: ArenaMap<ExprId, OutputTy>,
+    pub arena: Arc<TypeArena>,
+    pub name_ty_map: ArenaMap<NameId, TyRef>,
+    pub expr_ty_map: ArenaMap<ExprId, TyRef>,
 }
 
+impl PartialEq for InferenceResult {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.arena, &other.arena)
+            && self.name_ty_map == other.name_ty_map
+            && self.expr_ty_map == other.expr_ty_map
+    }
+}
+impl Eq for InferenceResult {}
+
 impl InferenceResult {
-    pub fn ty_for_name(&self, name: NameId) -> Option<OutputTy> {
-        self.name_ty_map.get(name).cloned()
+    pub fn ty_for_name(&self, name: NameId) -> Option<TyRef> {
+        self.name_ty_map.get(name).copied()
     }
 
-    pub fn ty_for_expr(&self, expr: ExprId) -> Option<OutputTy> {
-        self.expr_ty_map.get(expr).cloned()
+    pub fn ty_for_expr(&self, expr: ExprId) -> Option<TyRef> {
+        self.expr_ty_map.get(expr).copied()
     }
 }
 
@@ -284,7 +294,7 @@ pub struct CheckResult {
 /// cross-file types without re-inferring the dependency.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileSignature {
-    pub root_ty: OutputTy,
+    pub root_ty: OwnedTy,
 }
 
 /// Pre-import syntax data: everything needed for inference except resolved
@@ -318,7 +328,7 @@ pub struct InferenceInputs {
     pub name_res: NameResolution,
     pub grouped_defs: lang_ast::GroupedDefs,
     pub registry: Arc<TypeAliasRegistry>,
-    pub import_types: HashMap<ExprId, OutputTy>,
+    pub import_types: HashMap<ExprId, OwnedTy>,
     pub import_diagnostics: Vec<TixDiagnostic>,
     pub context_args: Arc<HashMap<smol_str::SmolStr, ParsedTy>>,
     /// Inference deadline in seconds. `None` means no deadline (CLI default).
@@ -392,7 +402,7 @@ pub struct CheckBuilder {
     indices: lang_ast::ModuleIndices,
     grouped_defs: lang_ast::GroupedDefs,
     aliases: Arc<TypeAliasRegistry>,
-    import_types: HashMap<ExprId, OutputTy>,
+    import_types: HashMap<ExprId, OwnedTy>,
     context_args: Arc<HashMap<smol_str::SmolStr, ParsedTy>>,
     deadline: Option<Instant>,
     cancel_flag: Option<Arc<AtomicBool>>,
@@ -405,7 +415,7 @@ impl CheckBuilder {
         db: &dyn AstDb,
         file: NixFile,
         aliases: Arc<TypeAliasRegistry>,
-        import_types: HashMap<ExprId, OutputTy>,
+        import_types: HashMap<ExprId, OwnedTy>,
         context_args: Arc<HashMap<smol_str::SmolStr, ParsedTy>>,
     ) -> Self {
         Self {
@@ -431,7 +441,7 @@ impl CheckBuilder {
         indices: lang_ast::ModuleIndices,
         grouped_defs: lang_ast::GroupedDefs,
         aliases: Arc<TypeAliasRegistry>,
-        import_types: HashMap<ExprId, OutputTy>,
+        import_types: HashMap<ExprId, OwnedTy>,
         context_args: Arc<HashMap<smol_str::SmolStr, ParsedTy>>,
     ) -> Self {
         Self {
@@ -596,7 +606,7 @@ pub struct CheckCtx<'db> {
     /// Pre-computed types for resolved import expressions. When an Apply ExprId
     /// is in this map, its type comes from the imported file's root expression
     /// rather than from the generic `import :: a -> b` builtin signature.
-    import_types: HashMap<ExprId, OutputTy>,
+    import_types: HashMap<ExprId, OwnedTy>,
 
     /// Context argument types for the root lambda (from `tix.toml` context
     /// configuration). Maps parameter names (e.g. "config", "lib", "pkgs") to
@@ -680,7 +690,7 @@ impl<'db> CheckCtx<'db> {
         name_res: &'db NameResolution,
         binding_exprs: &'db HashMap<NameId, ExprId>,
         type_aliases: Arc<TypeAliasRegistry>,
-        import_types: HashMap<ExprId, OutputTy>,
+        import_types: HashMap<ExprId, OwnedTy>,
         context_args: Arc<HashMap<smol_str::SmolStr, ParsedTy>>,
     ) -> Self {
         Self {
@@ -839,72 +849,80 @@ impl<'db> CheckCtx<'db> {
     // OutputTy interning (import results → internal types)
     // ==========================================================================
 
-    /// Intern an OutputTy as a single frozen TyId. Instead of eagerly
-    /// converting the entire OutputTy tree into TyIds (O(N) allocations),
-    /// wraps it in `Ty::Frozen(Arc<OutputTy>)` — one allocation. Fields are
+    /// Intern an OwnedTy as a single frozen TyId. Instead of eagerly
+    /// converting the entire type tree into TyIds (O(N) allocations),
+    /// wraps it in `Ty::Frozen(OwnedTy)` — one allocation. Fields are
     /// materialized on demand when `constrain` encounters the Frozen type.
-    fn intern_frozen_output_ty(&mut self, ty: &OutputTy) -> TyId {
-        self.alloc_concrete(Ty::Frozen(Arc::new(ty.clone())))
+    fn intern_frozen_owned_ty(&mut self, owned: &OwnedTy) -> TyId {
+        self.alloc_concrete(Ty::Frozen(owned.clone()))
     }
 
-    /// Intern an OutputTy into this file's TypeStorage, creating fresh TyIds.
+    /// Intern an OwnedTy into this file's TypeStorage, creating fresh TyIds.
     ///
-    /// Each TyVar(n) in the OutputTy maps to a fresh variable (via a local
+    /// Each TyVar(n) in the OwnedTy maps to a fresh variable (via a local
     /// HashMap). This ensures imported types are fully isolated from the
     /// source file's TypeStorage — constraints applied in this file cannot
     /// propagate back to the imported file.
-    fn intern_output_ty(&mut self, ty: &OutputTy) -> TyId {
+    fn intern_output_ty(&mut self, owned: &OwnedTy) -> TyId {
         let mut var_map: HashMap<u32, TyId> = HashMap::new();
-        self.intern_output_ty_inner(ty, &mut var_map)
+        self.intern_output_ty_inner(&owned.arena, owned.root, &mut var_map)
     }
 
-    fn intern_output_ty_inner(&mut self, ty: &OutputTy, var_map: &mut HashMap<u32, TyId>) -> TyId {
-        match ty {
+    fn intern_output_ty_inner(
+        &mut self,
+        arena: &TypeArena,
+        ty: TyRef,
+        var_map: &mut HashMap<u32, TyId>,
+    ) -> TyId {
+        match &arena[ty] {
             OutputTy::TyVar(n) => *var_map.entry(*n).or_insert_with(|| self.new_var()),
             OutputTy::Primitive(prim) => self.alloc_prim(*prim),
             OutputTy::List(inner) => {
-                let elem = self.intern_output_ty_inner(&inner.0, var_map);
+                let inner = *inner;
+                let elem = self.intern_output_ty_inner(arena, inner, var_map);
                 self.alloc_concrete(Ty::List(elem))
             }
             OutputTy::Lambda { param, body } => {
-                let p = self.intern_output_ty_inner(&param.0, var_map);
-                let b = self.intern_output_ty_inner(&body.0, var_map);
+                let (param, body) = (*param, *body);
+                let p = self.intern_output_ty_inner(arena, param, var_map);
+                let b = self.intern_output_ty_inner(arena, body, var_map);
                 self.alloc_concrete(Ty::Lambda { param: p, body: b })
             }
             OutputTy::AttrSet(attr) => {
+                let fields_vec: Vec<_> = attr.fields.iter().map(|(k, &v)| (k.clone(), v)).collect();
+                let dyn_ty = attr.dyn_ty;
+                let open = attr.open;
+                let optional_fields = attr.optional_fields.clone();
+
                 let mut fields = std::collections::BTreeMap::new();
-                for (k, v) in &attr.fields {
-                    let field_ty = self.intern_output_ty_inner(&v.0, var_map);
-                    fields.insert(k.clone(), field_ty);
+                for (k, v) in fields_vec {
+                    let field_ty = self.intern_output_ty_inner(arena, v, var_map);
+                    fields.insert(k, field_ty);
                 }
-                let dyn_ty = attr
-                    .dyn_ty
-                    .as_ref()
-                    .map(|d| self.intern_output_ty_inner(&d.0, var_map));
+                let dyn_ty = dyn_ty.map(|d| self.intern_output_ty_inner(arena, d, var_map));
                 self.alloc_concrete(Ty::AttrSet(lang_ty::AttrSetTy {
                     fields,
                     dyn_ty,
-                    open: attr.open,
-                    optional_fields: attr.optional_fields.clone(),
+                    open,
+                    optional_fields,
                 }))
             }
             // Union: create a fresh variable with each member as a lower bound.
-            // Record bounds directly without propagation — the OutputTy is
-            // already internally consistent, and constrain() would create
-            // spurious cross-links through shared type variables.
             OutputTy::Union(members) => {
+                let members = members.clone();
                 let var = self.new_var();
-                for m in members {
-                    let member_ty = self.intern_output_ty_inner(&m.0, var_map);
+                for m in &members {
+                    let member_ty = self.intern_output_ty_inner(arena, *m, var_map);
                     self.types.storage.add_lower_bound(var, member_ty);
                 }
                 var
             }
             // Intersection: create a fresh variable with each member as an upper bound.
             OutputTy::Intersection(members) => {
+                let members = members.clone();
                 let var = self.new_var();
-                for m in members {
-                    let member_ty = self.intern_output_ty_inner(&m.0, var_map);
+                for m in &members {
+                    let member_ty = self.intern_output_ty_inner(arena, *m, var_map);
                     self.types.storage.add_upper_bound(var, member_ty);
                 }
                 var
@@ -915,17 +933,19 @@ impl<'db> CheckCtx<'db> {
             // inner type from the exporting file. This prevents monomorphized
             // generics in dep files from polluting the importing file's types.
             OutputTy::Named(name, inner) => {
-                if let Some(alias_body) = self.type_aliases.get(name).cloned() {
+                let (name, inner) = (name.clone(), *inner);
+                if let Some(alias_body) = self.type_aliases.get(&name).cloned() {
                     let fresh_inner = self.intern_fresh_ty(alias_body);
-                    self.alloc_concrete(Ty::Named(name.clone(), fresh_inner))
+                    self.alloc_concrete(Ty::Named(name, fresh_inner))
                 } else {
-                    let inner_id = self.intern_output_ty_inner(&inner.0, var_map);
-                    self.alloc_concrete(Ty::Named(name.clone(), inner_id))
+                    let inner_id = self.intern_output_ty_inner(arena, inner, var_map);
+                    self.alloc_concrete(Ty::Named(name, inner_id))
                 }
             }
             // Negation: intern the inner type and wrap in Ty::Neg.
             OutputTy::Neg(inner) => {
-                let inner_id = self.intern_output_ty_inner(&inner.0, var_map);
+                let inner = *inner;
+                let inner_id = self.intern_output_ty_inner(arena, inner, var_map);
                 self.alloc_concrete(Ty::Neg(inner_id))
             }
             // Bottom/Top: fresh unconstrained variables. The internal Ty

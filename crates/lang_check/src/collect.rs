@@ -19,8 +19,9 @@ use smol_str::SmolStr;
 use super::{CheckCtx, InferenceResult, Polarity, TyId};
 use crate::storage::{TypeEntry, TypeStorage};
 use lang_ty::{
+    arena::import_from_arena,
     disjoint::{are_shapes_disjoint, ConstructorShape},
-    AttrSetTy, OutputTy, Ty, TyRef,
+    AttrSetTy, OutputTy, Ty, TyRef, TypeArena,
 };
 
 use Polarity::{Negative, Positive};
@@ -41,9 +42,11 @@ const CANON_DEADLINE_CHECK_INTERVAL: u32 = 512;
 
 struct Canonicalizer<'a> {
     table: &'a TypeStorage,
-    /// Cache stores `TyRef` (Arc<OutputTy>) so that multiple parents
-    /// referencing the same (TyId, Polarity) share a single Arc instead
-    /// of each getting a cloned OutputTy tree. This preserves DAG
+    /// Owned arena for interning all canonicalized OutputTy nodes.
+    arena: TypeArena,
+    /// Cache stores `TyRef` (arena index) so that multiple parents
+    /// referencing the same (TyId, Polarity) share a single index instead
+    /// of each getting a duplicated OutputTy tree. This preserves DAG
     /// structure from the bounds graph in the output, preventing the
     /// exponential tree blowup that caused OOM on files like
     /// initial-packages.nix (560K cache entries, 11+ GB RSS).
@@ -63,6 +66,7 @@ impl<'a> Canonicalizer<'a> {
     fn new(table: &'a TypeStorage) -> Self {
         Self {
             table,
+            arena: TypeArena::new(),
             cache: FxHashMap::default(),
             in_progress: FxHashSet::default(),
             deadline: None,
@@ -76,9 +80,9 @@ impl<'a> Canonicalizer<'a> {
         self
     }
 
-    /// Canonicalize and return an Arc-wrapped result. When the same
+    /// Canonicalize and return an arena-interned TyRef. When the same
     /// (TyId, Polarity) is used as a child from multiple parents, they
-    /// share the same Arc — preserving DAG structure in the output.
+    /// share the same index — preserving DAG structure in the output.
     ///
     /// Use this when building TyRef children (Lambda params, List elems,
     /// AttrSet fields, Named inners). Use `canonicalize` when you need
@@ -86,7 +90,7 @@ impl<'a> Canonicalizer<'a> {
     fn canonicalize_child(&mut self, ty_id: TyId, polarity: Polarity) -> TyRef {
         // Fast path: if deadline already exceeded, return degraded type.
         if self.deadline_exceeded {
-            return TyRef::from(OutputTy::TyVar(ty_id.0));
+            return self.arena.intern(OutputTy::TyVar(ty_id.0));
         }
 
         // Periodic deadline check.
@@ -99,18 +103,18 @@ impl<'a> Canonicalizer<'a> {
             {
                 log::warn!("canonicalization deadline exceeded, degrading remaining types");
                 self.deadline_exceeded = true;
-                return TyRef::from(OutputTy::TyVar(ty_id.0));
+                return self.arena.intern(OutputTy::TyVar(ty_id.0));
             }
         }
 
         let key = (ty_id, polarity);
 
-        if let Some(cached) = self.cache.get(&key) {
-            return cached.clone(); // Arc refcount bump — O(1), shared
+        if let Some(&cached) = self.cache.get(&key) {
+            return cached; // TyRef is Copy — O(1)
         }
 
         if self.in_progress.contains(&key) {
-            return TyRef::from(OutputTy::TyVar(ty_id.0));
+            return self.arena.intern(OutputTy::TyVar(ty_id.0));
         }
 
         // Guard against stack overflow on deeply nested type graphs.
@@ -122,22 +126,19 @@ impl<'a> Canonicalizer<'a> {
             let result = self.canonicalize_inner(ty_id, polarity);
             self.in_progress.remove(&key);
 
-            let tyref = TyRef::from(result);
-            self.cache.insert(key, tyref.clone());
+            let tyref = self.arena.intern(result);
+            self.cache.insert(key, tyref);
             tyref
         })
     }
 
-    /// Canonicalize and return an owned OutputTy. Unwraps the Arc from
-    /// `canonicalize_child`. Use this when you need to inspect/transform
-    /// the result (normalization helpers, expand_bounds pipeline).
+    /// Canonicalize and return an owned OutputTy. Looks up the arena-interned
+    /// result from `canonicalize_child`. Use this when you need to
+    /// inspect/transform the result (normalization helpers, expand_bounds
+    /// pipeline).
     fn canonicalize(&mut self, ty_id: TyId, polarity: Polarity) -> OutputTy {
         let tyref = self.canonicalize_child(ty_id, polarity);
-        // If we hold the only reference, move out without cloning.
-        match std::sync::Arc::try_unwrap(tyref.0) {
-            Ok(output) => output,
-            Err(arc) => (*arc).clone(),
-        }
+        self.arena[tyref].clone()
     }
 
     fn canonicalize_inner(&mut self, ty_id: TyId, polarity: Polarity) -> OutputTy {
@@ -220,8 +221,8 @@ impl<'a> Canonicalizer<'a> {
 
         // 2. Flatten nested composites.
         let flattened = match polarity {
-            Positive => flatten_union(members),
-            Negative => flatten_intersection(members),
+            Positive => flatten_union(&self.arena, members),
+            Negative => flatten_intersection(&self.arena, members),
         };
 
         // 3. Filter bare TyVar (uninformative in either position), Bottom
@@ -236,28 +237,28 @@ impl<'a> Canonicalizer<'a> {
         let concrete = match polarity {
             Positive => {
                 // Tautology detection: A ∨ ¬A = ⊤, drop both.
-                let concrete = remove_tautological_pairs(concrete);
+                let concrete = remove_tautological_pairs(&self.arena, concrete);
                 // Absorb open attrsets subsumed by more general open attrsets.
                 absorb_subsumed_union_members(concrete)
             }
             Negative => {
                 // Merge multiple attrsets into one (intersection of records =
                 // record with all fields).
-                let concrete = merge_attrset_intersection(concrete);
+                let concrete = merge_attrset_intersection(&mut self.arena, concrete);
                 // Remove redundant negations: when an intersection contains a
                 // concrete type T and Neg(S) where T and S are provably disjoint,
                 // the negation adds no information. E.g. `{name: string} & ~null`
                 // simplifies to `{name: string}` because attrsets are inherently
                 // non-null. Only removes when the positive member has a known
                 // constructor (not a TyVar).
-                let concrete = remove_redundant_negations(concrete);
+                let concrete = remove_redundant_negations(&self.arena, concrete);
                 // Contradiction detection: T ∧ ¬S = ⊥ when T ⊆ S.
-                if has_type_contradiction(&concrete) {
+                if has_type_contradiction(&self.arena, &concrete) {
                     return OutputTy::Bottom;
                 }
                 // Factor shared members from intersections of unions:
                 // (A|C) & (B|C) = C | (A&B).
-                factor_shared_from_intersection(concrete)
+                factor_shared_from_intersection(&mut self.arena, concrete)
             }
         };
 
@@ -271,8 +272,18 @@ impl<'a> Canonicalizer<'a> {
             0 => self.expand_bounds_empty_fallback(var_id, polarity),
             1 => concrete.into_iter().next().unwrap(),
             _ => match polarity {
-                Positive => OutputTy::Union(concrete.into_iter().map(TyRef::from).collect()),
-                Negative => OutputTy::Intersection(concrete.into_iter().map(TyRef::from).collect()),
+                Positive => OutputTy::Union(
+                    concrete
+                        .into_iter()
+                        .map(|ty| self.arena.intern(ty))
+                        .collect(),
+                ),
+                Negative => OutputTy::Intersection(
+                    concrete
+                        .into_iter()
+                        .map(|ty| self.arena.intern(ty))
+                        .collect(),
+                ),
             },
         }
     }
@@ -363,7 +374,7 @@ impl<'a> Canonicalizer<'a> {
             // (from variable bound expansion), so we normalize via De Morgan.
             Ty::Neg(inner) => {
                 let c_inner = self.canonicalize(*inner, polarity.flip());
-                negate_output_ty(c_inner)
+                negate_output_ty(&mut self.arena, c_inner)
             }
 
             // Named: canonicalize the inner type and wrap in OutputTy::Named.
@@ -371,15 +382,20 @@ impl<'a> Canonicalizer<'a> {
                 OutputTy::Named(name.clone(), self.canonicalize_child(*inner, polarity))
             }
 
-            // Frozen: already an OutputTy — just unwrap.
-            Ty::Frozen(output_ty) => output_ty.as_ref().clone(),
+            // Frozen: import the OwnedTy's arena subtree into our arena.
+            Ty::Frozen(owned) => {
+                let mut cache = FxHashMap::default();
+                let imported =
+                    import_from_arena(&mut self.arena, &owned.arena, owned.root, &mut cache);
+                self.arena[imported].clone()
+            }
 
             // Intersection: canonicalize both members and flatten/normalize
             // using the same logic as variable bound expansion.
             Ty::Inter(a, b) => {
                 let ca = self.canonicalize(*a, polarity);
                 let cb = self.canonicalize(*b, polarity);
-                let members = flatten_intersection(vec![ca, cb]);
+                let members = flatten_intersection(&self.arena, vec![ca, cb]);
                 // Filter bare TyVar, Bottom, and Top. Keep all members
                 // around for fallback if every concrete member is filtered out.
                 let all_members = members.clone();
@@ -391,23 +407,23 @@ impl<'a> Canonicalizer<'a> {
                 // Unlike variable-bound intersections (negative polarity only),
                 // Inter types from narrowing can appear in either polarity and
                 // may contain contradictions like String ∧ Int = ⊥.
-                if has_type_contradiction(&concrete) {
+                if has_type_contradiction(&self.arena, &concrete) {
                     return OutputTy::Bottom;
                 }
                 let had_concrete = !concrete.is_empty();
                 let concrete = match polarity {
                     Positive => {
-                        let c = remove_redundant_negations(concrete);
-                        remove_tautological_pairs(c)
+                        let c = remove_redundant_negations(&self.arena, concrete);
+                        remove_tautological_pairs(&self.arena, c)
                     }
                     Negative => {
-                        let c = merge_attrset_intersection(concrete);
-                        remove_redundant_negations(c)
+                        let c = merge_attrset_intersection(&mut self.arena, concrete);
+                        remove_redundant_negations(&self.arena, c)
                     }
                 };
                 // Factor shared members from intersections of unions:
                 // (A|C) & (B|C) = C | (A&B).
-                let concrete = factor_shared_from_intersection(concrete);
+                let concrete = factor_shared_from_intersection(&mut self.arena, concrete);
                 match concrete.len() {
                     // Tautology removal emptied a non-empty vec in positive
                     // position — return Top.
@@ -416,7 +432,12 @@ impl<'a> Canonicalizer<'a> {
                     // the first member before filtering (a TyVar or Bottom).
                     0 => all_members.into_iter().next().unwrap_or(OutputTy::Bottom),
                     1 => concrete.into_iter().next().unwrap(),
-                    _ => OutputTy::Intersection(concrete.into_iter().map(TyRef::from).collect()),
+                    _ => OutputTy::Intersection(
+                        concrete
+                            .into_iter()
+                            .map(|ty| self.arena.intern(ty))
+                            .collect(),
+                    ),
                 }
             }
 
@@ -424,7 +445,7 @@ impl<'a> Canonicalizer<'a> {
             Ty::Union(a, b) => {
                 let ca = self.canonicalize(*a, polarity);
                 let cb = self.canonicalize(*b, polarity);
-                let members = flatten_union(vec![ca, cb]);
+                let members = flatten_union(&self.arena, vec![ca, cb]);
                 let all_members = members.clone();
                 let concrete: Vec<OutputTy> = members
                     .into_iter()
@@ -433,7 +454,7 @@ impl<'a> Canonicalizer<'a> {
                 let had_concrete = !concrete.is_empty();
                 let concrete = match polarity {
                     Positive => {
-                        let c = remove_tautological_pairs(concrete);
+                        let c = remove_tautological_pairs(&self.arena, concrete);
                         absorb_subsumed_union_members(c)
                     }
                     Negative => absorb_subsumed_union_members(concrete),
@@ -444,7 +465,12 @@ impl<'a> Canonicalizer<'a> {
                     0 if had_concrete && polarity == Positive => OutputTy::Top,
                     0 => all_members.into_iter().next().unwrap_or(OutputTy::Bottom),
                     1 => concrete.into_iter().next().unwrap(),
-                    _ => OutputTy::Union(concrete.into_iter().map(TyRef::from).collect()),
+                    _ => OutputTy::Union(
+                        concrete
+                            .into_iter()
+                            .map(|ty| self.arena.intern(ty))
+                            .collect(),
+                    ),
                 }
             }
         }

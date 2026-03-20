@@ -29,7 +29,7 @@ use rayon::prelude::*;
 
 use crate::imports::{import_errors_to_diagnostics, resolve_import_types};
 use crate::{run_inference, CheckResult, FileSignature, InferenceInputs, SyntaxBundle};
-use lang_ty::OutputTy;
+use lang_ty::OwnedTy;
 
 // ==============================================================================
 // SyntaxProvider trait
@@ -305,12 +305,11 @@ impl InferenceCoordinator {
         let check_result = run_inference(&inputs, cancel_flag);
 
         // Extract root type as the file's signature.
-        let signature = check_result
-            .inference
-            .as_ref()
-            .and_then(|inf| inf.expr_ty_map.get(inputs.module.entry_expr))
-            .cloned()
-            .map(|root_ty| FileSignature { root_ty });
+        let signature = check_result.inference.as_ref().and_then(|inf| {
+            let root_ref = inf.expr_ty_map.get(inputs.module.entry_expr).copied()?;
+            let owned = OwnedTy::new(inf.arena.clone(), root_ref).compact();
+            Some(FileSignature { root_ty: owned })
+        });
 
         Some(CoordinatedResult {
             check_result,
@@ -324,7 +323,7 @@ impl InferenceCoordinator {
     // =========================================================================
 
     /// Get the cached root type for a file, if available.
-    pub fn get_signature(&self, path: &Path) -> Option<OutputTy> {
+    pub fn get_signature(&self, path: &Path) -> Option<OwnedTy> {
         self.cache.get(path).and_then(|entry| match &*entry {
             FileSlot::Ready(Some(sig)) => Some(sig.root_ty.clone()),
             _ => None,

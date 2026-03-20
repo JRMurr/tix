@@ -29,15 +29,13 @@
 // directional constraints preserve the subtyping relationship and naturally
 // produce union/intersection types during canonicalization.
 
-use std::sync::Arc;
-
 use super::{CheckCtx, InferenceError, LocatedError, TyId};
 
 use crate::storage::TypeEntry;
 use lang_ty::{
     arc_ty::OutputTy,
     disjoint::{are_shapes_disjoint, ConstructorShape},
-    AttrSetTy, Ty,
+    AttrSetTy, OwnedTy, Ty, TyRef, TypeArena,
 };
 use smallvec::SmallVec;
 use smol_str::SmolStr;
@@ -192,58 +190,52 @@ impl CheckCtx<'_> {
 
             // Frozen on LHS vs AttrSet on RHS: the hot path for large imports.
             // Only intern the fields the supertype demands.
-            (Ty::Frozen(output_ty), Ty::AttrSet(sup_attr)) => {
-                let output_ty = Arc::clone(output_ty);
+            (Ty::Frozen(owned), Ty::AttrSet(sup_attr)) => {
+                let owned = owned.clone();
                 let sup_attr = sup_attr.clone();
-                self.constrain_frozen_attrset(&output_ty, &sup_attr)
+                self.constrain_frozen_attrset(&owned, &sup_attr)
             }
 
             // Frozen on LHS vs Lambda on RHS: decompose structurally without
-            // interning the entire tree. This is critical for large imports
-            // like hackage-packages.nix — without this, applying the imported
-            // function would eagerly materialize all 16K+ fields into TyIds.
+            // interning the entire tree.
             (
-                Ty::Frozen(output_ty),
+                Ty::Frozen(owned),
                 Ty::Lambda {
                     param: sup_param,
                     body: sup_body,
                 },
             ) => {
-                let output_ty = Arc::clone(output_ty);
+                let owned = owned.clone();
                 let sup_param = *sup_param;
                 let sup_body = *sup_body;
-                self.constrain_frozen_lambda(&output_ty, sup_param, sup_body)
+                self.constrain_frozen_lambda(&owned, sup_param, sup_body)
             }
 
             // Frozen on LHS, any other RHS: full interning fallback.
-            // Non-lambda/attrset frozen types (primitives, lists, etc.) are
-            // small so eager interning is cheap.
-            (Ty::Frozen(output_ty), _) => {
-                let output_ty = Arc::clone(output_ty);
-                let interned = self.intern_output_ty(&output_ty);
+            (Ty::Frozen(owned), _) => {
+                let owned = owned.clone();
+                let interned = self.intern_output_ty(&owned);
                 self.constrain(interned, sup_id)
             }
 
-            // Lambda on LHS vs Frozen on RHS: same decomposition in the
-            // other direction.
+            // Lambda on LHS vs Frozen on RHS.
             (
                 Ty::Lambda {
                     param: sub_param,
                     body: sub_body,
                 },
-                Ty::Frozen(output_ty),
+                Ty::Frozen(owned),
             ) => {
-                let output_ty = Arc::clone(output_ty);
+                let owned = owned.clone();
                 let sub_param = *sub_param;
                 let sub_body = *sub_body;
-                self.constrain_lambda_frozen(sub_param, sub_body, &output_ty)
+                self.constrain_lambda_frozen(sub_param, sub_body, &owned)
             }
 
-            // Frozen on RHS: full interning fallback (rare — imports are
-            // typically on the LHS as the thing being accessed).
-            (_, Ty::Frozen(output_ty)) => {
-                let output_ty = Arc::clone(output_ty);
-                let interned = self.intern_output_ty(&output_ty);
+            // Frozen on RHS: full interning fallback.
+            (_, Ty::Frozen(owned)) => {
+                let owned = owned.clone();
+                let interned = self.intern_output_ty(&owned);
                 self.constrain(sub_id, interned)
             }
 
@@ -639,29 +631,29 @@ impl CheckCtx<'_> {
     /// where the importer accesses a small subset of fields.
     fn constrain_frozen_attrset(
         &mut self,
-        output_ty: &OutputTy,
+        owned: &OwnedTy,
         sup_attr: &AttrSetTy<TyId>,
     ) -> Result<(), InferenceError> {
         // Unwrap Named wrappers to find the structural type inside.
-        let inner = match output_ty {
-            OutputTy::Named(_, inner) => &inner.0,
-            other => other,
-        };
+        let root = owned.arena.unwrap_named(owned.root);
+        let inner = owned.arena.get(root);
 
         match inner {
             OutputTy::AttrSet(frozen_attr) => {
+                let frozen_attr = frozen_attr.clone();
                 // For each field demanded by the supertype, look it up in the
                 // frozen attrset and intern just that field's type.
                 for (key, sup_field) in &sup_attr.fields {
                     match frozen_attr.fields.get(key) {
-                        Some(frozen_field_ref) => {
-                            let field_ty = self.intern_frozen_output_ty(&frozen_field_ref.0);
+                        Some(&frozen_field_ref) => {
+                            let field_owned = OwnedTy::new(owned.arena.clone(), frozen_field_ref);
+                            let field_ty = self.intern_frozen_owned_ty(&field_owned);
                             self.constrain(field_ty, *sup_field)?;
                         }
                         None => {
-                            // Check dyn_ty in the frozen attrset.
-                            if let Some(ref frozen_dyn) = frozen_attr.dyn_ty {
-                                let dyn_ty = self.intern_frozen_output_ty(&frozen_dyn.0);
+                            if let Some(frozen_dyn) = frozen_attr.dyn_ty {
+                                let dyn_owned = OwnedTy::new(owned.arena.clone(), frozen_dyn);
+                                let dyn_ty = self.intern_frozen_owned_ty(&dyn_owned);
                                 self.constrain(dyn_ty, *sup_field)?;
                             } else if !frozen_attr.open && !sup_attr.optional_fields.contains(key) {
                                 return Err(InferenceError::MissingField {
@@ -674,20 +666,16 @@ impl CheckCtx<'_> {
                 }
 
                 // Propagate dyn_ty constraints.
-                if let (Some(ref frozen_dyn), Some(sup_dyn)) =
-                    (&frozen_attr.dyn_ty, sup_attr.dyn_ty)
-                {
-                    let dyn_ty = self.intern_frozen_output_ty(&frozen_dyn.0);
+                if let (Some(frozen_dyn), Some(sup_dyn)) = (frozen_attr.dyn_ty, sup_attr.dyn_ty) {
+                    let dyn_owned = OwnedTy::new(owned.arena.clone(), frozen_dyn);
+                    let dyn_ty = self.intern_frozen_owned_ty(&dyn_owned);
                     self.constrain(dyn_ty, sup_dyn)?;
                 }
 
                 Ok(())
             }
-            // Non-attrset OutputTy (lambda, primitive, union, etc.) meeting an
-            // AttrSet supertype: fall back to full interning and let the normal
-            // constrain logic handle the type mismatch or __functor resolution.
             _ => {
-                let interned = self.intern_output_ty(output_ty);
+                let interned = self.intern_output_ty(owned);
                 let sup_id = self.alloc_concrete(Ty::AttrSet(sup_attr.clone()));
                 self.constrain(interned, sup_id)
             }
@@ -705,30 +693,26 @@ impl CheckCtx<'_> {
     /// across param and body (needed for polymorphic functions like `x: x`).
     fn constrain_frozen_lambda(
         &mut self,
-        output_ty: &OutputTy,
+        owned: &OwnedTy,
         sup_param: TyId,
         sup_body: TyId,
     ) -> Result<(), InferenceError> {
-        // Unwrap Named wrappers to find the structural type inside.
-        let inner = match output_ty {
-            OutputTy::Named(_, inner) => &inner.0,
-            other => other,
-        };
+        let root = owned.arena.unwrap_named(owned.root);
+        let inner = owned.arena.get(root);
 
         match inner {
             OutputTy::Lambda { param, body } => {
-                // Only decompose lazily when the body is large enough to justify
-                // the slight precision loss from broken TyVar sharing. Small types
-                // (like `x: x`) get full interning for correct polymorphism.
-                if output_ty_field_count(&body.0) > FROZEN_LAMBDA_FIELD_THRESHOLD {
-                    let frozen_param = self.intern_frozen_output_ty(&param.0);
+                let (param, body) = (*param, *body);
+                if output_ty_field_count_arena(&owned.arena, body) > FROZEN_LAMBDA_FIELD_THRESHOLD {
+                    let param_owned = OwnedTy::new(owned.arena.clone(), param);
+                    let frozen_param = self.intern_frozen_owned_ty(&param_owned);
                     self.constrain(sup_param, frozen_param)?;
-                    let frozen_body = self.intern_frozen_output_ty(&body.0);
+                    let body_owned = OwnedTy::new(owned.arena.clone(), body);
+                    let frozen_body = self.intern_frozen_owned_ty(&body_owned);
                     self.constrain(frozen_body, sup_body)?;
                     Ok(())
                 } else {
-                    // Small lambda: full interning preserves variable sharing.
-                    let interned = self.intern_output_ty(output_ty);
+                    let interned = self.intern_output_ty(owned);
                     let sup_id = self.alloc_concrete(Ty::Lambda {
                         param: sup_param,
                         body: sup_body,
@@ -737,7 +721,7 @@ impl CheckCtx<'_> {
                 }
             }
             _ => {
-                let interned = self.intern_output_ty(output_ty);
+                let interned = self.intern_output_ty(owned);
                 let sup_id = self.alloc_concrete(Ty::Lambda {
                     param: sup_param,
                     body: sup_body,
@@ -747,28 +731,29 @@ impl CheckCtx<'_> {
         }
     }
 
-    /// Mirror of `constrain_frozen_lambda` for `Lambda <: Frozen(OutputTy)`.
+    /// Mirror of `constrain_frozen_lambda` for `Lambda <: Frozen(OwnedTy)`.
     fn constrain_lambda_frozen(
         &mut self,
         sub_param: TyId,
         sub_body: TyId,
-        output_ty: &OutputTy,
+        owned: &OwnedTy,
     ) -> Result<(), InferenceError> {
-        let inner = match output_ty {
-            OutputTy::Named(_, inner) => &inner.0,
-            other => other,
-        };
+        let root = owned.arena.unwrap_named(owned.root);
+        let inner = owned.arena.get(root);
 
         match inner {
             OutputTy::Lambda { param, body } => {
-                if output_ty_field_count(&body.0) > FROZEN_LAMBDA_FIELD_THRESHOLD {
-                    let frozen_param = self.intern_frozen_output_ty(&param.0);
+                let (param, body) = (*param, *body);
+                if output_ty_field_count_arena(&owned.arena, body) > FROZEN_LAMBDA_FIELD_THRESHOLD {
+                    let param_owned = OwnedTy::new(owned.arena.clone(), param);
+                    let frozen_param = self.intern_frozen_owned_ty(&param_owned);
                     self.constrain(frozen_param, sub_param)?;
-                    let frozen_body = self.intern_frozen_output_ty(&body.0);
+                    let body_owned = OwnedTy::new(owned.arena.clone(), body);
+                    let frozen_body = self.intern_frozen_owned_ty(&body_owned);
                     self.constrain(sub_body, frozen_body)?;
                     Ok(())
                 } else {
-                    let interned = self.intern_output_ty(output_ty);
+                    let interned = self.intern_output_ty(owned);
                     let sub_id = self.alloc_concrete(Ty::Lambda {
                         param: sub_param,
                         body: sub_body,
@@ -777,7 +762,7 @@ impl CheckCtx<'_> {
                 }
             }
             _ => {
-                let interned = self.intern_output_ty(output_ty);
+                let interned = self.intern_output_ty(owned);
                 let sub_id = self.alloc_concrete(Ty::Lambda {
                     param: sub_param,
                     body: sub_body,
@@ -880,34 +865,37 @@ fn are_types_disjoint(a: &Ty<TyId>, b: &Ty<TyId>) -> bool {
 /// Used to decide whether a Frozen lambda body is "large" enough to warrant
 /// lazy decomposition. Stops counting at the threshold to avoid traversing
 /// the entire tree for very large types.
-fn output_ty_field_count(ty: &OutputTy) -> usize {
-    output_ty_field_count_inner(ty, FROZEN_LAMBDA_FIELD_THRESHOLD + 1)
+fn output_ty_field_count_arena(arena: &TypeArena, ty: TyRef) -> usize {
+    output_ty_field_count_inner_arena(arena, ty, FROZEN_LAMBDA_FIELD_THRESHOLD + 1)
 }
 
-fn output_ty_field_count_inner(ty: &OutputTy, budget: usize) -> usize {
+fn output_ty_field_count_inner_arena(arena: &TypeArena, ty: TyRef, budget: usize) -> usize {
     if budget == 0 {
         return 0;
     }
-    match ty {
+    match &arena[ty] {
         OutputTy::AttrSet(attr) => attr.fields.len(),
         OutputTy::Lambda { param, body } => {
-            let p = output_ty_field_count_inner(&param.0, budget);
-            let b = output_ty_field_count_inner(&body.0, budget.saturating_sub(p));
+            let (param, body) = (*param, *body);
+            let p = output_ty_field_count_inner_arena(arena, param, budget);
+            let b = output_ty_field_count_inner_arena(arena, body, budget.saturating_sub(p));
             p + b
         }
-        OutputTy::Named(_, inner) => output_ty_field_count_inner(&inner.0, budget),
-        OutputTy::List(inner) => output_ty_field_count_inner(&inner.0, budget),
+        OutputTy::Named(_, inner) | OutputTy::List(inner) | OutputTy::Neg(inner) => {
+            let inner = *inner;
+            output_ty_field_count_inner_arena(arena, inner, budget)
+        }
         OutputTy::Union(members) | OutputTy::Intersection(members) => {
+            let members = members.clone();
             let mut total = 0;
-            for m in members {
-                total += output_ty_field_count_inner(&m.0, budget.saturating_sub(total));
+            for m in &members {
+                total += output_ty_field_count_inner_arena(arena, *m, budget.saturating_sub(total));
                 if total > budget {
                     return total;
                 }
             }
             total
         }
-        OutputTy::Neg(inner) => output_ty_field_count_inner(&inner.0, budget),
         _ => 0,
     }
 }

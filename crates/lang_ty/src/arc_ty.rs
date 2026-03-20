@@ -1,13 +1,12 @@
-use std::fmt;
 use std::ops::ControlFlow;
-use std::sync::{Arc, LazyLock};
 
 use derive_more::Debug;
-use rustc_hash::{FxHashMap, FxHashSet};
-
-use smol_str::SmolStr;
+use rustc_hash::FxHashMap;
 
 use crate::{AttrSetTy, PrimitiveTy};
+
+// Re-export TyRef from arena module.
+pub use crate::arena::TyRef;
 
 // ==============================================================================
 // OutputTy — the canonical output representation of types
@@ -16,6 +15,9 @@ use crate::{AttrSetTy, PrimitiveTy};
 // During inference we use `Ty<TyId>` which has 5 variants (no unions/intersections).
 // After inference, canonicalization produces `OutputTy` which adds Union and Intersection.
 // This separation makes it impossible to accidentally construct a union during inference.
+//
+// TyRef is now `la_arena::Idx<OutputTy>` — a 4-byte Copy index into a TypeArena.
+// All TyRef children are meaningless without their owning arena.
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum OutputTy {
@@ -34,121 +36,29 @@ pub enum OutputTy {
     #[debug("{_0:?}")]
     AttrSet(AttrSetTy<TyRef>),
 
-    /// A union of types (e.g. `int | string`). Produced when different branches
-    /// of if-then-else or list elements have different types.
+    /// A union of types (e.g. `int | string`).
     #[debug("Union({_0:?})")]
     Union(Vec<TyRef>),
 
     /// An intersection of types (e.g. `(int -> int) & (string -> string)`).
-    /// Produced in negative/input positions when a variable has multiple upper bounds.
     #[debug("Intersection({_0:?})")]
     Intersection(Vec<TyRef>),
 
     /// A type alias name wrapping the fully expanded inner type.
-    /// Display shows just the alias name; the inner type is preserved for
-    /// structural transparency (e.g. field access on a Named attrset).
     #[debug("Named({_0:?}, {_1:?})")]
-    Named(SmolStr, TyRef),
+    Named(smol_str::SmolStr, TyRef),
 
-    /// Negation type — `~T`. Used in Boolean-Algebraic Subtyping (BAS) for
-    /// precise else-branch narrowing. For example, when `isNull x` is false,
-    /// x gets type `a & ~null`. Only produced on atoms (primitives); compound
-    /// negation is not needed.
+    /// Negation type — `~T`.
     #[debug("Neg({_0:?})")]
     Neg(TyRef),
 
-    /// The uninhabited (bottom) type, representing contradictions like
-    /// `int & ~int`. No values inhabit this type. Displayed as `never`.
+    /// The uninhabited (bottom) type. Displayed as `never`.
     #[debug("Bottom")]
     Bottom,
 
-    /// The universal (top) type, representing tautologies like
-    /// `int | ~int`. All values inhabit this type. Displayed as `any`.
-    /// Dual to Bottom: identity for intersection (`A & any = A`),
-    /// absorbing for union (`A | any = any`).
+    /// The universal (top) type. Displayed as `any`.
     #[debug("Top")]
     Top,
-}
-
-/// Arc-wrapped OutputTy for recursive type structures.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[debug("{_0:?}")]
-pub struct TyRef(pub Arc<OutputTy>);
-
-impl PartialOrd for TyRef {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for TyRef {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.0.cmp(&other.0)
-    }
-}
-
-// ==============================================================================
-// Primitive interning — pre-allocated TyRefs for common OutputTy values
-// ==============================================================================
-//
-// During canonicalization, many identical OutputTy values (all 8 primitives,
-// Top, Bottom) are wrapped in Arc via `TyRef::from()`. With large stubs this
-// produces ~40M small Arc allocations. Interning returns a clone of the cached
-// Arc (cheap refcount bump) instead of allocating a new one.
-
-struct InternedTyRefs {
-    null: TyRef,
-    bool_: TyRef,
-    int: TyRef,
-    float: TyRef,
-    string: TyRef,
-    path: TyRef,
-    uri: TyRef,
-    number: TyRef,
-    top: TyRef,
-    bottom: TyRef,
-}
-
-static INTERNED: LazyLock<InternedTyRefs> = LazyLock::new(|| InternedTyRefs {
-    null: TyRef(Arc::new(OutputTy::Primitive(PrimitiveTy::Null))),
-    bool_: TyRef(Arc::new(OutputTy::Primitive(PrimitiveTy::Bool))),
-    int: TyRef(Arc::new(OutputTy::Primitive(PrimitiveTy::Int))),
-    float: TyRef(Arc::new(OutputTy::Primitive(PrimitiveTy::Float))),
-    string: TyRef(Arc::new(OutputTy::Primitive(PrimitiveTy::String))),
-    path: TyRef(Arc::new(OutputTy::Primitive(PrimitiveTy::Path))),
-    uri: TyRef(Arc::new(OutputTy::Primitive(PrimitiveTy::Uri))),
-    number: TyRef(Arc::new(OutputTy::Primitive(PrimitiveTy::Number))),
-    top: TyRef(Arc::new(OutputTy::Top)),
-    bottom: TyRef(Arc::new(OutputTy::Bottom)),
-});
-
-impl TyRef {
-    /// Return a TyRef for the given OutputTy, using a cached Arc for
-    /// primitives, Top, and Bottom. Falls through to `Arc::new` for
-    /// compound types.
-    pub fn interned(ty: OutputTy) -> Self {
-        match &ty {
-            OutputTy::Primitive(p) => match p {
-                PrimitiveTy::Null => INTERNED.null.clone(),
-                PrimitiveTy::Bool => INTERNED.bool_.clone(),
-                PrimitiveTy::Int => INTERNED.int.clone(),
-                PrimitiveTy::Float => INTERNED.float.clone(),
-                PrimitiveTy::String => INTERNED.string.clone(),
-                PrimitiveTy::Path => INTERNED.path.clone(),
-                PrimitiveTy::Uri => INTERNED.uri.clone(),
-                PrimitiveTy::Number => INTERNED.number.clone(),
-            },
-            OutputTy::Top => INTERNED.top.clone(),
-            OutputTy::Bottom => INTERNED.bottom.clone(),
-            _ => TyRef(Arc::new(ty)),
-        }
-    }
-}
-
-impl From<OutputTy> for TyRef {
-    fn from(value: OutputTy) -> Self {
-        TyRef::interned(value)
-    }
 }
 
 impl PartialOrd for OutputTy {
@@ -207,7 +117,6 @@ impl Ord for OutputTy {
                 na.cmp(nb).then_with(|| ta.cmp(tb))
             }
             (OutputTy::Neg(a), OutputTy::Neg(b)) => a.cmp(b),
-            // Same discriminant → same variant; already handled above.
             _ => unreachable!(),
         }
     }
@@ -216,521 +125,14 @@ impl Ord for OutputTy {
 pub type Substitutions = FxHashMap<u32, u32>;
 
 // ==============================================================================
-// Normalization and free variable collection on OutputTy
+// Display helpers — used by arena.rs display code
 // ==============================================================================
-
-impl OutputTy {
-    /// Returns true if this type or any of its children contains a TyVar.
-    /// Short-circuits on first hit — O(1) for concrete types, O(n) worst case.
-    /// Uses a visited set to avoid exponential blowup on DAG-shaped types.
-    pub fn has_type_vars(&self) -> bool {
-        self.any_node_matches(|ty| matches!(ty, OutputTy::TyVar(_)))
-    }
-
-    /// Normalize all the ty vars to start from 0 instead
-    /// of the "random" nums it has from solving.
-    pub fn normalize_vars(&self) -> OutputTy {
-        let free_vars = self.free_type_vars();
-
-        // Concrete types with no TyVar nodes are already normalized — skip the
-        // full tree walk + rebuild. This is the common case for NixOS config
-        // attrsets with hundreds of fields, avoiding ~7 GB of map_children
-        // allocations in large stubs.
-        if free_vars.is_empty() {
-            return self.clone();
-        }
-
-        let subs: Substitutions = free_vars
-            .iter()
-            .enumerate()
-            .map(|(i, var)| (*var, i as u32))
-            .collect();
-
-        // Handle root TyVar directly (no need to wrap in Arc).
-        if let OutputTy::TyVar(x) = self {
-            return OutputTy::TyVar(*subs.get(x).unwrap());
-        }
-        let mut cache = FxHashMap::default();
-        self.map_children_tyref(&mut |child| Self::normalize_inner_cached(child, &subs, &mut cache))
-    }
-
-    /// Memoized normalize_inner that caches by Arc pointer identity.
-    /// When the same `Arc<OutputTy>` subtree is encountered via a different
-    /// parent, the cached result is returned (Arc refcount bump) instead of
-    /// re-traversing and re-allocating. This prevents DAG-to-tree explosion.
-    fn normalize_inner_cached(
-        tyref: &TyRef,
-        free: &Substitutions,
-        cache: &mut FxHashMap<*const OutputTy, TyRef>,
-    ) -> TyRef {
-        let ptr = Arc::as_ptr(&tyref.0);
-        if let Some(cached) = cache.get(&ptr) {
-            return cached.clone();
-        }
-        let result =
-            stacker::maybe_grow(256 * 1024, 1024 * 1024, || {
-                if let OutputTy::TyVar(x) = &*tyref.0 {
-                    return TyRef::from(OutputTy::TyVar(*free.get(x).unwrap()));
-                }
-                TyRef::from(tyref.0.map_children_tyref(&mut |child| {
-                    Self::normalize_inner_cached(child, free, cache)
-                }))
-            });
-        cache.insert(ptr, result.clone());
-        result
-    }
-
-    /// Public normalize_inner for callers (e.g. PBT arbitrary) that already
-    /// have a substitution map. Delegates to the cached version.
-    pub fn normalize_inner(&self, free: &Substitutions) -> OutputTy {
-        if let OutputTy::TyVar(x) = self {
-            return OutputTy::TyVar(*free.get(x).unwrap());
-        }
-        let mut cache = FxHashMap::default();
-        self.map_children_tyref(&mut |child| Self::normalize_inner_cached(child, free, &mut cache))
-    }
-
-    /// Returns true if any Lambda in this type has a non-primitive param type.
-    /// Such types can't be precisely generated in PBT because the `if param == <value>`
-    /// code generation pattern doesn't fully constrain non-primitive params in
-    /// SimpleSub's polarity-aware canonicalization.
-    pub fn has_non_primitive_lambda_param(&self) -> bool {
-        let mut visited = FxHashSet::default();
-        self.has_non_primitive_lambda_param_inner(&mut visited)
-    }
-
-    fn has_non_primitive_lambda_param_inner(
-        &self,
-        visited: &mut FxHashSet<*const OutputTy>,
-    ) -> bool {
-        if let OutputTy::Lambda { param, .. } = self {
-            if !matches!(&*param.0, OutputTy::Primitive(_) | OutputTy::TyVar(_)) {
-                return true;
-            }
-        }
-        self.try_for_each_child_tyref(&mut |child| {
-            if visited.insert(Arc::as_ptr(&child.0))
-                && child.0.has_non_primitive_lambda_param_inner(visited)
-            {
-                ControlFlow::Break(())
-            } else {
-                ControlFlow::Continue(())
-            }
-        })
-        .is_break()
-    }
-
-    /// Returns true if this type or any of its children contains a Union or Intersection.
-    pub fn contains_union_or_intersection(&self) -> bool {
-        self.any_node_matches(|ty| matches!(ty, OutputTy::Union(_) | OutputTy::Intersection(_)))
-    }
-
-    /// Returns true if this type or any of its children contains an Intersection.
-    pub fn contains_intersection(&self) -> bool {
-        self.any_node_matches(|ty| matches!(ty, OutputTy::Intersection(_)))
-    }
-
-    /// Returns true if this type or any of its children contains a Neg.
-    pub fn contains_neg(&self) -> bool {
-        self.any_node_matches(|ty| matches!(ty, OutputTy::Neg(_)))
-    }
-
-    /// Returns true if this type is or contains Top or Bottom.
-    pub fn contains_top_or_bottom(&self) -> bool {
-        self.any_node_matches(|ty| matches!(ty, OutputTy::Top | OutputTy::Bottom))
-    }
-
-    /// Returns true if this type is or contains a bare TyVar outside of Lambda params.
-    /// TyVar is fine inside Lambda params (represents generic params), but can't be
-    /// generated as standalone Nix code.
-    pub fn contains_bare_tyvar(&self) -> bool {
-        let mut visited = FxHashSet::default();
-        self.contains_bare_tyvar_inner(&mut visited)
-    }
-
-    fn contains_bare_tyvar_inner(&self, visited: &mut FxHashSet<*const OutputTy>) -> bool {
-        match self {
-            OutputTy::TyVar(_) => true,
-            // Lambda params are allowed to have TyVar, so only check body
-            OutputTy::Lambda { body, .. } => {
-                visited.insert(Arc::as_ptr(&body.0)) && body.0.contains_bare_tyvar_inner(visited)
-            }
-            _ => self
-                .try_for_each_child_tyref(&mut |child| {
-                    if visited.insert(Arc::as_ptr(&child.0))
-                        && child.0.contains_bare_tyvar_inner(visited)
-                    {
-                        ControlFlow::Break(())
-                    } else {
-                        ControlFlow::Continue(())
-                    }
-                })
-                .is_break(),
-        }
-    }
-
-    /// Recursively flatten, deduplicate, and sort Union/Intersection members
-    /// for order-insensitive comparison. The type checker flattens nested
-    /// unions and may reorder/deduplicate members during canonicalization.
-    pub fn normalize_set_ops(&self) -> OutputTy {
-        let mut cache = FxHashMap::default();
-        self.normalize_set_ops_cached(&mut cache)
-    }
-
-    fn normalize_set_ops_cached(&self, cache: &mut FxHashMap<*const OutputTy, TyRef>) -> OutputTy {
-        match self {
-            OutputTy::Union(members) => {
-                let mut flat: Vec<TyRef> = Vec::new();
-                Self::flatten_set_op_cached(members, &mut flat, cache, |ty| match ty {
-                    OutputTy::Union(inner) => Some(inner),
-                    _ => None,
-                });
-                flat.sort();
-                flat.dedup();
-                if flat.len() == 1 {
-                    return flat.into_iter().next().unwrap().0.as_ref().clone();
-                }
-                OutputTy::Union(flat)
-            }
-            OutputTy::Intersection(members) => {
-                let mut flat: Vec<TyRef> = Vec::new();
-                Self::flatten_set_op_cached(members, &mut flat, cache, |ty| match ty {
-                    OutputTy::Intersection(inner) => Some(inner),
-                    _ => None,
-                });
-                flat.sort();
-                flat.dedup();
-                if flat.len() == 1 {
-                    return flat.into_iter().next().unwrap().0.as_ref().clone();
-                }
-                OutputTy::Intersection(flat)
-            }
-            _ => self.map_children_tyref(&mut |child| {
-                Self::normalize_set_ops_tyref_cached(child, cache)
-            }),
-        }
-    }
-
-    fn normalize_set_ops_tyref_cached(
-        tyref: &TyRef,
-        cache: &mut FxHashMap<*const OutputTy, TyRef>,
-    ) -> TyRef {
-        let ptr = Arc::as_ptr(&tyref.0);
-        if let Some(cached) = cache.get(&ptr) {
-            return cached.clone();
-        }
-        let result = TyRef::from(tyref.0.normalize_set_ops_cached(cache));
-        cache.insert(ptr, result.clone());
-        result
-    }
-
-    /// Flatten members of a set operation (Union or Intersection), normalizing
-    /// each child and inlining nested instances of the same variant.
-    /// `extract` returns the inner members if the type matches the variant being
-    /// flattened (e.g. Union members for a Union flatten), or None otherwise.
-    fn flatten_set_op_cached(
-        members: &[TyRef],
-        out: &mut Vec<TyRef>,
-        cache: &mut FxHashMap<*const OutputTy, TyRef>,
-        extract: fn(&OutputTy) -> Option<&Vec<TyRef>>,
-    ) {
-        for m in members {
-            let normalized = m.0.normalize_set_ops_cached(cache);
-            if let Some(inner) = extract(&normalized) {
-                out.extend(inner.iter().cloned());
-            } else {
-                out.push(TyRef::from(normalized));
-            }
-        }
-    }
-
-    /// Returns true if any TyVar index appears in Lambda param position more
-    /// than once across distinct Lambdas. This happens when the PBT generator
-    /// produces types like `TyVar(1) -> TyVar(1) -> int` — the code generator
-    /// creates independent shadowing params, so the checker infers distinct
-    /// variables where the type expects shared ones.
-    pub fn has_shared_tyvar_across_lambda_params(&self) -> bool {
-        let mut seen = rustc_hash::FxHashSet::default();
-        let mut visited = FxHashSet::default();
-        self.check_shared_lambda_param_tyvars(&mut seen, &mut visited)
-    }
-
-    /// Walk the type tree collecting TyVar indices from Lambda param positions.
-    /// Returns true as soon as a duplicate is found.
-    fn check_shared_lambda_param_tyvars(
-        &self,
-        seen: &mut rustc_hash::FxHashSet<u32>,
-        visited: &mut FxHashSet<*const OutputTy>,
-    ) -> bool {
-        match self {
-            OutputTy::Lambda { param, body } => {
-                if let OutputTy::TyVar(idx) = &*param.0 {
-                    if !seen.insert(*idx) {
-                        return true;
-                    }
-                }
-                // Recurse into param (for nested lambdas in param position)
-                // and body (for chained lambdas like `a -> b -> c`).
-                (visited.insert(Arc::as_ptr(&param.0))
-                    && param.0.check_shared_lambda_param_tyvars(seen, visited))
-                    || (visited.insert(Arc::as_ptr(&body.0))
-                        && body.0.check_shared_lambda_param_tyvars(seen, visited))
-            }
-            OutputTy::TyVar(_) | OutputTy::Primitive(_) | OutputTy::Bottom | OutputTy::Top => false,
-            _ => self
-                .try_for_each_child_tyref(&mut |child| {
-                    if visited.insert(Arc::as_ptr(&child.0))
-                        && child.0.check_shared_lambda_param_tyvars(seen, visited)
-                    {
-                        ControlFlow::Break(())
-                    } else {
-                        ControlFlow::Continue(())
-                    }
-                })
-                .is_break(),
-        }
-    }
-
-    /// Returns true if this type contains a Named wrapper.
-    pub fn contains_named(&self) -> bool {
-        self.any_node_matches(|ty| matches!(ty, OutputTy::Named(..)))
-    }
-
-    /// Unwrap Named wrappers to get at the structural type.
-    pub fn unwrap_named(&self) -> &OutputTy {
-        match self {
-            OutputTy::Named(_, inner) => inner.0.unwrap_named(),
-            other => other,
-        }
-    }
-
-    /// Like `normalize_vars`, but displays `?` when the entire type is a bare
-    /// type variable (meaning "unconstrained / unknown"). Compound types like
-    /// `a -> b -> a` keep normal letter names — those variables represent real
-    /// parameter types, not unknowns.
-    pub fn normalize_replacing_unknown(&self) -> OutputTy {
-        if matches!(self, OutputTy::TyVar(_)) {
-            return OutputTy::TyVar(UNKNOWN_TYVAR);
-        }
-        self.normalize_vars()
-    }
-
-    /// Collect free type variables in order of first appearance, deduplicated.
-    pub fn free_type_vars(&self) -> Vec<u32> {
-        let mut result = Vec::new();
-        let mut seen = rustc_hash::FxHashSet::default();
-        let mut visited = FxHashSet::default();
-        self.collect_free_type_vars(&mut result, &mut seen, &mut visited);
-        result
-    }
-
-    pub(crate) fn collect_free_type_vars(
-        &self,
-        result: &mut Vec<u32>,
-        seen: &mut rustc_hash::FxHashSet<u32>,
-        visited: &mut FxHashSet<*const OutputTy>,
-    ) {
-        if let OutputTy::TyVar(x) = self {
-            if seen.insert(*x) {
-                result.push(*x);
-            }
-            return;
-        }
-        stacker::maybe_grow(256 * 1024, 1024 * 1024, || {
-            self.for_each_child_tyref(&mut |child| {
-                if visited.insert(Arc::as_ptr(&child.0)) {
-                    child.0.collect_free_type_vars(result, seen, visited);
-                }
-            });
-        });
-    }
-
-    // ==========================================================================
-    // Child traversal helpers
-    // ==========================================================================
-    //
-    // Centralise the "recurse into direct children" logic so that new OutputTy
-    // variants only need one update site. These are intentionally shallow — they
-    // apply `f` to each direct child but do NOT recurse; callers compose
-    // recursion themselves.
-
-    // ==========================================================================
-    // TyRef-preserving child traversal helpers
-    // ==========================================================================
-    //
-    // Like map_children/for_each_child but pass `&TyRef` instead of `&OutputTy`.
-    // This preserves Arc identity so callers can use Arc::as_ptr for cache keys,
-    // which is essential for memoizing DAG walks without exponential blowup.
-
-    /// Apply `f` to every direct child TyRef, producing a new OutputTy with the
-    /// same variant structure. `f` receives and returns `TyRef`, preserving Arc
-    /// identity for cache-based memoization.
-    fn map_children_tyref(&self, f: &mut impl FnMut(&TyRef) -> TyRef) -> OutputTy {
-        match self {
-            OutputTy::TyVar(_) | OutputTy::Primitive(_) | OutputTy::Bottom | OutputTy::Top => {
-                self.clone()
-            }
-            OutputTy::List(inner) => OutputTy::List(f(inner)),
-            OutputTy::Lambda { param, body } => OutputTy::Lambda {
-                param: f(param),
-                body: f(body),
-            },
-            OutputTy::AttrSet(attr) => {
-                let fields = attr.fields.iter().map(|(k, v)| (k.clone(), f(v))).collect();
-                let dyn_ty = attr.dyn_ty.as_ref().map(f);
-                OutputTy::AttrSet(AttrSetTy {
-                    fields,
-                    dyn_ty,
-                    open: attr.open,
-                    optional_fields: attr.optional_fields.clone(),
-                })
-            }
-            OutputTy::Union(members) => OutputTy::Union(members.iter().map(f).collect()),
-            OutputTy::Intersection(members) => {
-                OutputTy::Intersection(members.iter().map(f).collect())
-            }
-            OutputTy::Named(name, inner) => OutputTy::Named(name.clone(), f(inner)),
-            OutputTy::Neg(inner) => OutputTy::Neg(f(inner)),
-        }
-    }
-
-    /// Visit every direct child TyRef for read-only inspection. Like
-    /// `for_each_child` but preserves Arc identity.
-    fn for_each_child_tyref(&self, f: &mut impl FnMut(&TyRef)) {
-        match self {
-            OutputTy::TyVar(_) | OutputTy::Primitive(_) | OutputTy::Bottom | OutputTy::Top => {}
-            OutputTy::List(inner) => f(inner),
-            OutputTy::Lambda { param, body } => {
-                f(param);
-                f(body);
-            }
-            OutputTy::AttrSet(attr) => {
-                for v in attr.fields.values() {
-                    f(v);
-                }
-                if let Some(dyn_ty) = &attr.dyn_ty {
-                    f(dyn_ty);
-                }
-            }
-            OutputTy::Union(members) | OutputTy::Intersection(members) => {
-                for m in members {
-                    f(m);
-                }
-            }
-            OutputTy::Named(_, inner) => f(inner),
-            OutputTy::Neg(inner) => f(inner),
-        }
-    }
-
-    /// Like `for_each_child_tyref` but supports early exit via `ControlFlow`.
-    /// Returns `Break(())` as soon as any call to `f` returns `Break`.
-    fn try_for_each_child_tyref(
-        &self,
-        f: &mut impl FnMut(&TyRef) -> ControlFlow<()>,
-    ) -> ControlFlow<()> {
-        match self {
-            OutputTy::TyVar(_) | OutputTy::Primitive(_) | OutputTy::Bottom | OutputTy::Top => {
-                ControlFlow::Continue(())
-            }
-            OutputTy::List(inner) => f(inner),
-            OutputTy::Lambda { param, body } => {
-                f(param)?;
-                f(body)
-            }
-            OutputTy::AttrSet(attr) => {
-                for v in attr.fields.values() {
-                    f(v)?;
-                }
-                if let Some(dyn_ty) = &attr.dyn_ty {
-                    f(dyn_ty)?;
-                }
-                ControlFlow::Continue(())
-            }
-            OutputTy::Union(members) | OutputTy::Intersection(members) => {
-                for m in members {
-                    f(m)?;
-                }
-                ControlFlow::Continue(())
-            }
-            OutputTy::Named(_, inner) => f(inner),
-            OutputTy::Neg(inner) => f(inner),
-        }
-    }
-
-    /// Returns true if any node in this type tree matches `pred`.
-    /// Short-circuits on first hit. Uses a visited set to avoid
-    /// exponential blowup on DAG-shaped types.
-    fn any_node_matches(&self, pred: impl Fn(&OutputTy) -> bool) -> bool {
-        let mut visited = FxHashSet::default();
-        self.any_node_matches_inner(&pred, &mut visited)
-    }
-
-    fn any_node_matches_inner(
-        &self,
-        pred: &impl Fn(&OutputTy) -> bool,
-        visited: &mut FxHashSet<*const OutputTy>,
-    ) -> bool {
-        if pred(self) {
-            return true;
-        }
-        self.try_for_each_child_tyref(&mut |child| {
-            if visited.insert(Arc::as_ptr(&child.0))
-                && child.0.any_node_matches_inner(pred, visited)
-            {
-                ControlFlow::Break(())
-            } else {
-                ControlFlow::Continue(())
-            }
-        })
-        .is_break()
-    }
-}
-
-// ==============================================================================
-// Display — human-readable type printing
-// ==============================================================================
-//
-// Type variables are rendered as lowercase letters (a, b, c, ..., z, a1, b1, ...).
-// Operator precedence is handled by checking whether parentheses are needed:
-//   `->` is right-associative and lowest precedence
-//   `|` is next
-//   `&` is next
-//   atoms (primitives, lists, attrsets, type vars) are highest
 
 /// Sentinel index for type variables that should display as `?` (unknown type).
-const UNKNOWN_TYVAR: u32 = u32::MAX;
-
-// Parenthesization predicates — shared by `Display` and `write_truncated`.
-
-/// Lambda params need parens if they are themselves lambdas, unions, or intersections.
-fn needs_parens_in_lambda_param(ty: &OutputTy) -> bool {
-    matches!(
-        ty,
-        OutputTy::Lambda { .. } | OutputTy::Union(_) | OutputTy::Intersection(_)
-    )
-}
-
-/// Union members need parens if they are lambdas.
-fn needs_parens_in_union_member(ty: &OutputTy) -> bool {
-    matches!(ty, OutputTy::Lambda { .. })
-}
-
-/// Intersection members need parens if they are lambdas or unions.
-fn needs_parens_in_intersection_member(ty: &OutputTy) -> bool {
-    matches!(ty, OutputTy::Lambda { .. } | OutputTy::Union(_))
-}
-
-/// Negation operands need parens if they are unions, intersections, or lambdas.
-fn needs_parens_in_neg(ty: &OutputTy) -> bool {
-    matches!(
-        ty,
-        OutputTy::Union(_) | OutputTy::Intersection(_) | OutputTy::Lambda { .. }
-    )
-}
+pub(crate) const UNKNOWN_TYVAR: u32 = u32::MAX;
 
 /// Convert a type variable index to a letter-based name: 0→a, 1→b, ..., 25→z, 26→a1, ...
-/// The sentinel value `UNKNOWN_TYVAR` renders as `?`.
-fn tyvar_name(idx: u32) -> String {
+pub(crate) fn tyvar_name(idx: u32) -> String {
     if idx == UNKNOWN_TYVAR {
         return "?".to_string();
     }
@@ -743,31 +145,45 @@ fn tyvar_name(idx: u32) -> String {
     }
 }
 
-// ==============================================================================
-// Truncated display — bounded type output for large types
-// ==============================================================================
-//
-// The `Display` trait impl remains unlimited (used by gen-stub, tests, and
-// anywhere correctness requires full output). `display_truncated` provides
-// bounded output for CLI, LSP, and diagnostics where readability matters more
-// than completeness.
+/// Lambda params need parens if they are themselves lambdas, unions, or intersections.
+pub(crate) fn needs_parens_in_lambda_param(ty: &OutputTy) -> bool {
+    matches!(
+        ty,
+        OutputTy::Lambda { .. } | OutputTy::Union(_) | OutputTy::Intersection(_)
+    )
+}
 
-/// Controls how much of a type is shown by `display_truncated`.
-/// A limit of 0 means unlimited for that dimension.
+/// Union members need parens if they are lambdas.
+pub(crate) fn needs_parens_in_union_member(ty: &OutputTy) -> bool {
+    matches!(ty, OutputTy::Lambda { .. })
+}
+
+/// Intersection members need parens if they are lambdas or unions.
+pub(crate) fn needs_parens_in_intersection_member(ty: &OutputTy) -> bool {
+    matches!(ty, OutputTy::Lambda { .. } | OutputTy::Union(_))
+}
+
+/// Negation operands need parens if they are unions, intersections, or lambdas.
+pub(crate) fn needs_parens_in_neg(ty: &OutputTy) -> bool {
+    matches!(
+        ty,
+        OutputTy::Union(_) | OutputTy::Intersection(_) | OutputTy::Lambda { .. }
+    )
+}
+
+// ==============================================================================
+// DisplayConfig — controls truncation for large types
+// ==============================================================================
+
 #[derive(Debug, Clone, Copy)]
 pub struct DisplayConfig {
-    /// Maximum attrset fields to show before eliding.
     pub max_fields: usize,
-    /// Maximum union/intersection members to show before eliding.
     pub max_members: usize,
-    /// Maximum nesting depth before collapsing.
     pub max_depth: usize,
-    /// Hard character budget — output is cut with `...` when exceeded.
     pub max_chars: usize,
 }
 
 impl DisplayConfig {
-    /// No limits — equivalent to the `Display` trait output.
     pub fn full() -> Self {
         Self {
             max_fields: 0,
@@ -777,7 +193,6 @@ impl DisplayConfig {
         }
     }
 
-    /// CLI binding/root output: readable summary of large types.
     pub fn cli() -> Self {
         Self {
             max_fields: 10,
@@ -787,7 +202,6 @@ impl DisplayConfig {
         }
     }
 
-    /// LSP hover: slightly more generous than CLI.
     pub fn hover() -> Self {
         Self {
             max_fields: 15,
@@ -797,7 +211,6 @@ impl DisplayConfig {
         }
     }
 
-    /// LSP inlay hints: very compact.
     pub fn inlay() -> Self {
         Self {
             max_fields: 3,
@@ -807,7 +220,6 @@ impl DisplayConfig {
         }
     }
 
-    /// LSP completion detail: compact.
     pub fn completion() -> Self {
         Self {
             max_fields: 3,
@@ -817,7 +229,6 @@ impl DisplayConfig {
         }
     }
 
-    /// Diagnostic error messages: moderate detail.
     pub fn diagnostic() -> Self {
         Self {
             max_fields: 8,
@@ -827,330 +238,129 @@ impl DisplayConfig {
         }
     }
 
-    fn is_unlimited(&self) -> bool {
+    pub(crate) fn is_unlimited(&self) -> bool {
         self.max_fields == 0 && self.max_members == 0 && self.max_depth == 0 && self.max_chars == 0
     }
 }
 
+// ==============================================================================
+// Child traversal helpers on OutputTy
+// ==============================================================================
+//
+// These iterate over the direct TyRef children stored in the enum variants.
+// They do NOT need the arena — children are TyRef (Idx) values embedded in
+// the variant. Only RESOLVING a TyRef to its OutputTy requires the arena.
+
 impl OutputTy {
-    /// Render the type with truncation limits applied. Small types that fit
-    /// within all limits produce output identical to `Display`. Large types
-    /// are elided with `...` at appropriate points.
-    pub fn display_truncated(&self, config: &DisplayConfig) -> String {
-        if config.is_unlimited() {
-            return format!("{self}");
-        }
-        let mut buf = String::new();
-        let mut state = TruncState {
-            config,
-            bytes_written: 0,
-            budget_exceeded: false,
-        };
-        write_truncated(self, &mut buf, &mut state, 0);
-        buf
-    }
-}
-
-struct TruncState<'a> {
-    config: &'a DisplayConfig,
-    /// Tracks bytes written, not characters. This is correct because all type
-    /// display output is ASCII (type names, operators, punctuation, letters).
-    bytes_written: usize,
-    budget_exceeded: bool,
-}
-
-impl TruncState<'_> {
-    fn at_depth_limit(&self, depth: usize) -> bool {
-        self.config.max_depth > 0 && depth >= self.config.max_depth
-    }
-
-    /// Push a string fragment, enforcing the byte budget.
-    /// Returns false if the budget was already exceeded before this call.
-    /// Note: `max_chars` in DisplayConfig is compared against byte length,
-    /// which is correct because type display output is ASCII-only.
-    fn push(&mut self, buf: &mut String, s: &str) -> bool {
-        if self.budget_exceeded {
-            return false;
-        }
-        let max = self.config.max_chars;
-        if max > 0 && self.bytes_written + s.len() > max {
-            // Exceeded — write what fits, then append "..."
-            let remaining = max.saturating_sub(self.bytes_written);
-            if remaining > 0 {
-                buf.push_str(&s[..remaining]);
+    /// Apply `f` to every direct child TyRef, producing a new OutputTy with the
+    /// same variant structure.
+    pub(crate) fn map_children(&self, f: &mut impl FnMut(TyRef) -> TyRef) -> OutputTy {
+        match self {
+            OutputTy::TyVar(_) | OutputTy::Primitive(_) | OutputTy::Bottom | OutputTy::Top => {
+                self.clone()
             }
-            buf.push_str("...");
-            self.bytes_written = max;
-            self.budget_exceeded = true;
-            return false;
-        }
-        buf.push_str(s);
-        self.bytes_written += s.len();
-        true
-    }
-}
-
-fn write_truncated(ty: &OutputTy, buf: &mut String, state: &mut TruncState<'_>, depth: usize) {
-    if state.budget_exceeded {
-        return;
-    }
-
-    stacker::maybe_grow(256 * 1024, 1024 * 1024, || match ty {
-        OutputTy::TyVar(x) => {
-            state.push(buf, &tyvar_name(*x));
-        }
-        OutputTy::Primitive(p) => {
-            state.push(buf, &format!("{p}"));
-        }
-        OutputTy::Bottom => {
-            state.push(buf, "never");
-        }
-        OutputTy::Top => {
-            state.push(buf, "any");
-        }
-
-        // Named aliases are already short — show the alias name, don't count depth.
-        OutputTy::Named(name, _) => {
-            state.push(buf, name);
-        }
-
-        OutputTy::List(inner) => {
-            if state.at_depth_limit(depth) {
-                state.push(buf, "[...]");
-            } else {
-                state.push(buf, "[");
-                if !state.budget_exceeded {
-                    write_truncated(&inner.0, buf, state, depth + 1);
-                }
-                if !state.budget_exceeded {
-                    state.push(buf, "]");
-                }
+            OutputTy::List(inner) => OutputTy::List(f(*inner)),
+            OutputTy::Lambda { param, body } => OutputTy::Lambda {
+                param: f(*param),
+                body: f(*body),
+            },
+            OutputTy::AttrSet(attr) => {
+                let fields = attr
+                    .fields
+                    .iter()
+                    .map(|(k, &v)| (k.clone(), f(v)))
+                    .collect();
+                let dyn_ty = attr.dyn_ty.map(f);
+                OutputTy::AttrSet(AttrSetTy {
+                    fields,
+                    dyn_ty,
+                    open: attr.open,
+                    optional_fields: attr.optional_fields.clone(),
+                })
             }
-        }
-
-        OutputTy::Lambda { param, body } => {
-            if state.at_depth_limit(depth) {
-                state.push(buf, "... -> ...");
-            } else {
-                if needs_parens_in_lambda_param(&param.0) {
-                    state.push(buf, "(");
-                    if !state.budget_exceeded {
-                        write_truncated(&param.0, buf, state, depth + 1);
-                    }
-                    if !state.budget_exceeded {
-                        state.push(buf, ")");
-                    }
-                } else {
-                    write_truncated(&param.0, buf, state, depth + 1);
-                }
-                if !state.budget_exceeded {
-                    state.push(buf, " -> ");
-                }
-                if !state.budget_exceeded {
-                    write_truncated(&body.0, buf, state, depth + 1);
-                }
-            }
-        }
-
-        OutputTy::AttrSet(attr) => {
-            if state.at_depth_limit(depth) {
-                let total = attr.fields.len() + attr.dyn_ty.is_some() as usize + attr.open as usize;
-                state.push(buf, &format!("{{ ... {total} fields ... }}"));
-            } else {
-                state.push(buf, "{ ");
-                let max_f = state.config.max_fields;
-                let mut count = 0;
-                let total_fields = attr.fields.len();
-                for (k, v) in attr.fields.iter() {
-                    if state.budget_exceeded {
-                        return;
-                    }
-                    if max_f > 0 && count >= max_f {
-                        let remaining = total_fields - count
-                            + attr.dyn_ty.is_some() as usize
-                            + attr.open as usize;
-                        state.push(buf, &format!("... ({remaining} more)"));
-                        state.push(buf, " }");
-                        return;
-                    }
-                    if count > 0 {
-                        state.push(buf, ", ");
-                    }
-                    let opt = if attr.optional_fields.contains(k) {
-                        "?"
-                    } else {
-                        ""
-                    };
-                    state.push(buf, &format!("{k}{opt}: "));
-                    if !state.budget_exceeded {
-                        write_truncated(&v.0, buf, state, depth + 1);
-                    }
-                    count += 1;
-                }
-                if let Some(dyn_ty) = &attr.dyn_ty {
-                    if !state.budget_exceeded {
-                        if count > 0 {
-                            state.push(buf, ", ");
-                        }
-                        state.push(buf, "_: ");
-                        if !state.budget_exceeded {
-                            write_truncated(&dyn_ty.0, buf, state, depth + 1);
-                        }
-                    }
-                }
-                if attr.open && !state.budget_exceeded {
-                    if count > 0 || attr.dyn_ty.is_some() {
-                        state.push(buf, ", ");
-                    }
-                    state.push(buf, "...");
-                }
-                if !state.budget_exceeded {
-                    state.push(buf, " }");
-                }
-            }
-        }
-
-        OutputTy::Union(members) => {
-            write_members_truncated(members, " | ", depth, buf, state, |m| {
-                needs_parens_in_union_member(&m.0)
-            });
-        }
-
-        OutputTy::Intersection(members) => {
-            write_members_truncated(members, " & ", depth, buf, state, |m| {
-                needs_parens_in_intersection_member(&m.0)
-            });
-        }
-
-        OutputTy::Neg(inner) => {
-            if needs_parens_in_neg(&inner.0) {
-                state.push(buf, "~(");
-                if !state.budget_exceeded {
-                    write_truncated(&inner.0, buf, state, depth);
-                }
-                if !state.budget_exceeded {
-                    state.push(buf, ")");
-                }
-            } else {
-                state.push(buf, "~");
-                if !state.budget_exceeded {
-                    write_truncated(&inner.0, buf, state, depth);
-                }
-            }
-        }
-    });
-}
-
-/// Write union/intersection members with truncation.
-fn write_members_truncated(
-    members: &[TyRef],
-    separator: &str,
-    depth: usize,
-    buf: &mut String,
-    state: &mut TruncState<'_>,
-    needs_parens: impl Fn(&TyRef) -> bool,
-) {
-    if state.at_depth_limit(depth) {
-        state.push(buf, "...");
-        return;
-    }
-    let max_m = state.config.max_members;
-    for (i, m) in members.iter().enumerate() {
-        if state.budget_exceeded {
-            return;
-        }
-        if max_m > 0 && i >= max_m {
-            let remaining = members.len() - i;
-            state.push(buf, &format!("{separator}... ({remaining} more)"));
-            return;
-        }
-        if i > 0 {
-            state.push(buf, separator);
-        }
-        if needs_parens(m) {
-            state.push(buf, "(");
-            if !state.budget_exceeded {
-                write_truncated(&m.0, buf, state, depth + 1);
-            }
-            if !state.budget_exceeded {
-                state.push(buf, ")");
-            }
-        } else {
-            write_truncated(&m.0, buf, state, depth + 1);
-        }
-    }
-}
-
-impl fmt::Display for OutputTy {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Guard against stack overflow on deeply nested type trees.
-        stacker::maybe_grow(256 * 1024, 1024 * 1024, || match self {
-            OutputTy::TyVar(x) => write!(f, "{}", tyvar_name(*x)),
-            OutputTy::Primitive(p) => write!(f, "{p}"),
-            OutputTy::List(inner) => write!(f, "[{inner}]"),
-            OutputTy::Lambda { param, body } => {
-                if needs_parens_in_lambda_param(&param.0) {
-                    write!(f, "({param}) -> {body}")
-                } else {
-                    write!(f, "{param} -> {body}")
-                }
-            }
-            OutputTy::AttrSet(attr) => write!(f, "{attr}"),
             OutputTy::Union(members) => {
-                for (i, m) in members.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, " | ")?;
-                    }
-                    if needs_parens_in_union_member(&m.0) {
-                        write!(f, "({m})")?;
-                    } else {
-                        write!(f, "{m}")?;
-                    }
-                }
-                Ok(())
+                OutputTy::Union(members.iter().copied().map(&mut *f).collect())
             }
             OutputTy::Intersection(members) => {
-                for (i, m) in members.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, " & ")?;
-                    }
-                    if needs_parens_in_intersection_member(&m.0) {
-                        write!(f, "({m})")?;
-                    } else {
-                        write!(f, "{m}")?;
-                    }
-                }
-                Ok(())
+                OutputTy::Intersection(members.iter().copied().map(&mut *f).collect())
             }
-            OutputTy::Named(name, _) => write!(f, "{name}"),
-            OutputTy::Neg(inner) => {
-                if needs_parens_in_neg(&inner.0) {
-                    write!(f, "~({inner})")
-                } else {
-                    write!(f, "~{inner}")
+            OutputTy::Named(name, inner) => OutputTy::Named(name.clone(), f(*inner)),
+            OutputTy::Neg(inner) => OutputTy::Neg(f(*inner)),
+        }
+    }
+
+    /// Visit every direct child TyRef for read-only inspection.
+    pub(crate) fn for_each_child(&self, f: &mut impl FnMut(TyRef)) {
+        match self {
+            OutputTy::TyVar(_) | OutputTy::Primitive(_) | OutputTy::Bottom | OutputTy::Top => {}
+            OutputTy::List(inner) => f(*inner),
+            OutputTy::Lambda { param, body } => {
+                f(*param);
+                f(*body);
+            }
+            OutputTy::AttrSet(attr) => {
+                for &v in attr.fields.values() {
+                    f(v);
+                }
+                if let Some(dyn_ty) = attr.dyn_ty {
+                    f(dyn_ty);
                 }
             }
-            OutputTy::Bottom => write!(f, "never"),
-            OutputTy::Top => write!(f, "any"),
-        })
+            OutputTy::Union(members) | OutputTy::Intersection(members) => {
+                for &m in members {
+                    f(m);
+                }
+            }
+            OutputTy::Named(_, inner) => f(*inner),
+            OutputTy::Neg(inner) => f(*inner),
+        }
+    }
+
+    /// Like `for_each_child` but supports early exit via `ControlFlow`.
+    pub(crate) fn try_for_each_child(
+        &self,
+        f: &mut impl FnMut(TyRef) -> ControlFlow<()>,
+    ) -> ControlFlow<()> {
+        match self {
+            OutputTy::TyVar(_) | OutputTy::Primitive(_) | OutputTy::Bottom | OutputTy::Top => {
+                ControlFlow::Continue(())
+            }
+            OutputTy::List(inner) => f(*inner),
+            OutputTy::Lambda { param, body } => {
+                f(*param)?;
+                f(*body)
+            }
+            OutputTy::AttrSet(attr) => {
+                for &v in attr.fields.values() {
+                    f(v)?;
+                }
+                if let Some(dyn_ty) = attr.dyn_ty {
+                    f(dyn_ty)?;
+                }
+                ControlFlow::Continue(())
+            }
+            OutputTy::Union(members) | OutputTy::Intersection(members) => {
+                for &m in members {
+                    f(m)?;
+                }
+                ControlFlow::Continue(())
+            }
+            OutputTy::Named(_, inner) => f(*inner),
+            OutputTy::Neg(inner) => f(*inner),
+        }
+    }
+
+    /// Unwrap Named wrappers given an arena to follow children.
+    /// Standalone version for cases where we have an &OutputTy but no arena
+    /// (e.g. in constrain.rs where we pattern-match on a cloned value).
+    pub fn unwrap_named_shallow(&self) -> &OutputTy {
+        // Without arena, can only unwrap one level.
+        self
     }
 }
 
-impl TyRef {
-    /// Delegates to `OutputTy::display_truncated`.
-    pub fn display_truncated(&self, config: &DisplayConfig) -> String {
-        self.0.display_truncated(config)
-    }
-}
-
-impl fmt::Display for TyRef {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(&*self.0, f)
-    }
-}
-
-impl fmt::Display for PrimitiveTy {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl std::fmt::Display for PrimitiveTy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             PrimitiveTy::Null => write!(f, "null"),
             PrimitiveTy::Bool => write!(f, "bool"),
@@ -1161,464 +371,5 @@ impl fmt::Display for PrimitiveTy {
             PrimitiveTy::Uri => write!(f, "uri"),
             PrimitiveTy::Number => write!(f, "number"),
         }
-    }
-}
-
-impl fmt::Display for AttrSetTy<TyRef> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{{ ")?;
-        let mut first = true;
-        for (k, v) in self.fields.iter() {
-            if !first {
-                write!(f, ", ")?;
-            }
-            first = false;
-            let opt = if self.optional_fields.contains(k) {
-                "?"
-            } else {
-                ""
-            };
-            write!(f, "{k}{opt}: {v}")?;
-        }
-        if let Some(dyn_ty) = &self.dyn_ty {
-            if !first {
-                write!(f, ", ")?;
-            }
-            first = false;
-            write!(f, "_: {dyn_ty}")?;
-        }
-        if self.open {
-            if !first {
-                write!(f, ", ")?;
-            }
-            write!(f, "...")?;
-        }
-        write!(f, " }}")
-    }
-}
-
-impl AttrSetTy<TyRef> {
-    /// Collect free type variables in order of first appearance, deduplicated.
-    /// Shares a single visited set across all fields so Arc-shared subtrees
-    /// are only traversed once.
-    pub fn free_type_vars(&self) -> Vec<u32> {
-        let mut result = Vec::new();
-        let mut seen = rustc_hash::FxHashSet::default();
-        let mut visited = FxHashSet::default();
-        for v in self.fields.values() {
-            v.0.collect_free_type_vars(&mut result, &mut seen, &mut visited);
-        }
-        if let Some(dyn_ty) = &self.dyn_ty {
-            dyn_ty
-                .0
-                .collect_free_type_vars(&mut result, &mut seen, &mut visited);
-        }
-        result
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn normalize_replacing_unknown_bare_tyvar() {
-        // A standalone TyVar appears once → replaced with `?`.
-        let ty = OutputTy::TyVar(5);
-        let result = ty.normalize_replacing_unknown();
-        assert_eq!(format!("{result}"), "?");
-    }
-
-    #[test]
-    fn normalize_replacing_unknown_compound_keeps_letters() {
-        // Compound types use normal normalize_vars — all vars get letters.
-        let ty = OutputTy::Lambda {
-            param: OutputTy::TyVar(0).into(),
-            body: OutputTy::TyVar(0).into(),
-        };
-        let result = ty.normalize_replacing_unknown();
-        assert_eq!(format!("{result}"), "a -> a");
-
-        // const :: a -> b -> a — b is a real parameter, not unknown.
-        let ty = OutputTy::Lambda {
-            param: OutputTy::TyVar(0).into(),
-            body: OutputTy::Lambda {
-                param: OutputTy::TyVar(1).into(),
-                body: OutputTy::TyVar(0).into(),
-            }
-            .into(),
-        };
-        let result = ty.normalize_replacing_unknown();
-        assert_eq!(format!("{result}"), "a -> b -> a");
-    }
-
-    #[test]
-    fn normalize_replacing_unknown_no_tyvars() {
-        // int -> string: no TyVars → unchanged.
-        let ty = OutputTy::Lambda {
-            param: OutputTy::Primitive(PrimitiveTy::Int).into(),
-            body: OutputTy::Primitive(PrimitiveTy::String).into(),
-        };
-        let result = ty.normalize_replacing_unknown();
-        assert_eq!(format!("{result}"), "int -> string");
-    }
-
-    #[test]
-    fn number_displays_as_number() {
-        // Number in lambda position must not produce "int | float -> int | float"
-        // (which looks like a 3-member union). It should display as "number -> number".
-        let ty = OutputTy::Lambda {
-            param: OutputTy::Primitive(PrimitiveTy::Number).into(),
-            body: OutputTy::Primitive(PrimitiveTy::Number).into(),
-        };
-        assert_eq!(format!("{ty}"), "number -> number");
-    }
-
-    #[test]
-    fn number_displays_standalone() {
-        let ty = OutputTy::Primitive(PrimitiveTy::Number);
-        assert_eq!(format!("{ty}"), "number");
-    }
-
-    #[test]
-    fn interned_primitives_share_arc() {
-        // TyRef::interned should return the same Arc pointer for identical
-        // primitive types, Top, and Bottom — verifying the interning cache.
-        let a = TyRef::interned(OutputTy::Primitive(PrimitiveTy::Int));
-        let b = TyRef::interned(OutputTy::Primitive(PrimitiveTy::Int));
-        assert!(Arc::ptr_eq(&a.0, &b.0), "interned Int should share Arc");
-
-        let c = TyRef::interned(OutputTy::Top);
-        let d = TyRef::interned(OutputTy::Top);
-        assert!(Arc::ptr_eq(&c.0, &d.0), "interned Top should share Arc");
-
-        let e = TyRef::interned(OutputTy::Bottom);
-        let f = TyRef::interned(OutputTy::Bottom);
-        assert!(Arc::ptr_eq(&e.0, &f.0), "interned Bottom should share Arc");
-
-        // TyRef::from also goes through interning.
-        let g: TyRef = OutputTy::Primitive(PrimitiveTy::String).into();
-        let h: TyRef = OutputTy::Primitive(PrimitiveTy::String).into();
-        assert!(Arc::ptr_eq(&g.0, &h.0), "From<OutputTy> should intern");
-    }
-
-    #[test]
-    fn shared_tyvar_across_lambda_params_detected() {
-        // TyVar(1) -> TyVar(1) -> int: same var in two Lambda params → true
-        let ty = OutputTy::Lambda {
-            param: OutputTy::TyVar(1).into(),
-            body: OutputTy::Lambda {
-                param: OutputTy::TyVar(1).into(),
-                body: OutputTy::Primitive(PrimitiveTy::Int).into(),
-            }
-            .into(),
-        };
-        assert!(ty.has_shared_tyvar_across_lambda_params());
-    }
-
-    #[test]
-    fn distinct_tyvar_across_lambda_params_ok() {
-        // TyVar(1) -> TyVar(2) -> int: distinct vars → false
-        let ty = OutputTy::Lambda {
-            param: OutputTy::TyVar(1).into(),
-            body: OutputTy::Lambda {
-                param: OutputTy::TyVar(2).into(),
-                body: OutputTy::Primitive(PrimitiveTy::Int).into(),
-            }
-            .into(),
-        };
-        assert!(!ty.has_shared_tyvar_across_lambda_params());
-    }
-
-    #[test]
-    fn tyvar_in_param_and_body_not_shared() {
-        // TyVar(1) -> TyVar(1): same var in param + body of one Lambda → false
-        let ty = OutputTy::Lambda {
-            param: OutputTy::TyVar(1).into(),
-            body: OutputTy::TyVar(1).into(),
-        };
-        assert!(!ty.has_shared_tyvar_across_lambda_params());
-    }
-
-    #[test]
-    fn no_lambda_no_sharing() {
-        assert!(!OutputTy::Primitive(PrimitiveTy::Int).has_shared_tyvar_across_lambda_params());
-    }
-
-    #[test]
-    fn shared_tyvar_nested_in_list() {
-        // [TyVar(1) -> TyVar(1) -> int]: sharing detected inside list element
-        let inner = OutputTy::Lambda {
-            param: OutputTy::TyVar(1).into(),
-            body: OutputTy::Lambda {
-                param: OutputTy::TyVar(1).into(),
-                body: OutputTy::Primitive(PrimitiveTy::Int).into(),
-            }
-            .into(),
-        };
-        let ty = OutputTy::List(inner.into());
-        assert!(ty.has_shared_tyvar_across_lambda_params());
-    }
-
-    #[test]
-    fn normalize_vars_preserves_dag_sharing() {
-        // Build a DAG: 30 levels of Lambda { param: shared, body: shared }.
-        // 2^30 paths but only 31 unique nodes.
-        // Without memoization: OOM. With memoization: instant.
-        let leaf = TyRef::from(OutputTy::TyVar(99));
-        let mut current = leaf;
-        for _ in 0..30 {
-            current = TyRef::from(OutputTy::Lambda {
-                param: current.clone(),
-                body: current.clone(),
-            });
-        }
-        let result = current.0.normalize_vars();
-        // Check the innermost leaf was renumbered to 0.
-        fn extract_leaf(ty: &OutputTy) -> Option<u32> {
-            match ty {
-                OutputTy::TyVar(x) => Some(*x),
-                OutputTy::Lambda { param, .. } => extract_leaf(&param.0),
-                _ => None,
-            }
-        }
-        assert_eq!(extract_leaf(&result), Some(0));
-        // Verify sharing is preserved: the result should also be a DAG.
-        // The root Lambda's param and body should point to the same Arc.
-        if let OutputTy::Lambda { param, body } = &result {
-            assert!(
-                Arc::ptr_eq(&param.0, &body.0),
-                "normalize_vars should preserve DAG sharing"
-            );
-        } else {
-            panic!("expected Lambda at root");
-        }
-    }
-
-    #[test]
-    fn read_only_predicates_handle_deep_dag() {
-        let leaf = TyRef::from(OutputTy::TyVar(42));
-        let mut current = leaf;
-        for _ in 0..30 {
-            current = TyRef::from(OutputTy::Lambda {
-                param: current.clone(),
-                body: current.clone(),
-            });
-        }
-        assert!(current.0.has_type_vars());
-        assert_eq!(current.0.free_type_vars(), vec![42]);
-        // These should complete without exponential blowup.
-        assert!(!current.0.contains_union_or_intersection());
-        assert!(!current.0.contains_neg());
-        assert!(!current.0.contains_top_or_bottom());
-        assert!(current.0.contains_bare_tyvar());
-    }
-
-    #[test]
-    fn normalize_set_ops_handles_deep_dag() {
-        // normalize_set_ops should not explode on a shared DAG.
-        // Completing without OOM is the main assertion.
-        let leaf = TyRef::from(OutputTy::Primitive(PrimitiveTy::Int));
-        let mut current = leaf;
-        for _ in 0..30 {
-            current = TyRef::from(OutputTy::Lambda {
-                param: current.clone(),
-                body: current.clone(),
-            });
-        }
-        let result = current.0.normalize_set_ops();
-        // Verify sharing is preserved in the output.
-        if let OutputTy::Lambda { param, body } = &result {
-            assert!(
-                Arc::ptr_eq(&param.0, &body.0),
-                "normalize_set_ops should preserve DAG sharing"
-            );
-        } else {
-            panic!("expected Lambda at root");
-        }
-    }
-
-    mod pbt {
-        use super::*;
-        use proptest::prelude::*;
-
-        proptest! {
-            #![proptest_config(ProptestConfig {
-                cases: 256, .. ProptestConfig::default()
-            })]
-
-            /// normalize_vars is idempotent: normalizing twice produces the same
-            /// result as normalizing once.
-            #[test]
-            fn normalize_vars_idempotent(ty in any::<OutputTy>()) {
-                let once = ty.normalize_vars();
-                let twice = once.normalize_vars();
-                prop_assert_eq!(once, twice);
-            }
-        }
-    }
-
-    // ==================================================================
-    // Truncated display
-    // ==================================================================
-
-    #[test]
-    fn truncated_full_matches_display() {
-        let ty = OutputTy::Lambda {
-            param: OutputTy::Primitive(PrimitiveTy::Int).into(),
-            body: OutputTy::Primitive(PrimitiveTy::String).into(),
-        };
-        assert_eq!(
-            ty.display_truncated(&DisplayConfig::full()),
-            format!("{ty}")
-        );
-    }
-
-    #[test]
-    fn truncated_fields_elided() {
-        // Build an attrset with 15 fields, truncate at 3.
-        let fields: Vec<(SmolStr, TyRef)> = (0..15)
-            .map(|i| {
-                (
-                    SmolStr::new(format!("f{i:02}")),
-                    TyRef::from(OutputTy::Primitive(PrimitiveTy::Int)),
-                )
-            })
-            .collect();
-        let ty = OutputTy::AttrSet(AttrSetTy {
-            fields: fields.into_iter().collect(),
-            dyn_ty: None,
-            open: false,
-            optional_fields: Default::default(),
-        });
-        let config = DisplayConfig {
-            max_fields: 3,
-            max_members: 0,
-            max_depth: 0,
-            max_chars: 0,
-        };
-        let result = ty.display_truncated(&config);
-        assert!(result.contains("... (12 more)"), "got: {result}");
-        // Should show exactly 3 fields before the ellipsis.
-        assert_eq!(result.matches(": int").count(), 3, "got: {result}");
-    }
-
-    #[test]
-    fn truncated_members_elided() {
-        let members: Vec<TyRef> = (0..10)
-            .map(|_| TyRef::from(OutputTy::Primitive(PrimitiveTy::Int)))
-            .collect();
-        let ty = OutputTy::Union(members);
-        let config = DisplayConfig {
-            max_fields: 0,
-            max_members: 2,
-            max_depth: 0,
-            max_chars: 0,
-        };
-        let result = ty.display_truncated(&config);
-        assert!(result.contains("... (8 more)"), "got: {result}");
-    }
-
-    #[test]
-    fn truncated_depth_limit() {
-        // Nested lambdas beyond depth limit.
-        let deep = OutputTy::Lambda {
-            param: OutputTy::Lambda {
-                param: OutputTy::Lambda {
-                    param: OutputTy::Primitive(PrimitiveTy::Int).into(),
-                    body: OutputTy::Primitive(PrimitiveTy::Int).into(),
-                }
-                .into(),
-                body: OutputTy::Primitive(PrimitiveTy::Int).into(),
-            }
-            .into(),
-            body: OutputTy::Primitive(PrimitiveTy::Int).into(),
-        };
-        let config = DisplayConfig {
-            max_fields: 0,
-            max_members: 0,
-            max_depth: 2,
-            max_chars: 0,
-        };
-        let result = deep.display_truncated(&config);
-        assert!(result.contains("... -> ..."), "got: {result}");
-    }
-
-    #[test]
-    fn truncated_char_budget() {
-        let ty = OutputTy::Lambda {
-            param: OutputTy::Primitive(PrimitiveTy::Int).into(),
-            body: OutputTy::Primitive(PrimitiveTy::String).into(),
-        };
-        let config = DisplayConfig {
-            max_fields: 0,
-            max_members: 0,
-            max_depth: 0,
-            max_chars: 8,
-        };
-        let result = ty.display_truncated(&config);
-        // "int -> string" is 13 chars; at budget 8 we get "int -> s..."
-        assert!(result.ends_with("..."), "got: {result}");
-        assert!(result.len() <= 11, "got len={}: {result}", result.len()); // 8 + "..."
-    }
-
-    #[test]
-    fn truncated_named_shows_alias() {
-        let ty = OutputTy::Named(
-            SmolStr::new("Derivation"),
-            TyRef::from(OutputTy::AttrSet(AttrSetTy {
-                fields: Default::default(),
-                dyn_ty: None,
-                open: true,
-                optional_fields: Default::default(),
-            })),
-        );
-        let config = DisplayConfig::cli();
-        assert_eq!(ty.display_truncated(&config), "Derivation");
-    }
-
-    #[test]
-    fn truncated_small_type_unchanged() {
-        // Types that fit within all limits should match Display exactly.
-        let ty = OutputTy::Lambda {
-            param: OutputTy::Primitive(PrimitiveTy::Int).into(),
-            body: OutputTy::Primitive(PrimitiveTy::String).into(),
-        };
-        assert_eq!(ty.display_truncated(&DisplayConfig::cli()), format!("{ty}"));
-    }
-
-    #[test]
-    fn truncated_attrset_depth_collapse() {
-        // At depth limit, attrset shows field count summary.
-        let ty = OutputTy::AttrSet(AttrSetTy {
-            fields: vec![
-                (
-                    SmolStr::new("x"),
-                    TyRef::from(OutputTy::Primitive(PrimitiveTy::Int)),
-                ),
-                (
-                    SmolStr::new("y"),
-                    TyRef::from(OutputTy::Primitive(PrimitiveTy::String)),
-                ),
-            ]
-            .into_iter()
-            .collect(),
-            dyn_ty: None,
-            open: true,
-            optional_fields: Default::default(),
-        });
-        // Wrapping in a lambda so the attrset is at depth 1 (past limit).
-        let wrapper = OutputTy::Lambda {
-            param: ty.into(),
-            body: OutputTy::Primitive(PrimitiveTy::Int).into(),
-        };
-        let config = DisplayConfig {
-            max_fields: 0,
-            max_members: 0,
-            max_depth: 1,
-            max_chars: 0,
-        };
-        let result = wrapper.display_truncated(&config);
-        assert!(result.contains("... 3 fields ..."), "got: {result}");
     }
 }

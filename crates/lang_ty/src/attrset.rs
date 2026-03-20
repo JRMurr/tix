@@ -15,13 +15,9 @@ pub struct AttrSetTy<RefType> {
 
     /// Whether this attrset accepts additional fields beyond those listed.
     /// `true` means "open" (e.g. a pattern with `...`), `false` means "exactly these fields".
-    /// Replaces the old row-polymorphism `rest` field — with structural subtyping,
-    /// width subtyping handles the cases that row variables used to cover.
     pub open: bool,
 
     /// Fields that may be omitted by the caller because they have default values.
-    /// Only meaningful for attrsets derived from lambda pattern parameters
-    /// (e.g. `{ x, y ? 0 }: ...` marks `y` as optional).
     pub optional_fields: BTreeSet<SmolStr>,
 }
 
@@ -56,9 +52,6 @@ impl<RefType> AttrSetTy<RefType> {
 impl<RefType: Clone + Debug> AttrSetTy<RefType> {
     /// Merge two attrsets. Fields from `other` override fields from `self` (right-biased).
     pub fn merge(self, other: Self) -> Self {
-        // Right-biased merge for optional_fields: start with self's optional set,
-        // remove keys that are concretely provided in `other` (they become required
-        // in the merged result), then union with other's optional set.
         let mut optional = self.optional_fields;
         for key in other.fields.keys() {
             if !other.optional_fields.contains(key) {
@@ -67,8 +60,6 @@ impl<RefType: Clone + Debug> AttrSetTy<RefType> {
         }
         optional.extend(other.optional_fields);
 
-        // Start from self's fields and override with other's, avoiding
-        // redundant re-insertion of self's fields through a fresh BTreeMap.
         let mut fields = self.fields;
         for (k, v) in other.fields {
             fields.insert(k, v);
@@ -76,9 +67,6 @@ impl<RefType: Clone + Debug> AttrSetTy<RefType> {
 
         Self {
             fields,
-            // Right-biased merge: Nix `//` gives priority to the right-hand side.
-            // We can't unify both dyn_ty values here (no constraint allocator),
-            // so right-biased is the correct approximation.
             dyn_ty: other.dyn_ty.or(self.dyn_ty),
             open: self.open || other.open,
             optional_fields: optional,
@@ -124,13 +112,11 @@ impl Ord for AttrSetTy<TyRef> {
 }
 
 impl AttrSetTy<TyRef> {
-    pub fn from_internal<'a>(
-        iter: impl IntoIterator<Item = (&'a str, crate::OutputTy)>,
-        open: bool,
-    ) -> Self {
+    /// Build an AttrSetTy from pre-interned TyRef children.
+    pub fn from_internal<'a>(iter: impl IntoIterator<Item = (&'a str, TyRef)>, open: bool) -> Self {
         let fields: BTreeMap<SmolStr, TyRef> = iter
             .into_iter()
-            .map(|(name, ty)| (SmolStr::from(name), ty.into()))
+            .map(|(name, ty)| (SmolStr::from(name), ty))
             .collect();
         Self {
             fields,
@@ -144,13 +130,13 @@ impl AttrSetTy<TyRef> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{arc_ty, OutputTy, TyRef};
+    use crate::{arc_ty, TypeArena};
 
-    /// Helper: build a simple closed AttrSetTy from field name-type pairs.
-    fn make_attrset(fields: &[(&str, OutputTy)]) -> AttrSetTy<TyRef> {
+    /// Helper: build a simple closed AttrSetTy from field name-type pairs using an arena.
+    fn make_attrset(arena: &mut TypeArena, fields: &[(&str, crate::OutputTy)]) -> AttrSetTy<TyRef> {
         let map: BTreeMap<SmolStr, TyRef> = fields
             .iter()
-            .map(|(k, v)| (SmolStr::from(*k), TyRef::from(v.clone())))
+            .map(|(k, v)| (SmolStr::from(*k), arena.intern(v.clone())))
             .collect();
         AttrSetTy {
             fields: map,
@@ -162,57 +148,94 @@ mod tests {
 
     #[test]
     fn merge_non_overlapping() {
-        let a = make_attrset(&[("x", arc_ty!(Int))]);
-        let b = make_attrset(&[("y", arc_ty!(String))]);
+        let mut arena = TypeArena::new();
+        let int_ref = arc_ty!(&mut arena, Int);
+        let str_ref = arc_ty!(&mut arena, String);
+        let a = make_attrset(
+            &mut arena,
+            &[("x", crate::OutputTy::Primitive(crate::PrimitiveTy::Int))],
+        );
+        let b = make_attrset(
+            &mut arena,
+            &[("y", crate::OutputTy::Primitive(crate::PrimitiveTy::String))],
+        );
         let merged = a.merge(b);
         assert_eq!(merged.fields.len(), 2);
-        assert_eq!(*merged.fields["x"].0, arc_ty!(Int));
-        assert_eq!(*merged.fields["y"].0, arc_ty!(String));
+        assert_eq!(merged.fields["x"], int_ref);
+        assert_eq!(merged.fields["y"], str_ref);
     }
 
     #[test]
     fn merge_overlapping_right_wins() {
-        let a = make_attrset(&[("x", arc_ty!(Int))]);
-        let b = make_attrset(&[("x", arc_ty!(String))]);
+        let mut arena = TypeArena::new();
+        let str_ref = arc_ty!(&mut arena, String);
+        let a = make_attrset(
+            &mut arena,
+            &[("x", crate::OutputTy::Primitive(crate::PrimitiveTy::Int))],
+        );
+        let b = make_attrset(
+            &mut arena,
+            &[("x", crate::OutputTy::Primitive(crate::PrimitiveTy::String))],
+        );
         let merged = a.merge(b);
         assert_eq!(merged.fields.len(), 1);
-        assert_eq!(*merged.fields["x"].0, arc_ty!(String));
+        assert_eq!(merged.fields["x"], str_ref);
     }
 
     #[test]
     fn merge_optional_becomes_required() {
-        // self has optional y, other has required y → result y is required.
-        let mut a = make_attrset(&[("y", arc_ty!(Int))]);
+        let mut arena = TypeArena::new();
+        let str_ref = arc_ty!(&mut arena, String);
+        let mut a = make_attrset(
+            &mut arena,
+            &[("y", crate::OutputTy::Primitive(crate::PrimitiveTy::Int))],
+        );
         a.optional_fields.insert(SmolStr::from("y"));
-        let b = make_attrset(&[("y", arc_ty!(String))]);
+        let b = make_attrset(
+            &mut arena,
+            &[("y", crate::OutputTy::Primitive(crate::PrimitiveTy::String))],
+        );
         let merged = a.merge(b);
         assert!(
             !merged.optional_fields.contains("y"),
             "y should be required after merge with required y"
         );
-        assert_eq!(*merged.fields["y"].0, arc_ty!(String));
+        assert_eq!(merged.fields["y"], str_ref);
     }
 
     #[test]
     fn merge_required_stays_in_other_optional() {
-        // self has required x, other has optional x → result x has other's value
-        // and is in optional set since other marks it optional.
-        let a = make_attrset(&[("x", arc_ty!(Int))]);
-        let mut b = make_attrset(&[("x", arc_ty!(String))]);
+        let mut arena = TypeArena::new();
+        let str_ref = arc_ty!(&mut arena, String);
+        let a = make_attrset(
+            &mut arena,
+            &[("x", crate::OutputTy::Primitive(crate::PrimitiveTy::Int))],
+        );
+        let mut b = make_attrset(
+            &mut arena,
+            &[("x", crate::OutputTy::Primitive(crate::PrimitiveTy::String))],
+        );
         b.optional_fields.insert(SmolStr::from("x"));
         let merged = a.merge(b);
         assert!(
             merged.optional_fields.contains("x"),
             "x should be optional because other marks it optional"
         );
-        assert_eq!(*merged.fields["x"].0, arc_ty!(String));
+        assert_eq!(merged.fields["x"], str_ref);
     }
 
     #[test]
     fn merge_both_optional() {
-        let mut a = make_attrset(&[("x", arc_ty!(Int))]);
+        let mut arena = TypeArena::new();
+        let mut a = make_attrset(
+            &mut arena,
+            &[("x", crate::OutputTy::Primitive(crate::PrimitiveTy::Int))],
+        );
         a.optional_fields.insert(SmolStr::from("x"));
-        let mut b = make_attrset(&[("x", arc_ty!(String))]);
+        let mut b = make_attrset(
+            &mut arena,
+            &[("x", crate::OutputTy::Primitive(crate::PrimitiveTy::String))],
+        );
         b.optional_fields.insert(SmolStr::from("x"));
         let merged = a.merge(b);
         assert!(
@@ -223,52 +246,70 @@ mod tests {
 
     #[test]
     fn merge_dyn_ty_right_only() {
-        let a = make_attrset(&[]);
-        let mut b = make_attrset(&[]);
-        b.dyn_ty = Some(TyRef::from(arc_ty!(Int)));
+        let mut arena = TypeArena::new();
+        let int_ref = arc_ty!(&mut arena, Int);
+        let a = make_attrset(&mut arena, &[]);
+        let mut b = make_attrset(&mut arena, &[]);
+        b.dyn_ty = Some(int_ref);
         let merged = a.merge(b);
-        assert_eq!(merged.dyn_ty.map(|t| (*t.0).clone()), Some(arc_ty!(Int)));
+        assert_eq!(merged.dyn_ty, Some(int_ref));
     }
 
     #[test]
     fn merge_dyn_ty_left_only() {
-        let mut a = make_attrset(&[]);
-        a.dyn_ty = Some(TyRef::from(arc_ty!(Int)));
-        let b = make_attrset(&[]);
+        let mut arena = TypeArena::new();
+        let int_ref = arc_ty!(&mut arena, Int);
+        let mut a = make_attrset(&mut arena, &[]);
+        a.dyn_ty = Some(int_ref);
+        let b = make_attrset(&mut arena, &[]);
         let merged = a.merge(b);
-        assert_eq!(merged.dyn_ty.map(|t| (*t.0).clone()), Some(arc_ty!(Int)));
+        assert_eq!(merged.dyn_ty, Some(int_ref));
     }
 
     #[test]
     fn merge_dyn_ty_both_right_wins() {
-        // Right-biased: other.dyn_ty.or(self.dyn_ty) means other takes precedence.
-        let mut a = make_attrset(&[]);
-        a.dyn_ty = Some(TyRef::from(arc_ty!(Int)));
-        let mut b = make_attrset(&[]);
-        b.dyn_ty = Some(TyRef::from(arc_ty!(String)));
+        let mut arena = TypeArena::new();
+        let int_ref = arc_ty!(&mut arena, Int);
+        let str_ref = arc_ty!(&mut arena, String);
+        let mut a = make_attrset(&mut arena, &[]);
+        a.dyn_ty = Some(int_ref);
+        let mut b = make_attrset(&mut arena, &[]);
+        b.dyn_ty = Some(str_ref);
         let merged = a.merge(b);
-        assert_eq!(merged.dyn_ty.map(|t| (*t.0).clone()), Some(arc_ty!(String)));
+        assert_eq!(merged.dyn_ty, Some(str_ref));
     }
 
     #[test]
     fn merge_open_if_either_open() {
-        let closed = make_attrset(&[("x", arc_ty!(Int))]);
-        let mut open = make_attrset(&[("y", arc_ty!(String))]);
+        let mut arena = TypeArena::new();
+        let closed = make_attrset(
+            &mut arena,
+            &[("x", crate::OutputTy::Primitive(crate::PrimitiveTy::Int))],
+        );
+        let mut open = make_attrset(
+            &mut arena,
+            &[("y", crate::OutputTy::Primitive(crate::PrimitiveTy::String))],
+        );
         open.open = true;
 
-        // closed.merge(open) → open
         let merged1 = closed.clone().merge(open.clone());
         assert!(merged1.open, "closed.merge(open) should be open");
 
-        // open.merge(closed) → open
         let merged2 = open.merge(closed);
         assert!(merged2.open, "open.merge(closed) should be open");
     }
 
     #[test]
     fn merge_both_closed_stays_closed() {
-        let a = make_attrset(&[("x", arc_ty!(Int))]);
-        let b = make_attrset(&[("y", arc_ty!(String))]);
+        let mut arena = TypeArena::new();
+        let a = make_attrset(
+            &mut arena,
+            &[("x", crate::OutputTy::Primitive(crate::PrimitiveTy::Int))],
+        );
+        let b = make_attrset(
+            &mut arena,
+            &[("y", crate::OutputTy::Primitive(crate::PrimitiveTy::String))],
+        );
         let merged = a.merge(b);
         assert!(!merged.open, "closed.merge(closed) should stay closed");
     }

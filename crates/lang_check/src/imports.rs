@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use lang_ast::nameres::ResolveResult;
 use lang_ast::{Expr, ExprId, Literal, Module, NameResolution};
-use lang_ty::OutputTy;
+use lang_ty::{OutputTy, OwnedTy};
 
 // ==============================================================================
 // Import Scanning
@@ -179,11 +179,14 @@ pub(crate) fn scan_callpackage_imports(
 /// `callPackage` applies the dependency-injection argument (the first parameter
 /// of the package function), so we extract the body type. For non-function files
 /// (e.g. a plain attrset), the type is returned as-is.
-pub(crate) fn extract_return_type(ty: &OutputTy) -> OutputTy {
-    match ty {
-        OutputTy::Lambda { body, .. } => body.0.as_ref().clone(),
-        OutputTy::Named(_, inner) => extract_return_type(&inner.0),
-        other => other.clone(),
+pub(crate) fn extract_return_type(owned: &OwnedTy) -> OwnedTy {
+    match owned.arena.get(owned.root) {
+        OutputTy::Lambda { body, .. } => OwnedTy::new(owned.arena.clone(), *body),
+        OutputTy::Named(_, inner) => {
+            let inner_owned = OwnedTy::new(owned.arena.clone(), *inner);
+            extract_return_type(&inner_owned)
+        }
+        _ => owned.clone(),
     }
 }
 
@@ -276,7 +279,7 @@ pub struct ImportError {
 pub struct ImportResolution {
     /// Successfully resolved import types, keyed by the Apply ExprId in the
     /// importing file.
-    pub types: HashMap<ExprId, OutputTy>,
+    pub types: HashMap<ExprId, OwnedTy>,
     /// Errors encountered during import resolution.
     pub errors: Vec<ImportError>,
     /// Maps ExprIds of import sub-expressions (Apply, Reference, Literal)
@@ -309,7 +312,7 @@ pub fn resolve_import_types<F>(
     lookup: F,
 ) -> ImportResolution
 where
-    F: Fn(&Path) -> Option<OutputTy>,
+    F: Fn(&Path) -> Option<OwnedTy>,
 {
     let scanned = scan_literal_imports(module, name_res, base_dir);
     let callpackage_imports = scan_callpackage_imports(module, base_dir);
@@ -439,7 +442,7 @@ pub fn resolve_import_types_from_stubs(
     module: &Module,
     name_res: &NameResolution,
     base_dir: &Path,
-    ephemeral_stubs: &HashMap<PathBuf, OutputTy>,
+    ephemeral_stubs: &HashMap<PathBuf, OwnedTy>,
 ) -> ImportResolution {
     resolve_import_types(module, name_res, base_dir, |p| {
         ephemeral_stubs.get(p).cloned()

@@ -113,7 +113,7 @@ impl CheckCtx<'_> {
                     // (needed for LSP hover/goto-def on the `import` keyword and path).
                     self.infer_expr(fun)?;
                     self.infer_expr(arg)?;
-                    return Ok(self.intern_frozen_output_ty(&import_ty));
+                    return Ok(self.intern_frozen_owned_ty(&import_ty));
                 }
 
                 // ── Conditional library function narrowing ────────────────

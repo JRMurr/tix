@@ -1,16 +1,19 @@
 pub mod arc_ty;
+pub mod arena;
 mod attrset;
 pub mod disjoint;
-mod primitive;
 pub mod simplify;
 
 #[cfg(any(test, feature = "proptest_support"))]
 pub mod arbitrary;
 
 pub use arc_ty::{DisplayConfig, OutputTy, Substitutions, TyRef};
+pub use arena::{OwnedTy, TypeArena, TypeDisplay};
 pub use attrset::AttrSetTy;
 use derive_more::Debug;
 pub use primitive::PrimitiveTy;
+
+mod primitive;
 
 // just to make it easy to share the constraints...
 pub trait RefType: Eq + std::hash::Hash {}
@@ -68,116 +71,120 @@ where
     Named(smol_str::SmolStr, R),
 
     /// A frozen (rigid) type from a cross-file import. Wraps a fully-resolved
-    /// OutputTy without eagerly converting it to inference TyIds. Fields are
-    /// materialized on demand when constrain encounters the Frozen type.
-    /// Contains no TyIds — always ground and variable-free.
+    /// OwnedTy (arena + root index) without eagerly converting it to inference
+    /// TyIds. Fields are materialized on demand when constrain encounters the
+    /// Frozen type.
     #[debug("Frozen({_0:?})")]
-    Frozen(std::sync::Arc<crate::arc_ty::OutputTy>),
+    Frozen(crate::arena::OwnedTy),
 }
 
-/// Macro for constructing `OutputTy` values conveniently in tests.
+/// Macro for constructing types in a TypeArena. Returns TyRef (arena index).
 ///
-/// Supports primitives, type variables, lists, lambdas, attrsets, unions, and intersections.
+/// First argument must be a `&mut TypeArena` expression.
 ///
 /// NOTE: This macro is structurally duplicated as `known_ty!` in `comment_parser`.
 /// If more variants are added, consider extracting a shared `impl_ty_macro!` helper.
 #[macro_export]
 macro_rules! arc_ty {
     // -- Match on known primitives -----------------------------------------
-    (Null) => {
-        $crate::OutputTy::Primitive($crate::PrimitiveTy::Null)
+    ($arena:expr, Null) => {
+        $arena.intern($crate::OutputTy::Primitive($crate::PrimitiveTy::Null))
     };
-    (Bool) => {
-        $crate::OutputTy::Primitive($crate::PrimitiveTy::Bool)
+    ($arena:expr, Bool) => {
+        $arena.intern($crate::OutputTy::Primitive($crate::PrimitiveTy::Bool))
     };
-    (Int) => {
-        $crate::OutputTy::Primitive($crate::PrimitiveTy::Int)
+    ($arena:expr, Int) => {
+        $arena.intern($crate::OutputTy::Primitive($crate::PrimitiveTy::Int))
     };
-    (Float) => {
-        $crate::OutputTy::Primitive($crate::PrimitiveTy::Float)
+    ($arena:expr, Float) => {
+        $arena.intern($crate::OutputTy::Primitive($crate::PrimitiveTy::Float))
     };
-    (String) => {
-        $crate::OutputTy::Primitive($crate::PrimitiveTy::String)
+    ($arena:expr, String) => {
+        $arena.intern($crate::OutputTy::Primitive($crate::PrimitiveTy::String))
     };
-    (Path) => {
-        $crate::OutputTy::Primitive($crate::PrimitiveTy::Path)
+    ($arena:expr, Path) => {
+        $arena.intern($crate::OutputTy::Primitive($crate::PrimitiveTy::Path))
     };
-    (Uri) => {
-        $crate::OutputTy::Primitive($crate::PrimitiveTy::Uri)
+    ($arena:expr, Uri) => {
+        $arena.intern($crate::OutputTy::Primitive($crate::PrimitiveTy::Uri))
     };
-    (Number) => {
-        $crate::OutputTy::Primitive($crate::PrimitiveTy::Number)
+    ($arena:expr, Number) => {
+        $arena.intern($crate::OutputTy::Primitive($crate::PrimitiveTy::Number))
     };
-    // -- Bottom (never / uninhabited type) ------------------------------------
-    (Bottom) => {
-        $crate::OutputTy::Bottom
+    // -- Bottom / Top -------------------------------------------------------
+    ($arena:expr, Bottom) => {
+        $arena.intern($crate::OutputTy::Bottom)
     };
-    // -- Top (universal / any type) -------------------------------------------
-    (Top) => {
-        $crate::OutputTy::Top
+    ($arena:expr, Top) => {
+        $arena.intern($crate::OutputTy::Top)
     };
-    // -- TyVar syntax: TyVar(N) --------------------------------------------
-    (# $n:expr) => {
-        $crate::OutputTy::TyVar($n)
+    // -- TyVar syntax: TyVar(N) or # N ------------------------------------
+    ($arena:expr, # $n:expr) => {
+        $arena.intern($crate::OutputTy::TyVar($n))
     };
-    (TyVar($n:expr)) => {
-        $crate::OutputTy::TyVar($n)
+    ($arena:expr, TyVar($n:expr)) => {
+        $arena.intern($crate::OutputTy::TyVar($n))
     };
 
-    (($($inner:tt)*)) => { $crate::arc_ty!($($inner)*) };
-    ([$($inner:tt)*]) => { $crate::OutputTy::List($crate::TyRef::from($crate::arc_ty!($($inner)*)))};
+    ($arena:expr, ($($inner:tt)*)) => { $crate::arc_ty!($arena, $($inner)*) };
+    ($arena:expr, [$($inner:tt)*]) => {{
+        let inner = $crate::arc_ty!($arena, $($inner)*);
+        $arena.intern($crate::OutputTy::List(inner))
+    }};
 
     // -- Closed attrset: { "key": ty, ... }
-    ({ $($key:literal : $ty:tt),* $(,)? }) => {{
-        $crate::OutputTy::AttrSet($crate::AttrSetTy::<$crate::TyRef>::from_internal(
-            [
-                $(($key, $crate::arc_ty!($ty)),)*
-            ],
+    ($arena:expr, { $($key:literal : $ty:tt),* $(,)? }) => {{
+        let attrset = $crate::AttrSetTy::<$crate::TyRef>::from_internal(
+            [$(($key, $crate::arc_ty!($arena, $ty)),)*],
             false,
-        ))
+        );
+        $arena.intern($crate::OutputTy::AttrSet(attrset))
     }};
 
     // -- Open attrset: { "key": ty, ... ; ... }
-    ({ $($key:literal : $ty:tt),* $(,)?; ... }) => {{
-        $crate::OutputTy::AttrSet($crate::AttrSetTy::<$crate::TyRef>::from_internal(
-            [
-                $(($key, $crate::arc_ty!($ty)),)*
-            ],
+    ($arena:expr, { $($key:literal : $ty:tt),* $(,)?; ... }) => {{
+        let attrset = $crate::AttrSetTy::<$crate::TyRef>::from_internal(
+            [$(($key, $crate::arc_ty!($arena, $ty)),)*],
             true,
-        ))
+        );
+        $arena.intern($crate::OutputTy::AttrSet(attrset))
     }};
 
     // -- Union: union!(ty1, ty2, ...)
-    (union!($($member:tt),+ $(,)?)) => {{
-        $crate::OutputTy::Union(vec![
-            $($crate::TyRef::from($crate::arc_ty!($member)),)+
-        ])
+    ($arena:expr, union!($($member:tt),+ $(,)?)) => {{
+        $arena.intern($crate::OutputTy::Union(vec![
+            $($crate::arc_ty!($arena, $member),)+
+        ]))
     }};
 
     // -- Intersection: isect!(ty1, ty2, ...)
-    (isect!($($member:tt),+ $(,)?)) => {{
-        $crate::OutputTy::Intersection(vec![
-            $($crate::TyRef::from($crate::arc_ty!($member)),)+
-        ])
+    ($arena:expr, isect!($($member:tt),+ $(,)?)) => {{
+        $arena.intern($crate::OutputTy::Intersection(vec![
+            $($crate::arc_ty!($arena, $member),)+
+        ]))
     }};
 
     // -- Named alias: named!("AliasName", inner_ty)
-    (named!($name:expr, $inner:tt)) => {{
-        $crate::OutputTy::Named(
+    ($arena:expr, named!($name:expr, $inner:tt)) => {{
+        let inner = $crate::arc_ty!($arena, $inner);
+        $arena.intern($crate::OutputTy::Named(
             smol_str::SmolStr::new($name),
-            $crate::TyRef::from($crate::arc_ty!($inner)),
-        )
+            inner,
+        ))
     }};
 
     // -- Negation: neg!(ty)
-    (neg!($($inner:tt)*)) => {{
-        $crate::OutputTy::Neg($crate::TyRef::from($crate::arc_ty!($($inner)*)))
+    ($arena:expr, neg!($($inner:tt)*)) => {{
+        let inner = $crate::arc_ty!($arena, $($inner)*);
+        $arena.intern($crate::OutputTy::Neg(inner))
     }};
 
-    ($arg:tt -> $($ret:tt)*) => {
-        $crate::OutputTy::Lambda {
-            param: $crate::TyRef::from($crate::arc_ty!($arg)),
-            body: $crate::TyRef::from($crate::arc_ty!($($ret)*)),
-        }
-    };
+    ($arena:expr, $arg:tt -> $($ret:tt)*) => {{
+        let param = $crate::arc_ty!($arena, $arg);
+        let body = $crate::arc_ty!($arena, $($ret)*);
+        $arena.intern($crate::OutputTy::Lambda {
+            param,
+            body,
+        })
+    }};
 }
