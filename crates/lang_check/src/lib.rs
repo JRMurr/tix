@@ -595,7 +595,7 @@ pub struct CheckCtx<'db> {
     /// Early-canonicalized types for names, captured at generalization time
     /// before use-site extrusions contaminate polymorphic variables with
     /// concrete bounds.
-    early_canonical: ArenaMap<NameId, OutputTy>,
+    early_canonical: ArenaMap<NameId, (TypeArena, TyRef)>,
 
     /// Type alias registry loaded from .tix declaration files.
     /// Wrapped in Arc for copy-on-write: most files share the registry

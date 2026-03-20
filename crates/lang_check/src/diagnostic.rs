@@ -408,9 +408,11 @@ fn canonicalize_ty_structural(
     // TODO: once canonicalize_standalone is updated to accept a `&mut TypeArena`
     // and return `TyRef` directly, remove the `arena.intern(...)` wrapper here.
     macro_rules! child {
-        ($ty_id:expr, $pol:expr) => {
-            arena.intern(canonicalize_standalone(table, $ty_id, $pol))
-        };
+        ($ty_id:expr, $pol:expr) => {{
+            let (src_arena, src_ty) = canonicalize_standalone(table, $ty_id, $pol);
+            let mut cache = rustc_hash::FxHashMap::default();
+            lang_ty::arena::import_from_arena(arena, &src_arena, src_ty, &mut cache)
+        }};
     }
 
     match ty {

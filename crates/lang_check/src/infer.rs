@@ -329,10 +329,10 @@ impl CheckCtx<'_> {
         let canon_start = std::time::Instant::now();
         for &(name_id, _ty) in &inferred {
             let name_slot = self.ty_for_name_direct(name_id);
-            let output =
+            let (mut arena, ty) =
                 canonicalize_standalone(&self.types.storage, name_slot, Polarity::Positive);
-            let simplified = simplify(&output);
-            self.early_canonical.insert(name_id, simplified);
+            let simplified = simplify(&mut arena, ty);
+            self.early_canonical.insert(name_id, (arena, simplified));
         }
         log::debug!(
             "  early canonicalization: {:.1}ms for {} names",
