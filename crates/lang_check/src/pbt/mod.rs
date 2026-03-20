@@ -30,8 +30,8 @@ use std::collections::{BTreeMap, HashSet};
 
 use lang_ast::{BoolBinOp, OverloadBinOp};
 use lang_ty::{
-    arbitrary::{arb_smol_str_ident, RecursiveParams},
-    AttrSetTy, OutputTy, PrimitiveTy, TyRef,
+    arbitrary::{arb_smol_str_ident, ArbitraryType, RecursiveParams},
+    AttrSetTy, OutputTy, PrimitiveTy, TyRef, TypeArena,
 };
 use proptest::prelude::{
     any, prop, prop_assert, prop_assert_eq, prop_compose, prop_oneof, proptest, BoxedStrategy,
@@ -39,7 +39,7 @@ use proptest::prelude::{
 };
 use smol_str::SmolStr;
 
-use crate::tests::{check_str, check_str_with_aliases, get_inferred_root};
+use crate::tests::{check_str, check_str_with_aliases, get_inferred_root, RootTy};
 
 type NixTextStr = String;
 

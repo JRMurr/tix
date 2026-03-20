@@ -463,8 +463,22 @@ impl Default for InferenceCoordinator {
 mod tests {
     use super::*;
     use crate::aliases::TypeAliasRegistry;
-    use lang_ty::OutputTy;
+    use lang_ty::{OutputTy, TypeArena};
     use std::io::Write;
+
+    /// Helper: create a FileSignature from an OutputTy value.
+    fn make_sig(ty: OutputTy) -> FileSignature {
+        let mut arena = TypeArena::new();
+        let root = arena.intern(ty);
+        FileSignature {
+            root_ty: OwnedTy::new(Arc::new(arena), root),
+        }
+    }
+
+    /// Helper: compare an OwnedTy to an OutputTy structurally.
+    fn owned_ty_eq(owned: &OwnedTy, expected: &OutputTy) -> bool {
+        owned.get() == expected
+    }
 
     /// A test syntax provider that reads .nix files from disk and parses them
     /// via a shared RootDatabase.
@@ -515,28 +529,29 @@ mod tests {
     fn passive_set_get_roundtrip() {
         let coord = InferenceCoordinator::new();
         let path = PathBuf::from("/tmp/test_passive.nix");
-        let sig = FileSignature {
-            root_ty: OutputTy::Primitive(lang_ty::PrimitiveTy::Int),
-        };
+        let sig = make_sig(OutputTy::Primitive(lang_ty::PrimitiveTy::Int));
 
         assert!(coord.get_signature(&path).is_none());
-        coord.set_signature(&path, sig.clone());
-        assert_eq!(coord.get_signature(&path), Some(sig.root_ty));
+        coord.set_signature(&path, sig);
+        let retrieved = coord.get_signature(&path);
+        assert!(retrieved.is_some());
+        assert!(owned_ty_eq(
+            &retrieved.unwrap(),
+            &OutputTy::Primitive(lang_ty::PrimitiveTy::Int)
+        ));
     }
 
     #[test]
     fn set_signature_returns_changed() {
         let coord = InferenceCoordinator::new();
         let path = PathBuf::from("/tmp/test_changed.nix");
-        let sig_int = FileSignature {
-            root_ty: OutputTy::Primitive(lang_ty::PrimitiveTy::Int),
-        };
-        let sig_str = FileSignature {
-            root_ty: OutputTy::Primitive(lang_ty::PrimitiveTy::String),
-        };
+        let sig_int = make_sig(OutputTy::Primitive(lang_ty::PrimitiveTy::Int));
+        let sig_str = make_sig(OutputTy::Primitive(lang_ty::PrimitiveTy::String));
 
-        assert!(coord.set_signature(&path, sig_int.clone()));
-        assert!(!coord.set_signature(&path, sig_int));
+        // Clone shares the same Arc, so PartialEq (ptr-based) will match.
+        let sig_int_clone = sig_int.clone();
+        assert!(coord.set_signature(&path, sig_int));
+        assert!(!coord.set_signature(&path, sig_int_clone));
         assert!(coord.set_signature(&path, sig_str));
     }
 
@@ -548,24 +563,9 @@ mod tests {
         let c = PathBuf::from("/c.nix");
 
         // a imports b, b imports c
-        coord.set_signature(
-            &a,
-            FileSignature {
-                root_ty: OutputTy::Primitive(lang_ty::PrimitiveTy::Int),
-            },
-        );
-        coord.set_signature(
-            &b,
-            FileSignature {
-                root_ty: OutputTy::Primitive(lang_ty::PrimitiveTy::Int),
-            },
-        );
-        coord.set_signature(
-            &c,
-            FileSignature {
-                root_ty: OutputTy::Primitive(lang_ty::PrimitiveTy::Int),
-            },
-        );
+        coord.set_signature(&a, make_sig(OutputTy::Primitive(lang_ty::PrimitiveTy::Int)));
+        coord.set_signature(&b, make_sig(OutputTy::Primitive(lang_ty::PrimitiveTy::Int)));
+        coord.set_signature(&c, make_sig(OutputTy::Primitive(lang_ty::PrimitiveTy::Int)));
         coord.record_deps(&a, &[b.clone()]);
         coord.record_deps(&b, &[c.clone()]);
 
@@ -677,9 +677,7 @@ mod tests {
         let path = PathBuf::from("/tmp/test_clear.nix");
         coord.set_signature(
             &path,
-            FileSignature {
-                root_ty: OutputTy::Primitive(lang_ty::PrimitiveTy::Int),
-            },
+            make_sig(OutputTy::Primitive(lang_ty::PrimitiveTy::Int)),
         );
         coord.record_deps(&path, &[PathBuf::from("/tmp/dep.nix")]);
 
@@ -696,11 +694,8 @@ mod tests {
         let a = PathBuf::from("/cycle_a.nix");
         let b = PathBuf::from("/cycle_b.nix");
 
-        let sig = FileSignature {
-            root_ty: OutputTy::Primitive(lang_ty::PrimitiveTy::Int),
-        };
-        coord.set_signature(&a, sig.clone());
-        coord.set_signature(&b, sig);
+        coord.set_signature(&a, make_sig(OutputTy::Primitive(lang_ty::PrimitiveTy::Int)));
+        coord.set_signature(&b, make_sig(OutputTy::Primitive(lang_ty::PrimitiveTy::Int)));
 
         // Create a cycle: a→b and b→a in reverse deps.
         coord.record_deps(&a, &[b.clone()]);
@@ -854,7 +849,10 @@ mod tests {
         let a_ty = coord
             .get_signature(&a_path)
             .expect("a.nix should be cached");
-        assert_eq!(a_ty, OutputTy::Primitive(lang_ty::PrimitiveTy::Int));
+        assert!(owned_ty_eq(
+            &a_ty,
+            &OutputTy::Primitive(lang_ty::PrimitiveTy::Int)
+        ));
     }
 
     /// Diamond dependency: shared dep inferred once, type flows correctly
@@ -901,9 +899,15 @@ mod tests {
 
         // b.nix and c.nix should both be `string` (from d.nix).
         let b_ty = coord.get_signature(&b_path).expect("b.nix cached");
-        assert_eq!(b_ty, OutputTy::Primitive(lang_ty::PrimitiveTy::String));
+        assert!(owned_ty_eq(
+            &b_ty,
+            &OutputTy::Primitive(lang_ty::PrimitiveTy::String)
+        ));
         let c_ty = coord.get_signature(&c_path).expect("c.nix cached");
-        assert_eq!(c_ty, OutputTy::Primitive(lang_ty::PrimitiveTy::String));
+        assert!(owned_ty_eq(
+            &c_ty,
+            &OutputTy::Primitive(lang_ty::PrimitiveTy::String)
+        ));
     }
 
     /// Cycle: A ↔ B doesn't deadlock. Files complete with ⊤ for back-edges.

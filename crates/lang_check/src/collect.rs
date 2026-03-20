@@ -1360,7 +1360,9 @@ mod tests {
         let mut a = TypeArena::new();
         let input = union(&mut a, vec![int(), string()]);
         let result = negate_output_ty(&mut a, input);
-        let expected = isect(&mut a, vec![neg(&mut a, int()), neg(&mut a, string())]);
+        let neg_int = neg(&mut a, int());
+        let neg_str = neg(&mut a, string());
+        let expected = isect(&mut a, vec![neg_int, neg_str]);
         assert_eq!(result, expected);
     }
 
@@ -1370,7 +1372,9 @@ mod tests {
         let mut a = TypeArena::new();
         let input = isect(&mut a, vec![int(), string()]);
         let result = negate_output_ty(&mut a, input);
-        let expected = union(&mut a, vec![neg(&mut a, int()), neg(&mut a, string())]);
+        let neg_int = neg(&mut a, int());
+        let neg_str = neg(&mut a, string());
+        let expected = union(&mut a, vec![neg_int, neg_str]);
         assert_eq!(result, expected);
     }
 
@@ -1378,9 +1382,11 @@ mod tests {
     fn negate_nested_de_morgan() {
         // ¬(¬Int ∨ String) → ¬(¬Int) ∧ ¬String → Int ∧ ¬String
         let mut a = TypeArena::new();
-        let input = union(&mut a, vec![neg(&mut a, int()), string()]);
+        let neg_int = neg(&mut a, int());
+        let input = union(&mut a, vec![neg_int, string()]);
         let result = negate_output_ty(&mut a, input);
-        let expected = isect(&mut a, vec![int(), neg(&mut a, string())]);
+        let neg_str = neg(&mut a, string());
+        let expected = isect(&mut a, vec![int(), neg_str]);
         assert_eq!(result, expected);
     }
 
@@ -1489,11 +1495,12 @@ mod tests {
         table.add_upper_bound(var_id, int_ty);
         table.add_upper_bound(var_id, neg_int);
 
-        let result = canonicalize_standalone(&table, var_id, Negative);
+        let (result_arena, result_ty) = canonicalize_standalone(&table, var_id, Negative);
         assert_eq!(
-            result,
+            result_arena[result_ty],
             OutputTy::Bottom,
-            "int & ~int contradiction should produce Bottom (never), got: {result:?}"
+            "int & ~int contradiction should produce Bottom (never), got: {:?}",
+            result_arena[result_ty]
         );
     }
 
@@ -1514,13 +1521,14 @@ mod tests {
         table.add_upper_bound(var_id, string_ty);
         table.add_upper_bound(var_id, neg_null);
 
-        let result = canonicalize_standalone(&table, var_id, Negative);
+        let (result_arena, result_ty) = canonicalize_standalone(&table, var_id, Negative);
         // ~null is redundant alongside string (disjoint constructors), so
         // it gets removed, leaving just string.
         assert_eq!(
-            result,
+            result_arena[result_ty],
             string(),
-            "string & ~null should simplify to string, got: {result:?}"
+            "string & ~null should simplify to string, got: {:?}",
+            result_arena[result_ty]
         );
     }
 
@@ -1581,8 +1589,10 @@ mod tests {
     #[test]
     fn disjoint_attrset_vs_list() {
         let mut a = TypeArena::new();
-        let attrset = a[arc_ty!(&mut a, { "x": Int })].clone();
-        let list = a[arc_ty!(&mut a, [Int])].clone();
+        let attrset_ref = arc_ty!(&mut a, { "x": Int });
+        let list_ref = arc_ty!(&mut a, [Int]);
+        let attrset = a[attrset_ref].clone();
+        let list = a[list_ref].clone();
         assert!(are_output_types_disjoint(&attrset, &list));
         assert!(are_output_types_disjoint(&list, &attrset));
     }
@@ -1590,7 +1600,8 @@ mod tests {
     #[test]
     fn disjoint_attrset_vs_lambda() {
         let mut a = TypeArena::new();
-        let attrset = a[arc_ty!(&mut a, { "x": Int })].clone();
+        let attrset_ref = arc_ty!(&mut a, { "x": Int });
+        let attrset = a[attrset_ref].clone();
         let lambda = OutputTy::Lambda {
             param: arc_ty!(&mut a, Int),
             body: arc_ty!(&mut a, String),
@@ -1602,7 +1613,8 @@ mod tests {
     #[test]
     fn disjoint_list_vs_lambda() {
         let mut a = TypeArena::new();
-        let list = a[arc_ty!(&mut a, [Int])].clone();
+        let list_ref = arc_ty!(&mut a, [Int]);
+        let list = a[list_ref].clone();
         let lambda = OutputTy::Lambda {
             param: arc_ty!(&mut a, Int),
             body: arc_ty!(&mut a, String),
@@ -1616,8 +1628,10 @@ mod tests {
         // Closed {x: Int} vs closed {y: String} — disjoint because
         // each requires a field the other doesn't have.
         let mut a = TypeArena::new();
-        let attrset1 = a[arc_ty!(&mut a, { "x": Int })].clone();
-        let attrset2 = a[arc_ty!(&mut a, { "y": String })].clone();
+        let r1 = arc_ty!(&mut a, { "x": Int });
+        let r2 = arc_ty!(&mut a, { "y": String });
+        let attrset1 = a[r1].clone();
+        let attrset2 = a[r2].clone();
         assert!(are_output_types_disjoint(&attrset1, &attrset2));
     }
 
@@ -1627,8 +1641,10 @@ mod tests {
         // both have field `x` (they overlap structurally, the field types
         // could unify or not, but the attrset shapes aren't disjoint).
         let mut a = TypeArena::new();
-        let attrset1 = a[arc_ty!(&mut a, { "x": Int })].clone();
-        let attrset2 = a[arc_ty!(&mut a, { "x": String })].clone();
+        let r1 = arc_ty!(&mut a, { "x": Int });
+        let r2 = arc_ty!(&mut a, { "x": String });
+        let attrset1 = a[r1].clone();
+        let attrset2 = a[r2].clone();
         assert!(!are_output_types_disjoint(&attrset1, &attrset2));
     }
 
@@ -1637,8 +1653,10 @@ mod tests {
         // Open {x: Int, ...} vs closed {y: String} — disjoint because
         // the open attrset requires `x` but the closed one doesn't have it.
         let mut a = TypeArena::new();
-        let open = a[arc_ty!(&mut a, { "x": Int; ... })].clone();
-        let closed = a[arc_ty!(&mut a, { "y": String })].clone();
+        let r1 = arc_ty!(&mut a, { "x": Int; ... });
+        let r2 = arc_ty!(&mut a, { "y": String });
+        let open = a[r1].clone();
+        let closed = a[r2].clone();
         assert!(are_output_types_disjoint(&open, &closed));
     }
 
@@ -1647,8 +1665,10 @@ mod tests {
         // Open {x: Int, ...} vs open {y: String, ...} — NOT disjoint because
         // both are open, so a value with both fields could satisfy both.
         let mut a = TypeArena::new();
-        let open1 = a[arc_ty!(&mut a, { "x": Int; ... })].clone();
-        let open2 = a[arc_ty!(&mut a, { "y": String; ... })].clone();
+        let r1 = arc_ty!(&mut a, { "x": Int; ... });
+        let r2 = arc_ty!(&mut a, { "y": String; ... });
+        let open1 = a[r1].clone();
+        let open2 = a[r2].clone();
         assert!(!are_output_types_disjoint(&open1, &open2));
     }
 
@@ -1657,16 +1677,20 @@ mod tests {
         // Closed {x: Int} vs open {y: String, ...} — disjoint because
         // the closed attrset doesn't have `y` which is required by the open one.
         let mut a = TypeArena::new();
-        let closed = a[arc_ty!(&mut a, { "x": Int })].clone();
-        let open = a[arc_ty!(&mut a, { "y": String; ... })].clone();
+        let r1 = arc_ty!(&mut a, { "x": Int });
+        let r2 = arc_ty!(&mut a, { "y": String; ... });
+        let closed = a[r1].clone();
+        let open = a[r2].clone();
         assert!(are_output_types_disjoint(&closed, &open));
     }
 
     #[test]
     fn not_disjoint_same_compound() {
         let mut a = TypeArena::new();
-        let list1 = a[arc_ty!(&mut a, [Int])].clone();
-        let list2 = a[arc_ty!(&mut a, [String])].clone();
+        let r1 = arc_ty!(&mut a, [Int]);
+        let r2 = arc_ty!(&mut a, [String]);
+        let list1 = a[r1].clone();
+        let list2 = a[r2].clone();
         assert!(!are_output_types_disjoint(&list1, &list2));
     }
 
@@ -1683,7 +1707,8 @@ mod tests {
     fn contradiction_attrset_neg_attrset() {
         // {x: int} ∧ ¬{x: int} → contradiction (same attrset).
         let mut a = TypeArena::new();
-        let attrset = a[arc_ty!(&mut a, { "x": Int })].clone();
+        let attrset_ref = arc_ty!(&mut a, { "x": Int });
+        let attrset = a[attrset_ref].clone();
         let members = vec![attrset.clone(), neg(&mut a, attrset)];
         assert!(has_type_contradiction(&a, &members));
     }
@@ -1692,7 +1717,8 @@ mod tests {
     fn contradiction_list_neg_list() {
         // [int] ∧ ¬[int] → contradiction.
         let mut a = TypeArena::new();
-        let list = a[arc_ty!(&mut a, [Int])].clone();
+        let list_ref = arc_ty!(&mut a, [Int]);
+        let list = a[list_ref].clone();
         let members = vec![list.clone(), neg(&mut a, list)];
         assert!(has_type_contradiction(&a, &members));
     }
@@ -1701,7 +1727,8 @@ mod tests {
     fn no_contradiction_attrset_neg_null() {
         // {x: int} ∧ ¬null — not contradictory (different constructors).
         let mut a = TypeArena::new();
-        let attrset = a[arc_ty!(&mut a, { "x": Int })].clone();
+        let attrset_ref = arc_ty!(&mut a, { "x": Int });
+        let attrset = a[attrset_ref].clone();
         let members = vec![attrset, neg(&mut a, null())];
         assert!(!has_type_contradiction(&a, &members));
     }
@@ -1710,7 +1737,8 @@ mod tests {
     fn no_contradiction_list_neg_string() {
         // [int] ∧ ¬string — not contradictory.
         let mut a = TypeArena::new();
-        let list = a[arc_ty!(&mut a, [Int])].clone();
+        let list_ref = arc_ty!(&mut a, [Int]);
+        let list = a[list_ref].clone();
         let members = vec![list, neg(&mut a, string())];
         assert!(!has_type_contradiction(&a, &members));
     }
@@ -1721,7 +1749,8 @@ mod tests {
     fn redundant_neg_removed_attrset_neg_null() {
         // {x: int} ∧ ¬null → {x: int} (attrset is inherently non-null).
         let mut a = TypeArena::new();
-        let attrset = a[arc_ty!(&mut a, { "x": Int })].clone();
+        let attrset_ref = arc_ty!(&mut a, { "x": Int });
+        let attrset = a[attrset_ref].clone();
         let members = vec![attrset.clone(), neg(&mut a, null())];
         let result = remove_redundant_negations(&a, members);
         assert_eq!(result, vec![attrset]);
@@ -1731,7 +1760,8 @@ mod tests {
     fn redundant_neg_removed_list_neg_string() {
         // [int] ∧ ¬string → [int] (list is inherently non-string).
         let mut a = TypeArena::new();
-        let list = a[arc_ty!(&mut a, [Int])].clone();
+        let list_ref = arc_ty!(&mut a, [Int]);
+        let list = a[list_ref].clone();
         let members = vec![list.clone(), neg(&mut a, string())];
         let result = remove_redundant_negations(&a, members);
         assert_eq!(result, vec![list]);
@@ -1771,7 +1801,8 @@ mod tests {
     fn tautology_attrset_neg_attrset() {
         // {x: int} ∨ ¬{x: int} → empty (tautology).
         let mut a = TypeArena::new();
-        let attrset = a[arc_ty!(&mut a, { "x": Int })].clone();
+        let attrset_ref = arc_ty!(&mut a, { "x": Int });
+        let attrset = a[attrset_ref].clone();
         let members = vec![attrset.clone(), neg(&mut a, attrset)];
         let result = remove_tautological_pairs(&a, members);
         assert!(result.is_empty());
@@ -1781,7 +1812,8 @@ mod tests {
     fn tautology_list_neg_list() {
         // [int] ∨ ¬[int] → empty.
         let mut a = TypeArena::new();
-        let list = a[arc_ty!(&mut a, [Int])].clone();
+        let list_ref = arc_ty!(&mut a, [Int]);
+        let list = a[list_ref].clone();
         let members = vec![list.clone(), neg(&mut a, list)];
         let result = remove_tautological_pairs(&a, members);
         assert!(result.is_empty());
@@ -1791,7 +1823,8 @@ mod tests {
     fn tautology_compound_preserves_others() {
         // {x: int} ∨ ¬{x: int} ∨ string → string.
         let mut a = TypeArena::new();
-        let attrset = a[arc_ty!(&mut a, { "x": Int })].clone();
+        let attrset_ref = arc_ty!(&mut a, { "x": Int });
+        let attrset = a[attrset_ref].clone();
         let members = vec![attrset.clone(), neg(&mut a, attrset), string()];
         let result = remove_tautological_pairs(&a, members);
         assert_eq!(result, vec![string()]);
@@ -1825,15 +1858,18 @@ mod tests {
     fn not_subtype_different_constructors() {
         let mut a = TypeArena::new();
         assert!(!is_output_subtype_or_equal(&int(), &string()));
-        let attrset = a[arc_ty!(&mut a, { "x": Int })].clone();
+        let attrset_ref = arc_ty!(&mut a, { "x": Int });
+        let attrset = a[attrset_ref].clone();
         assert!(!is_output_subtype_or_equal(&int(), &attrset));
     }
 
     #[test]
     fn subtype_structural_equality_attrset() {
         let mut a = TypeArena::new();
-        let a1 = a[arc_ty!(&mut a, { "x": Int })].clone();
-        let a2 = a[arc_ty!(&mut a, { "x": Int })].clone();
+        let r1 = arc_ty!(&mut a, { "x": Int });
+        let r2 = arc_ty!(&mut a, { "x": Int });
+        let a1 = a[r1].clone();
+        let a2 = a[r2].clone();
         assert!(is_output_subtype_or_equal(&a1, &a2));
     }
 
@@ -1874,11 +1910,12 @@ mod tests {
         table.add_lower_bound(var_id, int_ty);
         table.add_lower_bound(var_id, neg_int);
 
-        let result = canonicalize_standalone(&table, var_id, Positive);
+        let (result_arena, result_ty) = canonicalize_standalone(&table, var_id, Positive);
         assert_eq!(
-            result,
+            result_arena[result_ty],
             OutputTy::Top,
-            "int | ~int tautology should produce Top (any), got: {result:?}"
+            "int | ~int tautology should produce Top (any), got: {:?}",
+            result_arena[result_ty]
         );
     }
 
@@ -1902,8 +1939,10 @@ mod tests {
     #[test]
     fn absorb_open_wildcard_absorbs_open_with_fields() {
         let mut a = TypeArena::new();
-        let bare_open = a[arc_ty!(&mut a, { ; ... })].clone();
-        let specific_open = a[arc_ty!(&mut a, { "setenv": String; ... })].clone();
+        let r1 = arc_ty!(&mut a, { ; ... });
+        let r2 = arc_ty!(&mut a, { "setenv": String; ... });
+        let bare_open = a[r1].clone();
+        let specific_open = a[r2].clone();
         let members = vec![bare_open.clone(), specific_open];
         let result = absorb_subsumed_union_members(members);
         assert_eq!(result, vec![bare_open]);
@@ -1912,8 +1951,10 @@ mod tests {
     #[test]
     fn absorb_closed_not_absorbed() {
         let mut a = TypeArena::new();
-        let aa = a[arc_ty!(&mut a, { "x": Int })].clone();
-        let bb = a[arc_ty!(&mut a, { "x": Int, "y": String })].clone();
+        let r1 = arc_ty!(&mut a, { "x": Int });
+        let r2 = arc_ty!(&mut a, { "x": Int, "y": String });
+        let aa = a[r1].clone();
+        let bb = a[r2].clone();
         let members = vec![aa.clone(), bb.clone()];
         let result = absorb_subsumed_union_members(members);
         assert_eq!(result, vec![aa, bb]);
@@ -1922,8 +1963,10 @@ mod tests {
     #[test]
     fn absorb_partial_subsumption_keeps_both() {
         let mut a = TypeArena::new();
-        let aa = a[arc_ty!(&mut a, { "x": Int; ... })].clone();
-        let bb = a[arc_ty!(&mut a, { "y": String; ... })].clone();
+        let r1 = arc_ty!(&mut a, { "x": Int; ... });
+        let r2 = arc_ty!(&mut a, { "y": String; ... });
+        let aa = a[r1].clone();
+        let bb = a[r2].clone();
         let members = vec![aa.clone(), bb.clone()];
         let result = absorb_subsumed_union_members(members);
         assert_eq!(result, vec![aa, bb]);
@@ -1932,8 +1975,10 @@ mod tests {
     #[test]
     fn absorb_open_with_shared_fields() {
         let mut a = TypeArena::new();
-        let general = a[arc_ty!(&mut a, { "x": Int; ... })].clone();
-        let specific = a[arc_ty!(&mut a, { "x": Int, "y": String; ... })].clone();
+        let r1 = arc_ty!(&mut a, { "x": Int; ... });
+        let r2 = arc_ty!(&mut a, { "x": Int, "y": String; ... });
+        let general = a[r1].clone();
+        let specific = a[r2].clone();
         let members = vec![general.clone(), specific];
         let result = absorb_subsumed_union_members(members);
         assert_eq!(result, vec![general]);
@@ -1942,8 +1987,10 @@ mod tests {
     #[test]
     fn absorb_preserves_non_attrset_members() {
         let mut a = TypeArena::new();
-        let bare_open = a[arc_ty!(&mut a, { ; ... })].clone();
-        let specific = a[arc_ty!(&mut a, { "x": Int; ... })].clone();
+        let r1 = arc_ty!(&mut a, { ; ... });
+        let r2 = arc_ty!(&mut a, { "x": Int; ... });
+        let bare_open = a[r1].clone();
+        let specific = a[r2].clone();
         let members = vec![string(), bare_open.clone(), specific];
         let result = absorb_subsumed_union_members(members);
         assert_eq!(result, vec![string(), bare_open]);
@@ -2024,8 +2071,10 @@ mod tests {
     #[test]
     fn merge_inter_non_overlapping_fields() {
         let mut a = TypeArena::new();
-        let m1 = a[arc_ty!(&mut a, { "x": Int })].clone();
-        let m2 = a[arc_ty!(&mut a, { "y": String })].clone();
+        let r1 = arc_ty!(&mut a, { "x": Int });
+        let r2 = arc_ty!(&mut a, { "y": String });
+        let m1 = a[r1].clone();
+        let m2 = a[r2].clone();
         let result = merge_attrset_intersection(&mut a, vec![m1, m2]);
         assert_eq!(result.len(), 1, "should merge into one attrset: {result:?}");
         match &result[0] {
@@ -2041,8 +2090,10 @@ mod tests {
     #[test]
     fn merge_inter_overlapping_same_type() {
         let mut a = TypeArena::new();
-        let m1 = a[arc_ty!(&mut a, { "x": Int })].clone();
-        let m2 = a[arc_ty!(&mut a, { "x": Int })].clone();
+        let r1 = arc_ty!(&mut a, { "x": Int });
+        let r2 = arc_ty!(&mut a, { "x": Int });
+        let m1 = a[r1].clone();
+        let m2 = a[r2].clone();
         let result = merge_attrset_intersection(&mut a, vec![m1, m2]);
         assert_eq!(result.len(), 1);
         match &result[0] {
@@ -2056,8 +2107,10 @@ mod tests {
     #[test]
     fn merge_inter_overlapping_different_type() {
         let mut a = TypeArena::new();
-        let m1 = a[arc_ty!(&mut a, { "x": Int })].clone();
-        let m2 = a[arc_ty!(&mut a, { "x": String })].clone();
+        let r1 = arc_ty!(&mut a, { "x": Int });
+        let r2 = arc_ty!(&mut a, { "x": String });
+        let m1 = a[r1].clone();
+        let m2 = a[r2].clone();
         let result = merge_attrset_intersection(&mut a, vec![m1, m2]);
         assert_eq!(result.len(), 1);
         match &result[0] {
@@ -2077,7 +2130,8 @@ mod tests {
         let mut a = TypeArena::new();
         let tyvar_ref = a.intern(OutputTy::TyVar(0));
         let m1 = OutputTy::AttrSet(AttrSetTy::from_internal([("x", tyvar_ref)], false));
-        let m2 = a[arc_ty!(&mut a, { "x": Int })].clone();
+        let r2 = arc_ty!(&mut a, { "x": Int });
+        let m2 = a[r2].clone();
         let result = merge_attrset_intersection(&mut a, vec![m1, m2]);
         assert_eq!(result.len(), 1);
         match &result[0] {
@@ -2117,8 +2171,10 @@ mod tests {
     #[test]
     fn merge_inter_open_all_open() {
         let mut a = TypeArena::new();
-        let open1 = a[arc_ty!(&mut a, { "x": Int; ... })].clone();
-        let open2 = a[arc_ty!(&mut a, { "y": String; ... })].clone();
+        let r1 = arc_ty!(&mut a, { "x": Int; ... });
+        let r2 = arc_ty!(&mut a, { "y": String; ... });
+        let open1 = a[r1].clone();
+        let open2 = a[r2].clone();
         let result_both_open = merge_attrset_intersection(&mut a, vec![open1, open2]);
         assert_eq!(result_both_open.len(), 1);
         match &result_both_open[0] {
@@ -2126,8 +2182,10 @@ mod tests {
             other => panic!("expected AttrSet, got: {other:?}"),
         }
 
-        let open = a[arc_ty!(&mut a, { "x": Int; ... })].clone();
-        let closed = a[arc_ty!(&mut a, { "y": String })].clone();
+        let r3 = arc_ty!(&mut a, { "x": Int; ... });
+        let r4 = arc_ty!(&mut a, { "y": String });
+        let open = a[r3].clone();
+        let closed = a[r4].clone();
         let result_mixed = merge_attrset_intersection(&mut a, vec![open, closed]);
         assert_eq!(result_mixed.len(), 1);
         match &result_mixed[0] {
