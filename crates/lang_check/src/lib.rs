@@ -56,7 +56,7 @@ fn load_inline_aliases(
     }
 }
 
-#[instrument(level = "info", skip_all, name = "check_file", fields(file = %file.path(db).file_name().unwrap_or_default().to_string_lossy()))]
+#[instrument(level = "info", skip_all, name = "check_file", fields(file = lang_ast::display_path(&file.path(db)).as_str()))]
 #[salsa::tracked]
 pub fn check_file(db: &dyn AstDb, file: NixFile) -> Result<InferenceResult, Box<TixDiagnostic>> {
     check_file_with_aliases(db, file, &TypeAliasRegistry::default())
@@ -344,7 +344,7 @@ pub struct InferenceInputs {
 
 /// Run type inference using precomputed syntax data. Does not need the Salsa
 /// database. Consolidates the timeout-diagnostic logic shared by CLI and LSP.
-#[instrument(level = "info", skip_all, name = "run_inference", fields(file = inputs.file_path.as_ref().and_then(|p| p.file_name()).map(|f| f.to_string_lossy().into_owned()).unwrap_or_default().as_str()))]
+#[instrument(level = "info", skip_all, name = "run_inference", fields(file = inputs.file_path.as_deref().map(lang_ast::display_path).unwrap_or_default().as_str()))]
 pub fn run_inference(
     inputs: &InferenceInputs,
     cancel_flag: Option<Arc<AtomicBool>>,
