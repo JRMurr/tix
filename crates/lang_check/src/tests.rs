@@ -2328,6 +2328,90 @@ mod import_tests {
     }
 
     // ======================================================================
+    // Frozen import type tests — lazy materialization
+    // ======================================================================
+
+    // Import a large attrset and access only one field. The frozen type
+    // should materialize just that one field without interning the rest.
+    #[test]
+    fn frozen_import_large_attrset_single_field() {
+        // Build a Nix file with many fields but only access one.
+        let mut fields = String::new();
+        for i in 0..100 {
+            fields.push_str(&format!("field_{i} = {i}; "));
+        }
+        let lib_src = format!("{{ {fields} }}");
+
+        let ty = get_multifile_root(&[
+            ("/main.nix", "let lib = import /lib.nix; in lib.field_42"),
+            ("/lib.nix", &lib_src),
+        ]);
+        assert_eq!(ty, arc_ty!(Int));
+    }
+
+    // Import an attrset and access multiple fields — verify correct types.
+    #[test]
+    fn frozen_import_attrset_multiple_fields() {
+        let ty = get_multifile_root(&[
+            (
+                "/main.nix",
+                r#"
+                let lib = import /lib.nix;
+                in { a = lib.x; b = lib.y; }
+                "#,
+            ),
+            ("/lib.nix", r#"{ x = 1; y = "hello"; z = true; }"#),
+        ]);
+        match &ty {
+            OutputTy::AttrSet(attr) => {
+                assert_eq!(*attr.fields["a"].0, arc_ty!(Int));
+                assert_eq!(*attr.fields["b"].0, arc_ty!(String));
+            }
+            _ => panic!("expected attrset, got: {ty}"),
+        }
+    }
+
+    // Import a non-attrset type (lambda) — frozen falls back to full interning.
+    #[test]
+    fn frozen_import_lambda_fallback() {
+        let ty = get_multifile_root(&[
+            ("/main.nix", "let f = import /f.nix; in f 42"),
+            ("/f.nix", "x: x"),
+        ]);
+        assert_eq!(ty, arc_ty!(Int));
+    }
+
+    // Import an attrset and access a missing field — should report error.
+    #[test]
+    fn frozen_import_missing_field_error() {
+        let (_, errors, diagnostics) = check_multifile_with_aliases(
+            &[
+                ("/main.nix", "let lib = import /lib.nix; in lib.missing"),
+                ("/lib.nix", "{ x = 1; }"),
+            ],
+            &TypeAliasRegistry::default(),
+        );
+        assert!(errors.is_empty());
+        let has_missing_field = diagnostics.iter().any(|d| {
+            matches!(
+                d.kind,
+                crate::diagnostic::TixDiagnosticKind::MissingField { .. }
+            )
+        });
+        assert!(
+            has_missing_field,
+            "should report missing field on frozen attrset, got diagnostics: {diagnostics:?}"
+        );
+    }
+
+    // Import a primitive type — frozen falls back to full interning.
+    #[test]
+    fn frozen_import_primitive() {
+        let ty = get_multifile_root(&[("/main.nix", "import /n.nix"), ("/n.nix", "42")]);
+        assert_eq!(ty, arc_ty!(Int));
+    }
+
+    // ======================================================================
     // callPackage type-aware import resolution
     // ======================================================================
 

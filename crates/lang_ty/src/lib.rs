@@ -66,6 +66,13 @@ where
     /// `OutputTy::Named`.
     #[debug("Named({_0:?}, {_1:?})")]
     Named(smol_str::SmolStr, R),
+
+    /// A frozen (rigid) type from a cross-file import. Wraps a fully-resolved
+    /// OutputTy without eagerly converting it to inference TyIds. Fields are
+    /// materialized on demand when constrain encounters the Frozen type.
+    /// Contains no TyIds — always ground and variable-free.
+    #[debug("Frozen({_0:?})")]
+    Frozen(std::sync::Arc<crate::arc_ty::OutputTy>),
 }
 
 /// Macro for constructing `OutputTy` values conveniently in tests.

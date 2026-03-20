@@ -393,6 +393,7 @@ fn canonicalize_ty_structural(ty: &lang_ty::Ty<TyId>, table: &TypeStorage) -> Ou
             let c = canonicalize_standalone(table, *inner, Polarity::Positive);
             OutputTy::Named(name.clone(), lang_ty::TyRef::from(c))
         }
+        lang_ty::Ty::Frozen(output_ty) => output_ty.as_ref().clone(),
     }
 }
 

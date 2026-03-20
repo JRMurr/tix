@@ -350,6 +350,9 @@ impl<'a> Canonicalizer<'a> {
                 OutputTy::Named(name.clone(), TyRef::from(c))
             }
 
+            // Frozen: already an OutputTy — just unwrap.
+            Ty::Frozen(output_ty) => output_ty.as_ref().clone(),
+
             // Intersection: canonicalize both members and flatten/normalize
             // using the same logic as variable bound expansion.
             Ty::Inter(a, b) => {

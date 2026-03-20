@@ -839,6 +839,14 @@ impl<'db> CheckCtx<'db> {
     // OutputTy interning (import results → internal types)
     // ==========================================================================
 
+    /// Intern an OutputTy as a single frozen TyId. Instead of eagerly
+    /// converting the entire OutputTy tree into TyIds (O(N) allocations),
+    /// wraps it in `Ty::Frozen(Arc<OutputTy>)` — one allocation. Fields are
+    /// materialized on demand when `constrain` encounters the Frozen type.
+    fn intern_frozen_output_ty(&mut self, ty: &OutputTy) -> TyId {
+        self.alloc_concrete(Ty::Frozen(Arc::new(ty.clone())))
+    }
+
     /// Intern an OutputTy into this file's TypeStorage, creating fresh TyIds.
     ///
     /// Each TyVar(n) in the OutputTy maps to a fresh variable (via a local

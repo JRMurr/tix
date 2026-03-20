@@ -29,10 +29,13 @@
 // directional constraints preserve the subtyping relationship and naturally
 // produce union/intersection types during canonicalization.
 
+use std::sync::Arc;
+
 use super::{CheckCtx, InferenceError, LocatedError, TyId};
 
 use crate::storage::TypeEntry;
 use lang_ty::{
+    arc_ty::OutputTy,
     disjoint::{are_shapes_disjoint, ConstructorShape},
     AttrSetTy, Ty,
 };
@@ -175,6 +178,37 @@ impl CheckCtx<'_> {
             // Named is transparent — unwrap and constrain the inner type.
             (Ty::Named(_, inner), _) => self.constrain(*inner, sup_id),
             (_, Ty::Named(_, inner)) => self.constrain(sub_id, *inner),
+
+            // ── Frozen import types: lazy materialization ──────────────────
+            //
+            // Frozen wraps an entire OutputTy tree in a single TyId. Instead
+            // of eagerly interning all fields (O(N) TyId allocations), we
+            // materialize only the parts actually demanded by constraints.
+
+            // Frozen on LHS vs AttrSet on RHS: the hot path for large imports.
+            // Only intern the fields the supertype demands.
+            (Ty::Frozen(output_ty), Ty::AttrSet(sup_attr)) => {
+                let output_ty = Arc::clone(output_ty);
+                let sup_attr = sup_attr.clone();
+                self.constrain_frozen_attrset(&output_ty, &sup_attr)
+            }
+
+            // Frozen on LHS, any other RHS: full interning fallback.
+            // Non-attrset frozen types (lambdas, primitives, etc.) are small
+            // so eager interning is cheap.
+            (Ty::Frozen(output_ty), _) => {
+                let output_ty = Arc::clone(output_ty);
+                let interned = self.intern_output_ty(&output_ty);
+                self.constrain(interned, sup_id)
+            }
+
+            // Frozen on RHS: full interning fallback (rare — imports are
+            // typically on the LHS as the thing being accessed).
+            (_, Ty::Frozen(output_ty)) => {
+                let output_ty = Arc::clone(output_ty);
+                let interned = self.intern_output_ty(&output_ty);
+                self.constrain(sub_id, interned)
+            }
 
             // Lambda: contravariant in param, covariant in body.
             (
@@ -559,20 +593,83 @@ impl CheckCtx<'_> {
 
         Ok(())
     }
+
+    /// Lazy field-level materialization for `Frozen(OutputTy) <: AttrSet`.
+    ///
+    /// Instead of interning the entire frozen OutputTy (which may have hundreds
+    /// of fields), only intern the specific fields demanded by the supertype's
+    /// attrset. This is the hot path for large imports like `lib/default.nix`
+    /// where the importer accesses a small subset of fields.
+    fn constrain_frozen_attrset(
+        &mut self,
+        output_ty: &OutputTy,
+        sup_attr: &AttrSetTy<TyId>,
+    ) -> Result<(), InferenceError> {
+        // Unwrap Named wrappers to find the structural type inside.
+        let inner = match output_ty {
+            OutputTy::Named(_, inner) => &inner.0,
+            other => other,
+        };
+
+        match inner {
+            OutputTy::AttrSet(frozen_attr) => {
+                // For each field demanded by the supertype, look it up in the
+                // frozen attrset and intern just that field's type.
+                for (key, sup_field) in &sup_attr.fields {
+                    match frozen_attr.fields.get(key) {
+                        Some(frozen_field_ref) => {
+                            let field_ty = self.intern_frozen_output_ty(&frozen_field_ref.0);
+                            self.constrain(field_ty, *sup_field)?;
+                        }
+                        None => {
+                            // Check dyn_ty in the frozen attrset.
+                            if let Some(ref frozen_dyn) = frozen_attr.dyn_ty {
+                                let dyn_ty = self.intern_frozen_output_ty(&frozen_dyn.0);
+                                self.constrain(dyn_ty, *sup_field)?;
+                            } else if !frozen_attr.open && !sup_attr.optional_fields.contains(key) {
+                                return Err(InferenceError::MissingField {
+                                    field: key.clone(),
+                                    available: frozen_attr.fields.keys().cloned().collect(),
+                                });
+                            }
+                        }
+                    }
+                }
+
+                // Propagate dyn_ty constraints.
+                if let (Some(ref frozen_dyn), Some(sup_dyn)) =
+                    (&frozen_attr.dyn_ty, sup_attr.dyn_ty)
+                {
+                    let dyn_ty = self.intern_frozen_output_ty(&frozen_dyn.0);
+                    self.constrain(dyn_ty, sup_dyn)?;
+                }
+
+                Ok(())
+            }
+            // Non-attrset OutputTy (lambda, primitive, union, etc.) meeting an
+            // AttrSet supertype: fall back to full interning and let the normal
+            // constrain logic handle the type mismatch or __functor resolution.
+            _ => {
+                let interned = self.intern_output_ty(output_ty);
+                let sup_id = self.alloc_concrete(Ty::AttrSet(sup_attr.clone()));
+                self.constrain(interned, sup_id)
+            }
+        }
+    }
 }
 
 /// Check if sub could be a subtype of target based on constructor shape.
 /// Read-only — no side effects. Used by `constrain_rhs_union` to decide
 /// which union member to route a concrete sub-type to.
 fn is_concrete_compatible(sub: &Ty<TyId>, target: &TypeEntry) -> bool {
-    // Named is transparent — unwrap before checking compatibility.
+    // Named and Frozen are transparent/opaque — conservatively compatible.
     let sub = match sub {
-        Ty::Named(_, _) => return true, // conservative: might be compatible
+        Ty::Named(_, _) | Ty::Frozen(_) => return true,
         other => other,
     };
     match target {
         TypeEntry::Variable(_) => true,
-        TypeEntry::Concrete(Ty::Named(_, _)) => true, // conservative
+        TypeEntry::Concrete(Ty::Named(_, _) | Ty::Frozen(_)) => true, // conservative
         TypeEntry::Concrete(target_ty) => {
             discriminant_matches(sub, target_ty)
                 || matches!(

@@ -627,8 +627,8 @@ impl CheckCtx<'_> {
             TypeEntry::Variable(v) if v.level < self.types.storage.current_level => {
                 return ty_id;
             }
-            TypeEntry::Concrete(Ty::Primitive(_) | Ty::TyVar(_)) => {
-                // Leaf concrete types are trivially variable-free.
+            TypeEntry::Concrete(Ty::Primitive(_) | Ty::TyVar(_) | Ty::Frozen(_)) => {
+                // Leaf concrete types (and frozen imports) are trivially variable-free.
                 self.types.variable_free.insert(ty_id);
                 return ty_id;
             }
@@ -824,6 +824,11 @@ impl CheckCtx<'_> {
                         }
                         Ty::Named(name, inner) => {
                             extrude_single!(inner, polarity, |e| Ty::Named(name, e))
+                        }
+                        // Frozen types are ground (no variables) — handled by the
+                        // fast path above. Unreachable, but return as-is defensively.
+                        Ty::Frozen(_) => {
+                            unreachable!("Frozen should be caught by variable_free fast path")
                         }
                     };
 
@@ -1354,7 +1359,7 @@ impl CheckCtx<'_> {
                 Ty::Named(_, inner) => {
                     self.lift_reachable_vars_inner(inner, visited);
                 }
-                Ty::Primitive(_) | Ty::TyVar(_) => {}
+                Ty::Primitive(_) | Ty::TyVar(_) | Ty::Frozen(_) => {}
             }
         }
     }
