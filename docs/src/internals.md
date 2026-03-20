@@ -106,7 +106,7 @@ When a file contains `import ./other.nix`, tix resolves it demand-driven:
 
 1. **Import scanning** — `scan_literal_imports()` finds literal `import <path>` patterns. Dynamic imports (where the path is computed) remain unconstrained.
 2. **Demand-driven analysis** — an `InferenceCoordinator` manages concurrent file inference. When file A imports file B, B is inferred first (with cycle detection). The coordinator handles parallelism via rayon for batch project checking (`tix check`).
-3. **Type integration** — the imported file's root `OutputTy` is used as the type of the `import` expression. For `callPackage ./file.nix {}` patterns, tix recognizes the convention and peels the outer lambda layer.
+3. **Type integration** — the imported file's root `OutputTy` is wrapped in a `Ty::Frozen(Arc<OutputTy>)` — a single TyId that lazily materializes fields on demand. When the importer accesses `lib.strings`, only that field's type is interned; the other 493 fields remain frozen. This prevents O(N) TyId allocations for large imports. For `callPackage ./file.nix {}` patterns, tix recognizes the convention and peels the outer lambda layer.
 
 Files outside the project scope (e.g. transitive nixpkgs imports) get `⊤` — inference stays local to the project boundary.
 
