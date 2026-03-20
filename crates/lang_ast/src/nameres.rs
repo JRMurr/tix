@@ -292,7 +292,7 @@ pub struct NameResolution {
     refs_by_name: HashMap<NameId, Vec<ExprId>>,
 }
 
-#[instrument(level = "info", skip_all, name = "name_resolution")]
+#[instrument(level = "info", skip_all, name = "name_resolution", fields(file = %file.path(db).file_name().unwrap_or_default().to_string_lossy()))]
 #[salsa::tracked]
 pub fn name_resolution(db: &dyn crate::AstDb, file: NixFile) -> NameResolution {
     let module = module(db, file);
@@ -580,7 +580,7 @@ pub type DependentGroup = Vec<TypeDef>;
 pub type GroupedDefs = Vec<DependentGroup>;
 type DepGraph = DiGraph<NameId, ()>;
 
-#[instrument(level = "info", skip_all, name = "group_def")]
+#[instrument(level = "info", skip_all, name = "group_def", fields(file = %file.path(db).file_name().unwrap_or_default().to_string_lossy()))]
 #[salsa::tracked]
 pub fn group_def(db: &dyn crate::AstDb, file: NixFile) -> GroupedDefs {
     let module = module(db, file);

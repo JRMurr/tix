@@ -56,7 +56,7 @@ fn load_inline_aliases(
     }
 }
 
-#[instrument(level = "info", skip_all, name = "check_file")]
+#[instrument(level = "info", skip_all, name = "check_file", fields(file = %file.path(db).file_name().unwrap_or_default().to_string_lossy()))]
 #[salsa::tracked]
 pub fn check_file(db: &dyn AstDb, file: NixFile) -> Result<InferenceResult, Box<TixDiagnostic>> {
     check_file_with_aliases(db, file, &TypeAliasRegistry::default())
@@ -337,11 +337,14 @@ pub struct InferenceInputs {
     /// with partial results to avoid OOM from RLIMIT_AS. `None` means no
     /// RSS-based limit (CLI default).
     pub rss_limit_mb: Option<f64>,
+    /// File path for tracing span context. `None` is fine — the span field
+    /// will just be omitted.
+    pub file_path: Option<std::path::PathBuf>,
 }
 
 /// Run type inference using precomputed syntax data. Does not need the Salsa
 /// database. Consolidates the timeout-diagnostic logic shared by CLI and LSP.
-#[instrument(level = "info", skip_all, name = "run_inference")]
+#[instrument(level = "info", skip_all, name = "run_inference", fields(file = inputs.file_path.as_ref().and_then(|p| p.file_name()).map(|f| f.to_string_lossy().into_owned()).unwrap_or_default().as_str()))]
 pub fn run_inference(
     inputs: &InferenceInputs,
     cancel_flag: Option<Arc<AtomicBool>>,

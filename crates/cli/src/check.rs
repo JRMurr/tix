@@ -342,8 +342,6 @@ pub fn run_check_project(
     let infer_one = |path: &PathBuf| -> Option<RenderableResult> {
         let (_, fm) = metadata_map.remove(path)?;
 
-        tracing::info!("inference start: {}", fm.file_path.display());
-
         // Consume the pre-extracted SyntaxBundle from the DashMap.
         let bundle = match syntax_provider.syntax_for_file(&fm.file_path) {
             Some(b) => b,
@@ -379,6 +377,7 @@ pub fn run_check_project(
             context_args: bundle.context_args,
             deadline_secs: bundle.deadline_secs,
             rss_limit_mb: None,
+            file_path: Some(fm.file_path.clone()),
         };
 
         let check_result = lang_check::run_inference(&inputs, None);
@@ -393,8 +392,6 @@ pub fn run_check_project(
         }) {
             coordinator.set_signature(&fm.file_path, lang_check::FileSignature { root_ty: owned });
         }
-
-        tracing::info!("inference done:  {}", fm.file_path.display());
 
         // Extract only diagnostics + timed_out. The heavy InferenceResult
         // is dropped here, keeping memory bounded.

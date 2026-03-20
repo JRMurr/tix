@@ -300,6 +300,7 @@ impl InferenceCoordinator {
             context_args: bundle.context_args,
             deadline_secs: bundle.deadline_secs,
             rss_limit_mb: None,
+            file_path: Some(path.to_path_buf()),
         };
 
         let check_result = run_inference(&inputs, cancel_flag);
