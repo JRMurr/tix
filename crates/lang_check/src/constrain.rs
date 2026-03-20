@@ -42,6 +42,11 @@ use lang_ty::{
 use smallvec::SmallVec;
 use smol_str::SmolStr;
 
+/// Frozen lambda bodies with more than this many attrset fields get lazy
+/// decomposition (separate Frozen wrappers for param/body). Below this
+/// threshold, full interning preserves TyVar sharing for polymorphic types.
+const FROZEN_LAMBDA_FIELD_THRESHOLD: usize = 64;
+
 impl CheckCtx<'_> {
     /// Constrain sub <: sup, locating any error at the current expression.
     pub(crate) fn constrain_at(&mut self, sub: TyId, sup: TyId) -> Result<(), LocatedError> {
@@ -193,13 +198,45 @@ impl CheckCtx<'_> {
                 self.constrain_frozen_attrset(&output_ty, &sup_attr)
             }
 
+            // Frozen on LHS vs Lambda on RHS: decompose structurally without
+            // interning the entire tree. This is critical for large imports
+            // like hackage-packages.nix — without this, applying the imported
+            // function would eagerly materialize all 16K+ fields into TyIds.
+            (
+                Ty::Frozen(output_ty),
+                Ty::Lambda {
+                    param: sup_param,
+                    body: sup_body,
+                },
+            ) => {
+                let output_ty = Arc::clone(output_ty);
+                let sup_param = *sup_param;
+                let sup_body = *sup_body;
+                self.constrain_frozen_lambda(&output_ty, sup_param, sup_body)
+            }
+
             // Frozen on LHS, any other RHS: full interning fallback.
-            // Non-attrset frozen types (lambdas, primitives, etc.) are small
-            // so eager interning is cheap.
+            // Non-lambda/attrset frozen types (primitives, lists, etc.) are
+            // small so eager interning is cheap.
             (Ty::Frozen(output_ty), _) => {
                 let output_ty = Arc::clone(output_ty);
                 let interned = self.intern_output_ty(&output_ty);
                 self.constrain(interned, sup_id)
+            }
+
+            // Lambda on LHS vs Frozen on RHS: same decomposition in the
+            // other direction.
+            (
+                Ty::Lambda {
+                    param: sub_param,
+                    body: sub_body,
+                },
+                Ty::Frozen(output_ty),
+            ) => {
+                let output_ty = Arc::clone(output_ty);
+                let sub_param = *sub_param;
+                let sub_body = *sub_body;
+                self.constrain_lambda_frozen(sub_param, sub_body, &output_ty)
             }
 
             // Frozen on RHS: full interning fallback (rare — imports are
@@ -656,6 +693,99 @@ impl CheckCtx<'_> {
             }
         }
     }
+
+    /// Lazy structural decomposition for `Frozen(OutputTy) <: Lambda`.
+    ///
+    /// For large imported types (e.g. hackage-packages.nix returning a 16K-field
+    /// attrset), interning the entire tree is prohibitively expensive. This method
+    /// decomposes the lambda structurally, keeping param and body as separate
+    /// Frozen wrappers so the massive body stays opaque until fields are demanded.
+    ///
+    /// For small types, falls back to full interning to preserve TyVar sharing
+    /// across param and body (needed for polymorphic functions like `x: x`).
+    fn constrain_frozen_lambda(
+        &mut self,
+        output_ty: &OutputTy,
+        sup_param: TyId,
+        sup_body: TyId,
+    ) -> Result<(), InferenceError> {
+        // Unwrap Named wrappers to find the structural type inside.
+        let inner = match output_ty {
+            OutputTy::Named(_, inner) => &inner.0,
+            other => other,
+        };
+
+        match inner {
+            OutputTy::Lambda { param, body } => {
+                // Only decompose lazily when the body is large enough to justify
+                // the slight precision loss from broken TyVar sharing. Small types
+                // (like `x: x`) get full interning for correct polymorphism.
+                if output_ty_field_count(&body.0) > FROZEN_LAMBDA_FIELD_THRESHOLD {
+                    let frozen_param = self.intern_frozen_output_ty(&param.0);
+                    self.constrain(sup_param, frozen_param)?;
+                    let frozen_body = self.intern_frozen_output_ty(&body.0);
+                    self.constrain(frozen_body, sup_body)?;
+                    Ok(())
+                } else {
+                    // Small lambda: full interning preserves variable sharing.
+                    let interned = self.intern_output_ty(output_ty);
+                    let sup_id = self.alloc_concrete(Ty::Lambda {
+                        param: sup_param,
+                        body: sup_body,
+                    });
+                    self.constrain(interned, sup_id)
+                }
+            }
+            _ => {
+                let interned = self.intern_output_ty(output_ty);
+                let sup_id = self.alloc_concrete(Ty::Lambda {
+                    param: sup_param,
+                    body: sup_body,
+                });
+                self.constrain(interned, sup_id)
+            }
+        }
+    }
+
+    /// Mirror of `constrain_frozen_lambda` for `Lambda <: Frozen(OutputTy)`.
+    fn constrain_lambda_frozen(
+        &mut self,
+        sub_param: TyId,
+        sub_body: TyId,
+        output_ty: &OutputTy,
+    ) -> Result<(), InferenceError> {
+        let inner = match output_ty {
+            OutputTy::Named(_, inner) => &inner.0,
+            other => other,
+        };
+
+        match inner {
+            OutputTy::Lambda { param, body } => {
+                if output_ty_field_count(&body.0) > FROZEN_LAMBDA_FIELD_THRESHOLD {
+                    let frozen_param = self.intern_frozen_output_ty(&param.0);
+                    self.constrain(frozen_param, sub_param)?;
+                    let frozen_body = self.intern_frozen_output_ty(&body.0);
+                    self.constrain(sub_body, frozen_body)?;
+                    Ok(())
+                } else {
+                    let interned = self.intern_output_ty(output_ty);
+                    let sub_id = self.alloc_concrete(Ty::Lambda {
+                        param: sub_param,
+                        body: sub_body,
+                    });
+                    self.constrain(sub_id, interned)
+                }
+            }
+            _ => {
+                let interned = self.intern_output_ty(output_ty);
+                let sub_id = self.alloc_concrete(Ty::Lambda {
+                    param: sub_param,
+                    body: sub_body,
+                });
+                self.constrain(sub_id, interned)
+            }
+        }
+    }
 }
 
 /// Check if sub could be a subtype of target based on constructor shape.
@@ -744,4 +874,40 @@ fn are_types_disjoint(a: &Ty<TyId>, b: &Ty<TyId>) -> bool {
     };
 
     are_shapes_disjoint(&a_shape, &b_shape)
+}
+
+/// Count the total number of attrset fields reachable from an OutputTy.
+/// Used to decide whether a Frozen lambda body is "large" enough to warrant
+/// lazy decomposition. Stops counting at the threshold to avoid traversing
+/// the entire tree for very large types.
+fn output_ty_field_count(ty: &OutputTy) -> usize {
+    output_ty_field_count_inner(ty, FROZEN_LAMBDA_FIELD_THRESHOLD + 1)
+}
+
+fn output_ty_field_count_inner(ty: &OutputTy, budget: usize) -> usize {
+    if budget == 0 {
+        return 0;
+    }
+    match ty {
+        OutputTy::AttrSet(attr) => attr.fields.len(),
+        OutputTy::Lambda { param, body } => {
+            let p = output_ty_field_count_inner(&param.0, budget);
+            let b = output_ty_field_count_inner(&body.0, budget.saturating_sub(p));
+            p + b
+        }
+        OutputTy::Named(_, inner) => output_ty_field_count_inner(&inner.0, budget),
+        OutputTy::List(inner) => output_ty_field_count_inner(&inner.0, budget),
+        OutputTy::Union(members) | OutputTy::Intersection(members) => {
+            let mut total = 0;
+            for m in members {
+                total += output_ty_field_count_inner(&m.0, budget.saturating_sub(total));
+                if total > budget {
+                    return total;
+                }
+            }
+            total
+        }
+        OutputTy::Neg(inner) => output_ty_field_count_inner(&inner.0, budget),
+        _ => 0,
+    }
 }

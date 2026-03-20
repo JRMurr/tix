@@ -255,6 +255,7 @@ pub fn run_check_project(
     let metadata_map: DashMap<PathBuf, FileMetadata> = DashMap::with_capacity(pre_prepared.len());
     let mut import_edges: HashMap<PathBuf, Vec<PathBuf>> =
         HashMap::with_capacity(pre_prepared.len());
+    let mut expr_counts: HashMap<PathBuf, usize> = HashMap::with_capacity(pre_prepared.len());
 
     // Track original discovery order for deterministic Phase 3 output.
     let mut file_order: Vec<PathBuf> = Vec::with_capacity(pre_prepared.len());
@@ -268,6 +269,7 @@ pub fn run_check_project(
             std::fs::canonicalize(&pp.file_path).unwrap_or_else(|_| pp.file_path.clone());
 
         file_order.push(canonical_path.clone());
+        expr_counts.insert(canonical_path.clone(), pp.module.exprs().len());
         import_edges.insert(canonical_path.clone(), pp.import_targets);
         metadata_map.insert(
             canonical_path.clone(),
@@ -325,81 +327,118 @@ pub fn run_check_project(
     // signatures aren't cached yet when peers run in parallel). All acyclic
     // imports get real types.
 
+    // Files with more than this many expressions run sequentially within their
+    // layer to avoid concurrent memory spikes that cause OOM on large projects.
+    // 20K catches all known problematic files (hackage-packages.nix at 657K,
+    // perl-packages.nix at 154K, r-modules/default.nix at 47K) while staying
+    // well above typical file sizes (~100-1K exprs).
+    const HEAVY_FILE_EXPR_THRESHOLD: usize = 20_000;
+
     let coordinator = InferenceCoordinator::new();
     let mut all_results: Vec<RenderableResult> = Vec::with_capacity(files_count);
 
-    for layer in &layers {
-        let layer_results: Vec<RenderableResult> = layer
-            .par_iter()
-            .filter_map(|path| {
-                let (_, fm) = metadata_map.remove(path)?;
+    // Shared inference logic for a single file. Used by both the sequential
+    // (heavy) and parallel (light) paths.
+    let infer_one = |path: &PathBuf| -> Option<RenderableResult> {
+        let (_, fm) = metadata_map.remove(path)?;
 
-                tracing::info!("inference start: {}", fm.file_path.display());
+        tracing::info!("inference start: {}", fm.file_path.display());
 
-                // Consume the pre-extracted SyntaxBundle from the DashMap.
-                let bundle = match syntax_provider.syntax_for_file(&fm.file_path) {
-                    Some(b) => b,
-                    None => {
-                        return Some(RenderableResult {
-                            file_path: fm.file_path,
-                            source_text: fm.source_text,
-                            source_map: fm.source_map,
-                            diagnostics: vec![],
-                            timed_out: false,
-                        });
-                    }
-                };
-
-                let base_dir = fm.file_path.parent().unwrap_or(std::path::Path::new("/"));
-
-                // Resolve imports from the coordinator cache. Prior layers'
-                // signatures are available; intra-SCC imports get ⊤.
-                let import_resolution =
-                    coordinator.resolve_imports(&bundle.module, &bundle.name_res, base_dir);
-                let import_diagnostics =
-                    lang_check::imports::import_errors_to_diagnostics(&import_resolution.errors);
-
-                // Build InferenceInputs and run inference.
-                let inputs = lang_check::InferenceInputs {
-                    module: bundle.module,
-                    module_indices: bundle.module_indices,
-                    name_res: bundle.name_res,
-                    grouped_defs: bundle.grouped_defs,
-                    registry: bundle.registry,
-                    import_types: import_resolution.types,
-                    import_diagnostics,
-                    context_args: bundle.context_args,
-                    deadline_secs: bundle.deadline_secs,
-                    rss_limit_mb: None,
-                };
-
-                let check_result = lang_check::run_inference(&inputs, None);
-
-                // Cache this file's signature for subsequent layers.
-                if let Some(root_ty) = check_result
-                    .inference
-                    .as_ref()
-                    .and_then(|inf| inf.expr_ty_map.get(inputs.module.entry_expr))
-                    .cloned()
-                {
-                    coordinator.set_signature(&fm.file_path, lang_check::FileSignature { root_ty });
-                }
-
-                tracing::info!("inference done:  {}", fm.file_path.display());
-
-                // Extract only diagnostics + timed_out. The heavy InferenceResult
-                // is dropped here, keeping memory bounded.
-                Some(RenderableResult {
+        // Consume the pre-extracted SyntaxBundle from the DashMap.
+        let bundle = match syntax_provider.syntax_for_file(&fm.file_path) {
+            Some(b) => b,
+            None => {
+                return Some(RenderableResult {
                     file_path: fm.file_path,
                     source_text: fm.source_text,
                     source_map: fm.source_map,
-                    diagnostics: check_result.diagnostics,
-                    timed_out: check_result.timed_out,
-                })
-            })
-            .collect();
+                    diagnostics: vec![],
+                    timed_out: false,
+                });
+            }
+        };
 
-        all_results.extend(layer_results);
+        let base_dir = fm.file_path.parent().unwrap_or(std::path::Path::new("/"));
+
+        // Resolve imports from the coordinator cache. Prior layers'
+        // signatures are available; intra-SCC imports get ⊤.
+        let import_resolution =
+            coordinator.resolve_imports(&bundle.module, &bundle.name_res, base_dir);
+        let import_diagnostics =
+            lang_check::imports::import_errors_to_diagnostics(&import_resolution.errors);
+
+        // Build InferenceInputs and run inference.
+        let inputs = lang_check::InferenceInputs {
+            module: bundle.module,
+            module_indices: bundle.module_indices,
+            name_res: bundle.name_res,
+            grouped_defs: bundle.grouped_defs,
+            registry: bundle.registry,
+            import_types: import_resolution.types,
+            import_diagnostics,
+            context_args: bundle.context_args,
+            deadline_secs: bundle.deadline_secs,
+            rss_limit_mb: None,
+        };
+
+        let check_result = lang_check::run_inference(&inputs, None);
+
+        // Cache this file's signature for subsequent layers.
+        if let Some(root_ty) = check_result
+            .inference
+            .as_ref()
+            .and_then(|inf| inf.expr_ty_map.get(inputs.module.entry_expr))
+            .cloned()
+        {
+            coordinator.set_signature(&fm.file_path, lang_check::FileSignature { root_ty });
+        }
+
+        tracing::info!("inference done:  {}", fm.file_path.display());
+
+        // Extract only diagnostics + timed_out. The heavy InferenceResult
+        // is dropped here, keeping memory bounded.
+        Some(RenderableResult {
+            file_path: fm.file_path,
+            source_text: fm.source_text,
+            source_map: fm.source_map,
+            diagnostics: check_result.diagnostics,
+            timed_out: check_result.timed_out,
+        })
+    };
+
+    for layer in &layers {
+        // Partition into heavy files (run sequentially to bound memory) and
+        // light files (run in parallel as before).
+        let (heavy, light): (Vec<_>, Vec<_>) = layer
+            .iter()
+            .partition(|p| expr_counts.get(*p).copied().unwrap_or(0) > HEAVY_FILE_EXPR_THRESHOLD);
+
+        if !heavy.is_empty() {
+            tracing::info!(
+                "layer has {} heavy file(s) (>{} exprs), running sequentially: {}",
+                heavy.len(),
+                HEAVY_FILE_EXPR_THRESHOLD,
+                heavy
+                    .iter()
+                    .map(|p| format!(
+                        "{} ({})",
+                        p.file_name().unwrap_or_default().to_string_lossy(),
+                        expr_counts.get(*p).unwrap_or(&0)
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+
+        // Heavy files first (sequential) — frees their memory before light files start.
+        let heavy_results: Vec<RenderableResult> =
+            heavy.iter().filter_map(|p| infer_one(p)).collect();
+        // Light files (parallel).
+        let light_results: Vec<RenderableResult> =
+            light.par_iter().filter_map(|p| infer_one(p)).collect();
+
+        all_results.extend(heavy_results);
+        all_results.extend(light_results);
 
         // Reference-counted eviction: decrement importer counts for each
         // dependency of files in this layer. Evict signatures whose count

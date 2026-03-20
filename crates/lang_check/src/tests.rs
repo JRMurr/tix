@@ -2404,6 +2404,45 @@ mod import_tests {
         );
     }
 
+    // Import a function returning a large attrset (>64 fields). The Frozen
+    // lambda decomposition should lazily materialize param/body instead of
+    // interning all fields eagerly. Verifies the result type is correct
+    // when the importer applies the function.
+    #[test]
+    fn frozen_import_large_lambda_lazy_decomposition() {
+        // Build a large attrset with >64 fields to trigger lazy decomposition.
+        let mut fields: Vec<String> = Vec::new();
+        for i in 0..80 {
+            fields.push(format!("f{i} = {i}"));
+        }
+        let attrset = format!("{{ {} }}", fields.join("; "));
+        let lib_src = format!("x: {attrset}");
+
+        let ty = get_multifile_root(&[
+            ("/main.nix", "let lib = import /lib.nix; in (lib 1).f0"),
+            ("/lib.nix", &lib_src),
+        ]);
+        assert_eq!(ty, arc_ty!(Int));
+    }
+
+    // Import a function returning a large attrset and verify that field
+    // access works correctly through the lazy Frozen decomposition path.
+    #[test]
+    fn frozen_import_large_lambda_field_access() {
+        let mut fields: Vec<String> = Vec::new();
+        for i in 0..80 {
+            fields.push(format!("f{i} = \"val{i}\""));
+        }
+        let attrset = format!("{{ {} }}", fields.join("; "));
+        let lib_src = format!("x: {attrset}");
+
+        let ty = get_multifile_root(&[
+            ("/main.nix", "let lib = import /lib.nix; in (lib 1).f42"),
+            ("/lib.nix", &lib_src),
+        ]);
+        assert_eq!(ty, arc_ty!(String));
+    }
+
     // Import a primitive type — frozen falls back to full interning.
     #[test]
     fn frozen_import_primitive() {
