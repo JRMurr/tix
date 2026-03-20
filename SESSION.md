@@ -5,6 +5,14 @@ by design, or informational notes.
 
 ### Canonicalization / Type Display
 
+- **Expr canonicalization memory (partially fixed)**: Changed canonicalization
+  cache from `OutputTy` to `TyRef` (Arc) so DAG structure from the bounds graph
+  is preserved via Arc sharing. Per-file memory for `initial-packages.nix`
+  dropped from ~15 GB to ~1.2 GB (12× improvement). However, full `nixpkgs-test`
+  with 4 threads still OOMs at 16 GB — likely allocator fragmentation / cumulative
+  working set across many large files. May need per-file RSS checks or reducing
+  the number of heavy files processed concurrently.
+
 - ~~**Let-binding loses union type**~~: Fixed via `resolve_to_single_concrete_id`
   which compares type heads instead of TyIds, preserving unions through
   poly_type_env. PBT workarounds for union let-binding also removed.

@@ -41,7 +41,13 @@ const CANON_DEADLINE_CHECK_INTERVAL: u32 = 512;
 
 struct Canonicalizer<'a> {
     table: &'a TypeStorage,
-    cache: FxHashMap<(TyId, Polarity), OutputTy>,
+    /// Cache stores `TyRef` (Arc<OutputTy>) so that multiple parents
+    /// referencing the same (TyId, Polarity) share a single Arc instead
+    /// of each getting a cloned OutputTy tree. This preserves DAG
+    /// structure from the bounds graph in the output, preventing the
+    /// exponential tree blowup that caused OOM on files like
+    /// initial-packages.nix (560K cache entries, 11+ GB RSS).
+    cache: FxHashMap<(TyId, Polarity), TyRef>,
     in_progress: FxHashSet<(TyId, Polarity)>,
     /// Optional deadline for canonicalization. When exceeded, remaining
     /// types degrade to TyVar (same as inference deadline_exceeded).
@@ -70,10 +76,17 @@ impl<'a> Canonicalizer<'a> {
         self
     }
 
-    fn canonicalize(&mut self, ty_id: TyId, polarity: Polarity) -> OutputTy {
+    /// Canonicalize and return an Arc-wrapped result. When the same
+    /// (TyId, Polarity) is used as a child from multiple parents, they
+    /// share the same Arc — preserving DAG structure in the output.
+    ///
+    /// Use this when building TyRef children (Lambda params, List elems,
+    /// AttrSet fields, Named inners). Use `canonicalize` when you need
+    /// an owned OutputTy for normalization (flatten, filter, etc.).
+    fn canonicalize_child(&mut self, ty_id: TyId, polarity: Polarity) -> TyRef {
         // Fast path: if deadline already exceeded, return degraded type.
         if self.deadline_exceeded {
-            return OutputTy::TyVar(ty_id.0);
+            return TyRef::from(OutputTy::TyVar(ty_id.0));
         }
 
         // Periodic deadline check.
@@ -86,31 +99,45 @@ impl<'a> Canonicalizer<'a> {
             {
                 log::warn!("canonicalization deadline exceeded, degrading remaining types");
                 self.deadline_exceeded = true;
-                return OutputTy::TyVar(ty_id.0);
+                return TyRef::from(OutputTy::TyVar(ty_id.0));
             }
         }
 
         let key = (ty_id, polarity);
 
         if let Some(cached) = self.cache.get(&key) {
-            return cached.clone();
+            return cached.clone(); // Arc refcount bump — O(1), shared
         }
 
         if self.in_progress.contains(&key) {
-            return OutputTy::TyVar(ty_id.0);
+            return TyRef::from(OutputTy::TyVar(ty_id.0));
         }
 
         // Guard against stack overflow on deeply nested type graphs.
-        // canonicalize is the single recursive entry point — expand_bounds,
-        // canonicalize_inner, and canonicalize_concrete all recurse through here.
+        // canonicalize_child is the single recursive entry point —
+        // expand_bounds, canonicalize_inner, and canonicalize_concrete
+        // all recurse through here.
         stacker::maybe_grow(256 * 1024, 1024 * 1024, || {
             self.in_progress.insert(key);
             let result = self.canonicalize_inner(ty_id, polarity);
             self.in_progress.remove(&key);
 
-            self.cache.insert(key, result.clone());
-            result
+            let tyref = TyRef::from(result);
+            self.cache.insert(key, tyref.clone());
+            tyref
         })
+    }
+
+    /// Canonicalize and return an owned OutputTy. Unwraps the Arc from
+    /// `canonicalize_child`. Use this when you need to inspect/transform
+    /// the result (normalization helpers, expand_bounds pipeline).
+    fn canonicalize(&mut self, ty_id: TyId, polarity: Polarity) -> OutputTy {
+        let tyref = self.canonicalize_child(ty_id, polarity);
+        // If we hold the only reference, move out without cloning.
+        match std::sync::Arc::try_unwrap(tyref.0) {
+            Ok(output) => output,
+            Err(arc) => (*arc).clone(),
+        }
     }
 
     fn canonicalize_inner(&mut self, ty_id: TyId, polarity: Polarity) -> OutputTy {
@@ -307,27 +334,22 @@ impl<'a> Canonicalizer<'a> {
         match ty {
             Ty::Primitive(p) => OutputTy::Primitive(*p),
             Ty::TyVar(x) => OutputTy::TyVar(*x),
-            Ty::List(elem) => {
-                let c_elem = self.canonicalize(*elem, polarity);
-                OutputTy::List(TyRef::from(c_elem))
-            }
+            // Structural children use canonicalize_child to get shared TyRefs.
+            Ty::List(elem) => OutputTy::List(self.canonicalize_child(*elem, polarity)),
             Ty::Lambda { param, body } => {
-                let c_param = self.canonicalize(*param, polarity.flip());
-                let c_body = self.canonicalize(*body, polarity);
+                let c_param = self.canonicalize_child(*param, polarity.flip());
+                let c_body = self.canonicalize_child(*body, polarity);
                 OutputTy::Lambda {
-                    param: TyRef::from(c_param),
-                    body: TyRef::from(c_body),
+                    param: c_param,
+                    body: c_body,
                 }
             }
             Ty::AttrSet(attr) => {
                 let mut new_fields = BTreeMap::new();
                 for (k, &v) in &attr.fields {
-                    let c_field = self.canonicalize(v, polarity);
-                    new_fields.insert(k.clone(), TyRef::from(c_field));
+                    new_fields.insert(k.clone(), self.canonicalize_child(v, polarity));
                 }
-                let dyn_ty = attr
-                    .dyn_ty
-                    .map(|d| TyRef::from(self.canonicalize(d, polarity)));
+                let dyn_ty = attr.dyn_ty.map(|d| self.canonicalize_child(d, polarity));
                 OutputTy::AttrSet(AttrSetTy {
                     fields: new_fields,
                     dyn_ty,
@@ -346,8 +368,7 @@ impl<'a> Canonicalizer<'a> {
 
             // Named: canonicalize the inner type and wrap in OutputTy::Named.
             Ty::Named(name, inner) => {
-                let c = self.canonicalize(*inner, polarity);
-                OutputTy::Named(name.clone(), TyRef::from(c))
+                OutputTy::Named(name.clone(), self.canonicalize_child(*inner, polarity))
             }
 
             // Frozen: already an OutputTy — just unwrap.
