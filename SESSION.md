@@ -1,9 +1,16 @@
 ## Arena-Interned OutputTy Migration (In Progress)
 
-Phase 1 (lang_ty foundation) done. Phase 2-3 (lang_check) partially done.
-Main remaining work: collect.rs Canonicalizer rewrite, infer.rs simplify/
-canonicalize calls, all tests, PBT, comment_parser/tix_collect, CLI, LSP.
-See git log for details.
+All production code compiles (0 errors). LSP (313/313 pass), lang_ty (210 pass),
+CLI tests all pass. Remaining: 121 test compilation errors in lang_check:
+- collect.rs tests (58): borrow checker issues with arc_ty! macro in test assertions
+  (the macro borrows &mut arena, conflicting with assert_eq! temporary borrows)
+- pbt/mod.rs (44): needs ArbitraryType migration (OutputTy no longer has Arbitrary)
+- coordinator.rs tests (11): FileSignature now uses OwnedTy, test constructors need arena
+- pbt/stub_compose.rs (8): PBT sub-module needs arena context
+
+Fix approach: collect.rs tests need to pre-intern expected values before assert_eq!;
+PBT needs to use ArbitraryType from lang_ty::arbitrary; coordinator tests need
+arena helper for FileSignature construction.
 
 ## Known Issues & Future Work
 
