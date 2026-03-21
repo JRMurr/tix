@@ -20,6 +20,7 @@ mod semantic_tokens;
 pub mod server;
 mod signature_help;
 mod state;
+pub mod store_stubs;
 pub mod test_util;
 mod ty_nav;
 mod type_def;

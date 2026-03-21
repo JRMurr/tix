@@ -26,6 +26,8 @@ rlimit = "0.10"
 libc = "0.2"
 toml = { workspace = true }
 globset = { workspace = true }
+thiserror = { workspace = true }
+dirs = { workspace = true }
 
 [dev-dependencies]
 indoc = "2.0.5"

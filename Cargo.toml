@@ -37,6 +37,7 @@ dashmap = "6"
 parking_lot = "0.12"
 tower-lsp = "0.20"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-std"] }
+dirs = "6"
 
 # Release profile: optimize for speed. LTO across crates enables cross-crate
 # inlining (critical for constrain/extrude hot loops). Single codegen unit
