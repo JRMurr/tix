@@ -109,6 +109,9 @@ pub fn run_check_project(
     // Step 2: Build shared TypeAliasRegistry.
     let mut registry = build_registry(no_default_stubs, &[])?;
 
+    // Runtime stub generation.
+    crate::maybe_generate_stubs(&mut registry, &toml_config.stubs, &config_dir);
+
     // Load config-level stubs.
     for stub in toml_config.stubs.paths() {
         let stub_path = config_dir.join(stub);

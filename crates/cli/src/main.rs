@@ -852,6 +852,10 @@ fn run_check(
 
     // Load additional stubs from tix.toml config.
     if let (Some(ref cfg), Some(ref dir)) = (&toml_config, &config_dir) {
+        // Runtime stub generation: if TIX_BUILTIN_STUBS is not set and
+        // [stubs.generate] is configured, generate stubs via nix build.
+        maybe_generate_stubs(&mut registry, &cfg.stubs, dir);
+
         for stub in cfg.stubs.paths() {
             let stub_path = dir.join(stub);
             if let Err(e) = load_stubs(&mut registry, &stub_path) {
@@ -1183,6 +1187,31 @@ fn render_diagnostics(
     }
 
     (error_count, warning_count)
+}
+
+/// If `TIX_BUILTIN_STUBS` is not set and `[stubs.generate]` is configured,
+/// attempt runtime stub generation and set the registry's builtin stubs dir.
+fn maybe_generate_stubs(
+    registry: &mut TypeAliasRegistry,
+    stubs_config: &tix_lsp::project_config::StubsConfig,
+    config_dir: &std::path::Path,
+) {
+    // TIX_BUILTIN_STUBS takes priority — skip runtime generation.
+    if std::env::var("TIX_BUILTIN_STUBS").is_ok() {
+        return;
+    }
+
+    if let Some(gen_config) = stubs_config.generate() {
+        match tix_lsp::store_stubs::generate_stubs(gen_config, config_dir) {
+            Ok(dir) => {
+                eprintln!("Using generated stubs: {}", dir.display());
+                registry.set_builtin_stubs_dir(dir);
+            }
+            Err(e) => {
+                eprintln!("Warning: stub generation failed, using defaults: {e}");
+            }
+        }
+    }
 }
 
 /// Build a TypeAliasRegistry from CLI flags, loading stubs and validating.
