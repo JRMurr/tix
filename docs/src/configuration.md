@@ -22,7 +22,7 @@ stubs = ["@home-manager"]
 
 - **paths** — glob patterns matching files in this context
 - **exclude** — glob patterns for files to exclude even when `paths` matches. Useful when a broad glob like `dir/**/*.nix` covers a directory with a few files that belong to a different context.
-- **stubs** — which stub sets to load. `@nixos` and `@home-manager` are built-in references to the generated NixOS/Home Manager stubs (requires the `with-stubs` package or `TIX_BUILTIN_STUBS` env var)
+- **stubs** — which stub sets to load. `@nixos` and `@home-manager` are built-in references to the generated NixOS/Home Manager stubs (requires [`[stubs.generate]`](#runtime-stub-generation) or the `TIX_BUILTIN_STUBS` env var)
 
 For example, if most files under `common/` are NixOS modules but `common/homemanager/` contains Home Manager modules:
 
@@ -106,7 +106,7 @@ The LSP editor settings (`tix.diagnostics.unknownType`) take precedence over `ti
 
 ### Runtime stub generation
 
-Instead of pre-building stubs with the `with-stubs` package, tix can generate them at runtime on first use. The result is cached in the Nix store and reused on subsequent runs.
+Tix can generate full NixOS, Home Manager, and pkgs stubs at runtime on first use. The result is cached in the Nix store and reused on subsequent runs.
 
 ```toml
 [stubs.generate]

@@ -17,9 +17,6 @@ TLDR: try to be typescript for nix
 
 ```bash
 nix run github:JRMurr/tix -- my-file.nix
-
-# With pre-generated NixOS and Home Manager type stubs:
-nix run github:JRMurr/tix#with-stubs -- my-file.nix
 ```
 
 </details>
@@ -43,8 +40,6 @@ Then add the package to your config, e.g. in NixOS:
 {
   environment.systemPackages = [
     inputs.tix.packages.${pkgs.system}.default
-    # Or for the variant with pre-generated stubs:
-    # inputs.tix.packages.${pkgs.system}.with-stubs
   ];
 }
 ```
@@ -70,8 +65,6 @@ in
 {
   environment.systemPackages = [
     tix.packages.${builtins.currentSystem}.default
-    # Or for the variant with pre-generated stubs:
-    # tix.packages.${builtins.currentSystem}.with-stubs
   ];
 }
 ```

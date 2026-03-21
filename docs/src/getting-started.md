@@ -8,9 +8,6 @@ The fastest way to try tix — no installation required:
 
 ```bash
 nix run github:JRMurr/tix -- my-file.nix
-
-# With pre-generated NixOS + Home Manager type stubs:
-nix run github:JRMurr/tix#with-stubs -- my-file.nix
 ```
 
 ### Nix Flake (recommended)
@@ -31,8 +28,6 @@ Then add the package to your system configuration:
 {
   environment.systemPackages = [
     inputs.tix.packages.${pkgs.system}.default
-    # Or for the variant with pre-generated stubs:
-    # inputs.tix.packages.${pkgs.system}.with-stubs
   ];
 }
 ```
@@ -49,7 +44,7 @@ Or add it to a dev shell:
     in {
       devShells.x86_64-linux.default = pkgs.mkShell {
         buildInputs = [
-          tix.packages.x86_64-linux.with-stubs
+          tix.packages.x86_64-linux.default
         ];
       };
     };
@@ -74,8 +69,6 @@ in
 {
   environment.systemPackages = [
     tix.packages.${builtins.currentSystem}.default
-    # Or for the variant with pre-generated stubs:
-    # tix.packages.${builtins.currentSystem}.with-stubs
   ];
 }
 ```
