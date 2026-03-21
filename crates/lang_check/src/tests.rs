@@ -2812,6 +2812,46 @@ mod import_tests {
             "targets should include the outer Apply from callPackage"
         );
     }
+
+    // Regression: intern_output_ty without TyRef caching caused exponential
+    // blowup when the imported file's output type had DAG sharing (multiple
+    // attrset fields pointing to the same TyRef). This test creates a dep
+    // file whose output type with shared structure and verifies inference
+    // completes without OOM.
+    #[test]
+    fn callpackage_shared_output_type_no_oom() {
+        let ty = get_multifile_root(&[
+            (
+                "/main.nix",
+                r#"
+                let callPackage = x: x {};
+                in callPackage /pkg.nix {}
+                "#,
+            ),
+            (
+                "/pkg.nix",
+                r#"
+                { lib ? { id = x: x; mapAttrs = f: s: s; } }:
+                let
+                    mkOpt = default: { inherit default; type = "option"; };
+                    a = mkOpt 1;
+                    b = mkOpt 2;
+                    c = mkOpt 3;
+                    d = mkOpt "x";
+                    e = mkOpt true;
+                    f = mkOpt null;
+                    g = mkOpt 4;
+                    h = mkOpt 5;
+                in { inherit a b c d e f g h; }
+                "#,
+            ),
+        ]);
+        let ty = ty.resolve();
+        match ty.output_ty() {
+            OutputTy::AttrSet(_) => {}
+            _ => panic!("expected attrset, got: {ty}"),
+        }
+    }
 }
 
 // ==============================================================================

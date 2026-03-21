@@ -868,7 +868,8 @@ impl<'db> CheckCtx<'db> {
     /// propagate back to the imported file.
     fn intern_output_ty(&mut self, owned: &OwnedTy) -> TyId {
         let mut var_map: HashMap<u32, TyId> = HashMap::new();
-        self.intern_output_ty_inner(&owned.arena, owned.root, &mut var_map)
+        let mut ref_cache: HashMap<TyRef, TyId> = HashMap::new();
+        self.intern_output_ty_inner(&owned.arena, owned.root, &mut var_map, &mut ref_cache)
     }
 
     fn intern_output_ty_inner(
@@ -876,19 +877,27 @@ impl<'db> CheckCtx<'db> {
         arena: &TypeArena,
         ty: TyRef,
         var_map: &mut HashMap<u32, TyId>,
+        ref_cache: &mut HashMap<TyRef, TyId>,
     ) -> TyId {
-        match &arena[ty] {
+        // Preserve DAG sharing: if we already interned this TyRef, reuse it.
+        // Without this, shared subtrees in the TypeArena expand exponentially
+        // (e.g. common.nix's output type caused a 1.5GB allocation on chromium).
+        if let Some(&cached) = ref_cache.get(&ty) {
+            return cached;
+        }
+
+        let result = match &arena[ty] {
             OutputTy::TyVar(n) => *var_map.entry(*n).or_insert_with(|| self.new_var()),
             OutputTy::Primitive(prim) => self.alloc_prim(*prim),
             OutputTy::List(inner) => {
                 let inner = *inner;
-                let elem = self.intern_output_ty_inner(arena, inner, var_map);
+                let elem = self.intern_output_ty_inner(arena, inner, var_map, ref_cache);
                 self.alloc_concrete(Ty::List(elem))
             }
             OutputTy::Lambda { param, body } => {
                 let (param, body) = (*param, *body);
-                let p = self.intern_output_ty_inner(arena, param, var_map);
-                let b = self.intern_output_ty_inner(arena, body, var_map);
+                let p = self.intern_output_ty_inner(arena, param, var_map, ref_cache);
+                let b = self.intern_output_ty_inner(arena, body, var_map, ref_cache);
                 self.alloc_concrete(Ty::Lambda { param: p, body: b })
             }
             OutputTy::AttrSet(attr) => {
@@ -899,10 +908,11 @@ impl<'db> CheckCtx<'db> {
 
                 let mut fields = std::collections::BTreeMap::new();
                 for (k, v) in fields_vec {
-                    let field_ty = self.intern_output_ty_inner(arena, v, var_map);
+                    let field_ty = self.intern_output_ty_inner(arena, v, var_map, ref_cache);
                     fields.insert(k, field_ty);
                 }
-                let dyn_ty = dyn_ty.map(|d| self.intern_output_ty_inner(arena, d, var_map));
+                let dyn_ty =
+                    dyn_ty.map(|d| self.intern_output_ty_inner(arena, d, var_map, ref_cache));
                 self.alloc_concrete(Ty::AttrSet(lang_ty::AttrSetTy {
                     fields,
                     dyn_ty,
@@ -915,7 +925,7 @@ impl<'db> CheckCtx<'db> {
                 let members = members.clone();
                 let var = self.new_var();
                 for m in &members {
-                    let member_ty = self.intern_output_ty_inner(arena, *m, var_map);
+                    let member_ty = self.intern_output_ty_inner(arena, *m, var_map, ref_cache);
                     self.types.storage.add_lower_bound(var, member_ty);
                 }
                 var
@@ -925,7 +935,7 @@ impl<'db> CheckCtx<'db> {
                 let members = members.clone();
                 let var = self.new_var();
                 for m in &members {
-                    let member_ty = self.intern_output_ty_inner(arena, *m, var_map);
+                    let member_ty = self.intern_output_ty_inner(arena, *m, var_map, ref_cache);
                     self.types.storage.add_upper_bound(var, member_ty);
                 }
                 var
@@ -941,26 +951,25 @@ impl<'db> CheckCtx<'db> {
                     let fresh_inner = self.intern_fresh_ty(alias_body);
                     self.alloc_concrete(Ty::Named(name, fresh_inner))
                 } else {
-                    let inner_id = self.intern_output_ty_inner(arena, inner, var_map);
+                    let inner_id = self.intern_output_ty_inner(arena, inner, var_map, ref_cache);
                     self.alloc_concrete(Ty::Named(name, inner_id))
                 }
             }
             // Negation: intern the inner type and wrap in Ty::Neg.
             OutputTy::Neg(inner) => {
                 let inner = *inner;
-                let inner_id = self.intern_output_ty_inner(arena, inner, var_map);
+                let inner_id = self.intern_output_ty_inner(arena, inner, var_map, ref_cache);
                 self.alloc_concrete(Ty::Neg(inner_id))
             }
-            // Bottom/Top: fresh unconstrained variables. The internal Ty
-            // representation has no ⊤/⊥ variants, but a fresh variable
-            // approximates them correctly: no bounds → unconstrained,
-            // which means "anything goes" (Top) or "nothing produced"
-            // (Bottom) depending on polarity during canonicalization.
+            // Bottom/Top: fresh unconstrained variables.
             OutputTy::Bottom => self.new_var(),
             OutputTy::Top => self.new_var(),
             // Extern: wrap back as a Frozen type for inference.
             OutputTy::Extern(owned) => self.intern_frozen_owned_ty(owned),
-        }
+        };
+
+        ref_cache.insert(ty, result);
+        result
     }
 
     /// If `name_id` has a doc comment type annotation (e.g. `/** type: x :: int */`),
