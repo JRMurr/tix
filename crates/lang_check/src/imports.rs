@@ -12,7 +12,7 @@
 // peel one Lambda layer to get the return type.
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use lang_ast::nameres::ResolveResult;
 use lang_ast::{Expr, ExprId, Literal, Module, NameResolution};
@@ -194,12 +194,33 @@ pub(crate) fn extract_return_type(owned: &OwnedTy) -> OwnedTy {
 // Bulk Import Path Scanning (for dependency graph construction)
 // ==============================================================================
 
+/// Normalize path components (`.`, `..`) without any syscalls.
+///
+/// Safe when `base_dir` is already canonical — the joined path won't contain
+/// symlinks that would make textual `..` resolution incorrect.
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut out = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            c => out.push(c),
+        }
+    }
+    out.iter().collect()
+}
+
 /// Scan a module for all import paths without resolving types.
 ///
-/// Combines `scan_literal_imports` and `scan_callpackage_imports`, canonicalizes
+/// Combines `scan_literal_imports` and `scan_callpackage_imports`, normalizes
 /// paths, applies directory → `default.nix` resolution, and deduplicates.
-/// Returns only canonical paths — no ExprIds, no types. Used by `tix check`
+/// Returns only normalized paths — no ExprIds, no types. Used by `tix check`
 /// to build the file-level dependency graph before inference begins.
+///
+/// When `base_dir` is canonical, the returned paths are equivalent to
+/// `canonicalize` results (no symlinks within the Nix store tree).
 pub fn scan_all_import_paths(
     module: &Module,
     name_res: &NameResolution,
@@ -218,10 +239,12 @@ pub fn scan_all_import_paths(
         .chain(callpackage.iter().map(|(_, _, _, p)| p.clone()));
 
     for path in all_paths {
-        let canonical = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        // Cheap textual normalization instead of canonicalize() syscall.
+        // Safe because base_dir is already canonical (no symlinks to resolve).
+        let normalized = normalize_path(&path);
 
         // Apply directory → default.nix resolution.
-        let resolved = match resolve_directory_path(canonical) {
+        let resolved = match resolve_directory_path(normalized) {
             Some(p) => p,
             None => continue, // Directory with no default.nix.
         };
@@ -242,7 +265,7 @@ pub(crate) fn resolve_directory_path(path: PathBuf) -> Option<PathBuf> {
     if path.is_dir() {
         let default = path.join("default.nix");
         if default.is_file() {
-            Some(default.canonicalize().unwrap_or(default))
+            Some(normalize_path(&default))
         } else {
             None
         }

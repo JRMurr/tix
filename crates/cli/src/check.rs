@@ -137,19 +137,43 @@ pub fn run_check_project(
     let files_count = nix_files.len();
 
     // =========================================================================
-    // Phase 1 — Sequential Prepare
+    // Phase 1a — Parallel File I/O
+    // =========================================================================
+    //
+    // Front-load all disk I/O (canonicalize + read) in parallel. This avoids
+    // sequential syscalls for 42K+ files in large projects like nixpkgs.
+
+    struct PrereadFile {
+        original_path: PathBuf,
+        canonical_path: PathBuf,
+        contents: String,
+    }
+
+    let preread: Vec<PrereadFile> = nix_files
+        .par_iter()
+        .filter_map(|file_path| {
+            let canonical_path = std::fs::canonicalize(file_path).ok()?;
+            let contents = std::fs::read_to_string(&canonical_path).ok()?;
+            Some(PrereadFile {
+                original_path: file_path.clone(),
+                canonical_path,
+                contents,
+            })
+        })
+        .collect();
+
+    timer.mark("file I/O (parallel)");
+
+    // =========================================================================
+    // Phase 1b — Sequential Salsa Queries
     // =========================================================================
     //
     // Salsa queries (parse, lower, nameres, SCC grouping), classification,
-    // config validation, and context resolution all run sequentially because
-    // the Salsa database is single-threaded.
-    //
-    // Import resolution is deferred to the coordinator in Phase 2, which
-    // resolves imports demand-driven across files.
+    // config validation, and context resolution run sequentially because
+    // the Salsa database is single-threaded. All file I/O was done above.
 
-    // Intermediate data from Phase 1 before the registry is wrapped in Arc.
     struct PrePreparedFile {
-        file_path: PathBuf,
+        canonical_path: PathBuf,
         source_text: String,
         source_map: ModuleSourceMap,
         module: lang_ast::Module,
@@ -157,37 +181,39 @@ pub fn run_check_project(
         name_res: lang_ast::NameResolution,
         grouped_defs: lang_ast::GroupedDefs,
         context_args: Arc<std::collections::HashMap<smol_str::SmolStr, comment_parser::ParsedTy>>,
-        /// Import targets discovered during Phase 1 (for dependency graph).
         import_targets: Vec<PathBuf>,
     }
 
     let db = RootDatabase::default();
-    let mut pre_prepared: Vec<PrePreparedFile> = Vec::with_capacity(files_count);
+
+    // Pre-populate Salsa DB with file contents (no disk I/O). Consumes
+    // preread to move strings into Salsa without cloning.
+    struct PreloadedFile {
+        original_path: PathBuf,
+        canonical_path: PathBuf,
+        nix_file: lang_ast::NixFile,
+    }
+
+    let preloaded: Vec<PreloadedFile> = preread
+        .into_iter()
+        .map(|pf| PreloadedFile {
+            nix_file: db.preload_file(pf.canonical_path.clone(), pf.contents),
+            original_path: pf.original_path,
+            canonical_path: pf.canonical_path,
+        })
+        .collect();
+
+    let mut pre_prepared: Vec<PrePreparedFile> = Vec::with_capacity(preloaded.len());
     let mut config_warnings: Vec<String> = Vec::new();
 
-    for file_path in &nix_files {
-        let relative = file_path
+    for pf in &preloaded {
+        let relative = pf
+            .original_path
             .strip_prefix(&config_dir)
-            .unwrap_or(file_path)
+            .unwrap_or(&pf.original_path)
             .to_path_buf();
 
-        // Read source.
-        let source_text = match std::fs::read_to_string(file_path) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("warning: could not read {}: {e}", relative.display());
-                continue;
-            }
-        };
-
-        // Parse + lower via Salsa.
-        let nix_file = match db.read_file(file_path.clone()) {
-            Ok(f) => f,
-            Err(e) => {
-                eprintln!("warning: could not load {}: {e}", relative.display());
-                continue;
-            }
-        };
+        let nix_file = pf.nix_file;
 
         let (module, source_map) = module_and_source_maps(&db, nix_file);
         let name_res = name_resolution(&db, nix_file);
@@ -206,25 +232,35 @@ pub fn run_check_project(
         }
 
         // Config validation: compare classification vs tix.toml context.
-        if let Some(warning) =
-            validate_classification(file_path, &classification, &toml_config, &config_dir)
-        {
+        if let Some(warning) = validate_classification(
+            &pf.original_path,
+            &classification,
+            &toml_config,
+            &config_dir,
+        ) {
             config_warnings.push(warning);
         }
 
         // Resolve context args from tix.toml (may mutate registry).
-        let context_args =
-            config::resolve_context_for_file(file_path, &toml_config, &config_dir, &mut registry)
-                .unwrap_or_else(|e| {
-                    eprintln!(
-                        "warning: failed to resolve context for {}: {e}",
-                        relative.display()
-                    );
-                    Arc::default()
-                });
+        let context_args = config::resolve_context_for_file(
+            &pf.original_path,
+            &toml_config,
+            &config_dir,
+            &mut registry,
+        )
+        .unwrap_or_else(|e| {
+            eprintln!(
+                "warning: failed to resolve context for {}: {e}",
+                relative.display()
+            );
+            Arc::default()
+        });
 
         // Scan imports for the file-level dependency graph (Phase 1.5).
-        let base_dir = file_path.parent().unwrap_or(std::path::Path::new("/"));
+        let base_dir = pf
+            .canonical_path
+            .parent()
+            .unwrap_or(std::path::Path::new("/"));
         let import_targets =
             lang_check::imports::scan_all_import_paths(&module, &name_res, base_dir);
 
@@ -232,8 +268,11 @@ pub fn run_check_project(
         let module_indices = lang_ast::module_indices(&db, nix_file);
         let grouped_defs = lang_ast::group_def(&db, nix_file);
 
+        // Get source text from Salsa (already stored during preload).
+        let source_text = nix_file.contents(&db).clone();
+
         pre_prepared.push(PrePreparedFile {
-            file_path: file_path.clone(),
+            canonical_path: pf.canonical_path.clone(),
             source_text,
             source_map,
             module,
@@ -259,28 +298,22 @@ pub fn run_check_project(
     let mut file_order: Vec<PathBuf> = Vec::with_capacity(pre_prepared.len());
 
     for pp in pre_prepared {
-        // Canonicalize the key so it matches the canonical paths that
-        // resolve_import_types produces when looking up import targets.
-        // Without this, symlinked projects (like nixpkgs-test's /tmp → /nix/store)
-        // would never match and all imports would get ⊤.
-        let canonical_path =
-            std::fs::canonicalize(&pp.file_path).unwrap_or_else(|_| pp.file_path.clone());
-
-        file_order.push(canonical_path.clone());
-        expr_counts.insert(canonical_path.clone(), pp.module.exprs().len());
-        import_edges.insert(canonical_path.clone(), pp.import_targets);
+        // canonical_path was already computed during parallel pre-read.
+        file_order.push(pp.canonical_path.clone());
+        expr_counts.insert(pp.canonical_path.clone(), pp.module.exprs().len());
+        import_edges.insert(pp.canonical_path.clone(), pp.import_targets);
         metadata_map.insert(
-            canonical_path.clone(),
+            pp.canonical_path.clone(),
             FileMetadata {
-                file_path: canonical_path.clone(),
+                file_path: pp.canonical_path.clone(),
                 source_text: pp.source_text,
                 source_map: pp.source_map,
             },
         );
         precomputed.insert(
-            canonical_path.clone(),
+            pp.canonical_path.clone(),
             SyntaxBundle {
-                path: canonical_path,
+                path: pp.canonical_path,
                 module: pp.module,
                 module_indices: pp.module_indices,
                 name_res: pp.name_res,
@@ -290,7 +323,7 @@ pub fn run_check_project(
             },
         );
     }
-    timer.mark("prepare (sequential)");
+    timer.mark("salsa queries (sequential)");
 
     // =========================================================================
     // Phase 1.5 — Build file-level dependency graph and layers

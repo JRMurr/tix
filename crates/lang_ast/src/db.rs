@@ -69,6 +69,19 @@ impl RootDatabase {
 }
 
 impl RootDatabase {
+    /// Insert a pre-read file into the database without any disk I/O.
+    ///
+    /// The `path` must already be canonicalized. If the file is already loaded
+    /// (e.g. from a prior `read_file` call), the existing NixFile is returned.
+    /// Used by `tix check` to front-load all file reads in parallel before
+    /// the sequential Salsa query loop.
+    pub fn preload_file(&self, path: PathBuf, contents: String) -> NixFile {
+        match self.files.entry(path.clone()) {
+            dashmap::Entry::Occupied(entry) => *entry.get(),
+            dashmap::Entry::Vacant(entry) => *entry.insert(NixFile::new(self, path, contents)),
+        }
+    }
+
     /// Create or update a NixFile from editor-provided contents (for LSP).
     /// Uses Salsa input mutation to invalidate downstream queries.
     pub fn set_file_contents(&mut self, path: PathBuf, contents: String) -> NixFile {
