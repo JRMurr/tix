@@ -30,10 +30,10 @@ pub fn to_lsp_diagnostics(
     diagnostics
         .iter()
         .map(|diag| {
-            // File-level diagnostics (like InferenceTimeout) should only
+            // File-level diagnostics (like InferenceAborted) should only
             // highlight the first line, not the entire file.
             let (range, related_information) =
-                if matches!(diag.kind, TixDiagnosticKind::InferenceTimeout { .. }) {
+                if matches!(diag.kind, TixDiagnosticKind::InferenceAborted { .. }) {
                     (Range::new(Default::default(), Default::default()), None)
                 } else if let TixDiagnosticKind::DuplicateKey { first, second, .. } = &diag.kind {
                     // DuplicateKey carries its own AstPtr spans; point the diagnostic

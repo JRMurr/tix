@@ -906,7 +906,6 @@ fn run_check(
         registry: parking_lot::Mutex<Arc<lang_check::aliases::TypeAliasRegistry>>,
         /// tix.toml config + directory, used to resolve per-file context_args.
         config: Option<(config::TixConfig, std::path::PathBuf)>,
-        deadline_secs: Option<u64>,
     }
     impl lang_check::coordinator::SyntaxProvider for SingleFileSyntaxProvider {
         fn syntax_for_file(&self, path: &std::path::Path) -> Option<lang_check::SyntaxBundle> {
@@ -938,7 +937,6 @@ fn run_check(
                 grouped_defs,
                 registry,
                 context_args,
-                deadline_secs: self.deadline_secs,
             })
         }
     }
@@ -950,14 +948,13 @@ fn run_check(
             .as_ref()
             .zip(config_dir.as_ref())
             .map(|(cfg, dir)| (cfg.clone(), dir.clone())),
-        deadline_secs: None,
     };
 
     // Resolve imports using the coordinator (demand-driven).
     let import_resolution =
         lang_check::imports::resolve_import_types(&module, &name_res, base_dir, |dep_path| {
             // Demand the dependency's type from the coordinator.
-            let result = coordinator.demand_file(dep_path, &syntax_provider, None)?;
+            let result = coordinator.demand_file(dep_path, &syntax_provider)?;
             result.signature.map(|s| s.root_ty)
         });
 
@@ -981,7 +978,7 @@ fn run_check(
 
     // If inference timed out, identify which bindings are incomplete
     // and include them in the diagnostic for actionable feedback.
-    if result.timed_out {
+    if result.bailed_out {
         let missing_bindings: Vec<smol_str::SmolStr> = module
             .names()
             .filter(|(_, name)| {
@@ -1002,7 +999,7 @@ fn run_check(
             .collect();
         result.diagnostics.push(TixDiagnostic {
             at_expr: module.entry_expr,
-            kind: TixDiagnosticKind::InferenceTimeout { missing_bindings },
+            kind: TixDiagnosticKind::InferenceAborted { missing_bindings },
         });
     }
 

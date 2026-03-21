@@ -15,10 +15,8 @@
 // interactive requests (hover, completion) immediately.
 //
 // Cancellation: when a new edit arrives for a file that's currently being
-// analyzed, the in-flight analysis is cancelled via an Arc<AtomicBool> flag
-// that's checked periodically by the inference engine (alongside the existing
-// deadline mechanism). This avoids blocking the editor while waiting for a
-// 10-second timeout on a stale version of the file.
+// analyzed, the analysis loop checks the cancel flag between phases so it
+// can re-coalesce edits without waiting for inference to complete.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -115,10 +113,9 @@ impl TixLanguageServer {
         // import resolution.
         let coordinator = Arc::clone(&analysis_state.coordinator);
 
-        let syntax_provider = Arc::new(crate::state::LspSyntaxProvider::new(
-            Arc::clone(&analysis_state.registry),
-            analysis_state.deadline_secs,
-        ));
+        let syntax_provider = Arc::new(crate::state::LspSyntaxProvider::new(Arc::clone(
+            &analysis_state.registry,
+        )));
 
         let state = Arc::new(Mutex::new(analysis_state));
         let pending_text = Arc::new(Mutex::new(HashMap::new()));
@@ -554,7 +551,6 @@ fn spawn_analysis_loop(
                         &coordinator,
                         Some(&*lsp_syntax_provider),
                         &intermediate,
-                        Some(cancel_flag.clone()),
                     );
 
                 // Update DashMap with import data from Phase B.
@@ -568,8 +564,7 @@ fn spawn_analysis_loop(
                 // even when RSS is high. Background files go through warmup.
                 let mut inference_inputs = inference_inputs;
                 inference_inputs.core.rss_limit_mb = None;
-                let (check_result, infer_duration) =
-                    crate::state::run_inference(&inference_inputs, Some(cancel_flag.clone()));
+                let (check_result, infer_duration) = crate::state::run_inference(&inference_inputs);
 
                 let was_cancelled = cancel_flag.load(Ordering::Relaxed);
                 let total = syntax_duration + import_duration + infer_duration;
@@ -781,11 +776,6 @@ impl LanguageServer for TixLanguageServer {
                                 }
                             }
 
-                            if let Some(secs) = project_cfg.deadline {
-                                log::info!("Inference deadline: {secs}s (from tix.toml)");
-                                state.deadline_secs = secs;
-                            }
-
                             // Apply diagnostics overrides from tix.toml (project
                             // config is the base; editor settings override later).
                             if let Some(diag_proj) = &project_cfg.diagnostics {
@@ -830,7 +820,6 @@ impl LanguageServer for TixLanguageServer {
                                     warmup_coordinator,
                                     warmup_project_config,
                                     warmup_config_dir,
-                                    warmup_deadline,
                                     warmup_rss_limit,
                                 ) = {
                                     let st = self.state.lock();
@@ -839,7 +828,6 @@ impl LanguageServer for TixLanguageServer {
                                         Arc::clone(&st.coordinator),
                                         st.project_config.clone(),
                                         st.config_dir.clone(),
-                                        st.deadline_secs,
                                         st.rss_limit_mb,
                                     )
                                 };
@@ -852,7 +840,6 @@ impl LanguageServer for TixLanguageServer {
                                         &warmup_coordinator,
                                         warmup_project_config.as_ref(),
                                         warmup_config_dir.as_deref(),
-                                        warmup_deadline,
                                         warmup_rss_limit,
                                     );
                                     if !results.is_empty() {

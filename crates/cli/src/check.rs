@@ -287,7 +287,6 @@ pub fn run_check_project(
                 grouped_defs: pp.grouped_defs,
                 registry: Arc::clone(&registry),
                 context_args: pp.context_args,
-                deadline_secs: toml_config.deadline,
             },
         );
     }
@@ -380,12 +379,11 @@ pub fn run_check_project(
             import_types: import_resolution.types,
             import_diagnostics,
             context_args: bundle.context_args,
-            deadline_secs: bundle.deadline_secs,
             rss_limit_mb: None,
             file_path: Some(fm.file_path.clone()),
         };
 
-        let check_result = lang_check::run_inference(&inputs, None);
+        let check_result = lang_check::run_inference(&inputs);
 
         // Cache this file's signature for subsequent layers.
         if let Some(sig) =
@@ -398,7 +396,7 @@ pub fn run_check_project(
             file = %lang_ast::display_path(&fm.file_path),
             rss_mb = format_args!("{:.0}", lang_check::rss_mb()),
             diags = check_result.diagnostics.len(),
-            timed_out = check_result.timed_out,
+            bailed_out = check_result.bailed_out,
             "finished file"
         );
 

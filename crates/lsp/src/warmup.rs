@@ -57,7 +57,6 @@ pub fn run_batch_warmup(
     coordinator: &InferenceCoordinator,
     project_config: Option<&ProjectConfig>,
     config_dir: Option<&Path>,
-    deadline_secs: u64,
     rss_limit_mb: Option<f64>,
 ) -> Vec<WarmupFileResult> {
     if files.is_empty() {
@@ -256,12 +255,11 @@ pub fn run_batch_warmup(
             import_types: import_resolution.types,
             import_diagnostics,
             context_args: pp.context_args.clone(),
-            deadline_secs: Some(deadline_secs),
             rss_limit_mb,
             file_path: Some(pp.path.clone()),
         };
 
-        let check_result = lang_check::run_inference(&inputs, None);
+        let check_result = lang_check::run_inference(&inputs);
 
         // Cache this file's signature for subsequent layers.
         if let Some(sig) = lang_check::extract_file_signature(&check_result, pp.module.entry_expr) {
@@ -417,7 +415,7 @@ mod tests {
         let registry = Arc::new(TypeAliasRegistry::with_builtins());
         let coordinator = InferenceCoordinator::new();
 
-        let results = run_batch_warmup(files.clone(), registry, &coordinator, None, None, 10, None);
+        let results = run_batch_warmup(files.clone(), registry, &coordinator, None, None, None);
 
         assert_eq!(results.len(), 3, "should get results for all 3 files");
 
@@ -452,7 +450,7 @@ mod tests {
         let registry = Arc::new(TypeAliasRegistry::with_builtins());
         let coordinator = InferenceCoordinator::new();
 
-        let results = run_batch_warmup(files.clone(), registry, &coordinator, None, None, 10, None);
+        let results = run_batch_warmup(files.clone(), registry, &coordinator, None, None, None);
 
         assert_eq!(results.len(), 2);
 
@@ -484,7 +482,7 @@ mod tests {
         let registry = Arc::new(TypeAliasRegistry::with_builtins());
         let coordinator = InferenceCoordinator::new();
 
-        let results = run_batch_warmup(vec![], registry, &coordinator, None, None, 10, None);
+        let results = run_batch_warmup(vec![], registry, &coordinator, None, None, None);
         assert!(results.is_empty());
     }
 
@@ -497,7 +495,7 @@ mod tests {
         let registry = Arc::new(TypeAliasRegistry::with_builtins());
         let coordinator = InferenceCoordinator::new();
 
-        let results = run_batch_warmup(files, registry, &coordinator, None, None, 10, None);
+        let results = run_batch_warmup(files, registry, &coordinator, None, None, None);
         assert_eq!(results.len(), 1);
 
         let snap = results[0].to_snapshot();

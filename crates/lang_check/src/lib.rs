@@ -30,9 +30,7 @@ use lang_ast::{AstDb, Expr, ExprId, Module, NameId, NameResolution, NixFile, Ove
 use lang_ty::{OutputTy, OwnedTy, PrimitiveTy, Ty, TyRef, TypeArena};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
 use thiserror::Error;
 use tracing::instrument;
 use type_table::TypeTable;
@@ -280,9 +278,9 @@ pub struct CheckResult {
     /// Display-ready diagnostics (errors + warnings) with human-readable type
     /// names via OutputTy.
     pub diagnostics: Vec<TixDiagnostic>,
-    /// Whether inference was aborted because the deadline was exceeded.
-    /// Consumers can use this to emit a user-visible timeout diagnostic.
-    pub timed_out: bool,
+    /// Whether inference was aborted due to memory pressure (RSS limit).
+    /// Consumers can use this to emit a user-visible diagnostic.
+    pub bailed_out: bool,
 }
 
 // ==============================================================================
@@ -309,7 +307,6 @@ pub struct SyntaxBundle {
     pub grouped_defs: lang_ast::GroupedDefs,
     pub registry: Arc<TypeAliasRegistry>,
     pub context_args: Arc<HashMap<smol_str::SmolStr, ParsedTy>>,
-    pub deadline_secs: Option<u64>,
 }
 
 // ==============================================================================
@@ -331,8 +328,6 @@ pub struct InferenceInputs {
     pub import_types: HashMap<ExprId, OwnedTy>,
     pub import_diagnostics: Vec<TixDiagnostic>,
     pub context_args: Arc<HashMap<smol_str::SmolStr, ParsedTy>>,
-    /// Inference deadline in seconds. `None` means no deadline (CLI default).
-    pub deadline_secs: Option<u64>,
     /// RSS limit in MB. When process RSS exceeds this, inference bails out
     /// with partial results to avoid OOM from RLIMIT_AS. `None` means no
     /// RSS-based limit (CLI default).
@@ -343,23 +338,18 @@ pub struct InferenceInputs {
 }
 
 /// Run type inference using precomputed syntax data. Does not need the Salsa
-/// database. Consolidates the timeout-diagnostic logic shared by CLI and LSP.
+/// database. Consolidates the bail-out diagnostic logic shared by CLI and LSP.
 #[instrument(level = "info", skip_all, name = "run_inference", fields(file = inputs.file_path.as_deref().map(lang_ast::display_path).unwrap_or_default().as_str()))]
-pub fn run_inference(
-    inputs: &InferenceInputs,
-    cancel_flag: Option<Arc<AtomicBool>>,
-) -> CheckResult {
-    let mut check_result = CheckBuilder::from_inputs(inputs)
-        .cancel_flag(cancel_flag)
-        .run();
+pub fn run_inference(inputs: &InferenceInputs) -> CheckResult {
+    let mut check_result = CheckBuilder::from_inputs(inputs).run();
 
     // Merge import diagnostics.
     check_result
         .diagnostics
         .extend(inputs.import_diagnostics.clone());
 
-    // If inference timed out, add timeout diagnostic.
-    if check_result.timed_out {
+    // If inference bailed out (RSS limit), add diagnostic.
+    if check_result.bailed_out {
         let missing_bindings: Vec<smol_str::SmolStr> = inputs
             .module
             .names()
@@ -381,7 +371,7 @@ pub fn run_inference(
             .collect();
         check_result.diagnostics.push(TixDiagnostic {
             at_expr: inputs.module.entry_expr,
-            kind: diagnostic::TixDiagnosticKind::InferenceTimeout { missing_bindings },
+            kind: diagnostic::TixDiagnosticKind::InferenceAborted { missing_bindings },
         });
     }
 
@@ -426,8 +416,6 @@ pub struct CheckBuilder {
     aliases: Arc<TypeAliasRegistry>,
     import_types: HashMap<ExprId, OwnedTy>,
     context_args: Arc<HashMap<smol_str::SmolStr, ParsedTy>>,
-    deadline: Option<Instant>,
-    cancel_flag: Option<Arc<AtomicBool>>,
     rss_limit_mb: Option<f64>,
 }
 
@@ -448,8 +436,6 @@ impl CheckBuilder {
             aliases,
             import_types,
             context_args,
-            deadline: None,
-            cancel_flag: None,
             rss_limit_mb: None,
         }
     }
@@ -474,8 +460,6 @@ impl CheckBuilder {
             aliases,
             import_types,
             context_args,
-            deadline: None,
-            cancel_flag: None,
             rss_limit_mb: None,
         }
     }
@@ -483,9 +467,6 @@ impl CheckBuilder {
     /// Create a builder from an `InferenceInputs` bundle (used by
     /// `run_inference`).
     pub fn from_inputs(inputs: &InferenceInputs) -> Self {
-        let deadline = inputs
-            .deadline_secs
-            .map(|secs| Instant::now() + std::time::Duration::from_secs(secs));
         Self {
             module: inputs.module.clone(),
             name_res: inputs.name_res.clone(),
@@ -494,28 +475,8 @@ impl CheckBuilder {
             aliases: Arc::clone(&inputs.registry),
             import_types: inputs.import_types.clone(),
             context_args: Arc::clone(&inputs.context_args),
-            deadline,
-            cancel_flag: None,
             rss_limit_mb: inputs.rss_limit_mb,
         }
-    }
-
-    /// Set an optional inference deadline.
-    pub fn deadline(mut self, deadline: Option<Instant>) -> Self {
-        self.deadline = deadline;
-        self
-    }
-
-    /// Set a deadline as seconds from now.
-    pub fn deadline_secs(mut self, secs: u64) -> Self {
-        self.deadline = Some(Instant::now() + std::time::Duration::from_secs(secs));
-        self
-    }
-
-    /// Set an optional cancellation flag for cooperative early exit.
-    pub fn cancel_flag(mut self, flag: Option<Arc<AtomicBool>>) -> Self {
-        self.cancel_flag = flag;
-        self
     }
 
     /// Set an RSS limit in MB for memory-pressure early exit.
@@ -536,16 +497,10 @@ impl CheckBuilder {
             self.import_types,
             self.context_args,
         );
-        if let Some(d) = self.deadline {
-            check = check.with_deadline(d);
-        }
-        if let Some(flag) = self.cancel_flag {
-            check = check.with_cancel_flag(flag);
-        }
         if let Some(limit) = self.rss_limit_mb {
             check = check.with_rss_limit(limit);
         }
-        let (inference, mut diagnostics, timed_out) = check.infer_prog_partial(self.grouped_defs);
+        let (inference, mut diagnostics, bailed_out) = check.infer_prog_partial(self.grouped_defs);
 
         let lower_diags = diagnostic::lower_diagnostics_to_tix(
             &self.module.lower_diagnostics,
@@ -556,7 +511,7 @@ impl CheckBuilder {
         CheckResult {
             inference: Some(inference),
             diagnostics,
-            timed_out,
+            bailed_out,
         }
     }
 }
@@ -650,29 +605,17 @@ pub struct CheckCtx<'db> {
     /// double-applying the annotation.
     pre_annotated_params: FxHashSet<NameId>,
 
-    /// Optional deadline for inference. Checked after each SCC group and
-    /// periodically during expression inference; if exceeded, remaining work
-    /// is skipped and partial results returned. Used by import resolution to
-    /// prevent a single file from blocking the LSP indefinitely.
-    deadline: Option<Instant>,
-
-    /// Operation counter for periodic deadline checks. Incremented in
+    /// Operation counter for periodic RSS checks. Incremented in
     /// constrain() (the main hotspot for cascading work). Checked every
-    /// DEADLINE_CHECK_INTERVAL operations to avoid Instant::now() syscall
-    /// overhead on every call.
+    /// RSS_CHECK_INTERVAL operations to avoid excessive procfs reads.
     op_counter: u32,
 
-    /// Set when a periodic deadline check fires. Once set, constrain()
+    /// Set when an RSS check fires. Once set, constrain()
     /// returns Ok(()) immediately, infer_expr short-circuits to a fresh
     /// variable, and extrude returns the original type as-is.
-    deadline_exceeded: bool,
+    bailed_out: bool,
 
-    /// External cancellation flag. Set by the LSP server when a newer edit
-    /// arrives for the same file, allowing in-flight inference to abort early.
-    /// Checked alongside `deadline_exceeded` in the same hot paths.
-    cancel_flag: Option<Arc<AtomicBool>>,
-
-    /// Optional RSS limit in MB. When set, `past_deadline()` periodically
+    /// Optional RSS limit in MB. When set, `should_bail()` periodically
     /// checks the process RSS and triggers early exit if it exceeds this
     /// threshold. This prevents OOM crashes from RLIMIT_AS by bailing out
     /// before virtual address space is exhausted (virtual >> RSS).
@@ -735,61 +678,31 @@ impl<'db> CheckCtx<'db> {
             context_args,
             narrow_overrides: FxHashMap::default(),
             pre_annotated_params: FxHashSet::default(),
-            deadline: None,
             op_counter: 0,
-            deadline_exceeded: false,
-            cancel_flag: None,
+            bailed_out: false,
             rss_limit_mb: None,
             inferred_exprs: FxHashSet::default(),
         }
     }
 
-    /// Set a deadline after which inference will bail out with partial results.
-    pub fn with_deadline(mut self, deadline: Instant) -> Self {
-        self.deadline = Some(deadline);
-        self
-    }
-
-    /// Attach an external cancellation flag. When the flag is set to `true`,
-    /// inference bails out with partial results — the same behavior as
-    /// deadline expiry.
-    pub fn with_cancel_flag(mut self, flag: Arc<AtomicBool>) -> Self {
-        self.cancel_flag = Some(flag);
-        self
-    }
-
     /// Set an RSS limit in MB. When RSS exceeds this threshold, inference
-    /// bails out with partial results — the same behavior as deadline expiry.
-    /// Used by the LSP to prevent OOM crashes from RLIMIT_AS.
+    /// bails out with partial results. Used by the LSP to prevent OOM
+    /// crashes from RLIMIT_AS.
     pub fn with_rss_limit(mut self, limit_mb: f64) -> Self {
         self.rss_limit_mb = Some(limit_mb);
         self
     }
 
-    /// How often (in constrain ops) to check RSS. Less frequent than the
-    /// time-based deadline check because `/proc/self/statm` is a procfs read.
+    /// How often (in constrain ops) to check RSS. `/proc/self/statm` is a
+    /// procfs read so we don't want to do it on every constrain call.
     const RSS_CHECK_INTERVAL: u32 = 4096;
 
-    /// Check whether the inference deadline has been exceeded, cancellation
-    /// was requested externally, or RSS exceeds the memory limit. Caches a
-    /// positive result in `deadline_exceeded` so subsequent checks are O(1).
-    fn past_deadline(&mut self) -> bool {
-        if self.deadline_exceeded {
+    /// Check whether inference should bail out due to memory pressure.
+    /// Caches a positive result in `bailed_out` so subsequent checks are O(1).
+    fn should_bail(&mut self) -> bool {
+        if self.bailed_out {
             return true;
         }
-        if self.deadline.is_some_and(|d| Instant::now() > d) {
-            self.deadline_exceeded = true;
-            return true;
-        }
-        if let Some(ref flag) = self.cancel_flag {
-            if flag.load(Ordering::Relaxed) {
-                self.deadline_exceeded = true;
-                return true;
-            }
-        }
-        // Periodic RSS check — less frequent than deadline to avoid
-        // excessive procfs reads. Checked when op_counter aligns with
-        // RSS_CHECK_INTERVAL (which is a multiple of DEADLINE_CHECK_INTERVAL).
         if let Some(limit) = self.rss_limit_mb {
             if self.op_counter.is_multiple_of(Self::RSS_CHECK_INTERVAL) {
                 let rss = infer::rss_mb();
@@ -799,7 +712,7 @@ impl<'db> CheckCtx<'db> {
                         rss,
                         limit,
                     );
-                    self.deadline_exceeded = true;
+                    self.bailed_out = true;
                     return true;
                 }
             }

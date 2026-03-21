@@ -28,8 +28,8 @@ by design, or informational notes.
 - **Cyclic imports** degrade gracefully (unconstrained type variable + diagnostic)
   but don't support cross-file mutual recursion.
 
-- **Unconstrained variables** cause pathological constraint propagation. Deadline
-  mechanism (5s imports, 10s top-level) is the safety net; real fix is stubs.
+- **Unconstrained variables** cause pathological constraint propagation. RSS memory
+  limit is the safety net; real fix is stubs.
 
 - **Lambda parameter completion** limited by SimpleSub's extrusion-based
   generalization — call-site types don't flow back to parameter variables.
@@ -146,7 +146,7 @@ Intentional O(n^2) trade-offs, acceptable for typical Nix code sizes:
   No way to auto-derive `@context` from internal libraries.
 - **No watch mode in CLI** (requires external `watchexec`).
 - **gen-stubs nixos is slow** (full `nix eval`, no incremental).
-- **Timeout diagnostic** says what's missing but not how to fix it.
+- **Inference aborted diagnostic** says what's missing but not how to fix it.
 - **No workspace/multi-root LSP support.**
 - **No CONTRIBUTING.md** for potential contributors.
 - **No recursive type aliases** in `.tix` files.

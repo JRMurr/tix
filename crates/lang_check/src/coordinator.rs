@@ -20,7 +20,6 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -117,7 +116,7 @@ impl InferenceCoordinator {
             check_result: CheckResult {
                 inference: None,
                 diagnostics: vec![],
-                timed_out: false,
+                bailed_out: false,
             },
             signature: sig.clone(),
             import_paths: vec![],
@@ -144,7 +143,6 @@ impl InferenceCoordinator {
         &self,
         path: &Path,
         syntax_provider: &dyn SyntaxProvider,
-        cancel_flag: Option<Arc<AtomicBool>>,
     ) -> Option<CoordinatedResult> {
         // Fast path: already computed.
         if let Some(entry) = self.cache.get(path) {
@@ -214,7 +212,7 @@ impl InferenceCoordinator {
         }
 
         // Actually compute: extract syntax, resolve imports, run inference.
-        let result = self.compute_file(path, syntax_provider, cancel_flag);
+        let result = self.compute_file(path, syntax_provider);
 
         // Store result and notify waiters.
         // Only cache successful results — failed files (provider returned None)
@@ -247,7 +245,7 @@ impl InferenceCoordinator {
         files
             .par_iter()
             .map(|path| {
-                let result = self.demand_file(path, syntax_provider, None);
+                let result = self.demand_file(path, syntax_provider);
                 (path.clone(), result)
             })
             .collect()
@@ -259,7 +257,6 @@ impl InferenceCoordinator {
         &self,
         path: &Path,
         syntax_provider: &dyn SyntaxProvider,
-        cancel_flag: Option<Arc<AtomicBool>>,
     ) -> Option<CoordinatedResult> {
         let bundle = syntax_provider.syntax_for_file(path)?;
 
@@ -274,8 +271,7 @@ impl InferenceCoordinator {
                     return Some(sig);
                 }
                 // Demand-driven: infer the dependency.
-                let dep_result =
-                    self.demand_file(dep_path, syntax_provider, cancel_flag.clone())?;
+                let dep_result = self.demand_file(dep_path, syntax_provider)?;
                 dep_result.signature.map(|s| s.root_ty)
             });
 
@@ -298,12 +294,11 @@ impl InferenceCoordinator {
             import_types: import_resolution.types,
             import_diagnostics,
             context_args: bundle.context_args,
-            deadline_secs: bundle.deadline_secs,
             rss_limit_mb: None,
             file_path: Some(path.to_path_buf()),
         };
 
-        let check_result = run_inference(&inputs, cancel_flag);
+        let check_result = run_inference(&inputs);
 
         // Extract root type as the file's signature.
         let signature = crate::extract_file_signature(&check_result, inputs.module.entry_expr);
@@ -513,7 +508,6 @@ mod tests {
                 grouped_defs,
                 registry: Arc::clone(&self.registry),
                 context_args: Arc::default(),
-                deadline_secs: Some(10),
             })
         }
     }
@@ -589,7 +583,7 @@ mod tests {
         let provider = TestSyntaxProvider::new();
         let coord = InferenceCoordinator::new();
 
-        let result = coord.demand_file(&a_path, &provider, None);
+        let result = coord.demand_file(&a_path, &provider);
         assert!(result.is_some());
 
         // b should now be cached.
@@ -615,7 +609,7 @@ mod tests {
         let coord = InferenceCoordinator::new();
 
         // Should not deadlock — cycle is broken with ⊤.
-        let result = coord.demand_file(&a_path, &provider, None);
+        let result = coord.demand_file(&a_path, &provider);
         assert!(result.is_some());
         // Both files should be cached (even if one got ⊤ for the back-edge).
         assert!(coord.get_signature(&a_path).is_some() || coord.cache.contains_key(&a_path));
@@ -662,7 +656,7 @@ mod tests {
         let provider = TestSyntaxProvider::new();
         let coord = InferenceCoordinator::new();
 
-        let result = coord.demand_file(&a_path, &provider, None);
+        let result = coord.demand_file(&a_path, &provider);
         assert!(result.is_some());
 
         // All four files should be cached.
@@ -723,7 +717,7 @@ mod tests {
         let coord = InferenceCoordinator::new();
 
         // First demand: infer A (which imports B).
-        let result = coord.demand_file(&a_path, &provider, None);
+        let result = coord.demand_file(&a_path, &provider);
         assert!(result.is_some());
         assert!(coord.get_signature(&b_path).is_some());
 
@@ -734,7 +728,7 @@ mod tests {
         assert!(coord.get_signature(&b_path).is_none());
 
         // Re-demand A → should re-infer with fresh B.
-        let result2 = coord.demand_file(&a_path, &provider, None);
+        let result2 = coord.demand_file(&a_path, &provider);
         assert!(result2.is_some());
         assert!(coord.get_signature(&b_path).is_some());
     }
@@ -756,8 +750,8 @@ mod tests {
         let path1 = a_path.clone();
         let path2 = a_path.clone();
 
-        let t1 = std::thread::spawn(move || coord1.demand_file(&path1, &*provider1, None));
-        let t2 = std::thread::spawn(move || coord2.demand_file(&path2, &*provider2, None));
+        let t1 = std::thread::spawn(move || coord1.demand_file(&path1, &*provider1));
+        let t2 = std::thread::spawn(move || coord2.demand_file(&path2, &*provider2));
 
         let r1 = t1.join().unwrap();
         let r2 = t2.join().unwrap();
@@ -783,7 +777,7 @@ mod tests {
         let coord = InferenceCoordinator::new();
 
         // Should still produce a result for a.nix despite the missing dep.
-        let result = coord.demand_file(&a_path, &provider, None);
+        let result = coord.demand_file(&a_path, &provider);
         assert!(result.is_some());
     }
 
@@ -798,7 +792,7 @@ mod tests {
         let coord = InferenceCoordinator::new();
 
         // File doesn't exist → provider returns None.
-        let result = coord.demand_file(&path, &provider, None);
+        let result = coord.demand_file(&path, &provider);
         assert!(result.is_none());
 
         // Should NOT be cached as Ready(None).
@@ -836,7 +830,7 @@ mod tests {
         for layer in &layers {
             for path in layer {
                 let result = coord
-                    .demand_file(path, &provider, None)
+                    .demand_file(path, &provider)
                     .expect("inference should succeed");
 
                 // Cache the signature for subsequent layers.
@@ -890,7 +884,7 @@ mod tests {
         for layer in &layers {
             layer.iter().for_each(|path| {
                 let result = coord
-                    .demand_file(path, &provider, None)
+                    .demand_file(path, &provider)
                     .expect("inference should succeed");
                 if let Some(sig) = result.signature {
                     coord.set_signature(path, sig);
@@ -940,7 +934,7 @@ mod tests {
 
         // Should not deadlock.
         for path in &layers[0] {
-            let result = coord.demand_file(path, &provider, None);
+            let result = coord.demand_file(path, &provider);
             assert!(
                 result.is_some(),
                 "inference should succeed for {}",

@@ -2398,8 +2398,6 @@ mod tests {
         state.project_config = Some(ProjectConfig {
             stubs: vec![],
             context: context_map,
-            deadline: None,
-            import_deadline: None,
             project: None,
             diagnostics: None,
         });
@@ -2449,8 +2447,6 @@ mod tests {
         state.project_config = Some(ProjectConfig {
             stubs: vec![],
             context: context_map,
-            deadline: None,
-            import_deadline: None,
             project: None,
             diagnostics: None,
         });
@@ -2896,8 +2892,6 @@ mod tests {
         state.project_config = Some(ProjectConfig {
             stubs: vec![],
             context: context_map,
-            deadline: None,
-            import_deadline: None,
             project: None,
             diagnostics: None,
         });

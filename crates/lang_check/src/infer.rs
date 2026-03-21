@@ -61,7 +61,7 @@ enum OverloadProgress {
 
 impl CheckCtx<'_> {
     pub fn infer_prog(self, groups: GroupedDefs) -> Result<InferenceResult, Box<TixDiagnostic>> {
-        let (result, diagnostics, _timed_out) = self.infer_prog_partial(groups);
+        let (result, diagnostics, _bailed_out) = self.infer_prog_partial(groups);
         // Return the first error diagnostic (skip warnings like UnresolvedName).
         for diag in diagnostics {
             if !matches!(
@@ -81,8 +81,8 @@ impl CheckCtx<'_> {
     /// groups after a failed one still get inferred, so the LSP can show types
     /// for successfully-inferred bindings alongside error diagnostics.
     ///
-    /// Returns `(result, diagnostics, timed_out)` where `timed_out` is true
-    /// when inference was aborted because the deadline was exceeded.
+    /// Returns `(result, diagnostics, bailed_out)` where `bailed_out` is true
+    /// when inference was aborted due to memory pressure (RSS limit).
     pub fn infer_prog_partial(
         mut self,
         groups: GroupedDefs,
@@ -110,11 +110,12 @@ impl CheckCtx<'_> {
 
         let n_groups = groups.len();
         for (i, group) in groups.into_iter().enumerate() {
-            // Check deadline before each SCC group so a single file can't
-            // block the LSP indefinitely. Partial results (types inferred
-            // so far) are still returned.
-            if self.past_deadline() {
-                log::warn!("inference deadline exceeded after {i}/{n_groups} SCC groups");
+            // Check memory pressure before each SCC group. Partial results
+            // (types inferred so far) are still returned.
+            if self.should_bail() {
+                log::warn!(
+                    "inference bailed out (memory pressure) after {i}/{n_groups} SCC groups"
+                );
                 break;
             }
             let group_names: Vec<_> = group
@@ -133,7 +134,7 @@ impl CheckCtx<'_> {
             }
         }
 
-        if !self.past_deadline() {
+        if !self.should_bail() {
             let root_err = log_if_slow!(10, self.infer_root(), |elapsed| log::info!(
                 "infer_root took {:.1}ms (cache: {}, slots: {}, RSS: {:.0}MB)",
                 elapsed.as_secs_f64() * 1000.0,
@@ -145,7 +146,7 @@ impl CheckCtx<'_> {
                 errors.push(err);
             }
         } else {
-            log::warn!("skipping infer_root due to deadline");
+            log::warn!("skipping infer_root due to memory pressure");
         }
 
         // Convert internal errors and warnings to display-ready diagnostics
@@ -157,9 +158,9 @@ impl CheckCtx<'_> {
         // Check memory pressure before canonicalization. Canonicalization can
         // easily double RSS (it creates OutputTy for every expression), so if
         // we're already using a large fraction of the memory budget, force the
-        // deadline_exceeded path which skips expr-level canonicalization and
-        // degrades name-level types to cheap fallbacks.
-        if !self.deadline_exceeded {
+        // bailed_out path which skips expr-level canonicalization and degrades
+        // name-level types to cheap fallbacks.
+        if !self.bailed_out {
             if let Some(limit) = self.rss_limit_mb {
                 let rss = rss_mb();
                 if rss > limit {
@@ -169,13 +170,13 @@ impl CheckCtx<'_> {
                         rss,
                         limit,
                     );
-                    self.deadline_exceeded = true;
+                    self.bailed_out = true;
                 }
             }
         }
 
         // Capture before self is moved into Collector.
-        let timed_out = self.past_deadline();
+        let bailed_out = self.should_bail();
 
         let mut collector = Collector::new(self);
         let result = log_if_slow!(50, collector.finalize_inference(), |elapsed| log::info!(
@@ -183,7 +184,7 @@ impl CheckCtx<'_> {
             elapsed.as_secs_f64() * 1000.0,
             rss_mb(),
         ));
-        (result, diagnostics, timed_out)
+        (result, diagnostics, bailed_out)
     }
 
     fn infer_root(&mut self) -> Result<(), LocatedError> {
@@ -424,7 +425,7 @@ impl CheckCtx<'_> {
         let infer_start = std::time::Instant::now();
 
         for def in group {
-            if self.past_deadline() {
+            if self.should_bail() {
                 break;
             }
 
@@ -606,10 +607,10 @@ impl CheckCtx<'_> {
             return cached;
         }
 
-        // Bail out early if the deadline was exceeded. Return the original
+        // Bail out early if memory pressure was detected. Return the original
         // type as-is — extrusion results will be incomplete but we avoid
         // spending unbounded time in the bounds-copying loop.
-        if self.deadline_exceeded {
+        if self.bailed_out {
             return ty_id;
         }
 
@@ -907,7 +908,7 @@ impl CheckCtx<'_> {
         // Fixed-point loop: keep trying until no more progress.
         let mut iterations = 0;
         loop {
-            if self.past_deadline() {
+            if self.should_bail() {
                 break;
             }
 

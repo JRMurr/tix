@@ -58,27 +58,16 @@ impl CheckCtx<'_> {
         self.constrain_at(b, a)
     }
 
-    /// How often (in constrain() calls) to check the deadline. constrain() is
-    /// the main hotspot for cascading work, so checking here gives much finer
-    /// granularity than checking in infer_expr (which may only be called once
-    /// before a huge constrain cascade runs).
-    const DEADLINE_CHECK_INTERVAL: u32 = 1024;
-
     /// Record that `sub <: sup` — `sub` is a subtype of `sup`.
     pub fn constrain(&mut self, sub: TyId, sup: TyId) -> Result<(), InferenceError> {
-        // Periodic deadline/cancellation check inside the constraint propagation
-        // hotpath. This catches cases where a single infer_expr call triggers a
-        // huge constrain() cascade (e.g. structural subtyping on large attrsets),
-        // or when the LSP cancels analysis because a newer edit arrived.
-        // `past_deadline()` caches a positive result in `deadline_exceeded`, so
+        // Periodic RSS check inside the constraint propagation hotpath.
+        // This catches cases where a single infer_expr call triggers a huge
+        // constrain() cascade (e.g. structural subtyping on large attrsets).
+        // `should_bail()` caches a positive result in `bailed_out`, so
         // the first check is O(1) for subsequent calls.
-        if self.deadline.is_some() || self.cancel_flag.is_some() {
+        if self.rss_limit_mb.is_some() {
             self.op_counter = self.op_counter.wrapping_add(1);
-            if self
-                .op_counter
-                .is_multiple_of(Self::DEADLINE_CHECK_INTERVAL)
-                && self.past_deadline()
-            {
+            if self.op_counter.is_multiple_of(Self::RSS_CHECK_INTERVAL) && self.should_bail() {
                 log::warn!(
                     "inference aborted during constrain (after {} operations, {} cache entries, {} type slots)",
                     self.op_counter,
@@ -87,7 +76,7 @@ impl CheckCtx<'_> {
                 );
                 return Ok(());
             }
-        } else if self.deadline_exceeded {
+        } else if self.bailed_out {
             return Ok(());
         }
 

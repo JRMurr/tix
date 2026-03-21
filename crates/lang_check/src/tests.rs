@@ -2135,7 +2135,7 @@ mod import_tests {
                     dep_resolution.types,
                     Arc::default(),
                 );
-                let (dep_result, _diags, _timed_out) = dep_check.infer_prog_partial(dep_groups);
+                let (dep_result, _diags, _bailed_out) = dep_check.infer_prog_partial(dep_groups);
                 if let Some(&root_ty) = dep_result.expr_ty_map.get(dep_module.entry_expr) {
                     ephemeral_stubs
                         .insert(dep_path, OwnedTy::new(dep_result.arena.clone(), root_ty));
@@ -2166,7 +2166,7 @@ mod import_tests {
             resolution.types,
             Arc::default(),
         );
-        let (result, diagnostics, _timed_out) = entry_check.infer_prog_partial(entry_groups);
+        let (result, diagnostics, _bailed_out) = entry_check.infer_prog_partial(entry_groups);
 
         let root_ty = *result
             .expr_ty_map
@@ -6938,13 +6938,6 @@ fn inline_alias_references_another() {
 /// Helper: type-check with CheckBuilder (which includes lowering
 /// diagnostics) and return just the diagnostics.
 fn collect_diagnostics(src: &str) -> Vec<TixDiagnostic> {
-    collect_diagnostics_with_deadline(src, None)
-}
-
-fn collect_diagnostics_with_deadline(
-    src: &str,
-    deadline: Option<std::time::Instant>,
-) -> Vec<TixDiagnostic> {
     let (db, file) = TestDatabase::single_file(src).unwrap();
     let result = crate::CheckBuilder::from_db(
         &db,
@@ -6953,7 +6946,6 @@ fn collect_diagnostics_with_deadline(
         HashMap::new(),
         Arc::default(),
     )
-    .deadline(deadline)
     .run();
     result.diagnostics
 }
@@ -7388,14 +7380,10 @@ fn rec_failed_def_not_reinferred() {
         }
     "};
 
-    // Use a tight deadline to catch performance regression: the fixed version
-    // completes in <10ms, the broken version would take seconds.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    let diags = collect_diagnostics_with_deadline(nix, Some(deadline));
+    let diags = collect_diagnostics(nix);
 
-    // Should complete well within the deadline. The test itself is the perf
-    // assertion: if the re-inference bug regresses, this would either timeout
-    // or take an unreasonable time.
+    // The test itself is the perf assertion: if the re-inference bug
+    // regresses, this would take an unreasonable time.
     assert!(
         !diags.is_empty(),
         "should have type errors from mkValue's type mismatch"
@@ -7569,87 +7557,6 @@ fn functor_chained_call() {
     "};
     let ty = get_inferred_root(nix);
     assert_eq!(ty, expected_ty!(Int));
-}
-
-// ==============================================================================
-// Timeout / partial results
-// ==============================================================================
-
-/// A past deadline causes timed_out=true.
-#[test]
-fn timeout_produces_partial_results() {
-    use std::collections::HashMap;
-    use std::sync::Arc;
-    use std::time::{Duration, Instant};
-
-    let src = "let x = 1; y = 2; in x + y";
-    let (db, file) = lang_ast::tests::TestDatabase::single_file(src).unwrap();
-    let past = Instant::now() - Duration::from_secs(1);
-    let result = crate::CheckBuilder::from_db(
-        &db,
-        file,
-        Arc::new(TypeAliasRegistry::new()),
-        HashMap::new(),
-        Arc::new(HashMap::new()),
-    )
-    .deadline(Some(past))
-    .run();
-
-    assert!(
-        result.timed_out,
-        "should report timed_out with past deadline"
-    );
-}
-
-/// A pre-set cancel flag causes early exit.
-#[test]
-fn cancel_flag_stops_inference() {
-    use std::collections::HashMap;
-    use std::sync::atomic::AtomicBool;
-    use std::sync::Arc;
-
-    let src = "let x = 1; y = 2; in x + y";
-    let (db, file) = lang_ast::tests::TestDatabase::single_file(src).unwrap();
-    let cancel = Arc::new(AtomicBool::new(true));
-    let result = crate::CheckBuilder::from_db(
-        &db,
-        file,
-        Arc::new(TypeAliasRegistry::new()),
-        HashMap::new(),
-        Arc::new(HashMap::new()),
-    )
-    .cancel_flag(Some(cancel))
-    .run();
-
-    assert!(
-        result.timed_out,
-        "pre-set cancel flag should cause timed_out"
-    );
-}
-
-/// Timeout diagnostic lists missing bindings when not all were inferred.
-#[test]
-fn timeout_diagnostic_lists_missing_bindings() {
-    use std::collections::HashMap;
-    use std::sync::Arc;
-    use std::time::{Duration, Instant};
-
-    let src = "let a = 1; b = 2; c = 3; d = 4; e = 5; in a + b + c + d + e";
-    let (db, file) = lang_ast::tests::TestDatabase::single_file(src).unwrap();
-    let past = Instant::now() - Duration::from_secs(1);
-    let result = crate::CheckBuilder::from_db(
-        &db,
-        file,
-        Arc::new(TypeAliasRegistry::new()),
-        HashMap::new(),
-        Arc::new(HashMap::new()),
-    )
-    .deadline(Some(past))
-    .run();
-
-    assert!(result.timed_out, "should report timed_out");
-    // CheckBuilder.run() sets timed_out; the InferenceTimeout diagnostic is
-    // attached by the Salsa-level wrapper. Verify the flag is set.
 }
 
 // ==============================================================================

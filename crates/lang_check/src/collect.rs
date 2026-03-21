@@ -53,13 +53,13 @@ struct Canonicalizer<'a> {
     cache: FxHashMap<(TyId, Polarity), TyRef>,
     in_progress: FxHashSet<(TyId, Polarity)>,
     /// Optional deadline for canonicalization. When exceeded, remaining
-    /// types degrade to TyVar (same as inference deadline_exceeded).
+    /// types degrade to TyVar (same as inference bailed_out).
     deadline: Option<Instant>,
     /// Operation counter for periodic deadline checks.
     op_counter: u32,
     /// Set when a deadline check fires. Once set, canonicalize() returns
     /// TyVar immediately for all subsequent calls.
-    deadline_exceeded: bool,
+    bailed_out: bool,
 }
 
 impl<'a> Canonicalizer<'a> {
@@ -71,7 +71,7 @@ impl<'a> Canonicalizer<'a> {
             in_progress: FxHashSet::default(),
             deadline: None,
             op_counter: 0,
-            deadline_exceeded: false,
+            bailed_out: false,
         }
     }
 
@@ -89,7 +89,7 @@ impl<'a> Canonicalizer<'a> {
     /// an owned OutputTy for normalization (flatten, filter, etc.).
     fn canonicalize_child(&mut self, ty_id: TyId, polarity: Polarity) -> TyRef {
         // Fast path: if deadline already exceeded, return degraded type.
-        if self.deadline_exceeded {
+        if self.bailed_out {
             return self.arena.intern(OutputTy::TyVar(ty_id.0));
         }
 
@@ -102,7 +102,7 @@ impl<'a> Canonicalizer<'a> {
                 && self.deadline.is_some_and(|d| Instant::now() > d)
             {
                 log::warn!("canonicalization deadline exceeded, degrading remaining types");
-                self.deadline_exceeded = true;
+                self.bailed_out = true;
                 return self.arena.intern(OutputTy::TyVar(ty_id.0));
             }
         }
@@ -1153,7 +1153,7 @@ impl<'db> Collector<'db> {
 
     #[tracing::instrument(level = "info", skip_all, name = "canonicalize")]
     pub fn finalize_inference(&mut self) -> InferenceResult {
-        let deadline_exceeded = self.ctx.deadline_exceeded;
+        let bailed_out = self.ctx.bailed_out;
 
         let name_tys: Vec<_> = self
             .ctx
@@ -1171,14 +1171,12 @@ impl<'db> Collector<'db> {
         let mut expr_ty_map = ArenaMap::with_capacity(expr_cnt);
 
         // Create a Canonicalizer that borrows the type storage for this pass.
-        // Wire the inference deadline into canonicalization: if inference
-        // already exceeded its deadline, give canonicalization a short budget
-        // (500ms) for essential name-level types. Otherwise use the remaining
-        // inference deadline.
-        let canon_deadline = if deadline_exceeded {
+        // If inference bailed out (memory pressure), give canonicalization a
+        // short budget (500ms) for essential name-level types.
+        let canon_deadline = if bailed_out {
             Some(Instant::now() + std::time::Duration::from_millis(500))
         } else {
-            self.ctx.deadline
+            None
         };
         let mut canon = Canonicalizer::new(&self.ctx.types.storage);
         if let Some(d) = canon_deadline {
@@ -1195,10 +1193,10 @@ impl<'db> Collector<'db> {
                     // The early snapshot captured no type information (bare variable),
                     // likely because enclosing lambda parameter annotations hadn't
                     // propagated yet. Fall back to late canonicalization which sees
-                    // the fully-constrained bounds — unless the deadline was exceeded,
-                    // in which case use a degraded unconstrained type to avoid
-                    // expensive canonicalization on degenerate type graphs.
-                    if deadline_exceeded {
+                    // the fully-constrained bounds — unless we bailed out, in which
+                    // case use a degraded unconstrained type to avoid expensive
+                    // canonicalization on degenerate type graphs.
+                    if bailed_out {
                         canon.arena.intern(OutputTy::TyVar(0))
                     } else {
                         late_canon_count += 1;
@@ -1209,10 +1207,10 @@ impl<'db> Collector<'db> {
                     let mut cache = FxHashMap::default();
                     import_from_arena(&mut canon.arena, early_arena, *early_ty, &mut cache)
                 }
-            } else if deadline_exceeded {
-                // When the deadline was exceeded, use a degraded unconstrained type
-                // for names without an early-canonical snapshot. Late canonicalization
-                // can be very expensive on degenerate type graphs from partial inference.
+            } else if bailed_out {
+                // When bailed out, use a degraded unconstrained type for names
+                // without an early-canonical snapshot. Late canonicalization can
+                // be very expensive on degenerate type graphs from partial inference.
                 canon.arena.intern(OutputTy::TyVar(0))
             } else {
                 late_canon_count += 1;
@@ -1232,13 +1230,13 @@ impl<'db> Collector<'db> {
             );
         }
 
-        // When the inference deadline was exceeded, skip expression-level
-        // canonicalization. It iterates over every expression in the module
-        // and can be very expensive when the type graph has degenerate bounds
-        // from partial inference. Name-level types (above) are sufficient for
+        // When inference bailed out, skip expression-level canonicalization.
+        // It iterates over every expression in the module and can be very
+        // expensive when the type graph has degenerate bounds from partial
+        // inference. Name-level types (above) are sufficient for
         // hover/completion; expr-level types are mainly used for diagnostics
-        // and inlay hints, which are less critical on timed-out files.
-        if !deadline_exceeded {
+        // and inlay hints, which are less critical on bailed-out files.
+        if !bailed_out {
             let t_exprs = std::time::Instant::now();
             let expr_tys: Vec<_> = self
                 .ctx
