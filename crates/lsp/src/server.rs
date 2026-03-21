@@ -764,6 +764,47 @@ impl LanguageServer for TixLanguageServer {
                                 );
                             }
 
+                            // Runtime stub generation: if TIX_BUILTIN_STUBS is not
+                            // set and [stubs.generate] is configured, spawn a
+                            // background task to generate stubs via nix build.
+                            if std::env::var("TIX_BUILTIN_STUBS").is_err() {
+                                if let Some(gen_config) = project_cfg.stubs.generate() {
+                                    let gen_config = gen_config.clone();
+                                    let gen_config_dir = config_dir.clone();
+                                    let gen_state = self.state.clone();
+                                    let gen_event_tx = self.event_tx.clone();
+                                    let gen_snapshots = self.snapshots.clone();
+
+                                    tokio::task::spawn_blocking(move || {
+                                        log::info!("Starting runtime stub generation...");
+                                        match crate::store_stubs::generate_stubs(
+                                            &gen_config,
+                                            &gen_config_dir,
+                                        ) {
+                                            Ok(dir) => {
+                                                log::info!("Generated stubs: {}", dir.display());
+                                                let mut state = gen_state.lock();
+                                                Arc::make_mut(&mut state.registry)
+                                                    .set_builtin_stubs_dir(dir);
+
+                                                // Re-analyze all open files so they
+                                                // pick up the new stubs.
+                                                for entry in gen_snapshots.iter() {
+                                                    gen_event_tx
+                                                        .send(AnalysisEvent::ReanalyzeFile {
+                                                            path: entry.key().clone(),
+                                                        })
+                                                        .ok();
+                                                }
+                                            }
+                                            Err(e) => {
+                                                log::warn!("Stub generation failed: {e}");
+                                            }
+                                        }
+                                    });
+                                }
+                            }
+
                             // Load stubs from tix.toml config.
                             let mut state = self.state.lock();
                             for stub in project_cfg.stubs.paths() {
