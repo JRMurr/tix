@@ -46,6 +46,15 @@ let
     # needed extra dependencies like nixfmt. Skip them here to avoid
     # duplicating test deps in the binary build.
     doCheck = false;
+
+    # Ship support files for runtime stub generation. When tix runs outside
+    # a dev shell, it finds these via its own store path.
+    postInstall = ''
+      mkdir -p $out/share/tix
+      cp ${../stubs/lib.tix} $out/share/tix/lib.tix
+      cp ${../nix/generate-stubs-runtime.nix} $out/share/tix/generate-stubs-runtime.nix
+      cp ${../tools/extract-options.nix} $out/share/tix/extract-options.nix
+    '';
   });
 
   # ==============================================================================
