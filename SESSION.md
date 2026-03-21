@@ -24,7 +24,9 @@ by design, or informational notes.
   `import_from_arena()` deep-copying the entire external arena subtree, we now
   store a zero-copy reference via `Arc<TypeArena>`. The Extern variant is treated
   as a leaf by all traversal/simplification code and delegates display/predicates
-  to the external arena.
+  to the external arena. Additionally, `constrain_attrset_frozen` handles
+  `AttrSet <: Frozen(AttrSet)` lazily (field-by-field) instead of fully interning
+  the Frozen type. `initial-packages.nix` peak RSS dropped from ~7 GB to ~4.4 GB.
 
 - ~~**Let-binding loses union type**~~: Fixed via `resolve_to_single_concrete_id`
   which compares type heads instead of TyIds, preserving unions through
