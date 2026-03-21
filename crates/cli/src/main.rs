@@ -152,7 +152,7 @@ enum Command {
 
     /// Start the Language Server (LSP) on stdin/stdout
     Lsp {
-        /// Virtual address space limit in MiB (default: 4096).
+        /// RSS memory limit in MiB (default: 80% of system RAM).
         /// Set to 0 to disable. Overrides TIX_MEM_LIMIT env var.
         #[arg(long, value_name = "MIB")]
         mem_limit: Option<u64>,

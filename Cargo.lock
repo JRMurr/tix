@@ -1896,6 +1896,7 @@ dependencies = [
  "lang_ast",
  "lang_check",
  "lang_ty",
+ "libc",
  "log",
  "parking_lot",
  "proptest",
