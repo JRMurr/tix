@@ -57,17 +57,10 @@ by design, or informational notes.
 - Dynamic attrset keys not tracked in recursive sets (`nameres.rs`): could cause
   incorrect SCC grouping in edge cases.
 
-- **OOM on full nixpkgs pkgs/**: even with `-j 1`, certain files cause
-  unbounded memory growth during inference or canonicalization, eventually
-  getting OOM-killed on 32 GB RAM. Known example:
-  - `chromium/common.nix` (976 lines, 278 let-bindings) — canonicalization
-    of 278 names eats >32 GB. The types are enormous due to deep attrset
-    nesting and conditional flags.
-
-  Root cause: canonicalization and OutputTy construction have no memory budget.
-  Possible mitigations: memory-bounded canonicalization (bail out if OutputTy
-  exceeds a depth/size limit), iterative instead of recursive tree walks,
-  or a per-file RSS watchdog.
+- **OOM on full nixpkgs pkgs/**: even with `-j 1`, certain files may cause
+  unbounded memory growth during inference or canonicalization. The chromium/
+  default.nix OOM (caused by `intern_output_ty` lacking TyRef dedup) was fixed,
+  but other pathological files may still exist.
 
 - **~20 GB RSS on full nixpkgs** (parallel): checking all 42k files in parallel
   uses ~20 GB RAM. Most comes from parallel inference holding all files' type
