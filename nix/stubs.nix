@@ -16,6 +16,7 @@ import ./generate-stubs-runtime.nix {
   nixpkgs-path = pkgs.path;
   tix-path = tix;
   home-manager-path = home-manager;
+  inherit (pkgs.stdenv.hostPlatform) system;
   # At flake build time, these files are in the source tree rather than
   # shipped inside the tix store path.
   extract-options-nix = ../tools/extract-options.nix;

@@ -16,10 +16,13 @@
   home-manager-path ? null,
   extract-options-nix ? (tix-path + "/share/tix/extract-options.nix"),
   lib-tix-path ? (tix-path + "/share/tix/lib.tix"),
+  # In pure flake evaluation, builtins.currentSystem isn't available.
+  # The flake passes system explicitly; runtime (impure) uses the default.
+  system ? builtins.currentSystem,
 }:
 
 let
-  pkgs = import nixpkgs-path { };
+  pkgs = import nixpkgs-path { inherit system; };
   lib = pkgs.lib;
 
   # Suppress deprecation/rename warnings from the NixOS and Home Manager
