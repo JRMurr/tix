@@ -23,6 +23,7 @@ mod state;
 pub mod test_util;
 mod ty_nav;
 mod type_def;
+mod warmup;
 mod workspace_symbols;
 
 use lang_check::aliases::TypeAliasRegistry;

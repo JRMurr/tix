@@ -37,6 +37,23 @@ by design, or informational notes.
 - **rnix error recovery** on incomplete code (`pkgs.` with no field) can cascade,
   mangling subsequent expressions. Upstream issue.
 
+- **Narrowing through `with lib` not recognized**: `with lib; isBool val` doesn't
+  trigger narrowing because the `with` scope resolution can't trace back to the
+  builtin predicate. Affects nixpkgs modules using `with lib;` pattern (e.g.,
+  privoxy.nix, knot.nix). Would need `is_builtin_call` to handle WithExprs.
+
+- **`//` merge errors on cross-file types**: E004 "both sides must be attrsets"
+  fires on patterns like `ffmpeg-base.meta // { ... }` where the LHS type comes
+  from a callPackage/import that doesn't resolve to a concrete AttrSet during
+  deferred merge resolution. The diagnostic renders resolved bounds (showing both
+  sides as attrsets), but at resolution time the types are still variables.
+
+- **`int + int` produces `InvalidBinOp` in isolated warmup context**: When running
+  inference via `run_inference()` on `let b = import ./b.nix; in b + 1` where b.nix
+  evaluates to `42`, the `+` operator produces a spurious `InvalidBinOp` diagnostic
+  with both operands typed as `int`. May be related to overload resolution seeing
+  the import's type after coordinator lookup vs direct inference.
+
 ### Minor Untracked Items
 
 - `test/strings.nix`: `nameFromURL :: String -> String` annotation has wrong arity
@@ -59,7 +76,9 @@ by design, or informational notes.
 
 - **OOM on full nixpkgs pkgs/**: even with `-j 1`, certain files may cause
   unbounded memory growth during inference or canonicalization. The chromium/
-  default.nix OOM (caused by `intern_output_ty` lacking TyRef dedup) was fixed,
+  default.nix OOM (caused by `intern_output_ty` lacking TyRef dedup) and the
+  python-packages.nix OOM (caused by `infer_expr` re-evaluating shared
+  sub-expressions O(N²) times in `inherit (from) f1..fN` patterns) were fixed,
   but other pathological files may still exist.
 
 - **~20 GB RSS on full nixpkgs** (parallel): checking all 42k files in parallel

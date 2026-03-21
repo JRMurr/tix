@@ -895,7 +895,7 @@ impl AnalysisState {
 /// import, records the name→path link. This powers Select-through-import
 /// navigation (e.g. `x.child` where `x = import ./foo.nix` jumps to `child`
 /// in foo.nix).
-fn build_name_to_import(
+pub(crate) fn build_name_to_import(
     module: &Module,
     import_targets: &HashMap<ExprId, PathBuf>,
     grouped_defs: &GroupedDefs,
