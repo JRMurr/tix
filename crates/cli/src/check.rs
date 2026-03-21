@@ -342,6 +342,14 @@ pub fn run_check_project(
     let infer_one = |path: &PathBuf| -> Option<RenderableResult> {
         let (_, fm) = metadata_map.remove(path)?;
 
+        let expr_count = expr_counts.get(path).copied().unwrap_or(0);
+        tracing::info!(
+            file = %lang_ast::display_path(&fm.file_path),
+            exprs = expr_count,
+            rss_mb = format_args!("{:.0}", lang_check::rss_mb()),
+            "starting file"
+        );
+
         // Consume the pre-extracted SyntaxBundle from the DashMap.
         let bundle = match syntax_provider.syntax_for_file(&fm.file_path) {
             Some(b) => b,
@@ -393,6 +401,14 @@ pub fn run_check_project(
             coordinator.set_signature(&fm.file_path, lang_check::FileSignature { root_ty: owned });
         }
 
+        tracing::info!(
+            file = %lang_ast::display_path(&fm.file_path),
+            rss_mb = format_args!("{:.0}", lang_check::rss_mb()),
+            diags = check_result.diagnostics.len(),
+            timed_out = check_result.timed_out,
+            "finished file"
+        );
+
         // Extract only diagnostics + timed_out. The heavy InferenceResult
         // is dropped here, keeping memory bounded.
         Some(RenderableResult {
@@ -404,7 +420,14 @@ pub fn run_check_project(
         })
     };
 
-    for layer in &layers {
+    for (layer_idx, layer) in layers.iter().enumerate() {
+        tracing::info!(
+            layer = layer_idx,
+            files = layer.len(),
+            rss_mb = format_args!("{:.0}", lang_check::rss_mb()),
+            "starting layer"
+        );
+
         // Partition into heavy files (run sequentially to bound memory) and
         // light files (run in parallel as before).
         let (heavy, light): (Vec<_>, Vec<_>) = layer
