@@ -1333,6 +1333,49 @@ test_case!(
     { "x": Int, "y": String }
 );
 
+// Regression test: inherit (from) with many fields must not cause O(N²) slot
+// growth. Before the infer_expr caching fix, each field re-evaluated the shared
+// `from` expression, creating N copies of type variables that propagated through
+// the shared pre-allocated slot. With 200 fields this would create ~6M slots;
+// with caching it stays under 10K.
+#[test]
+fn inherit_from_many_fields_no_quadratic_blowup() {
+    // Generate: let src = { f0 = 0; f1 = 1; ...; f199 = 199; }; in { inherit (src) f0 f1 ... f199; }
+    let n = 200;
+    let mut src = String::from("let src = { ");
+    for i in 0..n {
+        src.push_str(&format!("f{i} = {i}; "));
+    }
+    src.push_str("}; in { inherit (src) ");
+    for i in 0..n {
+        src.push_str(&format!("f{i} "));
+    }
+    src.push_str("; }");
+
+    let (module, result) = check_str(&src);
+    let inference = result.expect("inference should succeed");
+    // Verify the result is an attrset with the expected fields.
+    let root_ref = *inference
+        .expr_ty_map
+        .get(module.entry_expr)
+        .expect("root type");
+    let root = &inference.arena[root_ref];
+    match root {
+        lang_ty::OutputTy::AttrSet(attr) => {
+            assert_eq!(attr.fields.len(), n, "should have {n} fields");
+        }
+        _ => panic!("expected attrset, got: {root:?}"),
+    }
+    // The key assertion: slot count should be linear, not quadratic.
+    // Without the fix, 200 fields would create ~6M slots.
+    // With the fix, it should be well under 10K.
+    assert!(
+        inference.arena.len() < 10_000,
+        "arena size {} is too large — possible quadratic blowup in inherit (from) inference",
+        inference.arena.len()
+    );
+}
+
 // ==============================================================================
 // Overload + Number interaction
 // ==============================================================================
