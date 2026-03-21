@@ -104,6 +104,46 @@ unknown_type = "hint"  # "off", "hint", "warning", or "error" (default: "hint")
 
 The LSP editor settings (`tix.diagnostics.unknownType`) take precedence over `tix.toml` when both are set.
 
+### Runtime stub generation
+
+Instead of pre-building stubs with the `with-stubs` package, tix can generate them at runtime on first use. The result is cached in the Nix store and reused on subsequent runs.
+
+```toml
+[stubs.generate]
+nixpkgs = "/nix/store/...-nixpkgs-src"
+home-manager = "/nix/store/...-home-manager-src"
+```
+
+Each source can be a direct store path or a Nix expression:
+
+```toml
+[stubs.generate]
+nixpkgs = { expr = "(builtins.getFlake (toString ./.)).inputs.nixpkgs" }
+home-manager = { expr = "(builtins.getFlake (toString ./.)).inputs.home-manager" }
+```
+
+- **nixpkgs** (required) — path to nixpkgs source, or `{ expr = "..." }` to evaluate
+- **home-manager** (optional) — path to home-manager source; omit to skip HM stubs
+
+On first run, tix invokes `nix build` to generate `.tix` stubs from the NixOS option tree, Home Manager options, and nixpkgs package set. This takes 30-60 seconds. Subsequent runs are instant thanks to a lightweight file cache (`~/.cache/tix/store-stubs/`). Changing either nixpkgs or tix version triggers regeneration.
+
+`[stubs.generate]` can coexist with manual stub paths:
+
+```toml
+[stubs]
+paths = ["./my-extra-stubs/"]
+
+[stubs.generate]
+nixpkgs = { expr = "(builtins.getFlake (toString ./.)).inputs.nixpkgs" }
+```
+
+**Resolution priority:**
+1. `TIX_BUILTIN_STUBS` env var (always wins)
+2. `[stubs.generate]` runtime generation
+3. Compiled-in minimal stubs
+
+**Requirements:** The tix binary must be installed via Nix (running from `/nix/store/...`). In dev mode (cargo build), use `TIX_BUILTIN_STUBS` or `nix build .#stubs` instead.
+
 ### Generating tix.toml
 
 Run `tix init` to automatically generate a `tix.toml` for your project:
