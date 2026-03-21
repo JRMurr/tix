@@ -767,8 +767,13 @@ impl LanguageServer for TixLanguageServer {
                             // Runtime stub generation: if TIX_BUILTIN_STUBS is not
                             // set and [stubs.generate] is configured, spawn a
                             // background task to generate stubs via nix build.
-                            if std::env::var("TIX_BUILTIN_STUBS").is_err() {
-                                if let Some(gen_config) = project_cfg.stubs.generate() {
+                            if let Some(gen_config) = project_cfg.stubs.generate() {
+                                if std::env::var("TIX_BUILTIN_STUBS").is_ok() {
+                                    log::info!(
+                                        "[stubs.generate] configured but TIX_BUILTIN_STUBS is set, skipping runtime generation"
+                                    );
+                                } else {
+                                    log::info!("[stubs.generate] configured, spawning background stub generation");
                                     let gen_config = gen_config.clone();
                                     let gen_config_dir = config_dir.clone();
                                     let gen_state = self.state.clone();
