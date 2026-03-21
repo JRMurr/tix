@@ -232,6 +232,13 @@ impl CheckCtx<'_> {
                 self.constrain_lambda_frozen(sub_param, sub_body, &owned)
             }
 
+            // AttrSet on LHS vs Frozen on RHS: mirror of constrain_frozen_attrset.
+            (Ty::AttrSet(sub_attr), Ty::Frozen(owned)) => {
+                let owned = owned.clone();
+                let sub_attr = sub_attr.clone();
+                self.constrain_attrset_frozen(&sub_attr, &owned)
+            }
+
             // Frozen on RHS: full interning fallback.
             (_, Ty::Frozen(owned)) => {
                 let owned = owned.clone();
@@ -768,6 +775,51 @@ impl CheckCtx<'_> {
                     body: sub_body,
                 });
                 self.constrain(sub_id, interned)
+            }
+        }
+    }
+
+    /// Lazy field-level materialization for `AttrSet <: Frozen(OutputTy)`.
+    ///
+    /// Mirror of `constrain_frozen_attrset`. For each field in the sub attrset,
+    /// look it up in the frozen attrset and constrain field-by-field without
+    /// interning the entire frozen type.
+    fn constrain_attrset_frozen(
+        &mut self,
+        sub_attr: &AttrSetTy<TyId>,
+        owned: &OwnedTy,
+    ) -> Result<(), InferenceError> {
+        let root = owned.arena.unwrap_named(owned.root);
+        let inner = owned.arena.get(root);
+
+        match inner {
+            OutputTy::AttrSet(frozen_attr) => {
+                let frozen_attr = frozen_attr.clone();
+                // For each field in the sub attrset, constrain against the
+                // corresponding frozen field.
+                for (key, &sub_field) in &sub_attr.fields {
+                    if let Some(&frozen_field_ref) = frozen_attr.fields.get(key) {
+                        let field_owned = OwnedTy::new(owned.arena.clone(), frozen_field_ref);
+                        let field_ty = self.intern_frozen_owned_ty(&field_owned);
+                        self.constrain(sub_field, field_ty)?;
+                    }
+                    // If the frozen attrset doesn't have this field but is open,
+                    // that's fine — no constraint needed.
+                }
+
+                // Propagate dyn_ty constraints.
+                if let (Some(sub_dyn), Some(frozen_dyn)) = (sub_attr.dyn_ty, frozen_attr.dyn_ty) {
+                    let dyn_owned = OwnedTy::new(owned.arena.clone(), frozen_dyn);
+                    let dyn_ty = self.intern_frozen_owned_ty(&dyn_owned);
+                    self.constrain(sub_dyn, dyn_ty)?;
+                }
+
+                Ok(())
+            }
+            _ => {
+                let interned = self.intern_output_ty(owned);
+                let sup_id = self.alloc_concrete(Ty::AttrSet(sub_attr.clone()));
+                self.constrain(sup_id, interned)
             }
         }
     }
