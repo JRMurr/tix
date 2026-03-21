@@ -147,21 +147,8 @@ pub fn run_batch_warmup(
                 Arc::default()
             };
 
-        // Convert context args to OutputTy.
-        let mut context_arena = lang_ty::TypeArena::new();
-        let context_arg_types: HashMap<SmolStr, lang_ty::OutputTy> = context_args
-            .iter()
-            .map(|(name, parsed_ty)| {
-                let output_ty = crate::ty_nav::parsed_ty_to_output_ty(
-                    parsed_ty,
-                    &registry_mut,
-                    &mut context_arena,
-                    0,
-                );
-                (name.clone(), output_ty)
-            })
-            .collect();
-        let context_arg_arena = Arc::new(context_arena);
+        let (context_arg_types, context_arg_arena) =
+            crate::ty_nav::convert_context_args(&context_args, &registry_mut);
 
         prepared.push(PreparedFile {
             path: file_path.clone(),
@@ -270,19 +257,21 @@ pub fn run_batch_warmup(
 
         let import_paths: Vec<PathBuf> = import_targets.values().cloned().collect();
 
-        // Build LSP data structures.
+        // Build LSP data structures. SyntaxData is built first by moving
+        // fields out of pp; FileAnalysis clones from it to avoid redundant
+        // copies from pp.
         let syntax_data = SyntaxData {
             parsed: pp.parsed,
             line_index: pp.line_index,
-            module: pp.module.clone(),
-            module_indices: pp.module_indices.clone(),
-            source_map: pp.source_map.clone(),
-            name_res: pp.name_res.clone(),
-            scopes: pp.scopes.clone(),
-            import_targets: import_targets.clone(),
-            name_to_import: name_to_import.clone(),
-            context_arg_types: pp.context_arg_types.clone(),
-            context_arg_arena: Arc::clone(&pp.context_arg_arena),
+            module: pp.module,
+            module_indices: pp.module_indices,
+            source_map: pp.source_map,
+            name_res: pp.name_res,
+            scopes: pp.scopes,
+            import_targets,
+            name_to_import,
+            context_arg_types: pp.context_arg_types,
+            context_arg_arena: pp.context_arg_arena,
         };
 
         let inference_data = InferenceData {
@@ -293,16 +282,16 @@ pub fn run_batch_warmup(
             nix_file: pp.nix_file,
             line_index: syntax_data.line_index.clone(),
             parsed: syntax_data.parsed.clone(),
-            module: pp.module,
-            module_indices: pp.module_indices,
-            source_map: pp.source_map,
-            name_res: pp.name_res,
-            scopes: pp.scopes,
+            module: syntax_data.module.clone(),
+            module_indices: syntax_data.module_indices.clone(),
+            source_map: syntax_data.source_map.clone(),
+            name_res: syntax_data.name_res.clone(),
+            scopes: syntax_data.scopes.clone(),
             check_result,
-            import_targets,
-            name_to_import,
-            context_arg_types: pp.context_arg_types,
-            context_arg_arena: pp.context_arg_arena,
+            import_targets: syntax_data.import_targets.clone(),
+            name_to_import: syntax_data.name_to_import.clone(),
+            context_arg_types: syntax_data.context_arg_types.clone(),
+            context_arg_arena: Arc::clone(&syntax_data.context_arg_arena),
         };
 
         Some(WarmupFileResult {
@@ -361,19 +350,7 @@ pub fn run_batch_warmup(
 impl WarmupFileResult {
     pub fn to_snapshot(&self) -> FileSnapshot {
         FileSnapshot {
-            syntax: SyntaxData {
-                parsed: self.syntax_data.parsed.clone(),
-                line_index: self.syntax_data.line_index.clone(),
-                module: self.syntax_data.module.clone(),
-                module_indices: self.syntax_data.module_indices.clone(),
-                source_map: self.syntax_data.source_map.clone(),
-                name_res: self.syntax_data.name_res.clone(),
-                scopes: self.syntax_data.scopes.clone(),
-                import_targets: self.syntax_data.import_targets.clone(),
-                name_to_import: self.syntax_data.name_to_import.clone(),
-                context_arg_types: self.syntax_data.context_arg_types.clone(),
-                context_arg_arena: Arc::clone(&self.syntax_data.context_arg_arena),
-            },
+            syntax: self.syntax_data.clone(),
             inference: Some(self.inference_data.clone()),
         }
     }

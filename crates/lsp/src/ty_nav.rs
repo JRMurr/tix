@@ -292,6 +292,22 @@ pub(crate) fn extract_alias_name(ty: &OutputTy) -> Option<&SmolStr> {
 // Re-export from lang_check::aliases for backward compatibility within the LSP crate.
 pub(crate) use lang_check::aliases::parsed_ty_to_output_ty;
 
+/// Convert context args (from tix.toml) to OutputTy, sharing a single arena.
+pub(crate) fn convert_context_args(
+    context_args: &HashMap<SmolStr, comment_parser::ParsedTy>,
+    registry: &lang_check::aliases::TypeAliasRegistry,
+) -> (HashMap<SmolStr, OutputTy>, Arc<TypeArena>) {
+    let mut arena = TypeArena::new();
+    let types = context_args
+        .iter()
+        .map(|(name, parsed_ty)| {
+            let output_ty = parsed_ty_to_output_ty(parsed_ty, registry, &mut arena, 0);
+            (name.clone(), output_ty)
+        })
+        .collect();
+    (types, Arc::new(arena))
+}
+
 /// Collect attrpath segments from an Attrpath node, relative to a boundary position.
 ///
 /// When `inclusive` is true (hover), includes the segment whose end >= boundary.

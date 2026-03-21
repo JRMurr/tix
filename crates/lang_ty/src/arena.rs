@@ -49,12 +49,13 @@ impl TypeArena {
     /// Intern a type node. Returns existing index if structurally identical
     /// node already exists, otherwise allocates and returns new index.
     pub fn intern(&mut self, node: OutputTy) -> TyRef {
-        if let Some(&existing) = self.intern.get(&node) {
-            return existing;
+        match self.intern.entry(node) {
+            std::collections::hash_map::Entry::Occupied(e) => *e.get(),
+            std::collections::hash_map::Entry::Vacant(e) => {
+                let id = self.inner.alloc(e.key().clone());
+                *e.insert(id)
+            }
         }
-        let id = self.inner.alloc(node.clone());
-        self.intern.insert(node, id);
-        id
     }
 
     /// Look up a type by index.

@@ -41,6 +41,7 @@ use crate::project_config::ProjectConfig;
 
 /// Syntax-level data. Always present once a file has been analyzed at least once.
 /// All fields come from the same analysis pass and are internally consistent.
+#[derive(Clone)]
 pub struct SyntaxData {
     pub parsed: rnix::Parse<rnix::Root>,
     pub line_index: LineIndex,
@@ -528,23 +529,8 @@ impl AnalysisState {
                 Arc::default()
             };
 
-        // Pre-convert context args to OutputTy for the LSP to use as a fallback
-        // when the root lambda doesn't explicitly destructure a name. All entries
-        // share one arena so TyRef children remain valid when traversed together.
-        let mut context_arena = lang_ty::TypeArena::new();
-        let context_arg_types: HashMap<SmolStr, OutputTy> = context_args
-            .iter()
-            .map(|(name, parsed_ty)| {
-                let output_ty = crate::ty_nav::parsed_ty_to_output_ty(
-                    parsed_ty,
-                    &self.registry,
-                    &mut context_arena,
-                    0,
-                );
-                (name.clone(), output_ty)
-            })
-            .collect();
-        let context_arg_arena = Arc::new(context_arena);
+        let (context_arg_types, context_arg_arena) =
+            crate::ty_nav::convert_context_args(&context_args, &self.registry);
         let t_imports = t0.elapsed();
 
         // -- Phase 4: Type inference --
@@ -671,22 +657,8 @@ impl AnalysisState {
                 Arc::default()
             };
 
-        // All context arg types share a single arena so their TyRef children
-        // remain valid when navigated together in get_module_config_type.
-        let mut context_arena = lang_ty::TypeArena::new();
-        let context_arg_types: HashMap<SmolStr, OutputTy> = context_args
-            .iter()
-            .map(|(name, parsed_ty)| {
-                let output_ty = crate::ty_nav::parsed_ty_to_output_ty(
-                    parsed_ty,
-                    &self.registry,
-                    &mut context_arena,
-                    0,
-                );
-                (name.clone(), output_ty)
-            })
-            .collect();
-        let context_arg_arena = Arc::new(context_arena);
+        let (context_arg_types, context_arg_arena) =
+            crate::ty_nav::convert_context_args(&context_args, &self.registry);
 
         let syntax_duration = t0.elapsed();
 
