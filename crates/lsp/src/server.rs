@@ -746,8 +746,11 @@ impl LanguageServer for TixLanguageServer {
                         Ok(project_cfg) => {
                             log::info!("Loaded project config from {}", config_path.display());
 
-                            if !project_cfg.stubs.is_empty() {
-                                log::info!("Project stubs: {}", project_cfg.stubs.join(", "),);
+                            if !project_cfg.stubs.paths().is_empty() {
+                                log::info!(
+                                    "Project stubs: {}",
+                                    project_cfg.stubs.paths().join(", "),
+                                );
                             }
                             if !project_cfg.context.is_empty() {
                                 log::info!(
@@ -763,7 +766,7 @@ impl LanguageServer for TixLanguageServer {
 
                             // Load stubs from tix.toml config.
                             let mut state = self.state.lock();
-                            for stub in &project_cfg.stubs {
+                            for stub in project_cfg.stubs.paths() {
                                 let stub_path = config_dir.join(stub);
                                 if let Err(e) = crate::load_stubs(
                                     Arc::make_mut(&mut state.registry),

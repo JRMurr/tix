@@ -110,7 +110,7 @@ pub fn run_check_project(
     let mut registry = build_registry(no_default_stubs, &[])?;
 
     // Load config-level stubs.
-    for stub in &toml_config.stubs {
+    for stub in toml_config.stubs.paths() {
         let stub_path = config_dir.join(stub);
         if let Err(e) = load_stubs(&mut registry, &stub_path) {
             eprintln!(

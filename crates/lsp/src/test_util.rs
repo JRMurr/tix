@@ -226,7 +226,7 @@ mod internal {
                 },
             );
             state.project_config = Some(ProjectConfig {
-                stubs: vec![],
+                stubs: Default::default(),
                 context,
                 project: None,
                 diagnostics: None,

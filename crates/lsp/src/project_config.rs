@@ -17,9 +17,10 @@ use smol_str::SmolStr;
 /// Top-level `tix.toml` configuration.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ProjectConfig {
-    /// Global stub file paths or directories (relative to tix.toml).
+    /// Stub configuration: either a plain array of paths (`stubs = ["./stubs"]`)
+    /// or a table with `paths` and/or `generate` keys.
     #[serde(default)]
-    pub stubs: Vec<String>,
+    pub stubs: StubsConfig,
 
     /// Named contexts mapping file globs to module arg types.
     #[serde(default)]
@@ -32,6 +33,81 @@ pub struct ProjectConfig {
     /// Diagnostic severity overrides.
     #[serde(default)]
     pub diagnostics: Option<DiagnosticsProjectConfig>,
+}
+
+// ==============================================================================
+// Stubs Configuration
+// ==============================================================================
+
+/// The `stubs` field in tix.toml supports two formats:
+///
+/// 1. Array of paths (backward-compatible):
+///    ```toml
+///    stubs = ["./my-stubs/"]
+///    ```
+///
+/// 2. Table with optional `paths` and `generate` keys:
+///    ```toml
+///    [stubs]
+///    paths = ["./my-stubs/"]
+///    [stubs.generate]
+///    nixpkgs = "/nix/store/...-nixpkgs-src"
+///    ```
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum StubsConfig {
+    Paths(Vec<String>),
+    Table {
+        #[serde(default)]
+        paths: Vec<String>,
+        #[serde(default)]
+        generate: Option<StubsGenerateConfig>,
+    },
+}
+
+impl Default for StubsConfig {
+    fn default() -> Self {
+        StubsConfig::Paths(Vec::new())
+    }
+}
+
+impl StubsConfig {
+    /// Get the list of stub file/directory paths.
+    pub fn paths(&self) -> &[String] {
+        match self {
+            StubsConfig::Paths(paths) => paths,
+            StubsConfig::Table { paths, .. } => paths,
+        }
+    }
+
+    /// Get the runtime generation config, if configured.
+    pub fn generate(&self) -> Option<&StubsGenerateConfig> {
+        match self {
+            StubsConfig::Paths(_) => None,
+            StubsConfig::Table { generate, .. } => generate.as_ref(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.paths().is_empty() && self.generate().is_none()
+    }
+}
+
+/// A Nix source reference: either a direct store path or a Nix expression
+/// that evaluates to one.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum NixSource {
+    Path(String),
+    Expr { expr: String },
+}
+
+/// Configuration for runtime stub generation via Nix.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct StubsGenerateConfig {
+    pub nixpkgs: Option<NixSource>,
+    #[serde(default, rename = "home-manager")]
+    pub home_manager: Option<NixSource>,
 }
 
 /// The `[diagnostics]` section of `tix.toml`.
@@ -455,5 +531,73 @@ mod tests {
             .diagnostics
             .expect("diagnostics section should exist");
         assert_eq!(diag.unknown_type, Some(crate::config::DiagnosticLevel::Off));
+    }
+
+    // =========================================================================
+    // StubsConfig parsing tests
+    // =========================================================================
+
+    #[test]
+    fn stubs_array_backward_compat() {
+        let toml_str = r#"stubs = ["./stubs", "./extra.tix"]"#;
+        let config: ProjectConfig = toml::from_str(toml_str).expect("parse error");
+        assert_eq!(config.stubs.paths(), &["./stubs", "./extra.tix"]);
+        assert!(config.stubs.generate().is_none());
+    }
+
+    #[test]
+    fn stubs_table_with_paths_and_generate() {
+        let toml_str = r#"
+            [stubs]
+            paths = ["./my-stubs/"]
+
+            [stubs.generate]
+            nixpkgs = "/nix/store/abc-nixpkgs-src"
+        "#;
+        let config: ProjectConfig = toml::from_str(toml_str).expect("parse error");
+        assert_eq!(config.stubs.paths(), &["./my-stubs/"]);
+        let gen = config.stubs.generate().expect("generate should be present");
+        assert!(
+            matches!(&gen.nixpkgs, Some(NixSource::Path(p)) if p == "/nix/store/abc-nixpkgs-src")
+        );
+        assert!(gen.home_manager.is_none());
+    }
+
+    #[test]
+    fn stubs_generate_with_expr() {
+        let toml_str = r#"
+            [stubs.generate]
+            nixpkgs = { expr = "(builtins.getFlake (toString ./.)).inputs.nixpkgs" }
+            home-manager = { expr = "(builtins.getFlake (toString ./.)).inputs.home-manager" }
+        "#;
+        let config: ProjectConfig = toml::from_str(toml_str).expect("parse error");
+        assert!(config.stubs.paths().is_empty());
+        let gen = config.stubs.generate().expect("generate should be present");
+        assert!(
+            matches!(&gen.nixpkgs, Some(NixSource::Expr { expr }) if expr.contains("getFlake"))
+        );
+        assert!(
+            matches!(&gen.home_manager, Some(NixSource::Expr { expr }) if expr.contains("home-manager"))
+        );
+    }
+
+    #[test]
+    fn stubs_generate_only_nixpkgs() {
+        let toml_str = r#"
+            [stubs.generate]
+            nixpkgs = "/nix/store/abc-nixpkgs-src"
+        "#;
+        let config: ProjectConfig = toml::from_str(toml_str).expect("parse error");
+        let gen = config.stubs.generate().expect("generate should be present");
+        assert!(gen.nixpkgs.is_some());
+        assert!(gen.home_manager.is_none());
+    }
+
+    #[test]
+    fn stubs_empty_default() {
+        let config: ProjectConfig = toml::from_str("").expect("parse error");
+        assert!(config.stubs.paths().is_empty());
+        assert!(config.stubs.generate().is_none());
+        assert!(config.stubs.is_empty());
     }
 }

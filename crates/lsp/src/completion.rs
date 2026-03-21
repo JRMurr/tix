@@ -2396,7 +2396,7 @@ mod tests {
 
         let mut state = AnalysisState::new(TypeAliasRegistry::default());
         state.project_config = Some(ProjectConfig {
-            stubs: vec![],
+            stubs: Default::default(),
             context: context_map,
             project: None,
             diagnostics: None,
@@ -2445,7 +2445,7 @@ mod tests {
 
         let mut state = AnalysisState::new(registry);
         state.project_config = Some(ProjectConfig {
-            stubs: vec![],
+            stubs: Default::default(),
             context: context_map,
             project: None,
             diagnostics: None,
@@ -2890,7 +2890,7 @@ mod tests {
 
         let mut state = AnalysisState::new(registry);
         state.project_config = Some(ProjectConfig {
-            stubs: vec![],
+            stubs: Default::default(),
             context: context_map,
             project: None,
             diagnostics: None,

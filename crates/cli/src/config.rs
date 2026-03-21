@@ -175,7 +175,7 @@ mod tests {
             stubs = ["./stubs"]
         "#;
         let config: TixConfig = toml::from_str(toml_str).expect("parse error");
-        assert_eq!(config.stubs, vec!["./stubs"]);
+        assert_eq!(config.stubs.paths(), &["./stubs"]);
         assert!(config.context.is_empty());
     }
 

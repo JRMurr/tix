@@ -852,7 +852,7 @@ fn run_check(
 
     // Load additional stubs from tix.toml config.
     if let (Some(ref cfg), Some(ref dir)) = (&toml_config, &config_dir) {
-        for stub in &cfg.stubs {
+        for stub in cfg.stubs.paths() {
             let stub_path = dir.join(stub);
             if let Err(e) = load_stubs(&mut registry, &stub_path) {
                 eprintln!(
