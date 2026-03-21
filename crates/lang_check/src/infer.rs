@@ -1197,7 +1197,22 @@ impl CheckCtx<'_> {
         let lhs_concrete = self.types.find_concrete_through_inter(mg.lhs);
         let rhs_concrete = self.types.find_concrete_through_inter(mg.rhs);
 
-        match (lhs_concrete, rhs_concrete) {
+        // Named is transparent — unwrap before matching, just like constrain does.
+        let unwrap_named = |ty: Ty<TyId>, storage: &crate::storage::TypeStorage| -> Ty<TyId> {
+            let mut current = ty;
+            while let Ty::Named(_, inner) = &current {
+                match storage.get(*inner) {
+                    crate::storage::TypeEntry::Concrete(c) => current = c.clone(),
+                    _ => break,
+                }
+            }
+            current
+        };
+
+        let lhs_unwrapped = lhs_concrete.map(|t| unwrap_named(t, &self.types.storage));
+        let rhs_unwrapped = rhs_concrete.map(|t| unwrap_named(t, &self.types.storage));
+
+        match (lhs_unwrapped, rhs_unwrapped) {
             (Some(Ty::AttrSet(lhs_attr)), Some(Ty::AttrSet(rhs_attr))) => {
                 let merged = lhs_attr.merge(rhs_attr);
                 let merged_id = self.alloc_concrete(Ty::AttrSet(merged));

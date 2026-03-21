@@ -3101,6 +3101,32 @@ diagnostic_msg!(
     contains "missing field `x`"
 );
 
+/// Regression: `//` (merge) should work when one side is wrapped in `Named`.
+/// nixpkgs pattern: `ffmpeg-base.meta // { description = "..." }` where
+/// ffmpeg-base.meta is a Named alias type.
+#[test]
+fn merge_through_named_type() {
+    let registry = registry_from_tix(
+        r#"
+        type Meta = { description: string, homepage: string };
+        val getMeta :: { ... } -> Meta;
+    "#,
+    );
+
+    let nix_src = indoc! { r#"
+        let meta = getMeta { x = 1; };
+        in meta // { description = "override"; }
+    "# };
+
+    let ty = get_inferred_root_with_aliases(nix_src, &registry);
+    let formatted = ty.to_string();
+    // Should merge successfully (produce an attrset), not error with E004.
+    assert!(
+        formatted.contains("description") && formatted.contains("homepage"),
+        "merge through Named should produce merged attrset, got: {formatted}"
+    );
+}
+
 // Let-binding flow: `let drv = mkDerivation { ... }; in drv` preserves the alias.
 #[test]
 fn alias_named_flows_through_let() {
