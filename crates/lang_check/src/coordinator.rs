@@ -20,7 +20,6 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -29,7 +28,7 @@ use rayon::prelude::*;
 
 use crate::imports::{import_errors_to_diagnostics, resolve_import_types};
 use crate::{run_inference, CheckResult, FileSignature, InferenceInputs, SyntaxBundle};
-use lang_ty::OutputTy;
+use lang_ty::OwnedTy;
 
 // ==============================================================================
 // SyntaxProvider trait
@@ -117,7 +116,7 @@ impl InferenceCoordinator {
             check_result: CheckResult {
                 inference: None,
                 diagnostics: vec![],
-                timed_out: false,
+                bailed_out: false,
             },
             signature: sig.clone(),
             import_paths: vec![],
@@ -144,7 +143,6 @@ impl InferenceCoordinator {
         &self,
         path: &Path,
         syntax_provider: &dyn SyntaxProvider,
-        cancel_flag: Option<Arc<AtomicBool>>,
     ) -> Option<CoordinatedResult> {
         // Fast path: already computed.
         if let Some(entry) = self.cache.get(path) {
@@ -214,7 +212,7 @@ impl InferenceCoordinator {
         }
 
         // Actually compute: extract syntax, resolve imports, run inference.
-        let result = self.compute_file(path, syntax_provider, cancel_flag);
+        let result = self.compute_file(path, syntax_provider);
 
         // Store result and notify waiters.
         // Only cache successful results — failed files (provider returned None)
@@ -247,7 +245,7 @@ impl InferenceCoordinator {
         files
             .par_iter()
             .map(|path| {
-                let result = self.demand_file(path, syntax_provider, None);
+                let result = self.demand_file(path, syntax_provider);
                 (path.clone(), result)
             })
             .collect()
@@ -259,7 +257,6 @@ impl InferenceCoordinator {
         &self,
         path: &Path,
         syntax_provider: &dyn SyntaxProvider,
-        cancel_flag: Option<Arc<AtomicBool>>,
     ) -> Option<CoordinatedResult> {
         let bundle = syntax_provider.syntax_for_file(path)?;
 
@@ -274,8 +271,7 @@ impl InferenceCoordinator {
                     return Some(sig);
                 }
                 // Demand-driven: infer the dependency.
-                let dep_result =
-                    self.demand_file(dep_path, syntax_provider, cancel_flag.clone())?;
+                let dep_result = self.demand_file(dep_path, syntax_provider)?;
                 dep_result.signature.map(|s| s.root_ty)
             });
 
@@ -298,19 +294,14 @@ impl InferenceCoordinator {
             import_types: import_resolution.types,
             import_diagnostics,
             context_args: bundle.context_args,
-            deadline_secs: bundle.deadline_secs,
             rss_limit_mb: None,
+            file_path: Some(path.to_path_buf()),
         };
 
-        let check_result = run_inference(&inputs, cancel_flag);
+        let check_result = run_inference(&inputs);
 
         // Extract root type as the file's signature.
-        let signature = check_result
-            .inference
-            .as_ref()
-            .and_then(|inf| inf.expr_ty_map.get(inputs.module.entry_expr))
-            .cloned()
-            .map(|root_ty| FileSignature { root_ty });
+        let signature = crate::extract_file_signature(&check_result, inputs.module.entry_expr);
 
         Some(CoordinatedResult {
             check_result,
@@ -324,7 +315,7 @@ impl InferenceCoordinator {
     // =========================================================================
 
     /// Get the cached root type for a file, if available.
-    pub fn get_signature(&self, path: &Path) -> Option<OutputTy> {
+    pub fn get_signature(&self, path: &Path) -> Option<OwnedTy> {
         self.cache.get(path).and_then(|entry| match &*entry {
             FileSlot::Ready(Some(sig)) => Some(sig.root_ty.clone()),
             _ => None,
@@ -431,6 +422,15 @@ impl InferenceCoordinator {
             .unwrap_or_default()
     }
 
+    /// Remove signatures for a batch of files. Used by the CLI's
+    /// reference-counted eviction to drop signatures whose importers
+    /// have all been processed.
+    pub fn remove_signatures_batch(&self, paths: &[PathBuf]) {
+        for path in paths {
+            self.cache.remove(path.as_path());
+        }
+    }
+
     /// Remove a file's signature and return its dependents (for didClose).
     pub fn remove_signature(&self, path: &Path) -> Vec<PathBuf> {
         self.cache.remove(path);
@@ -455,8 +455,26 @@ impl Default for InferenceCoordinator {
 mod tests {
     use super::*;
     use crate::aliases::TypeAliasRegistry;
-    use lang_ty::OutputTy;
+    use lang_ty::{OutputTy, TypeArena};
     use std::io::Write;
+
+    /// Helper: create a FileSignature from an OutputTy value.
+    fn make_sig(ty: OutputTy) -> FileSignature {
+        let mut arena = TypeArena::new();
+        let root = arena.intern(ty);
+        FileSignature {
+            root_ty: OwnedTy::new(Arc::new(arena), root),
+        }
+    }
+
+    /// Helper: compare an OwnedTy to an OutputTy structurally.
+    fn owned_ty_eq(owned: &OwnedTy, expected: &OutputTy) -> bool {
+        let ty = owned.get();
+        match ty {
+            OutputTy::Extern(inner) => inner.get() == expected,
+            other => other == expected,
+        }
+    }
 
     /// A test syntax provider that reads .nix files from disk and parses them
     /// via a shared RootDatabase.
@@ -490,7 +508,6 @@ mod tests {
                 grouped_defs,
                 registry: Arc::clone(&self.registry),
                 context_args: Arc::default(),
-                deadline_secs: Some(10),
             })
         }
     }
@@ -507,28 +524,29 @@ mod tests {
     fn passive_set_get_roundtrip() {
         let coord = InferenceCoordinator::new();
         let path = PathBuf::from("/tmp/test_passive.nix");
-        let sig = FileSignature {
-            root_ty: OutputTy::Primitive(lang_ty::PrimitiveTy::Int),
-        };
+        let sig = make_sig(OutputTy::Primitive(lang_ty::PrimitiveTy::Int));
 
         assert!(coord.get_signature(&path).is_none());
-        coord.set_signature(&path, sig.clone());
-        assert_eq!(coord.get_signature(&path), Some(sig.root_ty));
+        coord.set_signature(&path, sig);
+        let retrieved = coord.get_signature(&path);
+        assert!(retrieved.is_some());
+        assert!(owned_ty_eq(
+            &retrieved.unwrap(),
+            &OutputTy::Primitive(lang_ty::PrimitiveTy::Int)
+        ));
     }
 
     #[test]
     fn set_signature_returns_changed() {
         let coord = InferenceCoordinator::new();
         let path = PathBuf::from("/tmp/test_changed.nix");
-        let sig_int = FileSignature {
-            root_ty: OutputTy::Primitive(lang_ty::PrimitiveTy::Int),
-        };
-        let sig_str = FileSignature {
-            root_ty: OutputTy::Primitive(lang_ty::PrimitiveTy::String),
-        };
+        let sig_int = make_sig(OutputTy::Primitive(lang_ty::PrimitiveTy::Int));
+        let sig_str = make_sig(OutputTy::Primitive(lang_ty::PrimitiveTy::String));
 
-        assert!(coord.set_signature(&path, sig_int.clone()));
-        assert!(!coord.set_signature(&path, sig_int));
+        // Clone shares the same Arc, so PartialEq (ptr-based) will match.
+        let sig_int_clone = sig_int.clone();
+        assert!(coord.set_signature(&path, sig_int));
+        assert!(!coord.set_signature(&path, sig_int_clone));
         assert!(coord.set_signature(&path, sig_str));
     }
 
@@ -540,24 +558,9 @@ mod tests {
         let c = PathBuf::from("/c.nix");
 
         // a imports b, b imports c
-        coord.set_signature(
-            &a,
-            FileSignature {
-                root_ty: OutputTy::Primitive(lang_ty::PrimitiveTy::Int),
-            },
-        );
-        coord.set_signature(
-            &b,
-            FileSignature {
-                root_ty: OutputTy::Primitive(lang_ty::PrimitiveTy::Int),
-            },
-        );
-        coord.set_signature(
-            &c,
-            FileSignature {
-                root_ty: OutputTy::Primitive(lang_ty::PrimitiveTy::Int),
-            },
-        );
+        coord.set_signature(&a, make_sig(OutputTy::Primitive(lang_ty::PrimitiveTy::Int)));
+        coord.set_signature(&b, make_sig(OutputTy::Primitive(lang_ty::PrimitiveTy::Int)));
+        coord.set_signature(&c, make_sig(OutputTy::Primitive(lang_ty::PrimitiveTy::Int)));
         coord.record_deps(&a, &[b.clone()]);
         coord.record_deps(&b, &[c.clone()]);
 
@@ -580,7 +583,7 @@ mod tests {
         let provider = TestSyntaxProvider::new();
         let coord = InferenceCoordinator::new();
 
-        let result = coord.demand_file(&a_path, &provider, None);
+        let result = coord.demand_file(&a_path, &provider);
         assert!(result.is_some());
 
         // b should now be cached.
@@ -606,7 +609,7 @@ mod tests {
         let coord = InferenceCoordinator::new();
 
         // Should not deadlock — cycle is broken with ⊤.
-        let result = coord.demand_file(&a_path, &provider, None);
+        let result = coord.demand_file(&a_path, &provider);
         assert!(result.is_some());
         // Both files should be cached (even if one got ⊤ for the back-edge).
         assert!(coord.get_signature(&a_path).is_some() || coord.cache.contains_key(&a_path));
@@ -653,7 +656,7 @@ mod tests {
         let provider = TestSyntaxProvider::new();
         let coord = InferenceCoordinator::new();
 
-        let result = coord.demand_file(&a_path, &provider, None);
+        let result = coord.demand_file(&a_path, &provider);
         assert!(result.is_some());
 
         // All four files should be cached.
@@ -669,9 +672,7 @@ mod tests {
         let path = PathBuf::from("/tmp/test_clear.nix");
         coord.set_signature(
             &path,
-            FileSignature {
-                root_ty: OutputTy::Primitive(lang_ty::PrimitiveTy::Int),
-            },
+            make_sig(OutputTy::Primitive(lang_ty::PrimitiveTy::Int)),
         );
         coord.record_deps(&path, &[PathBuf::from("/tmp/dep.nix")]);
 
@@ -688,11 +689,8 @@ mod tests {
         let a = PathBuf::from("/cycle_a.nix");
         let b = PathBuf::from("/cycle_b.nix");
 
-        let sig = FileSignature {
-            root_ty: OutputTy::Primitive(lang_ty::PrimitiveTy::Int),
-        };
-        coord.set_signature(&a, sig.clone());
-        coord.set_signature(&b, sig);
+        coord.set_signature(&a, make_sig(OutputTy::Primitive(lang_ty::PrimitiveTy::Int)));
+        coord.set_signature(&b, make_sig(OutputTy::Primitive(lang_ty::PrimitiveTy::Int)));
 
         // Create a cycle: a→b and b→a in reverse deps.
         coord.record_deps(&a, &[b.clone()]);
@@ -719,7 +717,7 @@ mod tests {
         let coord = InferenceCoordinator::new();
 
         // First demand: infer A (which imports B).
-        let result = coord.demand_file(&a_path, &provider, None);
+        let result = coord.demand_file(&a_path, &provider);
         assert!(result.is_some());
         assert!(coord.get_signature(&b_path).is_some());
 
@@ -730,7 +728,7 @@ mod tests {
         assert!(coord.get_signature(&b_path).is_none());
 
         // Re-demand A → should re-infer with fresh B.
-        let result2 = coord.demand_file(&a_path, &provider, None);
+        let result2 = coord.demand_file(&a_path, &provider);
         assert!(result2.is_some());
         assert!(coord.get_signature(&b_path).is_some());
     }
@@ -752,8 +750,8 @@ mod tests {
         let path1 = a_path.clone();
         let path2 = a_path.clone();
 
-        let t1 = std::thread::spawn(move || coord1.demand_file(&path1, &*provider1, None));
-        let t2 = std::thread::spawn(move || coord2.demand_file(&path2, &*provider2, None));
+        let t1 = std::thread::spawn(move || coord1.demand_file(&path1, &*provider1));
+        let t2 = std::thread::spawn(move || coord2.demand_file(&path2, &*provider2));
 
         let r1 = t1.join().unwrap();
         let r2 = t2.join().unwrap();
@@ -779,7 +777,7 @@ mod tests {
         let coord = InferenceCoordinator::new();
 
         // Should still produce a result for a.nix despite the missing dep.
-        let result = coord.demand_file(&a_path, &provider, None);
+        let result = coord.demand_file(&a_path, &provider);
         assert!(result.is_some());
     }
 
@@ -794,10 +792,159 @@ mod tests {
         let coord = InferenceCoordinator::new();
 
         // File doesn't exist → provider returns None.
-        let result = coord.demand_file(&path, &provider, None);
+        let result = coord.demand_file(&path, &provider);
         assert!(result.is_none());
 
         // Should NOT be cached as Ready(None).
         assert!(!coord.cache.contains_key(&path));
+    }
+
+    // =========================================================================
+    // Layered inference integration tests
+    // =========================================================================
+
+    /// End-to-end test: cross-file type flow via layered inference.
+    /// b.nix = 42, a.nix = import ./b.nix → a.nix should get type `int`.
+    #[test]
+    fn layered_cross_file_type_flow() {
+        use crate::file_graph;
+
+        let dir = tempfile::tempdir().unwrap();
+        let b_path = write_nix(dir.path(), "b.nix", "42");
+        let a_contents = format!("import {}", b_path.display());
+        let a_path = write_nix(dir.path(), "a.nix", &a_contents);
+
+        // Build the import edge map.
+        let mut import_edges = HashMap::new();
+        import_edges.insert(a_path.clone(), vec![b_path.clone()]);
+        import_edges.insert(b_path.clone(), vec![]);
+
+        // Build layers.
+        let layers = file_graph::build_file_layers(&import_edges);
+        assert_eq!(layers.len(), 2);
+
+        let provider = TestSyntaxProvider::new();
+        let coord = InferenceCoordinator::new();
+
+        // Infer layer by layer.
+        for layer in &layers {
+            for path in layer {
+                let result = coord
+                    .demand_file(path, &provider)
+                    .expect("inference should succeed");
+
+                // Cache the signature for subsequent layers.
+                if let Some(sig) = result.signature {
+                    coord.set_signature(path, sig);
+                }
+            }
+        }
+
+        // a.nix should have type `int` (from b.nix), not ⊤.
+        let a_ty = coord
+            .get_signature(&a_path)
+            .expect("a.nix should be cached");
+        assert!(owned_ty_eq(
+            &a_ty,
+            &OutputTy::Primitive(lang_ty::PrimitiveTy::Int)
+        ));
+    }
+
+    /// Diamond dependency: shared dep inferred once, type flows correctly
+    /// through both paths.
+    #[test]
+    fn layered_diamond_dependency() {
+        use crate::file_graph;
+
+        let dir = tempfile::tempdir().unwrap();
+        let d_path = write_nix(dir.path(), "d.nix", "\"hello\"");
+        let b_contents = format!("import {}", d_path.display());
+        let b_path = write_nix(dir.path(), "b.nix", &b_contents);
+        let c_contents = format!("import {}", d_path.display());
+        let c_path = write_nix(dir.path(), "c.nix", &c_contents);
+        let a_contents = format!(
+            "let b = import {}; c = import {}; in {{ inherit b c; }}",
+            b_path.display(),
+            c_path.display()
+        );
+        let a_path = write_nix(dir.path(), "a.nix", &a_contents);
+
+        let mut import_edges = HashMap::new();
+        import_edges.insert(d_path.clone(), vec![]);
+        import_edges.insert(b_path.clone(), vec![d_path.clone()]);
+        import_edges.insert(c_path.clone(), vec![d_path.clone()]);
+        import_edges.insert(a_path.clone(), vec![b_path.clone(), c_path.clone()]);
+
+        let layers = file_graph::build_file_layers(&import_edges);
+        assert_eq!(layers.len(), 3);
+
+        let provider = TestSyntaxProvider::new();
+        let coord = InferenceCoordinator::new();
+
+        for layer in &layers {
+            layer.iter().for_each(|path| {
+                let result = coord
+                    .demand_file(path, &provider)
+                    .expect("inference should succeed");
+                if let Some(sig) = result.signature {
+                    coord.set_signature(path, sig);
+                }
+            });
+        }
+
+        // b.nix and c.nix should both be `string` (from d.nix).
+        let b_ty = coord.get_signature(&b_path).expect("b.nix cached");
+        assert!(owned_ty_eq(
+            &b_ty,
+            &OutputTy::Primitive(lang_ty::PrimitiveTy::String)
+        ));
+        let c_ty = coord.get_signature(&c_path).expect("c.nix cached");
+        assert!(owned_ty_eq(
+            &c_ty,
+            &OutputTy::Primitive(lang_ty::PrimitiveTy::String)
+        ));
+    }
+
+    /// Cycle: A ↔ B doesn't deadlock. Files complete with ⊤ for back-edges.
+    #[test]
+    fn layered_cycle_no_deadlock() {
+        use crate::file_graph;
+
+        let dir = tempfile::tempdir().unwrap();
+        let a_path_raw = dir.path().join("a.nix");
+        let b_path_raw = dir.path().join("b.nix");
+
+        std::fs::write(&b_path_raw, format!("import {}", a_path_raw.display())).unwrap();
+        std::fs::write(&a_path_raw, format!("import {}", b_path_raw.display())).unwrap();
+
+        let a_path = a_path_raw.canonicalize().unwrap();
+        let b_path = b_path_raw.canonicalize().unwrap();
+
+        let mut import_edges = HashMap::new();
+        import_edges.insert(a_path.clone(), vec![b_path.clone()]);
+        import_edges.insert(b_path.clone(), vec![a_path.clone()]);
+
+        let layers = file_graph::build_file_layers(&import_edges);
+        // Both should be in the same SCC layer.
+        assert_eq!(layers.len(), 1);
+        assert_eq!(layers[0].len(), 2);
+
+        let provider = TestSyntaxProvider::new();
+        let coord = InferenceCoordinator::new();
+
+        // Should not deadlock.
+        for path in &layers[0] {
+            let result = coord.demand_file(path, &provider);
+            assert!(
+                result.is_some(),
+                "inference should succeed for {}",
+                path.display()
+            );
+            if let Some(r) = result {
+                if let Some(sig) = r.signature {
+                    coord.set_signature(path, sig);
+                }
+            }
+        }
     }
 }

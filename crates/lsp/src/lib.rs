@@ -23,6 +23,7 @@ mod state;
 pub mod test_util;
 mod ty_nav;
 mod type_def;
+mod warmup;
 mod workspace_symbols;
 
 use lang_check::aliases::TypeAliasRegistry;
@@ -107,21 +108,12 @@ async fn async_lsp_main(mem_limit_override: Option<u64>, log_level_override: Opt
     );
 
     #[cfg(unix)]
-    let mem_limit_mib = apply_mem_limit(mem_limit_override);
+    let rss_limit_mb = apply_limits(mem_limit_override);
     #[cfg(not(unix))]
-    let mem_limit_mib: Option<u64> = {
+    let rss_limit_mb: Option<f64> = {
         let _ = mem_limit_override;
         None
     };
-
-    // Compute RSS limit for inference. Virtual address space (RLIMIT_AS) is
-    // typically 2-3x RSS due to allocator reservations, mmap regions, shared
-    // libraries, etc. Using 40% of the virtual limit as an RSS threshold
-    // prevents OOM crashes while leaving enough headroom for normal files.
-    let rss_limit_mb = mem_limit_mib.map(|mib| mib as f64 * 0.4);
-    if let Some(limit) = rss_limit_mb {
-        log::info!("RSS limit for inference: {:.0} MB", limit);
-    }
 
     let mut registry = TypeAliasRegistry::with_builtins();
 
@@ -148,19 +140,45 @@ async fn async_lsp_main(mem_limit_override: Option<u64>, log_level_override: Opt
     Server::new(stdin, stdout, socket).serve(service).await;
 }
 
-/// Apply a virtual address space limit via setrlimit(RLIMIT_AS) to prevent
-/// runaway memory usage from taking down the user's system. CLI `--mem-limit`
-/// flag takes priority, then `TIX_MEM_LIMIT` env var, then defaults to
-/// 4096 MiB (4 GiB). Set to 0 to disable.
-///
-/// Returns the effective limit in MiB, or `None` if the limit was disabled
-/// or could not be applied.
+/// Detect total physical memory via sysconf. Returns MiB, or 0 on failure.
 #[cfg(unix)]
-fn apply_mem_limit(cli_override: Option<u64>) -> Option<u64> {
-    const DEFAULT_MIB: u64 = 4096;
+fn total_memory_mib() -> u64 {
+    // SAFETY: sysconf is a standard POSIX function with no unsafe preconditions.
+    let pages = unsafe { libc::sysconf(libc::_SC_PHYS_PAGES) };
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    if pages <= 0 || page_size <= 0 {
+        return 0;
+    }
+    (pages as u64 * page_size as u64) / (1024 * 1024)
+}
+
+/// Set RSS and RLIMIT_AS limits to prevent runaway memory usage.
+///
+/// The RSS limit is what actually gates inference — when process RSS exceeds
+/// this, inference bails out with partial results. RLIMIT_AS is set to 2.5x
+/// the RSS limit as a hard backstop for virtual address space.
+///
+/// Default RSS limit: 80% of system RAM (fallback: 3200 MiB if detection
+/// fails). CLI `--mem-limit` / `TIX_MEM_LIMIT` override the RSS limit
+/// directly (in MiB). Set to 0 to disable both limits.
+///
+/// Returns the effective RSS limit in MB (as f64), or `None` if disabled.
+#[cfg(unix)]
+fn apply_limits(cli_override: Option<u64>) -> Option<f64> {
+    let total_mib = total_memory_mib();
+    if total_mib > 0 {
+        log::info!("Detected system memory: {} MiB", total_mib);
+    }
+
+    // 80% of system RAM, or 3200 MiB (80% of 4 GiB) if detection failed.
+    let default_rss_mib: u64 = if total_mib > 0 {
+        (total_mib as f64 * 0.8) as u64
+    } else {
+        3200
+    };
 
     // CLI flag takes priority over env var.
-    let limit_mib = if let Some(mib) = cli_override {
+    let rss_mib = if let Some(mib) = cli_override {
         if mib == 0 {
             log::info!("--mem-limit 0: memory limit disabled");
             return None;
@@ -176,41 +194,44 @@ fn apply_mem_limit(cli_override: Option<u64>) -> Option<u64> {
                 Ok(mib) => mib,
                 Err(_) => {
                     log::warn!(
-                        "Invalid TIX_MEM_LIMIT value '{val}', using default {DEFAULT_MIB} MiB"
+                        "Invalid TIX_MEM_LIMIT value '{val}', using default {default_rss_mib} MiB"
                     );
-                    DEFAULT_MIB
+                    default_rss_mib
                 }
             },
-            Err(_) => DEFAULT_MIB,
+            Err(_) => default_rss_mib,
         }
     };
 
-    let limit_bytes = limit_mib * 1024 * 1024;
+    log::info!("RSS limit for inference: {} MiB", rss_mib);
 
-    // Read the current hard limit so we don't try to exceed it (requires root).
-    let hard = match Resource::AS.get() {
-        Ok((_, hard)) => hard,
+    // Set RLIMIT_AS to 2.5x the RSS limit as a hard backstop. Virtual address
+    // space is typically 2-3x RSS due to allocator reservations, mmap regions,
+    // shared libraries, etc.
+    let rlimit_as_bytes = rss_mib as u128 * 1024 * 1024 * 5 / 2;
+    // Cap at u64::MAX to avoid overflow in the rlimit API.
+    let rlimit_as_bytes = rlimit_as_bytes.min(u64::MAX as u128) as u64;
+
+    match Resource::AS.get() {
+        Ok((_, hard)) => {
+            let effective = if hard == rlimit::INFINITY {
+                rlimit_as_bytes
+            } else {
+                rlimit_as_bytes.min(hard)
+            };
+            match Resource::AS.set(effective, hard) {
+                Ok(()) => {
+                    log::info!("RLIMIT_AS set to {} MiB", effective / (1024 * 1024));
+                }
+                Err(e) => {
+                    log::warn!("Failed to set RLIMIT_AS: {e}");
+                }
+            }
+        }
         Err(e) => {
             log::warn!("Failed to query RLIMIT_AS: {e}");
-            return None;
-        }
-    };
-
-    let effective = if hard == rlimit::INFINITY {
-        limit_bytes
-    } else {
-        limit_bytes.min(hard)
-    };
-
-    match Resource::AS.set(effective, hard) {
-        Ok(()) => {
-            let effective_mib = effective / (1024 * 1024);
-            log::info!("Memory limit set to {} MiB", effective_mib);
-            Some(effective_mib)
-        }
-        Err(e) => {
-            log::warn!("Failed to set memory limit to {limit_mib} MiB: {e}");
-            None
         }
     }
+
+    Some(rss_mib as f64)
 }

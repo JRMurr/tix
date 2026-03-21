@@ -14,7 +14,7 @@ pub mod arbitrary;
 #[cfg(any(test, feature = "proptest_support"))]
 pub mod tests;
 
-use std::{collections::HashMap, fmt, ops};
+use std::{collections::HashMap, fmt, ops, path::Path, sync::LazyLock};
 
 use comment::gather_doc_comments;
 pub use db::{AstDb, NixFile, RootDatabase};
@@ -26,7 +26,21 @@ use rnix::NixLanguage;
 use smol_str::SmolStr;
 use tracing::instrument;
 
-#[instrument(level = "info", skip_all, name = "parse+lower")]
+/// CWD captured once at startup, used to shorten absolute paths in log output.
+static CWD: LazyLock<Option<std::path::PathBuf>> = LazyLock::new(|| std::env::current_dir().ok());
+
+/// Return a display-friendly path: strip the CWD prefix when possible,
+/// otherwise return the full path. Used in tracing span fields.
+pub fn display_path(p: &Path) -> String {
+    if let Some(cwd) = CWD.as_deref() {
+        if let Ok(rel) = p.strip_prefix(cwd) {
+            return rel.display().to_string();
+        }
+    }
+    p.display().to_string()
+}
+
+#[instrument(level = "info", skip_all, name = "parse+lower", fields(file = display_path(&file.path(db)).as_str()))]
 #[salsa::tracked(no_eq)]
 pub fn module_and_source_maps(db: &dyn crate::AstDb, file: NixFile) -> (Module, ModuleSourceMap) {
     let parsed = db.parse_file(file);
@@ -54,7 +68,7 @@ pub struct ModuleIndices {
     pub param_to_lambda: HashMap<NameId, ExprId>,
 }
 
-#[instrument(level = "info", skip_all, name = "module_indices")]
+#[instrument(level = "info", skip_all, name = "module_indices", fields(file = display_path(&file.path(db)).as_str()))]
 #[salsa::tracked]
 pub fn module_indices(db: &dyn crate::AstDb, file: NixFile) -> ModuleIndices {
     let module = module(db, file);

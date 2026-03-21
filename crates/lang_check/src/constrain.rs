@@ -33,11 +33,17 @@ use super::{CheckCtx, InferenceError, LocatedError, TyId};
 
 use crate::storage::TypeEntry;
 use lang_ty::{
+    arc_ty::OutputTy,
     disjoint::{are_shapes_disjoint, ConstructorShape},
-    AttrSetTy, Ty,
+    AttrSetTy, OwnedTy, Ty, TyRef, TypeArena,
 };
 use smallvec::SmallVec;
 use smol_str::SmolStr;
+
+/// Frozen lambda bodies with more than this many attrset fields get lazy
+/// decomposition (separate Frozen wrappers for param/body). Below this
+/// threshold, full interning preserves TyVar sharing for polymorphic types.
+const FROZEN_LAMBDA_FIELD_THRESHOLD: usize = 64;
 
 impl CheckCtx<'_> {
     /// Constrain sub <: sup, locating any error at the current expression.
@@ -52,27 +58,16 @@ impl CheckCtx<'_> {
         self.constrain_at(b, a)
     }
 
-    /// How often (in constrain() calls) to check the deadline. constrain() is
-    /// the main hotspot for cascading work, so checking here gives much finer
-    /// granularity than checking in infer_expr (which may only be called once
-    /// before a huge constrain cascade runs).
-    const DEADLINE_CHECK_INTERVAL: u32 = 1024;
-
     /// Record that `sub <: sup` — `sub` is a subtype of `sup`.
     pub fn constrain(&mut self, sub: TyId, sup: TyId) -> Result<(), InferenceError> {
-        // Periodic deadline/cancellation check inside the constraint propagation
-        // hotpath. This catches cases where a single infer_expr call triggers a
-        // huge constrain() cascade (e.g. structural subtyping on large attrsets),
-        // or when the LSP cancels analysis because a newer edit arrived.
-        // `past_deadline()` caches a positive result in `deadline_exceeded`, so
+        // Periodic RSS check inside the constraint propagation hotpath.
+        // This catches cases where a single infer_expr call triggers a huge
+        // constrain() cascade (e.g. structural subtyping on large attrsets).
+        // `should_bail()` caches a positive result in `bailed_out`, so
         // the first check is O(1) for subsequent calls.
-        if self.deadline.is_some() || self.cancel_flag.is_some() {
+        if self.rss_limit_mb.is_some() {
             self.op_counter = self.op_counter.wrapping_add(1);
-            if self
-                .op_counter
-                .is_multiple_of(Self::DEADLINE_CHECK_INTERVAL)
-                && self.past_deadline()
-            {
+            if self.op_counter.is_multiple_of(Self::RSS_CHECK_INTERVAL) && self.should_bail() {
                 log::warn!(
                     "inference aborted during constrain (after {} operations, {} cache entries, {} type slots)",
                     self.op_counter,
@@ -81,7 +76,7 @@ impl CheckCtx<'_> {
                 );
                 return Ok(());
             }
-        } else if self.deadline_exceeded {
+        } else if self.bailed_out {
             return Ok(());
         }
 
@@ -175,6 +170,70 @@ impl CheckCtx<'_> {
             // Named is transparent — unwrap and constrain the inner type.
             (Ty::Named(_, inner), _) => self.constrain(*inner, sup_id),
             (_, Ty::Named(_, inner)) => self.constrain(sub_id, *inner),
+
+            // ── Frozen import types: lazy materialization ──────────────────
+            //
+            // Frozen wraps an entire OutputTy tree in a single TyId. Instead
+            // of eagerly interning all fields (O(N) TyId allocations), we
+            // materialize only the parts actually demanded by constraints.
+
+            // Frozen on LHS vs AttrSet on RHS: the hot path for large imports.
+            // Only intern the fields the supertype demands.
+            (Ty::Frozen(owned), Ty::AttrSet(sup_attr)) => {
+                let owned = owned.clone();
+                let sup_attr = sup_attr.clone();
+                self.constrain_frozen_attrset(&owned, &sup_attr)
+            }
+
+            // Frozen on LHS vs Lambda on RHS: decompose structurally without
+            // interning the entire tree.
+            (
+                Ty::Frozen(owned),
+                Ty::Lambda {
+                    param: sup_param,
+                    body: sup_body,
+                },
+            ) => {
+                let owned = owned.clone();
+                let sup_param = *sup_param;
+                let sup_body = *sup_body;
+                self.constrain_frozen_lambda(&owned, sup_param, sup_body)
+            }
+
+            // Frozen on LHS, any other RHS: full interning fallback.
+            (Ty::Frozen(owned), _) => {
+                let owned = owned.clone();
+                let interned = self.intern_output_ty(&owned);
+                self.constrain(interned, sup_id)
+            }
+
+            // Lambda on LHS vs Frozen on RHS.
+            (
+                Ty::Lambda {
+                    param: sub_param,
+                    body: sub_body,
+                },
+                Ty::Frozen(owned),
+            ) => {
+                let owned = owned.clone();
+                let sub_param = *sub_param;
+                let sub_body = *sub_body;
+                self.constrain_lambda_frozen(sub_param, sub_body, &owned)
+            }
+
+            // AttrSet on LHS vs Frozen on RHS: mirror of constrain_frozen_attrset.
+            (Ty::AttrSet(sub_attr), Ty::Frozen(owned)) => {
+                let owned = owned.clone();
+                let sub_attr = sub_attr.clone();
+                self.constrain_attrset_frozen(&sub_attr, &owned)
+            }
+
+            // Frozen on RHS: full interning fallback.
+            (_, Ty::Frozen(owned)) => {
+                let owned = owned.clone();
+                let interned = self.intern_output_ty(&owned);
+                self.constrain(sub_id, interned)
+            }
 
             // Lambda: contravariant in param, covariant in body.
             (
@@ -329,8 +388,10 @@ impl CheckCtx<'_> {
         ) {
             (true, false) => {
                 // Check: if b is concrete and provably disjoint from sup.
-                if matches!(self.types.storage.get(b), TypeEntry::Concrete(b_ty) if are_types_disjoint(b_ty, sup))
-                {
+                // For composed narrowing constraints (Inter(C1, C2)), check
+                // recursively — if any leaf of the intersection is disjoint
+                // from sup, the whole intersection is disjoint.
+                if self.is_disjoint_from_sup(b, sup) {
                     return Err(InferenceError::TypeMismatch(Box::new((
                         Ty::Inter(a, b),
                         sup.clone(),
@@ -352,8 +413,7 @@ impl CheckCtx<'_> {
                 self.constrain(a, target)
             }
             (false, true) => {
-                if matches!(self.types.storage.get(a), TypeEntry::Concrete(a_ty) if are_types_disjoint(a_ty, sup))
-                {
+                if self.is_disjoint_from_sup(a, sup) {
                     return Err(InferenceError::TypeMismatch(Box::new((
                         Ty::Inter(a, b),
                         sup.clone(),
@@ -381,6 +441,24 @@ impl CheckCtx<'_> {
                 self.constrain(a, sup_id)?;
                 self.constrain(b, sup_id)
             }
+        }
+    }
+
+    /// Check if a TyId (possibly a composed Inter from narrowing) is provably
+    /// disjoint from a super-type. For `Inter(A, B)`, if EITHER member is
+    /// disjoint from sup, the intersection is disjoint (since `A ∧ B ⊆ A`).
+    fn is_disjoint_from_sup(&self, id: TyId, sup: &Ty<TyId>) -> bool {
+        match self.types.storage.get(id) {
+            TypeEntry::Concrete(ty @ Ty::Inter(a, b)) => {
+                let (a, b) = (*a, *b);
+                // Check the Inter itself first (unlikely to match, but handles
+                // exotic cases). Then recurse into members.
+                are_types_disjoint(ty, sup)
+                    || self.is_disjoint_from_sup(a, sup)
+                    || self.is_disjoint_from_sup(b, sup)
+            }
+            TypeEntry::Concrete(ty) => are_types_disjoint(ty, sup),
+            _ => false,
         }
     }
 
@@ -559,20 +637,214 @@ impl CheckCtx<'_> {
 
         Ok(())
     }
+
+    /// Lazy field-level materialization for `Frozen(OutputTy) <: AttrSet`.
+    ///
+    /// Instead of interning the entire frozen OutputTy (which may have hundreds
+    /// of fields), only intern the specific fields demanded by the supertype's
+    /// attrset. This is the hot path for large imports like `lib/default.nix`
+    /// where the importer accesses a small subset of fields.
+    fn constrain_frozen_attrset(
+        &mut self,
+        owned: &OwnedTy,
+        sup_attr: &AttrSetTy<TyId>,
+    ) -> Result<(), InferenceError> {
+        // Unwrap Named wrappers to find the structural type inside.
+        let root = owned.arena.unwrap_named(owned.root);
+        let inner = owned.arena.get(root);
+
+        match inner {
+            OutputTy::AttrSet(frozen_attr) => {
+                let frozen_attr = frozen_attr.clone();
+                // For each field demanded by the supertype, look it up in the
+                // frozen attrset and intern just that field's type.
+                for (key, sup_field) in &sup_attr.fields {
+                    match frozen_attr.fields.get(key) {
+                        Some(&frozen_field_ref) => {
+                            let field_owned = OwnedTy::new(owned.arena.clone(), frozen_field_ref);
+                            let field_ty = self.intern_frozen_owned_ty(&field_owned);
+                            self.constrain(field_ty, *sup_field)?;
+                        }
+                        None => {
+                            if let Some(frozen_dyn) = frozen_attr.dyn_ty {
+                                let dyn_owned = OwnedTy::new(owned.arena.clone(), frozen_dyn);
+                                let dyn_ty = self.intern_frozen_owned_ty(&dyn_owned);
+                                self.constrain(dyn_ty, *sup_field)?;
+                            } else if !frozen_attr.open && !sup_attr.optional_fields.contains(key) {
+                                return Err(InferenceError::MissingField {
+                                    field: key.clone(),
+                                    available: frozen_attr.fields.keys().cloned().collect(),
+                                });
+                            }
+                        }
+                    }
+                }
+
+                // Propagate dyn_ty constraints.
+                if let (Some(frozen_dyn), Some(sup_dyn)) = (frozen_attr.dyn_ty, sup_attr.dyn_ty) {
+                    let dyn_owned = OwnedTy::new(owned.arena.clone(), frozen_dyn);
+                    let dyn_ty = self.intern_frozen_owned_ty(&dyn_owned);
+                    self.constrain(dyn_ty, sup_dyn)?;
+                }
+
+                Ok(())
+            }
+            _ => {
+                let interned = self.intern_output_ty(owned);
+                let sup_id = self.alloc_concrete(Ty::AttrSet(sup_attr.clone()));
+                self.constrain(interned, sup_id)
+            }
+        }
+    }
+
+    /// Lazy structural decomposition for `Frozen(OutputTy) <: Lambda`.
+    ///
+    /// For large imported types (e.g. hackage-packages.nix returning a 16K-field
+    /// attrset), interning the entire tree is prohibitively expensive. This method
+    /// decomposes the lambda structurally, keeping param and body as separate
+    /// Frozen wrappers so the massive body stays opaque until fields are demanded.
+    ///
+    /// For small types, falls back to full interning to preserve TyVar sharing
+    /// across param and body (needed for polymorphic functions like `x: x`).
+    fn constrain_frozen_lambda(
+        &mut self,
+        owned: &OwnedTy,
+        sup_param: TyId,
+        sup_body: TyId,
+    ) -> Result<(), InferenceError> {
+        let root = owned.arena.unwrap_named(owned.root);
+        let inner = owned.arena.get(root);
+
+        match inner {
+            OutputTy::Lambda { param, body } => {
+                let (param, body) = (*param, *body);
+                if output_ty_field_count_arena(&owned.arena, body) > FROZEN_LAMBDA_FIELD_THRESHOLD {
+                    let param_owned = OwnedTy::new(owned.arena.clone(), param);
+                    let frozen_param = self.intern_frozen_owned_ty(&param_owned);
+                    self.constrain(sup_param, frozen_param)?;
+                    let body_owned = OwnedTy::new(owned.arena.clone(), body);
+                    let frozen_body = self.intern_frozen_owned_ty(&body_owned);
+                    self.constrain(frozen_body, sup_body)?;
+                    Ok(())
+                } else {
+                    let interned = self.intern_output_ty(owned);
+                    let sup_id = self.alloc_concrete(Ty::Lambda {
+                        param: sup_param,
+                        body: sup_body,
+                    });
+                    self.constrain(interned, sup_id)
+                }
+            }
+            _ => {
+                let interned = self.intern_output_ty(owned);
+                let sup_id = self.alloc_concrete(Ty::Lambda {
+                    param: sup_param,
+                    body: sup_body,
+                });
+                self.constrain(interned, sup_id)
+            }
+        }
+    }
+
+    /// Mirror of `constrain_frozen_lambda` for `Lambda <: Frozen(OwnedTy)`.
+    fn constrain_lambda_frozen(
+        &mut self,
+        sub_param: TyId,
+        sub_body: TyId,
+        owned: &OwnedTy,
+    ) -> Result<(), InferenceError> {
+        let root = owned.arena.unwrap_named(owned.root);
+        let inner = owned.arena.get(root);
+
+        match inner {
+            OutputTy::Lambda { param, body } => {
+                let (param, body) = (*param, *body);
+                if output_ty_field_count_arena(&owned.arena, body) > FROZEN_LAMBDA_FIELD_THRESHOLD {
+                    let param_owned = OwnedTy::new(owned.arena.clone(), param);
+                    let frozen_param = self.intern_frozen_owned_ty(&param_owned);
+                    self.constrain(frozen_param, sub_param)?;
+                    let body_owned = OwnedTy::new(owned.arena.clone(), body);
+                    let frozen_body = self.intern_frozen_owned_ty(&body_owned);
+                    self.constrain(sub_body, frozen_body)?;
+                    Ok(())
+                } else {
+                    let interned = self.intern_output_ty(owned);
+                    let sub_id = self.alloc_concrete(Ty::Lambda {
+                        param: sub_param,
+                        body: sub_body,
+                    });
+                    self.constrain(sub_id, interned)
+                }
+            }
+            _ => {
+                let interned = self.intern_output_ty(owned);
+                let sub_id = self.alloc_concrete(Ty::Lambda {
+                    param: sub_param,
+                    body: sub_body,
+                });
+                self.constrain(sub_id, interned)
+            }
+        }
+    }
+
+    /// Lazy field-level materialization for `AttrSet <: Frozen(OutputTy)`.
+    ///
+    /// Mirror of `constrain_frozen_attrset`. For each field in the sub attrset,
+    /// look it up in the frozen attrset and constrain field-by-field without
+    /// interning the entire frozen type.
+    fn constrain_attrset_frozen(
+        &mut self,
+        sub_attr: &AttrSetTy<TyId>,
+        owned: &OwnedTy,
+    ) -> Result<(), InferenceError> {
+        let root = owned.arena.unwrap_named(owned.root);
+        let inner = owned.arena.get(root);
+
+        match inner {
+            OutputTy::AttrSet(frozen_attr) => {
+                let frozen_attr = frozen_attr.clone();
+                // For each field in the sub attrset, constrain against the
+                // corresponding frozen field.
+                for (key, &sub_field) in &sub_attr.fields {
+                    if let Some(&frozen_field_ref) = frozen_attr.fields.get(key) {
+                        let field_owned = OwnedTy::new(owned.arena.clone(), frozen_field_ref);
+                        let field_ty = self.intern_frozen_owned_ty(&field_owned);
+                        self.constrain(sub_field, field_ty)?;
+                    }
+                    // If the frozen attrset doesn't have this field but is open,
+                    // that's fine — no constraint needed.
+                }
+
+                // Propagate dyn_ty constraints.
+                if let (Some(sub_dyn), Some(frozen_dyn)) = (sub_attr.dyn_ty, frozen_attr.dyn_ty) {
+                    let dyn_owned = OwnedTy::new(owned.arena.clone(), frozen_dyn);
+                    let dyn_ty = self.intern_frozen_owned_ty(&dyn_owned);
+                    self.constrain(sub_dyn, dyn_ty)?;
+                }
+
+                Ok(())
+            }
+            _ => {
+                let interned = self.intern_output_ty(owned);
+                let sup_id = self.alloc_concrete(Ty::AttrSet(sub_attr.clone()));
+                self.constrain(sup_id, interned)
+            }
+        }
+    }
 }
 
 /// Check if sub could be a subtype of target based on constructor shape.
 /// Read-only — no side effects. Used by `constrain_rhs_union` to decide
 /// which union member to route a concrete sub-type to.
 fn is_concrete_compatible(sub: &Ty<TyId>, target: &TypeEntry) -> bool {
-    // Named is transparent — unwrap before checking compatibility.
+    // Named and Frozen are transparent/opaque — conservatively compatible.
     let sub = match sub {
-        Ty::Named(_, _) => return true, // conservative: might be compatible
+        Ty::Named(_, _) | Ty::Frozen(_) => return true,
         other => other,
     };
     match target {
         TypeEntry::Variable(_) => true,
-        TypeEntry::Concrete(Ty::Named(_, _)) => true, // conservative
+        TypeEntry::Concrete(Ty::Named(_, _) | Ty::Frozen(_)) => true, // conservative
         TypeEntry::Concrete(target_ty) => {
             discriminant_matches(sub, target_ty)
                 || matches!(
@@ -599,16 +871,9 @@ fn discriminant_matches(a: &Ty<TyId>, b: &Ty<TyId>) -> bool {
 ///
 /// See `lang_ty::disjoint::are_shapes_disjoint` for the full disjointness rules.
 fn are_types_disjoint(a: &Ty<TyId>, b: &Ty<TyId>) -> bool {
-    // Named is transparent — unwrap before checking disjointness.
-    if let Ty::Named(_, inner_a) = a {
-        // We can't dereference TyId here (no storage access), so Named
-        // conservatively falls through to Opaque below. This is sound but
-        // could be refined if needed.
-        let _ = inner_a;
-    }
-    if let Ty::Named(_, inner_b) = b {
-        let _ = inner_b;
-    }
+    // Named is transparent, but we can't dereference TyId here (no storage
+    // access), so Named conservatively falls through to Opaque below. This is
+    // sound but could be refined if needed.
 
     // Collect field keys as sorted slices — avoids building a throwaway
     // BTreeMap<SmolStr, ()> just to check key membership.
@@ -647,4 +912,43 @@ fn are_types_disjoint(a: &Ty<TyId>, b: &Ty<TyId>) -> bool {
     };
 
     are_shapes_disjoint(&a_shape, &b_shape)
+}
+
+/// Count the total number of attrset fields reachable from an OutputTy.
+/// Used to decide whether a Frozen lambda body is "large" enough to warrant
+/// lazy decomposition. Stops counting at the threshold to avoid traversing
+/// the entire tree for very large types.
+fn output_ty_field_count_arena(arena: &TypeArena, ty: TyRef) -> usize {
+    output_ty_field_count_inner_arena(arena, ty, FROZEN_LAMBDA_FIELD_THRESHOLD + 1)
+}
+
+fn output_ty_field_count_inner_arena(arena: &TypeArena, ty: TyRef, budget: usize) -> usize {
+    if budget == 0 {
+        return 0;
+    }
+    match &arena[ty] {
+        OutputTy::AttrSet(attr) => attr.fields.len(),
+        OutputTy::Lambda { param, body } => {
+            let (param, body) = (*param, *body);
+            let p = output_ty_field_count_inner_arena(arena, param, budget);
+            let b = output_ty_field_count_inner_arena(arena, body, budget.saturating_sub(p));
+            p + b
+        }
+        OutputTy::Named(_, inner) | OutputTy::List(inner) | OutputTy::Neg(inner) => {
+            let inner = *inner;
+            output_ty_field_count_inner_arena(arena, inner, budget)
+        }
+        OutputTy::Union(members) | OutputTy::Intersection(members) => {
+            let members = members.clone();
+            let mut total = 0;
+            for m in &members {
+                total += output_ty_field_count_inner_arena(arena, *m, budget.saturating_sub(total));
+                if total > budget {
+                    return total;
+                }
+            }
+            total
+        }
+        _ => 0,
+    }
 }

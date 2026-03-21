@@ -104,14 +104,6 @@ unknown_type = "hint"  # "off", "hint", "warning", or "error" (default: "hint")
 
 The LSP editor settings (`tix.diagnostics.unknownType`) take precedence over `tix.toml` when both are set.
 
-### Inference deadline
-
-By default the LSP aborts type inference after 10 seconds per file and returns partial results. If you work with large files that need more time:
-
-```toml
-deadline = 30          # seconds per top-level file (default: 10)
-```
-
 ### Generating tix.toml
 
 Run `tix init` to automatically generate a `tix.toml` for your project:

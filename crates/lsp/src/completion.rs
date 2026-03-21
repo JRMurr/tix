@@ -124,14 +124,19 @@ pub fn completion(
         let scope_id = scope_at_token(analysis, &token)?;
         let visible = collect_visible_names_no_inference(analysis, scope_id);
 
+        // Arena may come from stale inference; without it we can't display types.
+        let stale_arena = analysis.inference_result().map(|inf| inf.arena.clone());
         let dc = lang_ty::DisplayConfig::completion();
         let items: Vec<CompletionItem> = visible
             .into_iter()
-            .map(|(name, ty)| CompletionItem {
-                label: name.to_string(),
-                kind: Some(completion_kind_for_ty(ty.as_ref())),
-                detail: ty.as_ref().map(|t| t.display_truncated(&dc)),
-                ..Default::default()
+            .map(|(name, ty)| {
+                let arena_ref = stale_arena.as_deref();
+                CompletionItem {
+                    label: name.to_string(),
+                    kind: Some(completion_kind_for_ty(arena_ref, ty)),
+                    detail: ty.and_then(|t| arena_ref.map(|a| a.display_truncated(t, &dc))),
+                    ..Default::default()
+                }
             })
             .collect();
 
@@ -190,6 +195,7 @@ fn find_name_type_by_text(
     inference: &lang_check::InferenceResult,
     name_text: &str,
 ) -> Option<OutputTy> {
+    let arena = &*inference.arena;
     let mut best: Option<OutputTy> = None;
 
     for (name_id, name) in analysis.syntax.module.names() {
@@ -198,8 +204,9 @@ fn find_name_type_by_text(
         }
 
         // Try direct name_ty_map lookup.
-        if let Some(ty) = inference.name_ty_map.get(name_id) {
-            if !collect_attrset_fields(ty).is_empty() {
+        if let Some(&ty_ref) = inference.name_ty_map.get(name_id) {
+            let ty = &arena[ty_ref];
+            if !collect_attrset_fields(arena, ty).is_empty() {
                 return Some(ty.clone());
             }
             // Remember this as a fallback even if it has no attrset fields.
@@ -213,17 +220,18 @@ fn find_name_type_by_text(
             if let Some(&lambda_expr_id) =
                 analysis.syntax.module_indices.param_to_lambda.get(&name_id)
             {
-                if let Some(lambda_ty) = inference.expr_ty_map.get(lambda_expr_id) {
-                    if let Some(param_ty) = extract_lambda_param(lambda_ty) {
+                if let Some(&lambda_ty_ref) = inference.expr_ty_map.get(lambda_expr_id) {
+                    let lambda_ty = &arena[lambda_ty_ref];
+                    if let Some(param_ty) = extract_lambda_param(arena, lambda_ty) {
                         let resolved = if name.kind == NameKind::PatField {
                             // PatField: extract the specific field from the param type.
-                            let fields = collect_attrset_fields(&param_ty);
-                            fields.get(&name.text).map(|f| (*f.0).clone())
+                            let fields = collect_attrset_fields(arena, &param_ty);
+                            fields.get(&name.text).map(|&f| arena[f].clone())
                         } else {
                             Some(param_ty)
                         };
                         if let Some(ref ty) = resolved {
-                            if !collect_attrset_fields(ty).is_empty() {
+                            if !collect_attrset_fields(arena, ty).is_empty() {
                                 return resolved;
                             }
                             if best.is_none() {
@@ -274,6 +282,8 @@ fn try_dot_completion(
         .expr_for_node(base_ptr)
         .and_then(|eid| resolve_base_type(analysis, inference, eid));
 
+    let arena = &*inference.arena;
+
     let (base_ty, alias) = if let Some(ty) = precise_ty {
         let alias = extract_alias_name(&ty).cloned();
         (ty, alias)
@@ -286,21 +296,21 @@ fn try_dot_completion(
         (ty, None)
     };
 
-    log::debug!("dot_completion: base_ty={base_ty}, typed_segments={typed_segments:?}");
+    log::debug!("dot_completion: base_ty={base_ty:?}, typed_segments={typed_segments:?}");
 
     // Walk through the typed segments to resolve the nested type.
     // If segment resolution fails (e.g. the type doesn't have the expected
     // field, or error-recovery injected a bogus segment), fall back to just
     // showing the base type's fields.
-    let resolved_ty = resolve_through_segments(&base_ty, &typed_segments).unwrap_or(base_ty);
+    let resolved_ty = resolve_through_segments(arena, &base_ty, &typed_segments).unwrap_or(base_ty);
 
     let doc_ctx = alias
         .as_ref()
         .map(|a| (docs, a.as_str(), typed_segments.as_slice()));
 
     // Extract fields from the resolved type and build completion items.
-    let fields = collect_attrset_fields(&resolved_ty);
-    Some(fields_to_completion_items(&fields, doc_ctx))
+    let fields = collect_attrset_fields(arena, &resolved_ty);
+    Some(fields_to_completion_items(arena, &fields, doc_ctx))
 }
 
 /// Resolve the type of a base expression for dot completion.
@@ -317,9 +327,12 @@ fn resolve_base_type(
     inference: &lang_check::InferenceResult,
     base_expr_id: ExprId,
 ) -> Option<OutputTy> {
+    let arena = &*inference.arena;
+
     // Primary: direct expr_ty_map lookup.
-    if let Some(ty) = inference.expr_ty_map.get(base_expr_id) {
-        if !collect_attrset_fields(ty).is_empty() {
+    if let Some(&ty_ref) = inference.expr_ty_map.get(base_expr_id) {
+        let ty = &arena[ty_ref];
+        if !collect_attrset_fields(arena, ty).is_empty() {
             return Some(ty.clone());
         }
     }
@@ -331,13 +344,17 @@ fn resolve_base_type(
         _ => {
             // For `with` expressions, try the expr_ty_map type even if it
             // has no attrset fields (it may still be useful after segment resolution).
-            return inference.expr_ty_map.get(base_expr_id).cloned();
+            return inference
+                .expr_ty_map
+                .get(base_expr_id)
+                .map(|&ty_ref| arena[ty_ref].clone());
         }
     };
 
     // Check name_ty_map for a concrete type.
-    if let Some(name_ty) = inference.name_ty_map.get(name_id) {
-        if !collect_attrset_fields(name_ty).is_empty() {
+    if let Some(&name_ty_ref) = inference.name_ty_map.get(name_id) {
+        let name_ty = &arena[name_ty_ref];
+        if !collect_attrset_fields(arena, name_ty).is_empty() {
             return Some(name_ty.clone());
         }
     }
@@ -348,20 +365,21 @@ fn resolve_base_type(
     if matches!(name.kind, NameKind::Param | NameKind::PatField) {
         if let Some(&lambda_expr_id) = analysis.syntax.module_indices.param_to_lambda.get(&name_id)
         {
-            if let Some(lambda_ty) = inference.expr_ty_map.get(lambda_expr_id) {
+            if let Some(&lambda_ty_ref) = inference.expr_ty_map.get(lambda_expr_id) {
+                let lambda_ty = &arena[lambda_ty_ref];
                 log::debug!(
-                    "dot_completion fallback: lambda ty={lambda_ty} for param {:?}",
+                    "dot_completion fallback: lambda ty={lambda_ty:?} for param {:?}",
                     name.text
                 );
-                if let Some(param_ty) = extract_lambda_param(lambda_ty) {
+                if let Some(param_ty) = extract_lambda_param(arena, lambda_ty) {
                     // For PatField names (e.g. `pkgs` in `{ pkgs, ... }: body`),
                     // the lambda param type is the whole pattern attrset
                     // `{ pkgs: T, ... }`. We need the specific field's type `T`,
                     // not the entire attrset.
                     if name.kind == NameKind::PatField {
-                        let fields = collect_attrset_fields(&param_ty);
-                        if let Some(field_ty) = fields.get(&name.text) {
-                            return Some((*field_ty.0).clone());
+                        let fields = collect_attrset_fields(arena, &param_ty);
+                        if let Some(&field_ty_ref) = fields.get(&name.text) {
+                            return Some(arena[field_ty_ref].clone());
                         }
                     }
                     return Some(param_ty);
@@ -371,7 +389,10 @@ fn resolve_base_type(
     }
 
     // Last resort: return whatever expr_ty_map has, even if it's a TyVar.
-    inference.expr_ty_map.get(base_expr_id).cloned()
+    inference
+        .expr_ty_map
+        .get(base_expr_id)
+        .map(|&ty_ref| arena[ty_ref].clone())
 }
 
 /// Collect the attrpath segments that have already been typed (i.e. that have
@@ -483,12 +504,23 @@ fn try_attrpath_key_completion(
     // Find the module config type: scan the root lambda's pattern fields for
     // one whose type contains the first path segment as a field.
     let first_segment = full_path.first()?;
-    let config_ty = get_module_config_type(
+    // get_module_config_type returns (config_ty, is_from_context):
+    // when is_from_context=true, TyRef children belong to context_arg_arena;
+    // when false, they belong to inference.arena. Use the matching arena for
+    // all subsequent navigation to avoid index-out-of-bounds panics.
+    let (config_ty, is_from_context) = get_module_config_type(
         analysis,
         inference,
         first_segment,
         &analysis.syntax.context_arg_types,
+        &analysis.syntax.context_arg_arena,
     )?;
+    let config_arena: std::sync::Arc<lang_ty::TypeArena> = if is_from_context {
+        std::sync::Arc::clone(&analysis.syntax.context_arg_arena)
+    } else {
+        std::sync::Arc::clone(&inference.arena)
+    };
+    let arena: &lang_ty::TypeArena = &config_arena;
 
     // Extract the alias name before unwrap_or moves config_ty.
     let alias = extract_alias_name(&config_ty).cloned();
@@ -500,15 +532,15 @@ fn try_attrpath_key_completion(
     );
 
     // Walk the config type through the full path.
-    let resolved_ty = resolve_through_segments(&config_ty, &full_path).unwrap_or(config_ty);
+    let resolved_ty = resolve_through_segments(arena, &config_ty, &full_path).unwrap_or(config_ty);
 
     let doc_ctx = alias
         .as_ref()
         .map(|a| (docs, a.as_str(), full_path.as_slice()));
 
     // Extract fields and return completion items.
-    let fields = collect_attrset_fields(&resolved_ty);
-    Some(fields_to_completion_items(&fields, doc_ctx))
+    let fields = collect_attrset_fields(arena, &resolved_ty);
+    Some(fields_to_completion_items(arena, &fields, doc_ctx))
 }
 
 // ==============================================================================
@@ -573,6 +605,8 @@ fn try_callsite_completion(
     // Get the function expression from the Apply.
     let fun_expr = apply_node.lambda()?;
 
+    let arena = &*inference.arena;
+
     // Try source_map lookup first (precise, works when analysis is current).
     // Fall back to name-text lookup when analysis is stale (source_map can't
     // find the Apply node from the fresh tree).
@@ -581,20 +615,23 @@ fn try_callsite_completion(
         .source_map
         .expr_for_node(AstPtr::new(fun_expr.syntax()))
     {
-        Some(fun_expr_id) => inference.expr_ty_map.get(fun_expr_id)?.clone(),
+        Some(fun_expr_id) => {
+            let &ty_ref = inference.expr_ty_map.get(fun_expr_id)?;
+            arena[ty_ref].clone()
+        }
         None => {
             let fun_name_text = extract_ident_text(&fun_expr)?;
             find_name_type_by_text(analysis, inference, &fun_name_text)?
         }
     };
 
-    log::debug!("callsite_completion: fun_ty={fun_ty}");
+    log::debug!("callsite_completion: fun_ty={fun_ty:?}");
 
     // Extract the parameter type from the function type.
-    let param_ty = extract_lambda_param(&fun_ty)?;
+    let param_ty = extract_lambda_param(arena, &fun_ty)?;
 
     // Get expected fields from the parameter type.
-    let expected_fields = collect_attrset_fields(&param_ty);
+    let expected_fields = collect_attrset_fields(arena, &param_ty);
     if expected_fields.is_empty() {
         return None;
     }
@@ -614,7 +651,7 @@ fn try_callsite_completion(
     let alias = extract_alias_name(&param_ty);
     let doc_ctx = alias.map(|a| (docs, a.as_str(), &[] as &[SmolStr]));
 
-    Some(fields_to_completion_items(&remaining, doc_ctx))
+    Some(fields_to_completion_items(arena, &remaining, doc_ctx))
 }
 
 /// Collect field names already present in an attrset literal, using the lowered
@@ -663,25 +700,26 @@ fn try_inherit_completion(
         })
         .collect();
 
+    let arena = &*inference.arena;
+
     if let Some(from) = inherit_node.from() {
         // `inherit (expr) ▊;` — suggest fields from the expression's type.
         let expr_node = from.expr()?;
         let expr_ptr = AstPtr::new(expr_node.syntax());
         let expr_id = analysis.syntax.source_map.expr_for_node(expr_ptr)?;
-        let ty = inference.expr_ty_map.get(expr_id)?;
-        let fields = collect_attrset_fields(ty);
+        let &ty_ref = inference.expr_ty_map.get(expr_id)?;
+        let ty = &arena[ty_ref];
+        let fields = collect_attrset_fields(arena, ty);
 
+        let dc = lang_ty::DisplayConfig::completion();
         let items = fields
             .iter()
             .filter(|(name, _)| !existing.contains(name))
-            .map(|(name, ty)| {
-                let dc = lang_ty::DisplayConfig::completion();
-                CompletionItem {
-                    label: name.to_string(),
-                    kind: Some(CompletionItemKind::FIELD),
-                    detail: Some(ty.display_truncated(&dc)),
-                    ..Default::default()
-                }
+            .map(|(name, &field_ty_ref)| CompletionItem {
+                label: name.to_string(),
+                kind: Some(CompletionItemKind::FIELD),
+                detail: Some(arena.display_truncated(field_ty_ref, &dc)),
+                ..Default::default()
             })
             .collect();
 
@@ -711,10 +749,10 @@ fn try_inherit_completion(
         let items = visible
             .iter()
             .filter(|(name, _)| !existing.contains(name))
-            .map(|(name, ty)| CompletionItem {
+            .map(|(name, &ty)| CompletionItem {
                 label: name.to_string(),
-                kind: Some(completion_kind_for_ty(ty.as_ref())),
-                detail: ty.as_ref().map(|t| t.display_truncated(&dc)),
+                kind: Some(completion_kind_for_ty(Some(arena), ty)),
+                detail: ty.map(|t| arena.display_truncated(t, &dc)),
                 ..Default::default()
             })
             .collect();
@@ -732,16 +770,17 @@ fn try_identifier_completion(
     inference: &lang_check::InferenceResult,
     token: &rowan::SyntaxToken<rnix::NixLanguage>,
 ) -> Option<Vec<CompletionItem>> {
+    let arena = &*inference.arena;
     let scope_id = scope_at_token(analysis, token)?;
     let visible = collect_visible_names(analysis, inference, scope_id);
 
     let dc = lang_ty::DisplayConfig::completion();
     let items: Vec<CompletionItem> = visible
         .iter()
-        .map(|(name, ty)| CompletionItem {
+        .map(|(name, &ty)| CompletionItem {
             label: name.to_string(),
-            kind: Some(completion_kind_for_ty(ty.as_ref())),
-            detail: ty.as_ref().map(|t| t.display_truncated(&dc)),
+            kind: Some(completion_kind_for_ty(Some(arena), ty)),
+            detail: ty.map(|t| arena.display_truncated(t, &dc)),
             ..Default::default()
         })
         .collect();
@@ -796,24 +835,24 @@ fn collect_visible_names(
     analysis: &FileSnapshot,
     inference: &lang_check::InferenceResult,
     scope_id: nameres::ScopeId,
-) -> BTreeMap<SmolStr, Option<OutputTy>> {
-    let mut result: BTreeMap<SmolStr, Option<OutputTy>> = BTreeMap::new();
+) -> BTreeMap<SmolStr, Option<TyRef>> {
+    let arena = &*inference.arena;
+    let mut result: BTreeMap<SmolStr, Option<TyRef>> = BTreeMap::new();
 
     for scope_data in analysis.syntax.scopes.ancestors(scope_id) {
         if let Some(defs) = scope_data.as_definitions() {
             for (name, name_id) in defs {
                 result
                     .entry(name.clone())
-                    .or_insert_with(|| inference.name_ty_map.get(*name_id).cloned());
+                    .or_insert_with(|| inference.name_ty_map.get(*name_id).copied());
             }
         } else if let Some(with_expr_id) = scope_data.as_with() {
             // The With expression's env is the first child.
             if let Expr::With { env, .. } = &analysis.syntax.module[with_expr_id] {
-                if let Some(env_ty) = inference.expr_ty_map.get(*env) {
-                    for (field_name, field_ty) in collect_attrset_fields(env_ty) {
-                        result
-                            .entry(field_name)
-                            .or_insert_with(|| Some((*field_ty.0).clone()));
+                if let Some(&env_ty_ref) = inference.expr_ty_map.get(*env) {
+                    let env_ty = &arena[env_ty_ref];
+                    for (field_name, field_ty_ref) in collect_attrset_fields(arena, env_ty) {
+                        result.entry(field_name).or_insert(Some(field_ty_ref));
                     }
                 }
             }
@@ -840,25 +879,25 @@ fn collect_visible_names(
 fn collect_visible_names_no_inference(
     analysis: &FileSnapshot,
     scope_id: nameres::ScopeId,
-) -> BTreeMap<SmolStr, Option<OutputTy>> {
-    let mut result: BTreeMap<SmolStr, Option<OutputTy>> = BTreeMap::new();
+) -> BTreeMap<SmolStr, Option<TyRef>> {
+    let mut result: BTreeMap<SmolStr, Option<TyRef>> = BTreeMap::new();
     let inference = analysis.inference_result();
 
     for scope_data in analysis.syntax.scopes.ancestors(scope_id) {
         if let Some(defs) = scope_data.as_definitions() {
             for (name, name_id) in defs {
                 result.entry(name.clone()).or_insert_with(|| {
-                    inference.and_then(|inf| inf.name_ty_map.get(*name_id).cloned())
+                    inference.and_then(|inf| inf.name_ty_map.get(*name_id).copied())
                 });
             }
         } else if let Some(with_expr_id) = scope_data.as_with() {
             if let Some(inf) = inference {
+                let arena = &*inf.arena;
                 if let Expr::With { env, .. } = &analysis.syntax.module[with_expr_id] {
-                    if let Some(env_ty) = inf.expr_ty_map.get(*env) {
-                        for (field_name, field_ty) in collect_attrset_fields(env_ty) {
-                            result
-                                .entry(field_name)
-                                .or_insert_with(|| Some((*field_ty.0).clone()));
+                    if let Some(&env_ty_ref) = inf.expr_ty_map.get(*env) {
+                        let env_ty = &arena[env_ty_ref];
+                        for (field_name, field_ty_ref) in collect_attrset_fields(arena, env_ty) {
+                            result.entry(field_name).or_insert(Some(field_ty_ref));
                         }
                     }
                 }
@@ -878,24 +917,27 @@ fn collect_visible_names_no_inference(
 }
 
 /// Map a type to the appropriate LSP CompletionItemKind.
-fn completion_kind_for_ty(ty: Option<&OutputTy>) -> CompletionItemKind {
-    match ty {
-        Some(t) => {
-            if is_function_ty(t) {
+fn completion_kind_for_ty(
+    arena: Option<&lang_ty::TypeArena>,
+    ty: Option<TyRef>,
+) -> CompletionItemKind {
+    match (arena, ty) {
+        (Some(a), Some(t)) => {
+            if is_function_ty(a, t) {
                 CompletionItemKind::FUNCTION
             } else {
                 CompletionItemKind::VARIABLE
             }
         }
-        None => CompletionItemKind::VARIABLE,
+        _ => CompletionItemKind::VARIABLE,
     }
 }
 
 /// Check if a type is a function (Lambda), unwrapping Named wrappers.
-fn is_function_ty(ty: &OutputTy) -> bool {
-    match ty {
+fn is_function_ty(arena: &lang_ty::TypeArena, ty: TyRef) -> bool {
+    match &arena[ty] {
         OutputTy::Lambda { .. } => true,
-        OutputTy::Named(_, inner) => is_function_ty(&inner.0),
+        OutputTy::Named(_, inner) => is_function_ty(arena, *inner),
         _ => false,
     }
 }
@@ -917,12 +959,14 @@ fn is_function_ty(ty: &OutputTy) -> bool {
 /// prefix `["programs"]`, so field "steam" looks up
 /// `field_doc("NixosConfig", &["programs", "steam"])`.
 fn fields_to_completion_items(
+    arena: &lang_ty::TypeArena,
     fields: &BTreeMap<SmolStr, TyRef>,
     doc_ctx: Option<(&DocIndex, &str, &[SmolStr])>,
 ) -> Vec<CompletionItem> {
+    let dc = lang_ty::DisplayConfig::completion();
     fields
         .iter()
-        .map(|(name, ty)| {
+        .map(|(name, &ty_ref)| {
             let documentation = doc_ctx.and_then(|(docs, alias, prefix)| {
                 let mut path: Vec<SmolStr> = prefix.to_vec();
                 path.push(name.clone());
@@ -945,7 +989,7 @@ fn fields_to_completion_items(
             CompletionItem {
                 label: name.to_string(),
                 kind: Some(CompletionItemKind::FIELD),
-                detail: Some(ty.display_truncated(&lang_ty::DisplayConfig::completion())),
+                detail: Some(arena.display_truncated(ty_ref, &dc)),
                 documentation,
                 data,
                 ..Default::default()
@@ -1123,7 +1167,6 @@ mod tests {
         // The lambda param type captures within-body constraints: at minimum
         // "name" (from `pkgs.name`). "src" comes from the call site which
         // may or may not survive rnix error recovery.
-        eprintln!("lambda_param_body completions: {names:?}");
         assert!(
             names.contains(&"name"),
             "should complete name from within-body constraint, got: {names:?}"
@@ -1139,7 +1182,6 @@ mod tests {
         let offset = find_offset(src, "pkgs.;") + 5;
         let items = complete_at(src, offset);
         let names = labels(&items);
-        eprintln!("pat_param completions: {names:?}");
         assert!(
             names.contains(&"name"),
             "should complete name from within-body usage, got: {names:?}"
@@ -1180,7 +1222,6 @@ mod tests {
             _ => Vec::new(),
         };
         let names = labels(&items);
-        eprintln!("alias_typed completions: {names:?}");
         assert!(
             names.contains(&"lib"),
             "should complete `lib` from Pkgs alias, got: {names:?}"
@@ -1527,7 +1568,6 @@ mod tests {
         let results = complete_at_markers(src);
         let names = labels(&results[&1]);
         // Should still offer callsite fields, not just identifier completion
-        eprintln!("callsite with partial ident: {names:?}");
         assert!(
             names.contains(&"enable"),
             "should complete enable, got: {names:?}"
@@ -2358,8 +2398,6 @@ mod tests {
         state.project_config = Some(ProjectConfig {
             stubs: vec![],
             context: context_map,
-            deadline: None,
-            import_deadline: None,
             project: None,
             diagnostics: None,
         });
@@ -2409,8 +2447,6 @@ mod tests {
         state.project_config = Some(ProjectConfig {
             stubs: vec![],
             context: context_map,
-            deadline: None,
-            import_deadline: None,
             project: None,
             diagnostics: None,
         });
@@ -2828,7 +2864,7 @@ mod tests {
             _ => {
                 // Generated stubs don't exist (CI or fresh clone without
                 // `just gen-stubs`). Skip rather than fail.
-                eprintln!("skipping: stubs/generated/nixos.tix not found (run `just gen-stubs`)");
+                println!("skipping: stubs/generated/nixos.tix not found (run `just gen-stubs`)");
                 return;
             }
         };
@@ -2856,8 +2892,6 @@ mod tests {
         state.project_config = Some(ProjectConfig {
             stubs: vec![],
             context: context_map,
-            deadline: None,
-            import_deadline: None,
             project: None,
             diagnostics: None,
         });

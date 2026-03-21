@@ -30,7 +30,7 @@ Communicates over stdin/stdout. Stubs are loaded from `tix.toml` (auto-discovere
 | **Document Highlight** | Highlight all uses of the name under cursor |
 | **Code Actions** | Quick fixes: add missing field, add type annotation, remove unused binding |
 | **Formatting** | Runs `nixfmt` |
-| **Diagnostics** | Type errors, missing fields, import resolution errors, inference timeouts — each with a stable [error code](./diagnostics/index.md) |
+| **Diagnostics** | Type errors, missing fields, import resolution errors — each with a stable [error code](./diagnostics/index.md) |
 
 ## Diagnostics
 
@@ -40,7 +40,7 @@ When diagnostics are enabled (`"diagnostics": { "enable": true }`), tix reports:
 - **Missing fields** (ERROR): accessing a field that doesn't exist on a closed attrset ([E002](./diagnostics/e002.md))
 - **Unresolved names** (WARNING): references to names that can't be resolved ([E005](./diagnostics/e005.md))
 - **Import errors** (WARNING): `import ./missing.nix` where the target file doesn't exist ([E007](./diagnostics/e007.md)), angle bracket imports like `<nixpkgs>` ([E012](./diagnostics/e012.md)), or files that haven't been analyzed ([E013](./diagnostics/e013.md))
-- **Inference timeout** (WARNING): when type inference exceeds the 10-second deadline ([E008](./diagnostics/e008.md))
+- **Inference aborted** (WARNING): when type inference is aborted due to memory pressure ([E008](./diagnostics/e008.md))
 - **Unknown type** (configurable): bindings whose type is `?` ([E014](./diagnostics/e014.md)) — default severity: hint
 
 Every diagnostic has a stable error code (e.g. `E001`) that links to documentation. In VS Code, click the code in the Problems panel to open the docs page.
@@ -71,15 +71,17 @@ tix lsp --log-level trace    # maximum verbosity
 
 ### `--mem-limit`
 
-The LSP sets a 4 GiB virtual address space limit (`RLIMIT_AS`) at startup to prevent runaway inference from consuming all system memory. Override with the `--mem-limit` flag (value in MiB) or the `TIX_MEM_LIMIT` environment variable:
+The LSP sets an RSS (resident memory) limit at startup to prevent runaway inference from consuming all system memory. The default is **80% of system RAM** (detected via `sysconf`; falls back to 3200 MiB if detection fails). A hard `RLIMIT_AS` backstop is set to 2.5× the RSS limit to accommodate virtual address space overhead.
+
+Override with the `--mem-limit` flag (value in MiB, sets the RSS limit directly) or the `TIX_MEM_LIMIT` environment variable:
 
 ```bash
-tix lsp --mem-limit 8192     # 8 GiB
+tix lsp --mem-limit 8192     # 8 GiB RSS limit
 tix lsp --mem-limit 0        # no limit
 TIX_MEM_LIMIT=8192 tix lsp   # 8 GiB (env var, lower priority than --mem-limit)
 ```
 
-In addition to the hard `RLIMIT_AS` limit, the LSP monitors RSS (resident memory) and bails out of inference early when memory pressure is detected — returning partial results instead of crashing. This prevents the process from hitting the virtual address space limit (which would cause a hard SIGABRT). Background analysis of project files is also paused when RSS is high.
+When process RSS exceeds the limit, inference bails out early — returning partial results instead of crashing. Background analysis of project files is also paused when RSS is high.
 
 ## Editor setup
 

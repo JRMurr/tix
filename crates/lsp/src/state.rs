@@ -10,7 +10,6 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -42,6 +41,7 @@ use crate::project_config::ProjectConfig;
 
 /// Syntax-level data. Always present once a file has been analyzed at least once.
 /// All fields come from the same analysis pass and are internally consistent.
+#[derive(Clone)]
 pub struct SyntaxData {
     pub parsed: rnix::Parse<rnix::Root>,
     pub line_index: LineIndex,
@@ -53,6 +53,10 @@ pub struct SyntaxData {
     pub import_targets: HashMap<ExprId, PathBuf>,
     pub name_to_import: HashMap<NameId, PathBuf>,
     pub context_arg_types: HashMap<SmolStr, OutputTy>,
+    /// Arena that owns all TyRef indices inside `context_arg_types`. These two
+    /// fields must always be kept in sync — TyRef values from context_arg_types
+    /// are only valid when indexed against this arena.
+    pub context_arg_arena: Arc<lang_ty::TypeArena>,
 }
 
 /// Type inference results from a completed analysis pass.
@@ -96,7 +100,7 @@ pub struct SyntaxIntermediate {
     pub registry: Arc<TypeAliasRegistry>,
     pub context_args: Arc<HashMap<SmolStr, comment_parser::ParsedTy>>,
     pub context_arg_types: HashMap<SmolStr, OutputTy>,
-    pub deadline_secs: u64,
+    pub context_arg_arena: Arc<lang_ty::TypeArena>,
     pub rss_limit_mb: Option<f64>,
 }
 
@@ -113,18 +117,16 @@ pub struct LspInferenceInputs {
     pub import_targets: HashMap<ExprId, PathBuf>,
     pub name_to_import: HashMap<NameId, PathBuf>,
     pub context_arg_types: HashMap<SmolStr, OutputTy>,
+    pub context_arg_arena: Arc<lang_ty::TypeArena>,
 }
 
 /// Run type inference using precomputed syntax data. Does not need the Salsa
 /// database or the analysis mutex. Returns the check result and timing.
 ///
 /// Delegates to `lang_check::run_inference()` for the actual work.
-pub fn run_inference(
-    inputs: &LspInferenceInputs,
-    cancel_flag: Option<Arc<AtomicBool>>,
-) -> (CheckResult, Duration) {
+pub fn run_inference(inputs: &LspInferenceInputs) -> (CheckResult, Duration) {
     let t0 = Instant::now();
-    let check_result = lang_check::run_inference(&inputs.core, cancel_flag);
+    let check_result = lang_check::run_inference(&inputs.core);
     let elapsed = t0.elapsed();
     (check_result, elapsed)
 }
@@ -146,6 +148,7 @@ pub fn build_file_analysis(inputs: LspInferenceInputs, check_result: CheckResult
         import_targets: inputs.import_targets,
         name_to_import: inputs.name_to_import,
         context_arg_types: inputs.context_arg_types,
+        context_arg_arena: inputs.context_arg_arena,
     }
 }
 
@@ -179,16 +182,14 @@ pub struct LspSyntaxProvider {
         Option<crate::project_config::ProjectConfig>,
         Option<PathBuf>,
     )>,
-    deadline_secs: u64,
 }
 
 impl LspSyntaxProvider {
-    pub fn new(registry: Arc<TypeAliasRegistry>, deadline_secs: u64) -> Self {
+    pub fn new(registry: Arc<TypeAliasRegistry>) -> Self {
         Self {
             db: parking_lot::Mutex::new(RootDatabase::default()),
             registry: parking_lot::Mutex::new(registry),
             config: parking_lot::Mutex::new((None, None)),
-            deadline_secs,
         }
     }
 
@@ -238,7 +239,6 @@ impl SyntaxProvider for LspSyntaxProvider {
             grouped_defs,
             registry,
             context_args,
-            deadline_secs: Some(self.deadline_secs),
         })
     }
 }
@@ -256,7 +256,6 @@ pub fn resolve_imports_phase_b(
     coordinator: &InferenceCoordinator,
     syntax_provider: Option<&LspSyntaxProvider>,
     intermediate: &SyntaxIntermediate,
-    cancel_flag: Option<Arc<AtomicBool>>,
 ) -> (
     LspInferenceInputs,
     HashMap<ExprId, PathBuf>,
@@ -283,7 +282,7 @@ pub fn resolve_imports_phase_b(
             }
             // Demand-driven: parse + infer the dependency from disk.
             let provider = syntax_provider?;
-            let result = coordinator.demand_file(dep_path, provider, cancel_flag.clone())?;
+            let result = coordinator.demand_file(dep_path, provider)?;
             result.signature.map(|s| s.root_ty)
         },
     );
@@ -312,8 +311,8 @@ pub fn resolve_imports_phase_b(
             import_types: import_resolution.types,
             import_diagnostics,
             context_args: intermediate.context_args.clone(),
-            deadline_secs: Some(intermediate.deadline_secs),
             rss_limit_mb: intermediate.rss_limit_mb,
+            file_path: Some(intermediate.path.clone()),
         },
         nix_file: intermediate.nix_file,
         line_index: intermediate.line_index.clone(),
@@ -323,6 +322,7 @@ pub fn resolve_imports_phase_b(
         import_targets: import_targets.clone(),
         name_to_import: name_to_import.clone(),
         context_arg_types: intermediate.context_arg_types.clone(),
+        context_arg_arena: Arc::clone(&intermediate.context_arg_arena),
     };
 
     (
@@ -349,6 +349,7 @@ impl FileAnalysis {
                 import_targets: self.import_targets.clone(),
                 name_to_import: self.name_to_import.clone(),
                 context_arg_types: self.context_arg_types.clone(),
+                context_arg_arena: Arc::clone(&self.context_arg_arena),
             },
             inference: Some(InferenceData {
                 check_result: self.check_result.clone(),
@@ -383,6 +384,8 @@ pub struct FileAnalysis {
     /// without `config` — the `config :: NixosConfig` context arg still
     /// provides field information for attrpath key hover/completion).
     pub context_arg_types: HashMap<SmolStr, OutputTy>,
+    /// Arena owning all TyRef indices embedded in `context_arg_types`.
+    pub context_arg_arena: Arc<lang_ty::TypeArena>,
 }
 
 impl FileAnalysis {
@@ -427,9 +430,6 @@ pub struct AnalysisState {
     pub project_config: Option<ProjectConfig>,
     /// Directory containing the tix.toml file (for resolving relative paths).
     pub config_dir: Option<PathBuf>,
-    /// Inference deadline in seconds (per top-level file). Configurable via
-    /// `deadline` in `tix.toml`, defaults to 10.
-    pub deadline_secs: u64,
 
     /// Shared inference coordinator: caches file signatures (root types),
     /// tracks import dependencies, and handles invalidation cascading.
@@ -452,7 +452,6 @@ impl AnalysisState {
             files: HashMap::new(),
             project_config: None,
             config_dir: None,
-            deadline_secs: 10,
             coordinator: Arc::new(InferenceCoordinator::new()),
             rss_limit_mb: None,
         }
@@ -471,28 +470,13 @@ impl AnalysisState {
         path: PathBuf,
         contents: String,
     ) -> (&FileAnalysis, AnalysisTiming) {
-        self.update_file_inner(path, contents, None)
+        self.update_file_inner(path, contents)
     }
 
-    /// Like `update_file` but with an external cancellation flag. When the
-    /// flag is set to `true` (e.g. because a newer edit arrived for the same
-    /// file), type inference bails out early with partial results.
-    #[cfg(test)]
-    pub fn update_file_with_cancel(
-        &mut self,
-        path: PathBuf,
-        contents: String,
-        cancel_flag: Arc<AtomicBool>,
-    ) -> (&FileAnalysis, AnalysisTiming) {
-        self.update_file_inner(path, contents, Some(cancel_flag))
-    }
-
-    /// Shared implementation for `update_file` and `update_file_with_cancel`.
     fn update_file_inner(
         &mut self,
         path: PathBuf,
         contents: String,
-        cancel_flag: Option<Arc<AtomicBool>>,
     ) -> (&FileAnalysis, AnalysisTiming) {
         // Path is expected to be pre-canonicalized by uri_to_path() at the LSP boundary.
         let t_total = Instant::now();
@@ -545,26 +529,12 @@ impl AnalysisState {
                 Arc::default()
             };
 
-        // Pre-convert context args to OutputTy for the LSP to use as a fallback
-        // when the root lambda doesn't explicitly destructure a name.
-        let context_arg_types: HashMap<SmolStr, OutputTy> = context_args
-            .iter()
-            .map(|(name, parsed_ty)| {
-                let output_ty = crate::ty_nav::parsed_ty_to_output_ty(parsed_ty, &self.registry, 0);
-                (name.clone(), output_ty)
-            })
-            .collect();
+        let (context_arg_types, context_arg_arena) =
+            crate::ty_nav::convert_context_args(&context_args, &self.registry);
         let t_imports = t0.elapsed();
 
         // -- Phase 4: Type inference --
-        // Deadline for the top-level file (configurable via `deadline` in
-        // tix.toml, default 10s). If inference hangs (e.g. due to pathological
-        // constraint propagation on complex files), bail out with partial
-        // results rather than blocking the LSP indefinitely. The cancel flag
-        // provides an additional early-exit path when a newer edit supersedes
-        // this analysis.
         let t0 = Instant::now();
-        let deadline = Some(Instant::now() + Duration::from_secs(self.deadline_secs));
         let mut check_result = lang_check::CheckBuilder::from_db(
             &self.db,
             nix_file,
@@ -572,8 +542,6 @@ impl AnalysisState {
             import_resolution.types,
             context_args,
         )
-        .deadline(deadline)
-        .cancel_flag(cancel_flag)
         .rss_limit(self.rss_limit_mb)
         .run();
         let t_check = t0.elapsed();
@@ -584,7 +552,7 @@ impl AnalysisState {
 
         // If inference timed out, identify which bindings are incomplete
         // and include them in the diagnostic for actionable feedback.
-        if check_result.timed_out {
+        if check_result.bailed_out {
             let missing_bindings: Vec<SmolStr> = module
                 .names()
                 .filter(|(_, name)| {
@@ -605,7 +573,7 @@ impl AnalysisState {
                 .collect();
             check_result.diagnostics.push(TixDiagnostic {
                 at_expr: module.entry_expr,
-                kind: TixDiagnosticKind::InferenceTimeout { missing_bindings },
+                kind: TixDiagnosticKind::InferenceAborted { missing_bindings },
             });
         }
 
@@ -626,6 +594,7 @@ impl AnalysisState {
                 import_targets,
                 name_to_import,
                 context_arg_types,
+                context_arg_arena,
             },
         );
 
@@ -688,13 +657,8 @@ impl AnalysisState {
                 Arc::default()
             };
 
-        let context_arg_types: HashMap<SmolStr, OutputTy> = context_args
-            .iter()
-            .map(|(name, parsed_ty)| {
-                let output_ty = crate::ty_nav::parsed_ty_to_output_ty(parsed_ty, &self.registry, 0);
-                (name.clone(), output_ty)
-            })
-            .collect();
+        let (context_arg_types, context_arg_arena) =
+            crate::ty_nav::convert_context_args(&context_args, &self.registry);
 
         let syntax_duration = t0.elapsed();
 
@@ -715,7 +679,7 @@ impl AnalysisState {
             registry: Arc::clone(&self.registry),
             context_args,
             context_arg_types,
-            deadline_secs: self.deadline_secs,
+            context_arg_arena,
             rss_limit_mb: self.rss_limit_mb,
         };
 
@@ -732,6 +696,7 @@ impl AnalysisState {
             import_targets: HashMap::new(),
             name_to_import: HashMap::new(),
             context_arg_types: intermediate.context_arg_types.clone(),
+            context_arg_arena: Arc::clone(&intermediate.context_arg_arena),
         };
 
         (syntax_data, intermediate, syntax_duration)
@@ -789,8 +754,8 @@ impl AnalysisState {
                 import_types: import_resolution.types,
                 import_diagnostics,
                 context_args: intermediate.context_args.clone(),
-                deadline_secs: Some(intermediate.deadline_secs),
                 rss_limit_mb: intermediate.rss_limit_mb,
+                file_path: Some(intermediate.path.clone()),
             },
             nix_file: intermediate.nix_file,
             line_index: intermediate.line_index.clone(),
@@ -800,6 +765,7 @@ impl AnalysisState {
             import_targets: import_targets.clone(),
             name_to_import: name_to_import.clone(),
             context_arg_types: intermediate.context_arg_types.clone(),
+            context_arg_arena: Arc::clone(&intermediate.context_arg_arena),
         };
 
         (
@@ -813,7 +779,7 @@ impl AnalysisState {
     /// Store or update the file signature in the coordinator cache.
     /// Returns `true` if the type actually changed (callers use this to decide
     /// whether to trigger dependent re-analysis).
-    pub fn update_ephemeral_stub(&mut self, path: &Path, root_ty: OutputTy) -> bool {
+    pub fn update_ephemeral_stub(&mut self, path: &Path, root_ty: lang_ty::OwnedTy) -> bool {
         self.coordinator
             .set_signature(path, lang_check::FileSignature { root_ty })
     }
@@ -861,7 +827,7 @@ impl AnalysisState {
 /// import, records the name→path link. This powers Select-through-import
 /// navigation (e.g. `x.child` where `x = import ./foo.nix` jumps to `child`
 /// in foo.nix).
-fn build_name_to_import(
+pub(crate) fn build_name_to_import(
     module: &Module,
     import_targets: &HashMap<ExprId, PathBuf>,
     grouped_defs: &GroupedDefs,
@@ -1135,55 +1101,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn update_file_with_cancel_completes_normally_when_not_cancelled() {
-        // When the cancel flag is never set, analysis should complete and
-        // produce valid results — identical to `update_file`.
-        let src = "let x = 1; in x + x";
-        let path = crate::test_util::temp_path("cancel_normal.nix");
-        let cancel = Arc::new(AtomicBool::new(false));
-
-        let mut state = AnalysisState::new(TypeAliasRegistry::default());
-        let (analysis, timing) =
-            state.update_file_with_cancel(path.clone(), src.to_string(), cancel);
-
-        // Should have valid inference results.
-        assert!(
-            analysis.inference().is_some(),
-            "inference should succeed when cancel flag is not set"
-        );
-        // Timing should be non-zero.
-        assert!(
-            timing.total > Duration::ZERO,
-            "timing should be non-zero for completed analysis"
-        );
-        // Should not be marked as timed out.
-        assert!(
-            !analysis.check_result.timed_out,
-            "should not be marked as timed out"
-        );
-    }
-
-    #[test]
-    fn update_file_with_cancel_aborts_when_pre_cancelled() {
-        // When the cancel flag is already set before analysis begins,
-        // inference should bail out immediately with partial results.
-        let src = "let x = 1; in x + x";
-        let path = crate::test_util::temp_path("cancel_pre.nix");
-        let cancel = Arc::new(AtomicBool::new(true));
-
-        let mut state = AnalysisState::new(TypeAliasRegistry::default());
-        let (analysis, _timing) =
-            state.update_file_with_cancel(path.clone(), src.to_string(), cancel);
-
-        // When cancelled before inference starts, the inference engine
-        // treats it like a deadline exceeded — timed_out is set to true.
-        assert!(
-            analysis.check_result.timed_out,
-            "should be marked as timed out when cancel flag is pre-set"
-        );
-    }
-
     // =========================================================================
     // Ephemeral stub and dependency tracking tests
     // =========================================================================
@@ -1229,12 +1146,19 @@ mod tests {
         );
     }
 
+    /// Helper: create an OwnedTy from a primitive OutputTy for tests.
+    fn make_owned_ty(output_ty: OutputTy) -> lang_ty::OwnedTy {
+        let mut arena = lang_ty::TypeArena::new();
+        let root = arena.intern(output_ty);
+        lang_ty::OwnedTy::new(Arc::new(arena), root)
+    }
+
     #[test]
     fn update_ephemeral_stub_returns_changed() {
         let mut state = AnalysisState::new(TypeAliasRegistry::default());
         let path = PathBuf::from("/test.nix");
-        let ty_int = OutputTy::Primitive(lang_ty::PrimitiveTy::Int);
-        let ty_string = OutputTy::Primitive(lang_ty::PrimitiveTy::String);
+        let ty_int = make_owned_ty(OutputTy::Primitive(lang_ty::PrimitiveTy::Int));
+        let ty_string = make_owned_ty(OutputTy::Primitive(lang_ty::PrimitiveTy::String));
 
         // First insertion: new type, should return true.
         assert!(
@@ -1260,7 +1184,7 @@ mod tests {
         let mut state = AnalysisState::new(TypeAliasRegistry::default());
         let a = PathBuf::from("/a.nix");
         let b = PathBuf::from("/b.nix");
-        let ty_int = OutputTy::Primitive(lang_ty::PrimitiveTy::Int);
+        let ty_int = make_owned_ty(OutputTy::Primitive(lang_ty::PrimitiveTy::Int));
 
         // A imports B, B has an ephemeral stub.
         state.record_import_deps(&a, &[b.clone()]);

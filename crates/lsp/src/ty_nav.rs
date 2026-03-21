@@ -7,9 +7,10 @@
 // type aliases, and extract lambda parameter types.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 use lang_ast::Expr;
-use lang_ty::{OutputTy, TyRef};
+use lang_ty::{OutputTy, TyRef, TypeArena};
 use rowan::ast::AstNode;
 use smol_str::SmolStr;
 
@@ -29,12 +30,16 @@ pub(crate) fn get_str_literal(s: &rnix::ast::Str) -> Option<SmolStr> {
 }
 
 /// Walk a type through a series of field names, resolving each one.
-pub(crate) fn resolve_through_segments(ty: &OutputTy, segments: &[SmolStr]) -> Option<OutputTy> {
+pub(crate) fn resolve_through_segments(
+    arena: &TypeArena,
+    ty: &OutputTy,
+    segments: &[SmolStr],
+) -> Option<OutputTy> {
     let mut current = ty.clone();
     for seg in segments {
-        let fields = collect_attrset_fields(&current);
+        let fields = collect_attrset_fields(arena, &current);
         let field_ty = fields.get(seg)?;
-        current = (*field_ty.0).clone();
+        current = arena[*field_ty].clone();
     }
     Some(current)
 }
@@ -53,13 +58,18 @@ pub(crate) fn resolve_through_segments(ty: &OutputTy, segments: &[SmolStr]) -> O
 /// without any function.
 ///
 /// Returns `None` when no pattern field or context arg type contains the
-/// given segment.
+/// given segment. On success, returns `(config_ty, is_from_context)`:
+/// - `is_from_context = false`: the type lives in `inference.arena`.
+/// - `is_from_context = true`: the type lives in `context_arg_arena`.
+///   Callers must use the matching arena for all subsequent navigation of the
+///   returned type.
 pub(crate) fn get_module_config_type(
     analysis: &FileSnapshot,
     inference: &lang_check::InferenceResult,
     first_segment: &SmolStr,
     context_arg_types: &HashMap<SmolStr, OutputTy>,
-) -> Option<OutputTy> {
+    context_arena: &Arc<TypeArena>,
+) -> Option<(OutputTy, bool)> {
     // Escape hatch: a `/** no-module */` comment at the top of the file
     // opts out of all module-aware hover/completion. Useful for files that
     // match a tix.toml glob but aren't actually NixOS/HM modules.
@@ -67,6 +77,8 @@ pub(crate) fn get_module_config_type(
         return None;
     }
 
+    // Pattern-field types live in inference.arena.
+    let inference_arena = &*inference.arena;
     let root_expr_id = analysis.syntax.module.entry_expr;
 
     match &analysis.syntax.module[root_expr_id] {
@@ -75,10 +87,12 @@ pub(crate) fn get_module_config_type(
         Expr::Lambda { pat: Some(pat), .. } => {
             for (name_id, _default) in pat.fields.iter() {
                 let Some(name_id) = name_id else { continue };
-                if let Some(ty) = inference.name_ty_map.get(*name_id) {
-                    let fields = collect_attrset_fields(ty);
+                if let Some(&tyref) = inference.name_ty_map.get(*name_id) {
+                    let ty = &inference_arena[tyref];
+                    let fields = collect_attrset_fields(inference_arena, ty);
                     if fields.contains_key(first_segment) {
-                        return Some(ty.clone());
+                        // `false` = type lives in inference.arena
+                        return Some((ty.clone(), false));
                     }
                 }
             }
@@ -99,15 +113,18 @@ pub(crate) fn get_module_config_type(
         _ => {}
     }
 
-    // Fallback: check context arg types. Covers two cases:
+    // Fallback: check context arg types. TyRef children in these OutputTy
+    // values belong to context_arena — NOT inference.arena.
+    // Covers two cases:
     // 1. Lambda with `...` where `config` isn't destructured
     //    (e.g. `{ pkgs, ... }:`)
     // 2. Plain attrset module with no lambda wrapper
     //    (e.g. `{ services.openssh.enable = true; }`)
     for ty in context_arg_types.values() {
-        let fields = collect_attrset_fields(ty);
+        let fields = collect_attrset_fields(context_arena.as_ref(), ty);
         if fields.contains_key(first_segment) {
-            return Some(ty.clone());
+            // `true` = type lives in context_arena (context_arg_arena)
+            return Some((ty.clone(), true));
         }
     }
 
@@ -196,19 +213,19 @@ pub(crate) fn collect_parent_attrpath_context(attrset_node: &rnix::ast::AttrSet)
 
 /// Extract attrset fields from a type, unwrapping Named, Intersection, and Union
 /// wrappers as appropriate.
-pub(crate) fn collect_attrset_fields(ty: &OutputTy) -> BTreeMap<SmolStr, TyRef> {
+pub(crate) fn collect_attrset_fields(arena: &TypeArena, ty: &OutputTy) -> BTreeMap<SmolStr, TyRef> {
     match ty {
         OutputTy::AttrSet(attr) => attr.fields.clone(),
 
         // Named wraps an alias around an inner type — look through it.
-        OutputTy::Named(_, inner) => collect_attrset_fields(&inner.0),
+        OutputTy::Named(_, inner) => collect_attrset_fields(arena, &arena[*inner]),
 
         // Intersection of attrsets: merge all fields (a field present in any
         // member is available).
         OutputTy::Intersection(members) => {
             let mut merged = BTreeMap::new();
-            for m in members {
-                for (k, v) in collect_attrset_fields(&m.0) {
+            for &m in members {
+                for (k, v) in collect_attrset_fields(arena, &arena[m]) {
                     merged.entry(k).or_insert(v);
                 }
             }
@@ -219,12 +236,12 @@ pub(crate) fn collect_attrset_fields(ty: &OutputTy) -> BTreeMap<SmolStr, TyRef> 
         // complete on.
         OutputTy::Union(members) => {
             let mut iter = members.iter();
-            let Some(first) = iter.next() else {
+            let Some(&first) = iter.next() else {
                 return BTreeMap::new();
             };
-            let mut common = collect_attrset_fields(&first.0);
-            for m in iter {
-                let member_fields = collect_attrset_fields(&m.0);
+            let mut common = collect_attrset_fields(arena, &arena[first]);
+            for &m in iter {
+                let member_fields = collect_attrset_fields(arena, &arena[m]);
                 common.retain(|k, _| member_fields.contains_key(k));
             }
             common
@@ -235,15 +252,15 @@ pub(crate) fn collect_attrset_fields(ty: &OutputTy) -> BTreeMap<SmolStr, TyRef> 
 }
 
 /// Extract the parameter type from a function type.
-pub(crate) fn extract_lambda_param(ty: &OutputTy) -> Option<OutputTy> {
+pub(crate) fn extract_lambda_param(arena: &TypeArena, ty: &OutputTy) -> Option<OutputTy> {
     match ty {
-        OutputTy::Lambda { param, .. } => Some((*param.0).clone()),
-        OutputTy::Named(_, inner) => extract_lambda_param(&inner.0),
+        OutputTy::Lambda { param, .. } => Some(arena[*param].clone()),
+        OutputTy::Named(_, inner) => extract_lambda_param(arena, &arena[*inner]),
         // For an intersection of lambdas (overloaded function), try the first
         // member that's a lambda.
         OutputTy::Intersection(members) => {
-            for m in members {
-                if let Some(param) = extract_lambda_param(&m.0) {
+            for &m in members {
+                if let Some(param) = extract_lambda_param(arena, &arena[m]) {
                     return Some(param);
                 }
             }
@@ -253,8 +270,8 @@ pub(crate) fn extract_lambda_param(ty: &OutputTy) -> Option<OutputTy> {
         // `(A→B) | (A→C)`), extract the param from the first lambda member.
         // The param types are typically identical across union members.
         OutputTy::Union(members) => {
-            for m in members {
-                if let Some(param) = extract_lambda_param(&m.0) {
+            for &m in members {
+                if let Some(param) = extract_lambda_param(arena, &arena[m]) {
                     return Some(param);
                 }
             }
@@ -274,6 +291,22 @@ pub(crate) fn extract_alias_name(ty: &OutputTy) -> Option<&SmolStr> {
 
 // Re-export from lang_check::aliases for backward compatibility within the LSP crate.
 pub(crate) use lang_check::aliases::parsed_ty_to_output_ty;
+
+/// Convert context args (from tix.toml) to OutputTy, sharing a single arena.
+pub(crate) fn convert_context_args(
+    context_args: &HashMap<SmolStr, comment_parser::ParsedTy>,
+    registry: &lang_check::aliases::TypeAliasRegistry,
+) -> (HashMap<SmolStr, OutputTy>, Arc<TypeArena>) {
+    let mut arena = TypeArena::new();
+    let types = context_args
+        .iter()
+        .map(|(name, parsed_ty)| {
+            let output_ty = parsed_ty_to_output_ty(parsed_ty, registry, &mut arena, 0);
+            (name.clone(), output_ty)
+        })
+        .collect();
+    (types, Arc::new(arena))
+}
 
 /// Collect attrpath segments from an Attrpath node, relative to a boundary position.
 ///
@@ -319,29 +352,61 @@ pub(crate) fn collect_attrpath_segments(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lang_ty::{arc_ty, OutputTy, TyRef};
+    use lang_ty::{AttrSetTy, OutputTy, PrimitiveTy, TypeArena};
+
+    // Build primitive TyRef helpers to avoid repeated arena.intern() calls.
+    fn mk_int(arena: &mut TypeArena) -> TyRef {
+        arena.intern(OutputTy::Primitive(PrimitiveTy::Int))
+    }
+    fn mk_string(arena: &mut TypeArena) -> TyRef {
+        arena.intern(OutputTy::Primitive(PrimitiveTy::String))
+    }
+    fn mk_bool(arena: &mut TypeArena) -> TyRef {
+        arena.intern(OutputTy::Primitive(PrimitiveTy::Bool))
+    }
+
+    fn mk_attrset(arena: &mut TypeArena, fields: &[(&str, TyRef)]) -> TyRef {
+        let map = fields
+            .iter()
+            .map(|(k, v)| (SmolStr::from(*k), *v))
+            .collect();
+        arena.intern(OutputTy::AttrSet(AttrSetTy::from_fields(map)))
+    }
 
     #[test]
     fn collect_fields_plain_attrset() {
-        let ty = arc_ty!({ "x": Int, "y": String });
-        let fields = collect_attrset_fields(&ty);
+        let mut arena = TypeArena::new();
+        let int = mk_int(&mut arena);
+        let str_ = mk_string(&mut arena);
+        let ty_ref = mk_attrset(&mut arena, &[("x", int), ("y", str_)]);
+        let ty = arena[ty_ref].clone();
+        let fields = collect_attrset_fields(&arena, &ty);
         assert_eq!(fields.len(), 2);
-        assert_eq!(*fields["x"].0, arc_ty!(Int));
-        assert_eq!(*fields["y"].0, arc_ty!(String));
+        assert_eq!(arena[fields["x"]], OutputTy::Primitive(PrimitiveTy::Int));
+        assert_eq!(arena[fields["y"]], OutputTy::Primitive(PrimitiveTy::String));
     }
 
     #[test]
     fn collect_fields_named_wrapper() {
-        let ty = arc_ty!(named!("Foo", { "x": Int }));
-        let fields = collect_attrset_fields(&ty);
+        let mut arena = TypeArena::new();
+        let int = mk_int(&mut arena);
+        let inner = mk_attrset(&mut arena, &[("x", int)]);
+        let ty_ref = arena.intern(OutputTy::Named(SmolStr::from("Foo"), inner));
+        let ty = arena[ty_ref].clone();
+        let fields = collect_attrset_fields(&arena, &ty);
         assert_eq!(fields.len(), 1);
-        assert_eq!(*fields["x"].0, arc_ty!(Int));
+        assert_eq!(arena[fields["x"]], OutputTy::Primitive(PrimitiveTy::Int));
     }
 
     #[test]
     fn collect_fields_intersection() {
-        let ty = arc_ty!(isect!({ "x": Int }, { "y": String }));
-        let fields = collect_attrset_fields(&ty);
+        let mut arena = TypeArena::new();
+        let int = mk_int(&mut arena);
+        let str_ = mk_string(&mut arena);
+        let a = mk_attrset(&mut arena, &[("x", int)]);
+        let b = mk_attrset(&mut arena, &[("y", str_)]);
+        let ty = OutputTy::Intersection(vec![a, b]);
+        let fields = collect_attrset_fields(&arena, &ty);
         assert_eq!(fields.len(), 2);
         assert!(fields.contains_key("x"));
         assert!(fields.contains_key("y"));
@@ -349,8 +414,15 @@ mod tests {
 
     #[test]
     fn collect_fields_union_common_only() {
-        let ty = arc_ty!(union!({ "x": Int, "y": String }, { "x": Int, "z": Bool }));
-        let fields = collect_attrset_fields(&ty);
+        let mut arena = TypeArena::new();
+        let int = mk_int(&mut arena);
+        let str_ = mk_string(&mut arena);
+        let bool_ = mk_bool(&mut arena);
+        // {x: int, y: str} | {x: int, z: bool} → common field is x
+        let a = mk_attrset(&mut arena, &[("x", int), ("y", str_)]);
+        let b = mk_attrset(&mut arena, &[("x", int), ("z", bool_)]);
+        let ty = OutputTy::Union(vec![a, b]);
+        let fields = collect_attrset_fields(&arena, &ty);
         assert_eq!(fields.len(), 1, "only common field x should remain");
         assert!(fields.contains_key("x"));
     }
@@ -358,58 +430,81 @@ mod tests {
     #[test]
     fn collect_fields_union_empty() {
         // Non-attrset union members produce no fields.
-        let ty = arc_ty!(union!(Int, String));
-        let fields = collect_attrset_fields(&ty);
+        let mut arena = TypeArena::new();
+        let int = mk_int(&mut arena);
+        let str_ = mk_string(&mut arena);
+        let ty = OutputTy::Union(vec![int, str_]);
+        let fields = collect_attrset_fields(&arena, &ty);
         assert!(fields.is_empty());
     }
 
     #[test]
     fn collect_fields_nested_named_inter() {
         // Named("A", {x:int}) & {y:str} → {x:int, y:str}
-        let ty = OutputTy::Intersection(vec![
-            TyRef::from(arc_ty!(named!("A", { "x": Int }))),
-            TyRef::from(arc_ty!({ "y": String })),
-        ]);
-        let fields = collect_attrset_fields(&ty);
+        let mut arena = TypeArena::new();
+        let int = mk_int(&mut arena);
+        let str_ = mk_string(&mut arena);
+        let inner = mk_attrset(&mut arena, &[("x", int)]);
+        let named_ref = arena.intern(OutputTy::Named(SmolStr::from("A"), inner));
+        let attrset_ref = mk_attrset(&mut arena, &[("y", str_)]);
+        let ty = OutputTy::Intersection(vec![named_ref, attrset_ref]);
+        let fields = collect_attrset_fields(&arena, &ty);
         assert_eq!(fields.len(), 2);
         assert!(fields.contains_key("x"));
         assert!(fields.contains_key("y"));
     }
 
-    fn make_lambda(param: OutputTy, body: OutputTy) -> OutputTy {
-        OutputTy::Lambda {
-            param: TyRef::from(param),
-            body: TyRef::from(body),
-        }
+    fn make_lambda(arena: &mut TypeArena, param: TyRef, body: TyRef) -> TyRef {
+        arena.intern(OutputTy::Lambda { param, body })
     }
 
     #[test]
     fn extract_param_lambda() {
-        let ty = make_lambda(arc_ty!(Int), arc_ty!(String));
-        assert_eq!(extract_lambda_param(&ty), Some(arc_ty!(Int)));
+        let mut arena = TypeArena::new();
+        let int_ref = mk_int(&mut arena);
+        let str_ref = mk_string(&mut arena);
+        let lam_ref = make_lambda(&mut arena, int_ref, str_ref);
+        let ty = arena[lam_ref].clone();
+        let result = extract_lambda_param(&arena, &ty);
+        assert_eq!(result, Some(OutputTy::Primitive(PrimitiveTy::Int)));
     }
 
     #[test]
     fn extract_param_named_lambda() {
-        let inner = make_lambda(arc_ty!(Int), arc_ty!(String));
-        let ty = OutputTy::Named(SmolStr::from("F"), TyRef::from(inner));
-        assert_eq!(extract_lambda_param(&ty), Some(arc_ty!(Int)));
+        let mut arena = TypeArena::new();
+        let int_ref = mk_int(&mut arena);
+        let str_ref = mk_string(&mut arena);
+        let lam_ref = make_lambda(&mut arena, int_ref, str_ref);
+        let named_ref = arena.intern(OutputTy::Named(SmolStr::from("F"), lam_ref));
+        let ty = arena[named_ref].clone();
+        let result = extract_lambda_param(&arena, &ty);
+        assert_eq!(result, Some(OutputTy::Primitive(PrimitiveTy::Int)));
     }
 
     #[test]
     fn extract_param_intersection_of_lambdas() {
         // First lambda match wins.
-        let lam1 = make_lambda(arc_ty!(Int), arc_ty!(String));
-        let lam2 = make_lambda(arc_ty!(Bool), arc_ty!(String));
-        let ty = OutputTy::Intersection(vec![TyRef::from(lam1), TyRef::from(lam2)]);
-        assert_eq!(extract_lambda_param(&ty), Some(arc_ty!(Int)));
+        let mut arena = TypeArena::new();
+        let int_ref = mk_int(&mut arena);
+        let bool_ref = mk_bool(&mut arena);
+        let str_ref = mk_string(&mut arena);
+        let lam1 = make_lambda(&mut arena, int_ref, str_ref);
+        let lam2 = make_lambda(&mut arena, bool_ref, str_ref);
+        let ty = OutputTy::Intersection(vec![lam1, lam2]);
+        let result = extract_lambda_param(&arena, &ty);
+        assert_eq!(result, Some(OutputTy::Primitive(PrimitiveTy::Int)));
     }
 
     #[test]
     fn extract_param_union_of_lambdas() {
-        let lam1 = make_lambda(arc_ty!(Int), arc_ty!(String));
-        let lam2 = make_lambda(arc_ty!(Int), arc_ty!(Bool));
-        let ty = OutputTy::Union(vec![TyRef::from(lam1), TyRef::from(lam2)]);
-        assert_eq!(extract_lambda_param(&ty), Some(arc_ty!(Int)));
+        let mut arena = TypeArena::new();
+        let int_ref = mk_int(&mut arena);
+        let bool_ref = mk_bool(&mut arena);
+        let str_ref = mk_string(&mut arena);
+        let lam1 = make_lambda(&mut arena, int_ref, str_ref);
+        let lam2 = make_lambda(&mut arena, int_ref, bool_ref);
+        let ty = OutputTy::Union(vec![lam1, lam2]);
+        let result = extract_lambda_param(&arena, &ty);
+        assert_eq!(result, Some(OutputTy::Primitive(PrimitiveTy::Int)));
     }
 }

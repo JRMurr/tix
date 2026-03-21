@@ -5,10 +5,6 @@ by design, or informational notes.
 
 ### Canonicalization / Type Display
 
-- ~~**Let-binding loses union type**~~: Fixed via `resolve_to_single_concrete_id`
-  which compares type heads instead of TyIds, preserving unions through
-  poly_type_env. PBT workarounds for union let-binding also removed.
-
 - Early canonicalization captures clean polymorphic types for name bindings, but
   the root expression type still shows contaminated types for inherited names.
   The inherit creates a new NameId whose type comes from extruding the original,
@@ -32,8 +28,8 @@ by design, or informational notes.
 - **Cyclic imports** degrade gracefully (unconstrained type variable + diagnostic)
   but don't support cross-file mutual recursion.
 
-- **Unconstrained variables** cause pathological constraint propagation. Deadline
-  mechanism (5s imports, 10s top-level) is the safety net; real fix is stubs.
+- **Unconstrained variables** cause pathological constraint propagation. RSS memory
+  limit is the safety net; real fix is stubs.
 
 - **Lambda parameter completion** limited by SimpleSub's extrusion-based
   generalization — call-site types don't flow back to parameter variables.
@@ -41,12 +37,22 @@ by design, or informational notes.
 - **rnix error recovery** on incomplete code (`pkgs.` with no field) can cascade,
   mangling subsequent expressions. Upstream issue.
 
-- **Rename "not renameable" in editor** (FIXED): Root cause was `name_at_position`
-  using only `right_biased()` for `token_at_offset`. When the cursor is at the end
-  of an identifier (a token boundary), `right_biased()` picks the whitespace token
-  instead of the identifier. VS Code sends cursor positions at the end of words.
-  Fix: try right-biased first, then fall back to left-biased. Regression test:
-  `references::tests::name_at_end_of_identifier`.
+- **Narrowing through `with lib` not recognized**: `with lib; isBool val` doesn't
+  trigger narrowing because the `with` scope resolution can't trace back to the
+  builtin predicate. Affects nixpkgs modules using `with lib;` pattern (e.g.,
+  privoxy.nix, knot.nix). Would need `is_builtin_call` to handle WithExprs.
+
+- **`//` merge errors on cross-file types**: E004 "both sides must be attrsets"
+  fires on patterns like `ffmpeg-base.meta // { ... }` where the LHS type comes
+  from a callPackage/import that doesn't resolve to a concrete AttrSet during
+  deferred merge resolution. The diagnostic renders resolved bounds (showing both
+  sides as attrsets), but at resolution time the types are still variables.
+
+- **`int + int` produces `InvalidBinOp` in isolated warmup context**: When running
+  inference via `run_inference()` on `let b = import ./b.nix; in b + 1` where b.nix
+  evaluates to `42`, the `+` operator produces a spurious `InvalidBinOp` diagnostic
+  with both operands typed as `int`. May be related to overload resolution seeing
+  the import's type after coordinator lookup vs direct inference.
 
 ### Minor Untracked Items
 
@@ -68,31 +74,12 @@ by design, or informational notes.
 - Dynamic attrset keys not tracked in recursive sets (`nameres.rs`): could cause
   incorrect SCC grouping in edge cases.
 
-- ~~Extrude carried-overload loop is O(n^2) (`infer.rs`): could be linear with
-  worklist approach.~~ Fixed: per-name carried map + eager resolution + pruning.
-
-- **OOM on full nixpkgs pkgs/**: even with `-j 1`, certain files cause
-  unbounded memory growth during inference or canonicalization, eventually
-  getting OOM-killed on 32 GB RAM. Two distinct failure modes:
-
-  1. **Auto-generated giant package sets** — previously excluded from
-     `nixpkgs-test`, now all complete successfully. Worst case is
-     `hackage-packages.nix` (769k lines) at ~31s / 1.3 GB RSS.
-     `nixpkgs-test` deadline bumped from 30s to 60s to accommodate.
-
-  2. **Small files with deeply recursive inferred types** that blow up during
-     canonicalization or inference itself. Known examples:
-     - `chromium/common.nix` (976 lines, 278 let-bindings) — canonicalization
-       of 278 names eats >32 GB. The types are enormous due to deep attrset
-       nesting and conditional flags.
-     - `chicken/4/default.nix` (24 lines) — FIXED. Root cause was missing
-       extrusion cycle-break for self-referential concrete AttrSets (after
-       compact_scc_graph pinning). Added placeholder insertion like Lambda.
-
-  Root cause: canonicalization and OutputTy construction have no memory budget.
-  Possible mitigations: memory-bounded canonicalization (bail out if OutputTy
-  exceeds a depth/size limit), iterative instead of recursive tree walks,
-  or a per-file RSS watchdog.
+- **OOM on full nixpkgs pkgs/**: even with `-j 1`, certain files may cause
+  unbounded memory growth during inference or canonicalization. The chromium/
+  default.nix OOM (caused by `intern_output_ty` lacking TyRef dedup) and the
+  python-packages.nix OOM (caused by `infer_expr` re-evaluating shared
+  sub-expressions O(N²) times in `inherit (from) f1..fN` patterns) were fixed,
+  but other pathological files may still exist.
 
 - **~20 GB RSS on full nixpkgs** (parallel): checking all 42k files in parallel
   uses ~20 GB RAM. Most comes from parallel inference holding all files' type
@@ -102,133 +89,11 @@ by design, or informational notes.
 - Stale analysis name lookup (`completion.rs`): `find_name_type_by_text()` returns
   first match when source_map fails, may pick wrong shadowed binding.
 
-- No tests for chain re-analysis (A→B→C): requires full async analysis loop.
+- No tests for chain re-analysis (A->B->C): requires full async analysis loop.
 
 - `nix build .#stubs` emits `system.stateVersion is not set` warning.
 
 - Home Manager flake mode (`gen-stubs home-manager --flake`) untested end-to-end.
-
-- `LSP LineIndex` UTF-16 fix was applied (commit 0fe9b77) — verify it covers all
-  edge cases.
-
-### Memory Profile — `tix check` with parallel inference
-
-#### Small project (test/nixos_fixture, 5 files)
-
-Profiled with DHAT. Peak heap: ~50 MB. Dominated by `OutputTy::map_children` (50%),
-canonicalization (18%), Arc wrapping (10%).
-
-#### Full stubs (TIX_BUILTIN_STUBS with 266K-line stubs)
-
-**Before optimizations** (commit a018cb3, 40 files, `-j 4`):
-
-```
-Without TIX_BUILTIN_STUBS:  200 MB RSS,  0.4s
-With    TIX_BUILTIN_STUBS: 16.2 GB RSS, 21.1s   ← 80x memory increase
-```
-
-**After optimizations** (commit ca201cb, 32 files `test/`, 5 files `test/nixos_fixture/`):
-
-```
-32 files, no stubs:          123 MB RSS, 0.19s
-32 files, 266K-line stubs:   312 MB RSS, 0.83s   ← 2.5x (was 80x)
- 5 files, no stubs:           94 MB RSS
- 5 files, 266K-line stubs:   361 MB RSS, 0.73s
-```
-
-52x reduction (16.2 GB → 312 MB) from four changes:
-
-1. **`normalize_vars` short-circuit** — skip full tree walk + rebuild for concrete
-   types with no TyVar nodes (the common case for NixOS config attrsets).
-2. **CoW for `TypeAliasRegistry`** — `Arc<TypeAliasRegistry>` in `CheckCtx`, only
-   clone when inline aliases or context loading needed. Eliminates N deep clones.
-3. **Early `InferenceResult` drop** — `RenderableResult` captures only diagnostics;
-   `InferenceResult` (full OutputTy maps) dropped inside `par_iter` closure.
-4. **Primitive `TyRef` interning** — static cache for all 8 primitives + Top + Bottom,
-   routed through `From<OutputTy>` so every `TyRef` construction site benefits.
-
-**After further optimizations** (commit 58701fc):
-
-```
-With analyze globs (6 files): 639 MB RSS, 1.8s   ← from 6.8 GB / 18.5s
-All files (40 files):         3.9 GB RSS, 16.3s  ← from 6.8 GB / 18.5s
-```
-
-Three changes: concrete Ty::Union/Ty::Inter in intern_parsed_ty, variable_free cache
-for extrusion short-circuit, discover_all_nix_files respects [project] analyze globs.
-
-**Remaining memory bottleneck — constraint cascade in extrusion (investigated):**
-
-`test/strings.nix` alone uses 1.8 GB RSS / 9.35M type entries. Profile breakdown:
-- SCC groups: 1.88M slots (1.7s). Group 181 (`f` = levenshtein helper) creates 1.49M.
-- `infer_root.infer_expr`: +7.47M slots (2.6s) — from extruding 104 poly bindings.
-- `infer_root.resolve_pending`: 0 new slots but 6.5s — pure constraint traversal.
-- Canonicalization: 3.4s on 9.35M entries.
-
-Root cause: 4 bindings (`concatImapStrings`, `concatImapStringsSep`, `elemAt`,
-`genList`) each create ~1.87M entries from a single `extrude()` call. The extrusion
-itself only creates ~7 new type entries, but `link_extruded_var` triggers constraint
-propagation through the entire bounds graph (cascading through the 1.88M entries from
-the levenshtein SCC group). Each extrusion creates O(graph_size) constrain_cache
-entries. This is inherent to the bounds-based SimpleSub approach — the constraints must
-propagate to maintain soundness.
-
-**After bounds graph compaction** (commit 85e75de, branch `bounds-graph-compaction`):
-
-```
-strings.nix with stubs:      278 MB RSS, 1.5s    ← from 1.8 GB / ~15s (-85% RSS, -90% time)
-All files, -j 4:             2.6 GB RSS, 8.0s    ← from 3.9 GB / 16.3s (-33% RSS, -51% time)
-All files, -j 16:            5.0 GB RSS, 8.1s    (not directly comparable to -j 4 baseline)
-```
-
-Compaction replaces fully-determined type variables (pinned between identical
-concrete bounds) with their concrete type in-place after each SCC group. This
-eliminates variables that extrusion treats as polymorphic but are effectively
-constants. 39,920 variables pinned across 179 SCC groups in the full test suite.
-
-Remaining mitigations (not yet implemented):
-- **Lazy bounds propagation**: Don't propagate bounds through link_extruded_var
-  immediately; instead record the link and propagate on demand when the fresh
-  variable is actually constrained at a use site. Requires careful analysis of
-  when bounds observation occurs.
-- **Per-file deadline**: strings.nix takes 1.5s now; still worth capping for
-  pathological inputs. `tix check` now reads `deadline` from tix.toml and passes
-  it to `InferenceInputs.deadline_secs`.
-
-**Additional micro-optimizations (committed):**
-
-- SmallVec for remaining Vec/HashSet in canonicalization helpers
-  (absorb_subsumed, remove_redundant_negations, remove_tautological_pairs)
-- ConstructorShape uses `&[SmolStr]` field_keys instead of BTreeMap<SmolStr, ()>
-- Removed redundant `bounds.to_vec()` in expand_bounds
-- `link_extruded_var` takes only polarity-relevant bounds (not full TypeVariable)
-- `AttrSetTy::merge()` reuses self.fields in-place
-- `[profile.release]` with thin LTO + codegen-units=1
-
-**Other remaining optimization (deferred):**
-
-- **BTreeMap → sorted Vec for output `AttrSetTy`:** Fields are built once, read-only
-  after. `Vec<(SmolStr, TyRef)>` with binary search would halve allocation overhead.
-  Deferred because it's invasive (~15 files across 4 crates) and current numbers are
-  acceptable.
-
-<details>
-<summary>Pre-optimization heaptrack breakdown (14.8 GB heap)</summary>
-
-| Peak   | Function                            | What |
-|--------|-------------------------------------|------|
-| 3.49 GB | `Iterator::Map::fold` (in `map_children`) | BTreeMap rebuild via `.map().collect()` |
-| 2.97 GB | `TyRef::from(OutputTy)`             | 40M Arc allocs for OutputTy nodes |
-| 1.38 GB | `BTreeMap::from_iter`               | New BTreeMaps for attrset fields |
-| 1.09 GB | `RawVec::finish_grow`               | Vec growth during inference |
-| 889 MB  | `BTreeMap::VacantEntry::insert`     | BTreeMap node insertions |
-| 872 MB  | `OutputTy::map_children` (direct)   | map_children itself |
-| 848 MB  | `BTreeMap::clone::clone_subtree`    | Deep-cloning BTreeMaps |
-| 623 MB  | `BTreeMap::from_iter` (2nd mono)    | Another monomorphization |
-| 583 MB  | `Iterator::Map::fold` (2nd mono)    | Another call chain |
-| 227 MB  | `BTreeMap::insert_recursing`        | B-tree node splits |
-
-</details>
 
 ### PBT Flakiness
 
@@ -258,12 +123,17 @@ Intentional O(n^2) trade-offs, acceptable for typical Nix code sizes:
   40k+ OutputTy values caused OOM. Opportunistic cross-file resolution is
   disabled until memory-budgeted caching is implemented (e.g., LRU eviction,
   size-capped entries, or only caching types for files that are imported).
-- ~~LSP Step 6 (demand-driven for unresolved imports)~~: Done. Opening file A
-  that imports un-opened file B now demand-infers B from disk via
-  `LspSyntaxProvider` + `InferenceCoordinator::demand_file()`. E013 no longer
-  fires for demand-resolved imports.
 - TODO: Demand-inferred files accumulate in the coordinator cache indefinitely.
   Add LRU eviction for memory-constrained environments.
+
+### Remaining Optimization Opportunities
+
+- **Lazy bounds propagation**: Don't propagate bounds through link_extruded_var
+  immediately; instead record the link and propagate on demand when the fresh
+  variable is actually constrained at a use site.
+- **BTreeMap -> sorted Vec for output `AttrSetTy`:** Fields are built once, read-only
+  after. `Vec<(SmolStr, TyRef)>` with binary search would halve allocation overhead.
+  Deferred because it's invasive (~15 files across 4 crates).
 
 ### DX Audit: Untracked Items
 
@@ -276,7 +146,7 @@ Intentional O(n^2) trade-offs, acceptable for typical Nix code sizes:
   No way to auto-derive `@context` from internal libraries.
 - **No watch mode in CLI** (requires external `watchexec`).
 - **gen-stubs nixos is slow** (full `nix eval`, no incremental).
-- **Timeout diagnostic** says what's missing but not how to fix it.
+- **Inference aborted diagnostic** says what's missing but not how to fix it.
 - **No workspace/multi-root LSP support.**
 - **No CONTRIBUTING.md** for potential contributors.
 - **No recursive type aliases** in `.tix` files.
@@ -286,7 +156,7 @@ Intentional O(n^2) trade-offs, acceptable for typical Nix code sizes:
 Strengths to preserve during future work:
 
 - Core type inference: row polymorphism, union types, narrowing, let-polymorphism.
-- Stubs: clean `.tix` syntax, module→type-alias system, ~500+ lib declarations.
+- Stubs: clean `.tix` syntax, module->type-alias system, ~500+ lib declarations.
 - LSP: 14 features including code actions, semantic tokens, signature help.
 - Error messages: miette formatting, "did you mean?", source context.
 - Narrowing: `builtins.isString`, `x ? field`, `x == null`, `assert`, boolean

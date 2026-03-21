@@ -25,17 +25,6 @@ pub struct ProjectConfig {
     #[serde(default)]
     pub context: HashMap<String, ContextConfig>,
 
-    /// Maximum seconds for type inference on a single file before bailing
-    /// out with partial results. Defaults to 10 when omitted.
-    #[serde(default)]
-    pub deadline: Option<u64>,
-
-    /// Deprecated: no longer used (imports resolve via stubs, not recursive
-    /// inference). Kept so existing tix.toml files don't fail to parse.
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub import_deadline: Option<u64>,
-
     /// Project-wide analysis configuration.
     #[serde(default)]
     pub project: Option<ProjectSection>,

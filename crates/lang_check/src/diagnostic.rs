@@ -2,20 +2,69 @@
 // Display-Ready Diagnostics
 // ==============================================================================
 //
-// TixDiagnostic is the public-facing error type, using OutputTy (which has a
-// human-readable Display impl) instead of internal Ty<TyId>. Conversion from
-// the internal InferenceError happens at the boundary between inference and
-// output, while we still have access to TypeStorage for canonicalization.
+// TixDiagnostic is the public-facing error type. Type-bearing variants store
+// `OwnedTy` (an arena + root index bundle) which carries its own display
+// context and supports structural equality. Conversion from internal
+// InferenceError happens at the inference/output boundary while TypeStorage
+// is still available for canonicalization.
 
 use std::fmt;
+use std::sync::Arc;
 
 use lang_ast::{AstPtr, ExprId, OverloadBinOp};
-use lang_ty::{DisplayConfig, OutputTy};
+use lang_ty::{DisplayConfig, OutputTy, OwnedTy, TypeArena};
 use smol_str::SmolStr;
 
 use crate::collect::canonicalize_standalone;
 use crate::storage::TypeStorage;
 use crate::{InferenceError, Located, LocatedError, LocatedWarning, Polarity, TyId, Warning};
+
+// ==============================================================================
+// DiagTy — arena-backed type with structural equality for diagnostics
+// ==============================================================================
+//
+// `OwnedTy::PartialEq` uses pointer identity (same Arc + same root index).
+// Diagnostics need structural equality so that an error produced by inference
+// can be compared to an expected value constructed in a test. `DiagTy` wraps
+// `OwnedTy` and compares by normalised display string, which is canonical for
+// any structurally equal pair of types.
+
+/// Arena-backed type wrapper for diagnostic fields.
+///
+/// Equality is structural: two `DiagTy` values are equal when their full
+/// (unlimited) display strings match.  This allows diagnostic assertions
+/// like `assert_eq!(error.kind, TixDiagnosticKind::TypeMismatch { ... })`
+/// to work even when the two arenas are distinct allocations.
+#[derive(Clone)]
+pub struct DiagTy(pub OwnedTy);
+
+impl DiagTy {
+    /// Render with truncation for human-facing messages.
+    pub fn display_truncated(&self, config: &DisplayConfig) -> String {
+        self.0.display_truncated(config)
+    }
+}
+
+impl PartialEq for DiagTy {
+    fn eq(&self, other: &Self) -> bool {
+        // Structural equality: compare the full (unlimited) display strings.
+        // Two types are equal iff their canonical string representations match.
+        let full = DisplayConfig::full();
+        self.0.display_truncated(&full) == other.0.display_truncated(&full)
+    }
+}
+
+impl Eq for DiagTy {}
+
+impl fmt::Debug for DiagTy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "DiagTy({})",
+            self.0.display_truncated(&DisplayConfig::full())
+        )
+    }
+}
 
 /// A display-ready diagnostic paired with the expression where it occurred.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,8 +76,8 @@ pub struct TixDiagnostic {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TixDiagnosticKind {
     TypeMismatch {
-        expected: OutputTy,
-        actual: OutputTy,
+        expected: DiagTy,
+        actual: DiagTy,
     },
     MissingField {
         field: SmolStr,
@@ -37,12 +86,12 @@ pub enum TixDiagnosticKind {
     },
     InvalidBinOp {
         op: OverloadBinOp,
-        lhs_ty: OutputTy,
-        rhs_ty: OutputTy,
+        lhs_ty: DiagTy,
+        rhs_ty: DiagTy,
     },
     InvalidAttrMerge {
-        lhs_ty: OutputTy,
-        rhs_ty: OutputTy,
+        lhs_ty: DiagTy,
+        rhs_ty: DiagTy,
     },
     UnresolvedName {
         name: SmolStr,
@@ -75,11 +124,11 @@ pub enum TixDiagnosticKind {
         name: SmolStr,
         error: SmolStr,
     },
-    /// Inference was aborted because the deadline was exceeded.
-    /// Bindings inferred before the timeout still have types; only
-    /// the remaining ones are missing.
-    InferenceTimeout {
-        /// Names of bindings that were not inferred before the deadline.
+    /// Inference was aborted due to memory pressure (RSS limit exceeded).
+    /// Bindings inferred before the limit was reached still have types;
+    /// only the remaining ones are missing.
+    InferenceAborted {
+        /// Names of bindings that were not inferred before the abort.
         /// Empty if all bindings were inferred but expression-level types
         /// were skipped.
         missing_bindings: Vec<SmolStr>,
@@ -117,7 +166,7 @@ impl TixDiagnosticKind {
             TixDiagnosticKind::UnresolvedName { .. } => "E005",
             TixDiagnosticKind::DuplicateKey { .. } => "E006",
             TixDiagnosticKind::ImportNotFound { .. } => "E007",
-            TixDiagnosticKind::InferenceTimeout { .. } => "E008",
+            TixDiagnosticKind::InferenceAborted { .. } => "E008",
             TixDiagnosticKind::AnnotationArityMismatch { .. } => "E009",
             TixDiagnosticKind::AnnotationUnchecked { .. } => "E010",
             TixDiagnosticKind::AnnotationParseError { .. } => "E011",
@@ -142,7 +191,7 @@ impl TixDiagnosticKind {
                 | TixDiagnosticKind::AnnotationParseError { .. }
                 | TixDiagnosticKind::DuplicateKey { .. }
                 | TixDiagnosticKind::ImportNotFound { .. }
-                | TixDiagnosticKind::InferenceTimeout { .. }
+                | TixDiagnosticKind::InferenceAborted { .. }
                 | TixDiagnosticKind::AngleBracketImport { .. }
                 | TixDiagnosticKind::ImportUnresolved { .. }
         )
@@ -238,11 +287,11 @@ impl fmt::Display for TixDiagnosticKind {
                     "imported file `{path}` has not been analyzed — add it to [project] analyze in tix.toml or open it in the editor"
                 )
             }
-            TixDiagnosticKind::InferenceTimeout { missing_bindings } => {
+            TixDiagnosticKind::InferenceAborted { missing_bindings } => {
                 if missing_bindings.is_empty() {
                     write!(
                         f,
-                        "type inference timed out — partial results are available for bindings inferred before the deadline"
+                        "type inference aborted (memory limit exceeded) — partial results are available for bindings inferred before the limit was reached"
                     )
                 } else if missing_bindings.len() <= 5 {
                     let names = missing_bindings
@@ -250,7 +299,7 @@ impl fmt::Display for TixDiagnosticKind {
                         .map(|n| format!("`{n}`"))
                         .collect::<Vec<_>>()
                         .join(", ");
-                    write!(f, "type inference timed out — missing types for: {names}")
+                    write!(f, "type inference aborted (memory limit exceeded) — missing types for: {names}")
                 } else {
                     let shown = missing_bindings[..5]
                         .iter()
@@ -259,7 +308,7 @@ impl fmt::Display for TixDiagnosticKind {
                         .join(", ");
                     write!(
                         f,
-                        "type inference timed out — missing types for: {shown}, and {} more",
+                        "type inference aborted (memory limit exceeded) — missing types for: {shown}, and {} more",
                         missing_bindings.len() - 5
                     )
                 }
@@ -339,70 +388,108 @@ pub fn suggest_similar<'a>(
 // InferenceError → TixDiagnostic conversion
 // ==============================================================================
 
-/// Recursively convert a Ty<TyId> to OutputTy by canonicalizing children.
-fn canonicalize_ty_structural(ty: &lang_ty::Ty<TyId>, table: &TypeStorage) -> OutputTy {
+/// Canonicalize a `Ty<TyId>` into an arena-interned `TyRef`.
+///
+/// Compound types (Lambda, List, AttrSet, etc.) require their child `TyId`s to
+/// be canonicalized via `canonicalize_standalone` and then interned so that the
+/// resulting `TyRef` children are valid indices into the same arena.
+///
+/// Leaf types (Primitive, TyVar) are interned directly without recursion.
+/// `Frozen` types are imported from their own arena into the local one.
+fn canonicalize_ty_structural(
+    ty: &lang_ty::Ty<TyId>,
+    table: &TypeStorage,
+    arena: &mut TypeArena,
+) -> lang_ty::TyRef {
+    // Inline helper: canonicalize a child TyId and intern the resulting OutputTy.
+    // Defined as a macro rather than a closure to avoid borrow-checker complaints
+    // about `arena` being captured by the closure while also needed in the match arms.
+    //
+    // TODO: once canonicalize_standalone is updated to accept a `&mut TypeArena`
+    // and return `TyRef` directly, remove the `arena.intern(...)` wrapper here.
+    macro_rules! child {
+        ($ty_id:expr, $pol:expr) => {{
+            let (src_arena, src_ty) = canonicalize_standalone(table, $ty_id, $pol);
+            let mut cache = rustc_hash::FxHashMap::default();
+            lang_ty::arena::import_from_arena(arena, &src_arena, src_ty, &mut cache)
+        }};
+    }
+
     match ty {
-        lang_ty::Ty::Primitive(p) => OutputTy::Primitive(*p),
-        lang_ty::Ty::TyVar(x) => OutputTy::TyVar(*x),
+        lang_ty::Ty::Primitive(p) => arena.intern(OutputTy::Primitive(*p)),
+        lang_ty::Ty::TyVar(x) => arena.intern(OutputTy::TyVar(*x)),
         lang_ty::Ty::List(elem) => {
-            let c_elem = canonicalize_standalone(table, *elem, Polarity::Positive);
-            OutputTy::List(lang_ty::TyRef::from(c_elem))
+            let c_elem = child!(*elem, Polarity::Positive);
+            arena.intern(OutputTy::List(c_elem))
         }
         lang_ty::Ty::Lambda { param, body } => {
-            let c_param = canonicalize_standalone(table, *param, Polarity::Negative);
-            let c_body = canonicalize_standalone(table, *body, Polarity::Positive);
-            OutputTy::Lambda {
-                param: lang_ty::TyRef::from(c_param),
-                body: lang_ty::TyRef::from(c_body),
-            }
+            let c_param = child!(*param, Polarity::Negative);
+            let c_body = child!(*body, Polarity::Positive);
+            arena.intern(OutputTy::Lambda {
+                param: c_param,
+                body: c_body,
+            })
         }
         lang_ty::Ty::AttrSet(attr) => {
-            let fields = attr
+            // Canonicalize each field and the dynamic field type before interning
+            // the attrset node, since intern() requires all children to already
+            // be valid indices in this arena.
+            let fields: std::collections::BTreeMap<_, _> = attr
                 .fields
                 .iter()
-                .map(|(k, &v)| {
-                    let c_field = canonicalize_standalone(table, v, Polarity::Positive);
-                    (k.clone(), lang_ty::TyRef::from(c_field))
-                })
+                .map(|(k, &v)| (k.clone(), child!(v, Polarity::Positive)))
                 .collect();
-            let dyn_ty = attr.dyn_ty.map(|d| {
-                lang_ty::TyRef::from(canonicalize_standalone(table, d, Polarity::Positive))
-            });
-            OutputTy::AttrSet(lang_ty::AttrSetTy {
+            let dyn_ty = attr.dyn_ty.map(|d| child!(d, Polarity::Positive));
+            arena.intern(OutputTy::AttrSet(lang_ty::AttrSetTy {
                 fields,
                 dyn_ty,
                 open: attr.open,
                 optional_fields: attr.optional_fields.clone(),
-            })
+            }))
         }
         lang_ty::Ty::Neg(inner) => {
-            let c_inner = canonicalize_standalone(table, *inner, Polarity::Positive);
-            OutputTy::Neg(lang_ty::TyRef::from(c_inner))
+            let c_inner = child!(*inner, Polarity::Positive);
+            arena.intern(OutputTy::Neg(c_inner))
         }
         lang_ty::Ty::Inter(a, b) => {
-            let ca = canonicalize_standalone(table, *a, Polarity::Positive);
-            let cb = canonicalize_standalone(table, *b, Polarity::Positive);
-            OutputTy::Intersection(vec![lang_ty::TyRef::from(ca), lang_ty::TyRef::from(cb)])
+            let ca = child!(*a, Polarity::Positive);
+            let cb = child!(*b, Polarity::Positive);
+            arena.intern(OutputTy::Intersection(vec![ca, cb]))
         }
         lang_ty::Ty::Union(a, b) => {
-            let ca = canonicalize_standalone(table, *a, Polarity::Positive);
-            let cb = canonicalize_standalone(table, *b, Polarity::Positive);
-            OutputTy::Union(vec![lang_ty::TyRef::from(ca), lang_ty::TyRef::from(cb)])
+            let ca = child!(*a, Polarity::Positive);
+            let cb = child!(*b, Polarity::Positive);
+            arena.intern(OutputTy::Union(vec![ca, cb]))
         }
         lang_ty::Ty::Named(name, inner) => {
-            let c = canonicalize_standalone(table, *inner, Polarity::Positive);
-            OutputTy::Named(name.clone(), lang_ty::TyRef::from(c))
+            let c = child!(*inner, Polarity::Positive);
+            arena.intern(OutputTy::Named(name.clone(), c))
         }
+        // Frozen types carry their own arena; reference it zero-copy.
+        lang_ty::Ty::Frozen(owned) => arena.intern(OutputTy::Extern(owned.clone())),
     }
 }
 
+/// Wrap a `TyRef` and the arena it lives in as a self-contained `DiagTy`.
+fn make_diag_ty(arena: Arc<TypeArena>, ty: lang_ty::TyRef) -> DiagTy {
+    DiagTy(OwnedTy::new(arena, ty))
+}
+
 /// Convert a single `LocatedError` into a `TixDiagnostic`.
+///
+/// Each error gets its own arena so that diagnostics are fully self-contained
+/// and can be stored, cloned, or compared without keeping the TypeStorage alive.
 fn error_to_diagnostic(error: &LocatedError, table: &TypeStorage) -> TixDiagnostic {
     let kind = match &error.payload {
         InferenceError::TypeMismatch(pair) => {
-            let actual = canonicalize_ty_structural(&pair.0, table);
-            let expected = canonicalize_ty_structural(&pair.1, table);
-            TixDiagnosticKind::TypeMismatch { expected, actual }
+            let mut arena = TypeArena::new();
+            let actual = canonicalize_ty_structural(&pair.0, table, &mut arena);
+            let expected = canonicalize_ty_structural(&pair.1, table, &mut arena);
+            let arena = Arc::new(arena);
+            TixDiagnosticKind::TypeMismatch {
+                expected: make_diag_ty(Arc::clone(&arena), expected),
+                actual: make_diag_ty(Arc::clone(&arena), actual),
+            }
         }
         InferenceError::MissingField { field, available } => {
             let suggestion = suggest_similar(field, available.iter());
@@ -413,18 +500,25 @@ fn error_to_diagnostic(error: &LocatedError, table: &TypeStorage) -> TixDiagnost
             }
         }
         InferenceError::InvalidBinOp(triple) => {
-            let lhs_ty = canonicalize_ty_structural(&triple.1, table);
-            let rhs_ty = canonicalize_ty_structural(&triple.2, table);
+            let mut arena = TypeArena::new();
+            let lhs_ty = canonicalize_ty_structural(&triple.1, table, &mut arena);
+            let rhs_ty = canonicalize_ty_structural(&triple.2, table, &mut arena);
+            let arena = Arc::new(arena);
             TixDiagnosticKind::InvalidBinOp {
                 op: triple.0,
-                lhs_ty,
-                rhs_ty,
+                lhs_ty: make_diag_ty(Arc::clone(&arena), lhs_ty),
+                rhs_ty: make_diag_ty(Arc::clone(&arena), rhs_ty),
             }
         }
         InferenceError::InvalidAttrMerge(pair) => {
-            let lhs_ty = canonicalize_ty_structural(&pair.0, table);
-            let rhs_ty = canonicalize_ty_structural(&pair.1, table);
-            TixDiagnosticKind::InvalidAttrMerge { lhs_ty, rhs_ty }
+            let mut arena = TypeArena::new();
+            let lhs_ty = canonicalize_ty_structural(&pair.0, table, &mut arena);
+            let rhs_ty = canonicalize_ty_structural(&pair.1, table, &mut arena);
+            let arena = Arc::new(arena);
+            TixDiagnosticKind::InvalidAttrMerge {
+                lhs_ty: make_diag_ty(Arc::clone(&arena), lhs_ty),
+                rhs_ty: make_diag_ty(Arc::clone(&arena), rhs_ty),
+            }
         }
     };
 
@@ -503,7 +597,22 @@ pub fn lower_diagnostics_to_tix(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use lang_ty::{OwnedTy, TypeArena};
+
     use super::*;
+
+    /// Construct a `DiagTy` for a primitive type, for use in test assertions.
+    ///
+    /// `DiagTy::PartialEq` compares by display string, so two `DiagTy` values
+    /// wrapping the same primitive type will compare equal even if they live in
+    /// different arenas.
+    fn prim_owned(p: lang_ty::PrimitiveTy) -> DiagTy {
+        let mut arena = TypeArena::new();
+        let ty = arena.intern(OutputTy::Primitive(p));
+        DiagTy(OwnedTy::new(Arc::new(arena), ty))
+    }
 
     #[test]
     fn edit_distance_identical() {
@@ -560,8 +669,8 @@ mod tests {
     #[test]
     fn type_mismatch_display() {
         let kind = TixDiagnosticKind::TypeMismatch {
-            expected: OutputTy::Primitive(lang_ty::PrimitiveTy::String),
-            actual: OutputTy::Primitive(lang_ty::PrimitiveTy::Int),
+            expected: prim_owned(lang_ty::PrimitiveTy::String),
+            actual: prim_owned(lang_ty::PrimitiveTy::Int),
         };
         assert_eq!(
             kind.to_string(),
@@ -598,8 +707,8 @@ mod tests {
     fn invalid_bin_op_display() {
         let kind = TixDiagnosticKind::InvalidBinOp {
             op: OverloadBinOp::Sub,
-            lhs_ty: OutputTy::Primitive(lang_ty::PrimitiveTy::String),
-            rhs_ty: OutputTy::Primitive(lang_ty::PrimitiveTy::Int),
+            lhs_ty: prim_owned(lang_ty::PrimitiveTy::String),
+            rhs_ty: prim_owned(lang_ty::PrimitiveTy::Int),
         };
         assert_eq!(kind.to_string(), "cannot apply `-` to `string` and `int`");
     }
@@ -607,8 +716,8 @@ mod tests {
     #[test]
     fn invalid_attr_merge_display() {
         let kind = TixDiagnosticKind::InvalidAttrMerge {
-            lhs_ty: OutputTy::Primitive(lang_ty::PrimitiveTy::Int),
-            rhs_ty: OutputTy::Primitive(lang_ty::PrimitiveTy::Int),
+            lhs_ty: prim_owned(lang_ty::PrimitiveTy::Int),
+            rhs_ty: prim_owned(lang_ty::PrimitiveTy::Int),
         };
         let msg = kind.to_string();
         assert!(msg.contains("cannot merge"));
@@ -643,30 +752,30 @@ mod tests {
     }
 
     #[test]
-    fn inference_timeout_display_no_missing() {
-        let kind = TixDiagnosticKind::InferenceTimeout {
+    fn inference_aborted_display_no_missing() {
+        let kind = TixDiagnosticKind::InferenceAborted {
             missing_bindings: vec![],
         };
         let msg = kind.to_string();
-        assert!(msg.contains("timed out"));
+        assert!(msg.contains("aborted"));
         assert!(msg.contains("partial results"));
     }
 
     #[test]
-    fn inference_timeout_display_with_missing() {
-        let kind = TixDiagnosticKind::InferenceTimeout {
+    fn inference_aborted_display_with_missing() {
+        let kind = TixDiagnosticKind::InferenceAborted {
             missing_bindings: vec!["x".into(), "y".into()],
         };
         let msg = kind.to_string();
-        assert!(msg.contains("timed out"));
+        assert!(msg.contains("aborted"));
         assert!(msg.contains("`x`"));
         assert!(msg.contains("`y`"));
         assert!(!msg.contains("and"), "should not truncate for <=5 items");
     }
 
     #[test]
-    fn inference_timeout_display_truncated() {
-        let kind = TixDiagnosticKind::InferenceTimeout {
+    fn inference_aborted_display_truncated() {
+        let kind = TixDiagnosticKind::InferenceAborted {
             missing_bindings: vec![
                 "a".into(),
                 "b".into(),
@@ -678,7 +787,7 @@ mod tests {
             ],
         };
         let msg = kind.to_string();
-        assert!(msg.contains("timed out"));
+        assert!(msg.contains("aborted"));
         assert!(msg.contains("`a`"));
         assert!(msg.contains("`e`"));
         assert!(msg.contains("and 2 more"));
@@ -692,8 +801,8 @@ mod tests {
     fn diagnostic_codes_are_stable() {
         assert_eq!(
             TixDiagnosticKind::TypeMismatch {
-                expected: OutputTy::Primitive(lang_ty::PrimitiveTy::Int),
-                actual: OutputTy::Primitive(lang_ty::PrimitiveTy::String),
+                expected: prim_owned(lang_ty::PrimitiveTy::Int),
+                actual: prim_owned(lang_ty::PrimitiveTy::String),
             }
             .code(),
             "E001"
@@ -701,8 +810,8 @@ mod tests {
         assert_eq!(
             TixDiagnosticKind::InvalidBinOp {
                 op: OverloadBinOp::Add,
-                lhs_ty: OutputTy::Primitive(lang_ty::PrimitiveTy::Int),
-                rhs_ty: OutputTy::Primitive(lang_ty::PrimitiveTy::String),
+                lhs_ty: prim_owned(lang_ty::PrimitiveTy::Int),
+                rhs_ty: prim_owned(lang_ty::PrimitiveTy::String),
             }
             .code(),
             "E003"
@@ -726,8 +835,8 @@ mod tests {
     #[test]
     fn docs_url_format() {
         let kind = TixDiagnosticKind::TypeMismatch {
-            expected: OutputTy::Primitive(lang_ty::PrimitiveTy::Int),
-            actual: OutputTy::Primitive(lang_ty::PrimitiveTy::String),
+            expected: prim_owned(lang_ty::PrimitiveTy::Int),
+            actual: prim_owned(lang_ty::PrimitiveTy::String),
         };
         assert_eq!(
             kind.docs_url(),
@@ -747,8 +856,8 @@ mod tests {
         }
         .is_warning());
         assert!(!TixDiagnosticKind::TypeMismatch {
-            expected: OutputTy::Primitive(lang_ty::PrimitiveTy::Int),
-            actual: OutputTy::Primitive(lang_ty::PrimitiveTy::String),
+            expected: prim_owned(lang_ty::PrimitiveTy::Int),
+            actual: prim_owned(lang_ty::PrimitiveTy::String),
         }
         .is_warning());
     }

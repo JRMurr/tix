@@ -106,9 +106,18 @@ When a file contains `import ./other.nix`, tix resolves it demand-driven:
 
 1. **Import scanning** — `scan_literal_imports()` finds literal `import <path>` patterns. Dynamic imports (where the path is computed) remain unconstrained.
 2. **Demand-driven analysis** — an `InferenceCoordinator` manages concurrent file inference. When file A imports file B, B is inferred first (with cycle detection). The coordinator handles parallelism via rayon for batch project checking (`tix check`).
-3. **Type integration** — the imported file's root `OutputTy` is used as the type of the `import` expression. For `callPackage ./file.nix {}` patterns, tix recognizes the convention and peels the outer lambda layer.
+3. **Type integration** — the imported file's root `OutputTy` is wrapped in a `Ty::Frozen(Arc<OutputTy>)` — a single TyId that lazily materializes fields on demand. When the importer accesses `lib.strings`, only that field's type is interned; the other 493 fields remain frozen. This prevents O(N) TyId allocations for large imports. For `callPackage ./file.nix {}` patterns, tix recognizes the convention and peels the outer lambda layer.
 
 Files outside the project scope (e.g. transitive nixpkgs imports) get `⊤` — inference stays local to the project boundary.
+
+### Layered inference in `tix check`
+
+In batch mode (`tix check`), files are inferred in topological layers based on their import dependencies:
+
+1. **Import scanning** — during Phase 1 (sequential prepare), each file's import targets are scanned to build a file-level dependency graph.
+2. **SCC computation + layering** — Tarjan's algorithm computes strongly-connected components (SCCs), then a condensation DAG is topologically sorted into layers. Layer 0 contains leaf files (no in-project dependencies); each subsequent layer depends only on prior layers.
+3. **Layer-by-layer inference** — files within each layer run in parallel via rayon. Dependencies from prior layers have their signatures cached in the `InferenceCoordinator`, so imports resolve to real types instead of `⊤`. Files within the same SCC (mutual imports) get `⊤` for intra-SCC imports.
+4. **Reference-counted eviction** — after each layer, signatures whose importers have all been processed are evicted from the cache, keeping memory bounded to the dependency "frontier" rather than the entire project.
 
 ## Stub integration
 

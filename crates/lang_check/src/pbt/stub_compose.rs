@@ -16,14 +16,14 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 
 use comment_parser::ParsedTy;
-use lang_ty::{OutputTy, PrimitiveTy, TyRef};
+use lang_ty::{arbitrary::RawTy, OutputTy, PrimitiveTy};
 use proptest::prelude::*;
 use smol_str::SmolStr;
 
 use crate::aliases::TypeAliasRegistry;
 use crate::tests::{
     check_str, check_str_with_aliases_and_context, get_inferred_root_with_aliases,
-    get_inferred_root_with_aliases_and_context,
+    get_inferred_root_with_aliases_and_context, raw_to_root, RootTy,
 };
 
 // ==============================================================================
@@ -164,26 +164,20 @@ enum Ty {
 }
 
 impl Ty {
-    /// Convert to OutputTy for assertion comparison.
+    /// Convert to RawTy for assertion comparison.
     /// `Any` cannot be converted — it represents a type variable, not a concrete type.
-    fn to_output_ty(self) -> Option<OutputTy> {
+    fn to_raw_ty(self) -> Option<RawTy> {
         match self {
-            Ty::Int => Some(OutputTy::Primitive(PrimitiveTy::Int)),
-            Ty::Float => Some(OutputTy::Primitive(PrimitiveTy::Float)),
-            Ty::Bool => Some(OutputTy::Primitive(PrimitiveTy::Bool)),
-            Ty::String => Some(OutputTy::Primitive(PrimitiveTy::String)),
-            Ty::Null => Some(OutputTy::Primitive(PrimitiveTy::Null)),
-            Ty::ListInt => Some(OutputTy::List(TyRef::from(OutputTy::Primitive(
-                PrimitiveTy::Int,
-            )))),
-            Ty::ListString => Some(OutputTy::List(TyRef::from(OutputTy::Primitive(
-                PrimitiveTy::String,
-            )))),
-            Ty::ListBool => Some(OutputTy::List(TyRef::from(OutputTy::Primitive(
-                PrimitiveTy::Bool,
-            )))),
-            Ty::ListListInt => Some(OutputTy::List(TyRef::from(OutputTy::List(TyRef::from(
-                OutputTy::Primitive(PrimitiveTy::Int),
+            Ty::Int => Some(RawTy::Primitive(PrimitiveTy::Int)),
+            Ty::Float => Some(RawTy::Primitive(PrimitiveTy::Float)),
+            Ty::Bool => Some(RawTy::Primitive(PrimitiveTy::Bool)),
+            Ty::String => Some(RawTy::Primitive(PrimitiveTy::String)),
+            Ty::Null => Some(RawTy::Primitive(PrimitiveTy::Null)),
+            Ty::ListInt => Some(RawTy::List(Box::new(RawTy::Primitive(PrimitiveTy::Int)))),
+            Ty::ListString => Some(RawTy::List(Box::new(RawTy::Primitive(PrimitiveTy::String)))),
+            Ty::ListBool => Some(RawTy::List(Box::new(RawTy::Primitive(PrimitiveTy::Bool)))),
+            Ty::ListListInt => Some(RawTy::List(Box::new(RawTy::List(Box::new(
+                RawTy::Primitive(PrimitiveTy::Int),
             ))))),
             Ty::ListAny | Ty::Any => None,
         }
@@ -416,7 +410,7 @@ fn check_composed_expr(
     nix_src: &str,
     pattern: AccessPattern,
     registry: &TypeAliasRegistry,
-) -> OutputTy {
+) -> RootTy {
     let context_args = make_context_args(pattern, registry);
 
     let root_ty = match pattern {
@@ -430,10 +424,10 @@ fn check_composed_expr(
         AccessPattern::Bare => root_ty,
         AccessPattern::LambdaParam | AccessPattern::PkgsLib => {
             // Root type is a lambda { lib, ... }: body  or  { pkgs, ... }: body.
-            match root_ty {
-                OutputTy::Lambda { body, .. } => (*body.0).clone(),
+            match root_ty.output_ty() {
+                OutputTy::Lambda { body, .. } => root_ty.child(*body),
                 other => panic!(
-                    "expected lambda type for {:?} pattern, got: {}\nsrc: {}",
+                    "expected lambda type for {:?} pattern, got: {:?}\nsrc: {}",
                     pattern, other, nix_src
                 ),
             }
@@ -949,7 +943,8 @@ proptest! {
 
         // For concrete result types, assert exact match.
         // For `Any` (polymorphic), the result is some concrete type — just check it's valid.
-        if let Some(expected) = expected_ty.to_output_ty() {
+        if let Some(expected_raw) = expected_ty.to_raw_ty() {
+            let expected = raw_to_root(&expected_raw);
             prop_assert_eq!(
                 inferred, expected,
                 "pattern={:?}\nsrc:\n{}", pattern, nix_src
@@ -979,7 +974,8 @@ proptest! {
         let registry = &*COMPOSABLE_REGISTRY;
         let inferred = check_composed_expr(&nix_src, pattern, &registry);
 
-        if let Some(expected) = expected_ty.to_output_ty() {
+        if let Some(expected_raw) = expected_ty.to_raw_ty() {
+            let expected = raw_to_root(&expected_raw);
             prop_assert_eq!(
                 inferred, expected,
                 "pattern={:?}\nsrc:\n{}", pattern, nix_src
@@ -1007,7 +1003,8 @@ proptest! {
         let registry = &*COMPOSABLE_REGISTRY;
         let inferred = check_composed_expr(&nix_src, pattern, &registry);
 
-        if let Some(expected) = expected_ty.to_output_ty() {
+        if let Some(expected_raw) = expected_ty.to_raw_ty() {
+            let expected = raw_to_root(&expected_raw);
             prop_assert_eq!(
                 inferred, expected,
                 "pattern={:?}\nsrc:\n{}", pattern, nix_src

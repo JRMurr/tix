@@ -948,6 +948,7 @@ dependencies = [
  "log",
  "miette",
  "parking_lot",
+ "petgraph",
  "proptest",
  "rayon",
  "rnix",
@@ -966,6 +967,7 @@ name = "lang_ty"
 version = "0.1.0"
 dependencies = [
  "derive_more",
+ "la-arena",
  "lang_ast",
  "proptest",
  "rustc-hash 2.1.0",
@@ -1894,9 +1896,11 @@ dependencies = [
  "lang_ast",
  "lang_check",
  "lang_ty",
+ "libc",
  "log",
  "parking_lot",
  "proptest",
+ "rayon",
  "rlimit",
  "rnix",
  "rowan",

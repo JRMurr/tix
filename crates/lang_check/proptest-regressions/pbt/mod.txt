@@ -6,3 +6,6 @@
 # everyone who runs the test benefits from these saved cases.
 cc 61bb342fc93af9dc85a2f35481e1e559a0bd3f9c111f3b733095e4782f7c4ecb # shrinks to (ty, text) = (Union([Lambda(TyVar(1) -> Null), Lambda(TyVar(1) -> Null)]), "(if true then ((__pbt_p: null)) else ((__pbt_p: null)))")
 cc 7090d935eb65fe5d797e72d0e0cc007e3783d9c76d82d816c259cabf6a1963c2 # shrinks to (ty, text) = (AttrSetTy { fields: {"_pbt_mTDh__kN3U": Lambda(TyVar(1) -> Lambda(TyVar(1) -> Bool))}, dyn_ty: None, open: false, optional_fields: {} }, "({\"_pbt_mTDh__kN3U\"=((__pbt_p: ((__pbt_p: false)));})")
+cc cf9b0a98b716e33d1d1b2fc8a6a914a81778bd26edb19c818a272bf3fd3327c6 # shrinks to (ty, text) = (Lambda { param: Primitive(Null), body: Lambda { param: Primitive(Null), body: Lambda { param: TyVar(1), body: Primitive(Null) } } }, "(__pbt_p: let __pbt_chk = __pbt_assert_null __pbt_p; in ((__pbt_p: let __pbt_chk = __pbt_assert_null __pbt_p; in ((__pbt_p: null)))))")
+cc afe3e6c44709ae456ecbbc1796d87637872e3c2a867b7f8bfb88a15af882e7cb # shrinks to (ty, text) = (Lambda { param: TyVar(2), body: Lambda { param: TyVar(1), body: Primitive(Int) } }, "(__pbt_p: (__pbt_p: (let _pbt_t__6 = (-4007); in _pbt_t__6)))")
+cc f330fadd8bb48f9b4aab87edbd350e5b55730d8f07043ed8dc5a84c8715c9e75 # shrinks to (ty, text) = (Union([Primitive(Null), Primitive(Bool)]), "(if true then (null) else (false))")

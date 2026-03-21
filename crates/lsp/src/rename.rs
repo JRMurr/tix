@@ -753,7 +753,7 @@ mod tests {
         let src = match std::fs::read_to_string(&path) {
             Ok(s) => s,
             Err(_) => {
-                eprintln!("skipping: nix/rust.nix not found at {}", path.display());
+                println!("skipping: nix/rust.nix not found at {}", path.display());
                 return;
             }
         };

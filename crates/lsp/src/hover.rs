@@ -43,7 +43,7 @@ pub fn hover(
 
         // Check for a name at this node first (shows the binding's type).
         if let Some(name_id) = analysis.syntax.source_map.name_for_node(ptr) {
-            if let Some(ty) = inference.name_ty_map.get(name_id) {
+            if let Some(&ty_ref) = inference.name_ty_map.get(name_id) {
                 let name_text = &analysis.syntax.module[name_id].text;
                 let range = analysis.syntax.line_index.range(node.text_range());
 
@@ -60,12 +60,17 @@ pub fn hover(
                 // Param/PatField: keep letter names (genuine polymorphism).
                 // All other bindings: replace single-occurrence TyVars with `?`.
                 let kind = analysis.syntax.module[name_id].kind;
-                let is_unknown = !is_param_kind(kind) && matches!(ty, OutputTy::TyVar(_));
+                let is_unknown =
+                    !is_param_kind(kind) && matches!(inference.arena[ty_ref], OutputTy::TyVar(_));
                 let dc = lang_ty::DisplayConfig::hover();
                 let ty_str = if is_param_kind(kind) {
-                    ty.display_truncated(&dc)
+                    inference.arena.display_truncated(ty_ref, &dc)
                 } else {
-                    ty.normalize_replacing_unknown().display_truncated(&dc)
+                    // normalize_replacing_unknown needs &mut TypeArena; clone to a
+                    // temporary so we don't need to mutate the shared Arc.
+                    let mut tmp = (*inference.arena).clone();
+                    let normalized = tmp.normalize_replacing_unknown(ty_ref);
+                    tmp.display_truncated(normalized, &dc)
                 };
 
                 // When the type is `?`, append an actionable explanation.
@@ -100,7 +105,7 @@ pub fn hover(
                 continue;
             }
 
-            if let Some(ty) = inference.expr_ty_map.get(expr_id) {
+            if let Some(&ty_ref) = inference.expr_ty_map.get(expr_id) {
                 let range = analysis.syntax.line_index.range(node.text_range());
 
                 // Determine normalization mode: if this expression is a
@@ -121,10 +126,16 @@ pub fn hover(
                     _ => false,
                 };
                 let dc = lang_ty::DisplayConfig::hover();
-                let ty_display = if is_param_ref {
-                    ty.normalize_vars()
-                } else {
-                    ty.normalize_replacing_unknown()
+                // normalize_replacing_unknown / normalize_vars both need &mut
+                // TypeArena; clone to a temporary to avoid mutating the shared Arc.
+                let ty_str = {
+                    let mut tmp = (*inference.arena).clone();
+                    let normalized = if is_param_ref {
+                        tmp.normalize_vars(ty_ref)
+                    } else {
+                        tmp.normalize_replacing_unknown(ty_ref)
+                    };
+                    tmp.display_truncated(normalized, &dc)
                 };
 
                 // For Reference expressions (variable uses), look up decl_doc
@@ -132,22 +143,14 @@ pub fn hover(
                 // from stubs (e.g. hovering on `mkDerivation` shows its doc).
                 if let Expr::Reference(ref_name) = &analysis.syntax.module[expr_id] {
                     let doc = docs.decl_doc(ref_name.as_str());
-                    return Some(make_hover(
-                        ty_display.display_truncated(&dc),
-                        doc.map(|d| d.as_str()),
-                        range,
-                    ));
+                    return Some(make_hover(ty_str, doc.map(|d| d.as_str()), range));
                 }
 
                 // For Select expressions, try to find field-level docs by
                 // walking the Select chain to build a field path and finding
                 // the base name's type alias.
                 let doc = try_select_field_doc(analysis, expr_id, docs);
-                return Some(make_hover(
-                    ty_display.display_truncated(&dc),
-                    doc.as_deref(),
-                    range,
-                ));
+                return Some(make_hover(ty_str, doc.as_deref(), range));
             }
         }
 
@@ -168,6 +171,11 @@ struct AttrpathKeyResolution {
     full_path: Vec<smol_str::SmolStr>,
     alias_name: Option<smol_str::SmolStr>,
     config_ty: OutputTy,
+    /// The arena that owns TyRef indices inside `config_ty`. This is either
+    /// `inference.arena` (for pattern-field types) or `context_arg_arena`
+    /// (for context-arg fallback types). All navigation of `config_ty` must
+    /// use this arena — do NOT substitute `inference.arena` here.
+    config_arena: std::sync::Arc<lang_ty::TypeArena>,
 }
 
 /// Resolve an attrpath key token to its config type, full path, and alias name.
@@ -206,18 +214,28 @@ fn resolve_attrpath_key(
     }
 
     let first_segment = full_path.first()?;
-    let config_ty = get_module_config_type(
+    // get_module_config_type returns (config_ty, is_from_context):
+    // when is_from_context=true, TyRef children belong to context_arg_arena;
+    // when false, they belong to inference.arena.
+    let (config_ty, is_from_context) = get_module_config_type(
         analysis,
         inference,
         first_segment,
         &analysis.syntax.context_arg_types,
+        &analysis.syntax.context_arg_arena,
     )?;
+    let config_arena = if is_from_context {
+        std::sync::Arc::clone(&analysis.syntax.context_arg_arena)
+    } else {
+        std::sync::Arc::clone(&inference.arena)
+    };
     let alias_name = extract_alias_name(&config_ty).cloned();
 
     Some(AttrpathKeyResolution {
         full_path,
         alias_name,
         config_ty,
+        config_arena,
     })
 }
 
@@ -234,7 +252,10 @@ fn try_attrpath_key_hover(
     use crate::ty_nav::resolve_through_segments;
 
     let res = resolve_attrpath_key(analysis, token)?;
-    let resolved_ty = resolve_through_segments(&res.config_ty, &res.full_path)?;
+    // Use config_arena — it matches whichever arena owns the TyRef indices
+    // inside config_ty (either inference.arena or context_arg_arena).
+    let arena = &*res.config_arena;
+    let resolved_ty = resolve_through_segments(arena, &res.config_ty, &res.full_path)?;
 
     let doc = res.alias_name.as_ref().and_then(|a| {
         docs.field_doc(a.as_str(), &res.full_path)
@@ -244,7 +265,13 @@ fn try_attrpath_key_hover(
     let last_segment = res.full_path.last()?;
     let range = analysis.syntax.line_index.range(token.text_range());
     let dc = lang_ty::DisplayConfig::hover();
-    let type_display = format!("{last_segment} :: {}", resolved_ty.display_truncated(&dc));
+    // Clone the config_arena to get a mutable tmp for intern+display.
+    let mut tmp = (*res.config_arena).clone();
+    let resolved_ref = tmp.intern(resolved_ty);
+    let type_display = format!(
+        "{last_segment} :: {}",
+        tmp.display_truncated(resolved_ref, &dc)
+    );
 
     Some(make_hover(type_display, doc.as_deref(), range))
 }
@@ -316,11 +343,14 @@ fn try_select_field_doc(
                 // Try to find the inferred type for the expression and extract
                 // the alias name directly from the Named variant.
                 let inference = analysis.inference_result()?;
-                if let Some(OutputTy::Named(alias_name, _)) = inference.expr_ty_map.get(current) {
-                    path.reverse();
-                    return docs
-                        .field_doc(alias_name.as_str(), &path)
-                        .map(|d| d.to_string());
+                if let Some(&ty_ref) = inference.expr_ty_map.get(current) {
+                    if let OutputTy::Named(alias_name, _) = &inference.arena[ty_ref] {
+                        let alias_name = alias_name.clone();
+                        path.reverse();
+                        return docs
+                            .field_doc(alias_name.as_str(), &path)
+                            .map(|d| d.to_string());
+                    }
                 }
 
                 // Fallback: try capitalizing the base name as an alias name.

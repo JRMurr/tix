@@ -11,7 +11,7 @@ Every tix diagnostic has a stable error code. Codes never change meaning once as
 | [E005](./e005.md) | Warning | Unresolved name |
 | [E006](./e006.md) | Warning | Duplicate key |
 | [E007](./e007.md) | Warning | Import target not found |
-| [E008](./e008.md) | Warning | Inference timeout |
+| [E008](./e008.md) | Warning | Inference aborted |
 | [E009](./e009.md) | Warning | Annotation arity mismatch |
 | [E010](./e010.md) | Warning | Annotation accepted but not verified |
 | [E011](./e011.md) | Warning | Annotation parse error |

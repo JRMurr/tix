@@ -61,7 +61,7 @@ enum OverloadProgress {
 
 impl CheckCtx<'_> {
     pub fn infer_prog(self, groups: GroupedDefs) -> Result<InferenceResult, Box<TixDiagnostic>> {
-        let (result, diagnostics, _timed_out) = self.infer_prog_partial(groups);
+        let (result, diagnostics, _bailed_out) = self.infer_prog_partial(groups);
         // Return the first error diagnostic (skip warnings like UnresolvedName).
         for diag in diagnostics {
             if !matches!(
@@ -81,8 +81,8 @@ impl CheckCtx<'_> {
     /// groups after a failed one still get inferred, so the LSP can show types
     /// for successfully-inferred bindings alongside error diagnostics.
     ///
-    /// Returns `(result, diagnostics, timed_out)` where `timed_out` is true
-    /// when inference was aborted because the deadline was exceeded.
+    /// Returns `(result, diagnostics, bailed_out)` where `bailed_out` is true
+    /// when inference was aborted due to memory pressure (RSS limit).
     pub fn infer_prog_partial(
         mut self,
         groups: GroupedDefs,
@@ -110,11 +110,12 @@ impl CheckCtx<'_> {
 
         let n_groups = groups.len();
         for (i, group) in groups.into_iter().enumerate() {
-            // Check deadline before each SCC group so a single file can't
-            // block the LSP indefinitely. Partial results (types inferred
-            // so far) are still returned.
-            if self.past_deadline() {
-                log::warn!("inference deadline exceeded after {i}/{n_groups} SCC groups");
+            // Check memory pressure before each SCC group. Partial results
+            // (types inferred so far) are still returned.
+            if self.should_bail() {
+                log::warn!(
+                    "inference bailed out (memory pressure) after {i}/{n_groups} SCC groups"
+                );
                 break;
             }
             let group_names: Vec<_> = group
@@ -133,7 +134,7 @@ impl CheckCtx<'_> {
             }
         }
 
-        if !self.past_deadline() {
+        if !self.should_bail() {
             let root_err = log_if_slow!(10, self.infer_root(), |elapsed| log::info!(
                 "infer_root took {:.1}ms (cache: {}, slots: {}, RSS: {:.0}MB)",
                 elapsed.as_secs_f64() * 1000.0,
@@ -145,7 +146,7 @@ impl CheckCtx<'_> {
                 errors.push(err);
             }
         } else {
-            log::warn!("skipping infer_root due to deadline");
+            log::warn!("skipping infer_root due to memory pressure");
         }
 
         // Convert internal errors and warnings to display-ready diagnostics
@@ -157,9 +158,9 @@ impl CheckCtx<'_> {
         // Check memory pressure before canonicalization. Canonicalization can
         // easily double RSS (it creates OutputTy for every expression), so if
         // we're already using a large fraction of the memory budget, force the
-        // deadline_exceeded path which skips expr-level canonicalization and
-        // degrades name-level types to cheap fallbacks.
-        if !self.deadline_exceeded {
+        // bailed_out path which skips expr-level canonicalization and degrades
+        // name-level types to cheap fallbacks.
+        if !self.bailed_out {
             if let Some(limit) = self.rss_limit_mb {
                 let rss = rss_mb();
                 if rss > limit {
@@ -169,13 +170,13 @@ impl CheckCtx<'_> {
                         rss,
                         limit,
                     );
-                    self.deadline_exceeded = true;
+                    self.bailed_out = true;
                 }
             }
         }
 
         // Capture before self is moved into Collector.
-        let timed_out = self.past_deadline();
+        let bailed_out = self.should_bail();
 
         let mut collector = Collector::new(self);
         let result = log_if_slow!(50, collector.finalize_inference(), |elapsed| log::info!(
@@ -183,7 +184,7 @@ impl CheckCtx<'_> {
             elapsed.as_secs_f64() * 1000.0,
             rss_mb(),
         ));
-        (result, diagnostics, timed_out)
+        (result, diagnostics, bailed_out)
     }
 
     fn infer_root(&mut self) -> Result<(), LocatedError> {
@@ -329,10 +330,10 @@ impl CheckCtx<'_> {
         let canon_start = std::time::Instant::now();
         for &(name_id, _ty) in &inferred {
             let name_slot = self.ty_for_name_direct(name_id);
-            let output =
+            let (mut arena, ty) =
                 canonicalize_standalone(&self.types.storage, name_slot, Polarity::Positive);
-            let simplified = simplify(&output);
-            self.early_canonical.insert(name_id, simplified);
+            let simplified = simplify(&mut arena, ty);
+            self.early_canonical.insert(name_id, (arena, simplified));
         }
         log::debug!(
             "  early canonicalization: {:.1}ms for {} names",
@@ -424,7 +425,7 @@ impl CheckCtx<'_> {
         let infer_start = std::time::Instant::now();
 
         for def in group {
-            if self.past_deadline() {
+            if self.should_bail() {
                 break;
             }
 
@@ -606,10 +607,10 @@ impl CheckCtx<'_> {
             return cached;
         }
 
-        // Bail out early if the deadline was exceeded. Return the original
+        // Bail out early if memory pressure was detected. Return the original
         // type as-is — extrusion results will be incomplete but we avoid
         // spending unbounded time in the bounds-copying loop.
-        if self.deadline_exceeded {
+        if self.bailed_out {
             return ty_id;
         }
 
@@ -627,8 +628,8 @@ impl CheckCtx<'_> {
             TypeEntry::Variable(v) if v.level < self.types.storage.current_level => {
                 return ty_id;
             }
-            TypeEntry::Concrete(Ty::Primitive(_) | Ty::TyVar(_)) => {
-                // Leaf concrete types are trivially variable-free.
+            TypeEntry::Concrete(Ty::Primitive(_) | Ty::TyVar(_) | Ty::Frozen(_)) => {
+                // Leaf concrete types (and frozen imports) are trivially variable-free.
                 self.types.variable_free.insert(ty_id);
                 return ty_id;
             }
@@ -825,6 +826,11 @@ impl CheckCtx<'_> {
                         Ty::Named(name, inner) => {
                             extrude_single!(inner, polarity, |e| Ty::Named(name, e))
                         }
+                        // Frozen types are ground (no variables) — handled by the
+                        // fast path above. Unreachable, but return as-is defensively.
+                        Ty::Frozen(_) => {
+                            unreachable!("Frozen should be caught by variable_free fast path")
+                        }
                     };
 
                     // Cache changed concrete types so repeated visits to the
@@ -902,7 +908,7 @@ impl CheckCtx<'_> {
         // Fixed-point loop: keep trying until no more progress.
         let mut iterations = 0;
         loop {
-            if self.past_deadline() {
+            if self.should_bail() {
                 break;
             }
 
@@ -1192,7 +1198,22 @@ impl CheckCtx<'_> {
         let lhs_concrete = self.types.find_concrete_through_inter(mg.lhs);
         let rhs_concrete = self.types.find_concrete_through_inter(mg.rhs);
 
-        match (lhs_concrete, rhs_concrete) {
+        // Named is transparent — unwrap before matching, just like constrain does.
+        let unwrap_named = |ty: Ty<TyId>, storage: &crate::storage::TypeStorage| -> Ty<TyId> {
+            let mut current = ty;
+            while let Ty::Named(_, inner) = &current {
+                match storage.get(*inner) {
+                    crate::storage::TypeEntry::Concrete(c) => current = c.clone(),
+                    _ => break,
+                }
+            }
+            current
+        };
+
+        let lhs_unwrapped = lhs_concrete.map(|t| unwrap_named(t, &self.types.storage));
+        let rhs_unwrapped = rhs_concrete.map(|t| unwrap_named(t, &self.types.storage));
+
+        match (lhs_unwrapped, rhs_unwrapped) {
             (Some(Ty::AttrSet(lhs_attr)), Some(Ty::AttrSet(rhs_attr))) => {
                 let merged = lhs_attr.merge(rhs_attr);
                 let merged_id = self.alloc_concrete(Ty::AttrSet(merged));
@@ -1354,7 +1375,7 @@ impl CheckCtx<'_> {
                 Ty::Named(_, inner) => {
                     self.lift_reachable_vars_inner(inner, visited);
                 }
-                Ty::Primitive(_) | Ty::TyVar(_) => {}
+                Ty::Primitive(_) | Ty::TyVar(_) | Ty::Frozen(_) => {}
             }
         }
     }

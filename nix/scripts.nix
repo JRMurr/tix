@@ -88,7 +88,6 @@ in
       TIX_ARGS=()
       MEM_LIMIT_GB=16
       RELEASE=0
-      TIMEOUT=""
       USE_TIME=0
       LOG_FILE=""
 
@@ -101,11 +100,6 @@ in
           --mem-limit)
             [[ $# -ge 2 ]] || { echo "ERROR: --mem-limit requires a value" >&2; exit 2; }
             MEM_LIMIT_GB="$2"
-            shift 2
-            ;;
-          --timeout)
-            [[ $# -ge 2 ]] || { echo "ERROR: --timeout requires a value" >&2; exit 2; }
-            TIMEOUT="$2"
             shift 2
             ;;
           --time)
@@ -162,11 +156,8 @@ in
       TIX_BUILTIN_STUBS="$(resolve_stubs)"
       export TIX_BUILTIN_STUBS
 
-      # Build the command with optional timeout and time wrappers.
+      # Build the command with optional time wrapper.
       CMD=()
-      if [[ -n "$TIMEOUT" ]]; then
-        CMD+=(timeout "''${TIMEOUT}s")
-      fi
       if [[ "$USE_TIME" -eq 1 ]]; then
         GNU_TIME="$(command -v time)"
         CMD+=("$GNU_TIME" -v)
@@ -195,7 +186,6 @@ in
     text = ''
       ${sharedHelpers}
 
-      DEADLINE=60
       JOBS=""
       TIMING=0
       RELEASE=0
@@ -205,11 +195,6 @@ in
 
       while [[ $# -gt 0 ]]; do
         case "$1" in
-          --deadline)
-            [[ $# -ge 2 ]] || { echo "ERROR: --deadline requires a value" >&2; exit 2; }
-            DEADLINE="$2"
-            shift 2
-            ;;
           --jobs|-j)
             [[ $# -ge 2 ]] || { echo "ERROR: --jobs requires a value" >&2; exit 2; }
             JOBS="$2"
@@ -242,7 +227,6 @@ in
             echo "                      Examples: lib/ pkgs/ nixos/ pkgs/by-name/"
             echo ""
             echo "Options:"
-            echo "  --deadline <secs>   Per-file inference deadline (default: 60)"
             echo "  --jobs, -j <N>      Number of parallel inference threads"
             echo "  --timing            Print per-phase timing and memory usage"
             echo "  --release           Build tix in release mode"
@@ -308,13 +292,10 @@ in
         ! -path '*/deprecated/*' \
         2>/dev/null | wc -l)
       echo "Found ~''${NIX_COUNT} .nix files"
-      echo "Deadline: ''${DEADLINE}s per file"
 
       # Generate tix.toml.
       {
         echo "# Auto-generated for nixpkgs checking."
-        echo "deadline = ''${DEADLINE}"
-        echo ""
         echo "[project]"
         if [[ ''${#DIRS[@]} -gt 0 ]]; then
           analyze="["
@@ -386,7 +367,6 @@ in
     text = ''
       ${sharedHelpers}
 
-      DEADLINE=60
       PARALLEL=0
       JOBS=""
       TIMING=0
@@ -395,11 +375,6 @@ in
 
       while [[ $# -gt 0 ]]; do
         case "$1" in
-          --deadline)
-            [[ $# -ge 2 ]] || { echo "ERROR: --deadline requires a value" >&2; exit 2; }
-            DEADLINE="$2"
-            shift 2
-            ;;
           --parallel)
             PARALLEL=1
             shift
@@ -424,7 +399,7 @@ in
             ;;
           *)
             echo "Unknown flag: $1" >&2
-            echo "Usage: nixpkgs-lib-test [--deadline <secs>] [--parallel] [--jobs N] [--timing] [--release] [--mem-limit <GB>]" >&2
+            echo "Usage: nixpkgs-lib-test [--parallel] [--jobs N] [--timing] [--release] [--mem-limit <GB>]" >&2
             exit 2
             ;;
         esac
@@ -457,8 +432,6 @@ in
         # Generate tix.toml with deadline written directly (no write-then-sed).
         cat > "$WORK_DIR/lib/tix.toml" <<TOML
       # Auto-generated for parallel nixpkgs lib/ checking.
-      deadline = $DEADLINE
-
       [project]
       exclude = ["tests/**", "deprecated/**"]
       TOML
@@ -503,13 +476,11 @@ in
       )
 
       echo "Found ''${#NIX_FILES[@]} .nix files in $LIB_DIR"
-      echo "Deadline: ''${DEADLINE}s per file"
       echo "Memory limit: ''${MEM_LIMIT_GB} GB"
       echo "---"
 
       pass=0
       type_error=0
-      timed_out=0
       crash=0
       crash_files=()
 
@@ -518,7 +489,7 @@ in
 
         set +e
         run_with_mem_limit "$MEM_LIMIT_GB" \
-          timeout "''${DEADLINE}s" "$TIX_CLI" "$f" >/dev/null 2>&1
+          "$TIX_CLI" "$f" >/dev/null 2>&1
         rc=$?
         set -e
 
@@ -530,10 +501,6 @@ in
           1)
             printf "  TYPE_ERR  %s\n" "$rel"
             type_error=$((type_error + 1))
-            ;;
-          124)
-            printf "  TIMEOUT   %s\n" "$rel"
-            timed_out=$((timed_out + 1))
             ;;
           *)
             printf "  CRASH(%d) %s\n" "$rc" "$rel"
@@ -549,7 +516,6 @@ in
       echo "=============================="
       printf "  Pass:       %d\n" "$pass"
       printf "  Type error: %d\n" "$type_error"
-      printf "  Timeout:    %d\n" "$timed_out"
       printf "  Crash:      %d\n" "$crash"
       echo "------------------------------"
       printf "  Total:      %d\n" "''${#NIX_FILES[@]}"

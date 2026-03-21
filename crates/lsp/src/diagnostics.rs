@@ -30,10 +30,10 @@ pub fn to_lsp_diagnostics(
     diagnostics
         .iter()
         .map(|diag| {
-            // File-level diagnostics (like InferenceTimeout) should only
+            // File-level diagnostics (like InferenceAborted) should only
             // highlight the first line, not the entire file.
             let (range, related_information) =
-                if matches!(diag.kind, TixDiagnosticKind::InferenceTimeout { .. }) {
+                if matches!(diag.kind, TixDiagnosticKind::InferenceAborted { .. }) {
                     (Range::new(Default::default(), Default::default()), None)
                 } else if let TixDiagnosticKind::DuplicateKey { first, second, .. } = &diag.kind {
                     // DuplicateKey carries its own AstPtr spans; point the diagnostic
@@ -131,10 +131,10 @@ pub fn unknown_type_diagnostics(
 
     let mut diags = Vec::new();
 
-    for (name_id, ty) in inference.name_ty_map.iter() {
+    for (name_id, &ty_ref) in inference.name_ty_map.iter() {
         // Only bare type variables (unconstrained) — compound types like
         // `a -> a` are genuinely polymorphic, not unknown.
-        if !matches!(ty, OutputTy::TyVar(_)) {
+        if !matches!(inference.arena[ty_ref], OutputTy::TyVar(_)) {
             continue;
         }
 

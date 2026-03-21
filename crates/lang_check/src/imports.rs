@@ -12,11 +12,11 @@
 // peel one Lambda layer to get the return type.
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use lang_ast::nameres::ResolveResult;
 use lang_ast::{Expr, ExprId, Literal, Module, NameResolution};
-use lang_ty::OutputTy;
+use lang_ty::{OutputTy, OwnedTy};
 
 // ==============================================================================
 // Import Scanning
@@ -179,12 +179,82 @@ pub(crate) fn scan_callpackage_imports(
 /// `callPackage` applies the dependency-injection argument (the first parameter
 /// of the package function), so we extract the body type. For non-function files
 /// (e.g. a plain attrset), the type is returned as-is.
-pub(crate) fn extract_return_type(ty: &OutputTy) -> OutputTy {
-    match ty {
-        OutputTy::Lambda { body, .. } => body.0.as_ref().clone(),
-        OutputTy::Named(_, inner) => extract_return_type(&inner.0),
-        other => other.clone(),
+pub(crate) fn extract_return_type(owned: &OwnedTy) -> OwnedTy {
+    match owned.arena.get(owned.root) {
+        OutputTy::Lambda { body, .. } => OwnedTy::new(owned.arena.clone(), *body),
+        OutputTy::Named(_, inner) => {
+            let inner_owned = OwnedTy::new(owned.arena.clone(), *inner);
+            extract_return_type(&inner_owned)
+        }
+        _ => owned.clone(),
     }
+}
+
+// ==============================================================================
+// Bulk Import Path Scanning (for dependency graph construction)
+// ==============================================================================
+
+/// Normalize path components (`.`, `..`) without any syscalls.
+///
+/// Safe when `base_dir` is already canonical — the joined path won't contain
+/// symlinks that would make textual `..` resolution incorrect.
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut out = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            c => out.push(c),
+        }
+    }
+    out.iter().collect()
+}
+
+/// Scan a module for all import paths without resolving types.
+///
+/// Combines `scan_literal_imports` and `scan_callpackage_imports`, normalizes
+/// paths, applies directory → `default.nix` resolution, and deduplicates.
+/// Returns only normalized paths — no ExprIds, no types. Used by `tix check`
+/// to build the file-level dependency graph before inference begins.
+///
+/// When `base_dir` is canonical, the returned paths are equivalent to
+/// `canonicalize` results (no symlinks within the Nix store tree).
+pub fn scan_all_import_paths(
+    module: &Module,
+    name_res: &NameResolution,
+    base_dir: &Path,
+) -> Vec<PathBuf> {
+    let literal = scan_literal_imports(module, name_res, base_dir);
+    let callpackage = scan_callpackage_imports(module, base_dir);
+
+    let mut seen = HashSet::new();
+    let mut result = Vec::new();
+
+    let all_paths = literal
+        .resolved
+        .iter()
+        .map(|(_, p)| p.clone())
+        .chain(callpackage.iter().map(|(_, _, _, p)| p.clone()));
+
+    for path in all_paths {
+        // Cheap textual normalization instead of canonicalize() syscall.
+        // Safe because base_dir is already canonical (no symlinks to resolve).
+        let normalized = normalize_path(&path);
+
+        // Apply directory → default.nix resolution.
+        let resolved = match resolve_directory_path(normalized) {
+            Some(p) => p,
+            None => continue, // Directory with no default.nix.
+        };
+
+        if seen.insert(resolved.clone()) {
+            result.push(resolved);
+        }
+    }
+
+    result
 }
 
 /// Resolve a path that may point to a directory, applying Nix's convention
@@ -195,7 +265,7 @@ pub(crate) fn resolve_directory_path(path: PathBuf) -> Option<PathBuf> {
     if path.is_dir() {
         let default = path.join("default.nix");
         if default.is_file() {
-            Some(default.canonicalize().unwrap_or(default))
+            Some(normalize_path(&default))
         } else {
             None
         }
@@ -232,7 +302,7 @@ pub struct ImportError {
 pub struct ImportResolution {
     /// Successfully resolved import types, keyed by the Apply ExprId in the
     /// importing file.
-    pub types: HashMap<ExprId, OutputTy>,
+    pub types: HashMap<ExprId, OwnedTy>,
     /// Errors encountered during import resolution.
     pub errors: Vec<ImportError>,
     /// Maps ExprIds of import sub-expressions (Apply, Reference, Literal)
@@ -265,7 +335,7 @@ pub fn resolve_import_types<F>(
     lookup: F,
 ) -> ImportResolution
 where
-    F: Fn(&Path) -> Option<OutputTy>,
+    F: Fn(&Path) -> Option<OwnedTy>,
 {
     let scanned = scan_literal_imports(module, name_res, base_dir);
     let callpackage_imports = scan_callpackage_imports(module, base_dir);
@@ -395,7 +465,7 @@ pub fn resolve_import_types_from_stubs(
     module: &Module,
     name_res: &NameResolution,
     base_dir: &Path,
-    ephemeral_stubs: &HashMap<PathBuf, OutputTy>,
+    ephemeral_stubs: &HashMap<PathBuf, OwnedTy>,
 ) -> ImportResolution {
     resolve_import_types(module, name_res, base_dir, |p| {
         ephemeral_stubs.get(p).cloned()

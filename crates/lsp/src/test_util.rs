@@ -228,8 +228,6 @@ mod internal {
             state.project_config = Some(ProjectConfig {
                 stubs: vec![],
                 context,
-                deadline: None,
-                import_deadline: None,
                 project: None,
                 diagnostics: None,
             });

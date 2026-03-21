@@ -1,12 +1,192 @@
 use indoc::indoc;
 use lang_ast::{module, tests::TestDatabase, Expr, Module};
-use lang_ty::{arc_ty, OutputTy, PrimitiveTy};
+use lang_ty::arbitrary::{intern_raw, RawTy};
+use lang_ty::arena::TyRef;
+use lang_ty::{arc_ty, OutputTy, PrimitiveTy, TypeArena};
+use std::sync::Arc;
 
 use crate::aliases::TypeAliasRegistry;
 use crate::diagnostic::{TixDiagnostic, TixDiagnosticKind};
 use crate::{check_file_with_aliases, InferenceResult};
 
 use super::check_file;
+
+// ==============================================================================
+// RootTy — test helper bundling a TyRef with its owning TypeArena
+// ==============================================================================
+//
+// Inference results return (TyRef, Arc<TypeArena>). RootTy bundles them so
+// tests can compare types, display them, and navigate children ergonomically.
+
+#[derive(Clone)]
+pub struct RootTy {
+    pub ty: TyRef,
+    pub arena: Arc<TypeArena>,
+}
+
+impl RootTy {
+    pub fn new(ty: TyRef, arena: Arc<TypeArena>) -> Self {
+        Self { ty, arena }
+    }
+
+    /// Access the OutputTy node at the root.
+    pub fn output_ty(&self) -> &OutputTy {
+        &self.arena[self.ty]
+    }
+
+    /// Resolve through Extern layers: if the root type is `Extern(owned)`,
+    /// return a RootTy pointing into the external arena. Otherwise return self.
+    /// This lets test code pattern-match on the actual structural type and
+    /// use `child()` with TyRef children from that type.
+    pub fn resolve(&self) -> RootTy {
+        if let OutputTy::Extern(owned) = &self.arena[self.ty] {
+            RootTy {
+                ty: owned.root,
+                arena: owned.arena.clone(),
+            }
+        } else {
+            self.clone()
+        }
+    }
+
+    /// Create a RootTy for a child TyRef (shares the same arena).
+    pub fn child(&self, child: TyRef) -> RootTy {
+        RootTy {
+            ty: child,
+            arena: self.arena.clone(),
+        }
+    }
+
+    /// Clone the arena, normalize type variable numbering to 1..n.
+    pub fn normalize_vars(&self) -> RootTy {
+        let mut arena = (*self.arena).clone();
+        let ty = arena.normalize_vars(self.ty);
+        RootTy::new(ty, Arc::new(arena))
+    }
+
+    /// Clone the arena, normalize set operations, return a new RootTy.
+    pub fn normalize_set_ops(&self) -> RootTy {
+        let mut arena = (*self.arena).clone();
+        let ty = arena.normalize_set_ops(self.ty);
+        RootTy::new(ty, Arc::new(arena))
+    }
+
+    /// Delegate to the arena's contains_union_or_intersection.
+    pub fn contains_union_or_intersection(&self) -> bool {
+        self.arena.contains_union_or_intersection(self.ty)
+    }
+}
+
+impl std::fmt::Display for RootTy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.arena.display(self.ty))
+    }
+}
+
+impl std::fmt::Debug for RootTy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "RootTy({})", self.arena.display(self.ty))
+    }
+}
+
+/// Structural cross-arena equality: compares two types from potentially
+/// different arenas by recursively comparing their OutputTy nodes.
+fn ty_eq(a_arena: &TypeArena, a: TyRef, b_arena: &TypeArena, b: TyRef) -> bool {
+    use rustc_hash::FxHashSet;
+    fn inner(
+        a_arena: &TypeArena,
+        a: TyRef,
+        b_arena: &TypeArena,
+        b: TyRef,
+        visited: &mut FxHashSet<(TyRef, TyRef)>,
+    ) -> bool {
+        if !visited.insert((a, b)) {
+            return true; // cycle — assume equal
+        }
+        let a_node = &a_arena[a];
+        let b_node = &b_arena[b];
+        match (a_node, b_node) {
+            (OutputTy::TyVar(x), OutputTy::TyVar(y)) => x == y,
+            (OutputTy::Primitive(x), OutputTy::Primitive(y)) => x == y,
+            (OutputTy::Bottom, OutputTy::Bottom) | (OutputTy::Top, OutputTy::Top) => true,
+            (OutputTy::List(a_inner), OutputTy::List(b_inner)) => {
+                inner(a_arena, *a_inner, b_arena, *b_inner, visited)
+            }
+            (
+                OutputTy::Lambda {
+                    param: ap,
+                    body: ab,
+                },
+                OutputTy::Lambda {
+                    param: bp,
+                    body: bb,
+                },
+            ) => {
+                inner(a_arena, *ap, b_arena, *bp, visited)
+                    && inner(a_arena, *ab, b_arena, *bb, visited)
+            }
+            (OutputTy::AttrSet(a_attr), OutputTy::AttrSet(b_attr)) => {
+                a_attr.open == b_attr.open
+                    && a_attr.optional_fields == b_attr.optional_fields
+                    && a_attr.fields.len() == b_attr.fields.len()
+                    && a_attr.fields.keys().eq(b_attr.fields.keys())
+                    && a_attr
+                        .fields
+                        .values()
+                        .zip(b_attr.fields.values())
+                        .all(|(av, bv)| inner(a_arena, *av, b_arena, *bv, visited))
+                    && match (a_attr.dyn_ty, b_attr.dyn_ty) {
+                        (Some(ad), Some(bd)) => inner(a_arena, ad, b_arena, bd, visited),
+                        (None, None) => true,
+                        _ => false,
+                    }
+            }
+            (OutputTy::Union(am), OutputTy::Union(bm))
+            | (OutputTy::Intersection(am), OutputTy::Intersection(bm)) => {
+                am.len() == bm.len()
+                    && am
+                        .iter()
+                        .zip(bm.iter())
+                        .all(|(a, b)| inner(a_arena, *a, b_arena, *b, visited))
+            }
+            (OutputTy::Named(an, ai), OutputTy::Named(bn, bi)) => {
+                an == bn && inner(a_arena, *ai, b_arena, *bi, visited)
+            }
+            (OutputTy::Neg(ai), OutputTy::Neg(bi)) => inner(a_arena, *ai, b_arena, *bi, visited),
+            // Extern: follow through to the external arena
+            (OutputTy::Extern(a_owned), _) => {
+                inner(&a_owned.arena, a_owned.root, b_arena, b, visited)
+            }
+            (_, OutputTy::Extern(b_owned)) => {
+                inner(a_arena, a, &b_owned.arena, b_owned.root, visited)
+            }
+            _ => false,
+        }
+    }
+    inner(a_arena, a, b_arena, b, &mut FxHashSet::default())
+}
+
+impl PartialEq for RootTy {
+    fn eq(&self, other: &Self) -> bool {
+        ty_eq(&self.arena, self.ty, &other.arena, other.ty)
+    }
+}
+
+/// Create a RootTy from a RawTy by interning into a fresh arena.
+pub fn raw_to_root(raw: &RawTy) -> RootTy {
+    let mut arena = TypeArena::new();
+    let ty = intern_raw(&mut arena, raw);
+    RootTy::new(ty, Arc::new(arena))
+}
+
+/// Build a RootTy from arc_ty! tokens using a fresh arena.
+macro_rules! expected_ty {
+    ($($tt:tt)*) => {{
+        let mut arena = TypeArena::new();
+        let ty = arc_ty!(&mut arena, $($tt)*);
+        RootTy::new(ty, Arc::new(arena))
+    }};
+}
 
 pub fn check_str(src: &str) -> (Module, Result<InferenceResult, Box<TixDiagnostic>>) {
     let (db, file) = TestDatabase::single_file(src).unwrap();
@@ -23,26 +203,24 @@ pub fn check_str_with_aliases(
     (module, check_file_with_aliases(&db, file, aliases))
 }
 
-pub fn get_inferred_root_with_aliases(src: &str, aliases: &TypeAliasRegistry) -> OutputTy {
+pub fn get_inferred_root_with_aliases(src: &str, aliases: &TypeAliasRegistry) -> RootTy {
     let (module, inference) = check_str_with_aliases(src, aliases);
     let inference = inference.expect("No type error");
-    inference
+    let ty = *inference
         .expr_ty_map
         .get(module.entry_expr)
-        .expect("No type for root module entry")
-        .clone()
+        .expect("No type for root module entry");
+    RootTy::new(ty, inference.arena.clone())
 }
 
-pub fn get_inferred_root(src: &str) -> OutputTy {
+pub fn get_inferred_root(src: &str) -> RootTy {
     let (module, inference) = check_str(src);
-
     let inference = inference.expect("No type error");
-
-    inference
+    let ty = *inference
         .expr_ty_map
         .get(module.entry_expr)
-        .expect("No type for root module entry")
-        .clone()
+        .expect("No type for root module entry");
+    RootTy::new(ty, inference.arena.clone())
 }
 
 pub fn get_check_error(src: &str) -> TixDiagnosticKind {
@@ -57,10 +235,10 @@ pub fn get_diagnostic_message(src: &str) -> String {
 }
 
 #[track_caller]
-pub fn expect_ty_inference(src: &str, expected: OutputTy) {
+pub fn expect_ty_inference(src: &str, expected: RootTy) {
     let root_ty = get_inferred_root(src);
 
-    assert_eq!(root_ty, expected)
+    assert_eq!(root_ty, expected, "expected: {expected}, got: {root_ty}")
 }
 
 #[track_caller]
@@ -75,8 +253,8 @@ macro_rules! test_case {
         #[test]
         fn $name() {
             let file = indoc! { $file };
-            let ty = arc_ty!($ty);
-            expect_ty_inference(file, ty);
+            let expected = expected_ty!($ty);
+            expect_ty_inference(file, expected);
         }
     };
 }
@@ -95,7 +273,7 @@ macro_rules! alias_test_case {
             let registry = registry_from_tix($tix);
             let nix_src = indoc! { $nix };
             let ty = get_inferred_root_with_aliases(nix_src, &registry);
-            let expected = arc_ty!($ty);
+            let expected = expected_ty!($ty);
             assert_eq!(ty, expected);
         }
     };
@@ -414,10 +592,7 @@ error_case!(
         in
         foo
     ",
-    TixDiagnosticKind::TypeMismatch {
-        actual: OutputTy::Primitive(PrimitiveTy::Int),
-        expected: OutputTy::Primitive(PrimitiveTy::String),
-    }
+    matches TixDiagnosticKind::TypeMismatch { .. }
 );
 
 // ==============================================================================
@@ -529,7 +704,7 @@ fn pat_field_annotation_root_lambda_constrains_body() {
     " };
 
     let root_ty = get_inferred_root(file);
-    let expected = arc_ty!({ "x": (Int) } -> Int);
+    let expected = expected_ty!({ "x": (Int) } -> Int);
     assert_eq!(
         root_ty, expected,
         "annotated root lambda body should be int"
@@ -598,31 +773,32 @@ test_case!(
 /// Look up the type of a named binding by text name, with aliases loaded.
 /// When the same name has multiple NameIds (e.g. definition + inherit reference),
 /// prefer the version without unions/intersections (the clean early-canonicalized form).
-fn get_name_type_with_aliases(src: &str, name: &str, aliases: &TypeAliasRegistry) -> OutputTy {
+fn get_name_type_with_aliases(src: &str, name: &str, aliases: &TypeAliasRegistry) -> RootTy {
     let (module, inference) = check_str_with_aliases(src, aliases);
     let inference = inference.expect("No type error");
 
-    let mut best: Option<OutputTy> = None;
+    let mut best: Option<TyRef> = None;
     for (name_id, name_data) in module.names() {
         if name_data.text == name {
-            if let Some(ty) = inference.name_ty_map.get(name_id) {
-                let is_better = match &best {
+            if let Some(&ty) = inference.name_ty_map.get(name_id) {
+                let is_better = match best {
                     None => true,
                     Some(prev) => {
-                        !ty.contains_union_or_intersection()
-                            && prev.contains_union_or_intersection()
+                        !inference.arena.contains_union_or_intersection(ty)
+                            && inference.arena.contains_union_or_intersection(prev)
                     }
                 };
                 if is_better {
-                    best = Some(ty.clone());
+                    best = Some(ty);
                 }
             }
         }
     }
-    best.unwrap_or_else(|| panic!("Name '{name}' not found in module"))
+    let ty = best.unwrap_or_else(|| panic!("Name '{name}' not found in module"));
+    RootTy::new(ty, inference.arena.clone())
 }
 
-fn get_name_type(src: &str, name: &str) -> OutputTy {
+fn get_name_type(src: &str, name: &str) -> RootTy {
     get_name_type_with_aliases(src, name, &TypeAliasRegistry::default())
 }
 
@@ -647,22 +823,22 @@ fn apply_polymorphism() {
     // not contaminated by concrete bounds from use sites.
     let apply_ty = get_name_type(file, "apply");
     assert!(
-        !apply_ty.contains_union_or_intersection(),
+        !apply_ty.arena.contains_union_or_intersection(apply_ty.ty),
         "apply should be purely polymorphic, got: {apply_ty}"
     );
     // Normalized: (a -> b) -> a -> b, i.e. Lambda { param: Lambda(0 -> 1), body: Lambda(0 -> 1) }
-    let expected = arc_ty!(((# 0) -> (# 1)) -> (# 0) -> (# 1));
+    let expected = expected_ty!(((# 0) -> (# 1)) -> (# 0) -> (# 1));
     assert_eq!(apply_ty, expected, "apply should be (a -> b) -> a -> b");
 
     // `addTwo` should now infer as `number -> number` — the partial application
     // of `add` to an int constrains the remaining operand and result via Number.
     let add_two_ty = get_name_type(file, "addTwo");
-    assert_eq!(add_two_ty, arc_ty!(Number -> Number));
+    assert_eq!(add_two_ty, expected_ty!(Number -> Number));
 
     // `strApply` should infer as `String` — the extrusion of `apply` gets
     // independent fresh vars, so `addTwo`'s Number constraints don't leak here.
     let str_apply_ty = get_name_type(file, "strApply");
-    assert_eq!(str_apply_ty, arc_ty!(String));
+    assert_eq!(str_apply_ty, expected_ty!(String));
 }
 
 // PBT assertion builtins: applying `__pbt_assert_int` to a lambda param
@@ -775,20 +951,14 @@ test_case!(
 error_case!(
     negate_string_error,
     r#"-"hello""#,
-    TixDiagnosticKind::TypeMismatch {
-        actual: OutputTy::Primitive(PrimitiveTy::String),
-        expected: OutputTy::Primitive(PrimitiveTy::Number),
-    }
+    matches TixDiagnosticKind::TypeMismatch { .. }
 );
 
 // Type error: can't subtract with a string.
 error_case!(
     sub_string_error,
     r#""hello" - 1"#,
-    TixDiagnosticKind::TypeMismatch {
-        actual: OutputTy::Primitive(PrimitiveTy::String),
-        expected: OutputTy::Primitive(PrimitiveTy::Number),
-    }
+    matches TixDiagnosticKind::TypeMismatch { .. }
 );
 
 // ==============================================================================
@@ -959,15 +1129,18 @@ fn with_nested_let_bound_envs() {
     let ty = get_inferred_root(
         r#"let pkgs = { mkShell = 1; }; lib = { id = x: x; }; in with pkgs; with lib; { a = mkShell; b = id; }"#,
     );
-    match &ty {
+    match ty.output_ty() {
         OutputTy::AttrSet(attr) => {
             assert!(attr.fields.contains_key("a"), "should have field a");
             assert!(attr.fields.contains_key("b"), "should have field b");
-            assert_eq!(*attr.fields["a"].0, OutputTy::Primitive(PrimitiveTy::Int));
+            assert_eq!(
+                ty.arena[attr.fields["a"]],
+                OutputTy::Primitive(PrimitiveTy::Int)
+            );
             assert!(
-                matches!(&*attr.fields["b"].0, OutputTy::Lambda { .. }),
+                matches!(ty.arena[attr.fields["b"]], OutputTy::Lambda { .. }),
                 "b should be a lambda, got: {}",
-                &*attr.fields["b"].0
+                ty.arena.display(attr.fields["b"])
             );
         }
         _ => panic!("expected attrset, got: {ty}"),
@@ -1017,7 +1190,7 @@ fn recursive_function() {
     // f :: a -> b where f is applied recursively. The exact shape depends on
     // how the cycle is broken, but it must be a lambda.
     assert!(
-        matches!(&ty, lang_ty::OutputTy::Lambda { .. }),
+        matches!(ty.output_ty(), lang_ty::OutputTy::Lambda { .. }),
         "recursive function should produce a lambda type, got: {ty}"
     );
 }
@@ -1027,7 +1200,7 @@ fn recursive_function() {
 fn mutual_recursion_types() {
     let ty = get_inferred_root("let f = x: g x; g = x: f x; in { inherit f g; }");
     // Both f and g are in the same SCC group and are mutually recursive lambdas.
-    match &ty {
+    match ty.output_ty() {
         lang_ty::OutputTy::AttrSet(attr) => {
             assert!(attr.fields.contains_key("f"), "should have field f");
             assert!(attr.fields.contains_key("g"), "should have field g");
@@ -1050,23 +1223,41 @@ test_case!(nested_list, "[[1 2] [3 4]]", [[Int]]);
 #[test]
 fn heterogeneous_list() {
     let ty = get_inferred_root("[1 \"hi\" true]");
-    match &ty {
-        lang_ty::OutputTy::List(elem) => match &*elem.0 {
+    match ty.output_ty() {
+        lang_ty::OutputTy::List(elem) => match &ty.arena[*elem] {
             lang_ty::OutputTy::Union(members) => {
                 assert_eq!(
                     members.len(),
                     3,
                     "expected 3 union members, got: {}",
-                    elem.0
+                    ty.arena.display(*elem)
                 );
-                let has_int = members.iter().any(|m| *m.0 == arc_ty!(Int));
-                let has_string = members.iter().any(|m| *m.0 == arc_ty!(String));
-                let has_bool = members.iter().any(|m| *m.0 == arc_ty!(Bool));
-                assert!(has_int, "union should contain Int, got: {}", elem.0);
-                assert!(has_string, "union should contain String, got: {}", elem.0);
-                assert!(has_bool, "union should contain Bool, got: {}", elem.0);
+                let has_int = members
+                    .iter()
+                    .any(|m| matches!(&ty.arena[*m], OutputTy::Primitive(PrimitiveTy::Int)));
+                let has_string = members
+                    .iter()
+                    .any(|m| matches!(&ty.arena[*m], OutputTy::Primitive(PrimitiveTy::String)));
+                let has_bool = members
+                    .iter()
+                    .any(|m| matches!(&ty.arena[*m], OutputTy::Primitive(PrimitiveTy::Bool)));
+                assert!(
+                    has_int,
+                    "union should contain Int, got: {}",
+                    ty.arena.display(*elem)
+                );
+                assert!(
+                    has_string,
+                    "union should contain String, got: {}",
+                    ty.arena.display(*elem)
+                );
+                assert!(
+                    has_bool,
+                    "union should contain Bool, got: {}",
+                    ty.arena.display(*elem)
+                );
             }
-            other => panic!("expected union element type, got: {other}"),
+            other => panic!("expected union element type, got: {other:?}"),
         },
         _ => panic!("expected list type, got: {ty}"),
     }
@@ -1110,7 +1301,7 @@ test_case!(
 fn select_default() {
     let ty = get_inferred_root("let s = { x = 1; }; in s.x or \"fallback\"");
     // Should be union of Int and String (field exists with Int, default is String).
-    match &ty {
+    match ty.output_ty() {
         lang_ty::OutputTy::Union(members) => {
             assert_eq!(members.len(), 2, "expected 2 union members, got: {ty}");
         }
@@ -1133,6 +1324,49 @@ test_case!(
     "let src = { x = 1; y = \"hi\"; }; in { inherit (src) x y; }",
     { "x": Int, "y": String }
 );
+
+// Regression test: inherit (from) with many fields must not cause O(N²) slot
+// growth. Before the infer_expr caching fix, each field re-evaluated the shared
+// `from` expression, creating N copies of type variables that propagated through
+// the shared pre-allocated slot. With 200 fields this would create ~6M slots;
+// with caching it stays under 10K.
+#[test]
+fn inherit_from_many_fields_no_quadratic_blowup() {
+    // Generate: let src = { f0 = 0; f1 = 1; ...; f199 = 199; }; in { inherit (src) f0 f1 ... f199; }
+    let n = 200;
+    let mut src = String::from("let src = { ");
+    for i in 0..n {
+        src.push_str(&format!("f{i} = {i}; "));
+    }
+    src.push_str("}; in { inherit (src) ");
+    for i in 0..n {
+        src.push_str(&format!("f{i} "));
+    }
+    src.push_str("; }");
+
+    let (module, result) = check_str(&src);
+    let inference = result.expect("inference should succeed");
+    // Verify the result is an attrset with the expected fields.
+    let root_ref = *inference
+        .expr_ty_map
+        .get(module.entry_expr)
+        .expect("root type");
+    let root = &inference.arena[root_ref];
+    match root {
+        lang_ty::OutputTy::AttrSet(attr) => {
+            assert_eq!(attr.fields.len(), n, "should have {n} fields");
+        }
+        _ => panic!("expected attrset, got: {root:?}"),
+    }
+    // The key assertion: slot count should be linear, not quadratic.
+    // Without the fix, 200 fields would create ~6M slots.
+    // With the fix, it should be well under 10K.
+    assert!(
+        inference.arena.len() < 10_000,
+        "arena size {} is too large — possible quadratic blowup in inherit (from) inference",
+        inference.arena.len()
+    );
+}
 
 // ==============================================================================
 // Overload + Number interaction
@@ -1171,7 +1405,7 @@ fn dynamic_select_no_panic() {
     // Dynamic key can't resolve statically — the result comes from the
     // attrset's dyn_ty, which is unconstrained (type variable).
     assert!(
-        matches!(ty, OutputTy::TyVar(_)),
+        matches!(ty.output_ty(), OutputTy::TyVar(_)),
         "dynamic select should produce type var, got: {ty}"
     );
 }
@@ -1183,7 +1417,7 @@ fn dynamic_intermediate_attr_key() {
     // The dynamic key produces an attrset with a dynamic entry whose
     // value is { b = int }.
     assert!(
-        matches!(ty, OutputTy::AttrSet(_)),
+        matches!(ty.output_ty(), OutputTy::AttrSet(_)),
         "dynamic intermediate key should produce attrset, got: {ty}"
     );
 }
@@ -1222,7 +1456,7 @@ fn dyn_ty_constrains_missing_named_field() {
     let ty = get_inferred_root_with_aliases(nix_src, &registry);
     // After the fix, dyn_ty (int) should flow through to `name`, giving it
     // int type (instead of an unconstrained type variable).
-    assert_eq!(ty, OutputTy::Primitive(PrimitiveTy::Int));
+    assert_eq!(ty, expected_ty!(Int));
 }
 
 // ==============================================================================
@@ -1237,7 +1471,7 @@ fn bidirectional_let_cycle() {
     // Both a and b are in the same SCC group with circular references.
     // The type should be a free variable (no concrete info to discover).
     assert!(
-        matches!(&ty, lang_ty::OutputTy::TyVar(_)),
+        matches!(ty.output_ty(), lang_ty::OutputTy::TyVar(_)),
         "bidirectional let should produce a free type variable, got: {ty}"
     );
 }
@@ -1257,12 +1491,12 @@ test_case!(list_concat, "[1 2] ++ [3 4]", [Int]);
 #[test]
 fn list_concat_heterogeneous() {
     let ty = get_inferred_root("[1] ++ [\"hi\"]");
-    match &ty {
+    match ty.output_ty() {
         lang_ty::OutputTy::List(elem) => {
             assert!(
-                matches!(&*elem.0, lang_ty::OutputTy::Union(_)),
+                matches!(&ty.arena[*elem], lang_ty::OutputTy::Union(_)),
                 "heterogeneous concat should have union element type, got: {}",
-                elem.0
+                ty.arena.display(*elem)
             );
         }
         _ => panic!("expected list type, got: {ty}"),
@@ -1279,7 +1513,7 @@ test_case!(assert_body, "assert true; 42", Int);
 #[test]
 fn if_union_branches() {
     let ty = get_inferred_root("if true then 1 else \"hi\"");
-    match &ty {
+    match ty.output_ty() {
         lang_ty::OutputTy::Union(members) => {
             assert_eq!(members.len(), 2, "expected 2 union members, got: {ty}");
         }
@@ -1310,14 +1544,14 @@ fn alias_resolution_in_annotation() {
     let ty = get_inferred_root_with_aliases(nix_src, &registry);
     // With alias provenance tracking, the annotation wraps the type in Named.
     // Unwrap it to check the inner structural type.
-    let inner = match &ty {
+    let inner_ref = match ty.output_ty() {
         lang_ty::OutputTy::Named(name, inner) => {
             assert_eq!(name.as_str(), "MyRecord");
-            &*inner.0
+            *inner
         }
-        other => other,
+        _ => ty.ty,
     };
-    match inner {
+    match &ty.arena[inner_ref] {
         lang_ty::OutputTy::AttrSet(attr) => {
             assert!(attr.fields.contains_key("name"), "should have field name");
             assert!(attr.fields.contains_key("age"), "should have field age");
@@ -1337,7 +1571,7 @@ fn global_val_for_unresolved_name() {
     "# };
 
     let ty = get_inferred_root_with_aliases(nix_src, &registry);
-    match &ty {
+    match ty.output_ty() {
         lang_ty::OutputTy::AttrSet(attr) => {
             assert!(attr.fields.contains_key("name"), "should have field name");
         }
@@ -1358,12 +1592,16 @@ fn global_val_polymorphism() {
     "# };
 
     let ty = get_inferred_root_with_aliases(nix_src, &registry);
-    match &ty {
+    match ty.output_ty() {
         lang_ty::OutputTy::AttrSet(attr) => {
-            let int_ty = attr.fields.get("int_result").expect("int_result field");
-            let str_ty = attr.fields.get("str_result").expect("str_result field");
-            assert_eq!(*int_ty.0, arc_ty!(Int), "id 42 should be int");
-            assert_eq!(*str_ty.0, arc_ty!(String), "id \"hello\" should be string");
+            let int_ty = *attr.fields.get("int_result").expect("int_result field");
+            let str_ty = *attr.fields.get("str_result").expect("str_result field");
+            assert_eq!(ty.child(int_ty), expected_ty!(Int), "id 42 should be int");
+            assert_eq!(
+                ty.child(str_ty),
+                expected_ty!(String),
+                "id \"hello\" should be string"
+            );
         }
         _ => panic!("expected attrset type, got: {ty}"),
     }
@@ -1426,13 +1664,14 @@ fn alias_with_union_in_param_skips_bidirectional_constraints() {
         .expect("inference should succeed with union-alias annotation");
 
     let mod_ = module(&db, file);
-    let root_ty = inference
+    let root_ref = *inference
         .expr_ty_map
         .get(mod_.entry_expr)
         .expect("root should have a type");
+    let root_ty = RootTy::new(root_ref, inference.arena.clone());
     assert_eq!(
-        *root_ty,
-        arc_ty!(String),
+        root_ty,
+        expected_ty!(String),
         "root should be string, got: {root_ty}"
     );
 
@@ -1487,13 +1726,14 @@ fn nested_alias_with_union_in_param_skips_bidirectional_constraints() {
         .expect("inference should succeed with nested union-alias annotation");
 
     let mod_ = module(&db, file);
-    let root_ty = inference
+    let root_ref = *inference
         .expr_ty_map
         .get(mod_.entry_expr)
         .expect("root should have a type");
+    let root_ty = RootTy::new(root_ref, inference.arena.clone());
     assert_eq!(
-        *root_ty,
-        arc_ty!(String),
+        root_ty,
+        expected_ty!(String),
         "root should be string, got: {root_ty}"
     );
 
@@ -1567,11 +1807,12 @@ test_case!(
 mod import_tests {
     use lang_ast::tests::MultiFileTestDatabase;
     use lang_ast::AstDb;
-    use lang_ty::{arc_ty, OutputTy};
+    use lang_ty::{arc_ty, OutputTy, PrimitiveTy, TypeArena};
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
+    use super::RootTy;
     use crate::aliases::TypeAliasRegistry;
     use crate::diagnostic::TixDiagnostic;
     use crate::imports::resolve_import_types_from_stubs;
@@ -1581,19 +1822,17 @@ mod import_tests {
     /// For each dependency file (not the entry file), we infer it standalone
     /// and collect its root type into an ephemeral stubs map. Then we infer
     /// the entry file using those ephemeral stubs.
-    fn check_multifile(files: &[(&str, &str)]) -> (OutputTy, Vec<crate::imports::ImportError>) {
+    fn check_multifile(files: &[(&str, &str)]) -> (RootTy, Vec<crate::imports::ImportError>) {
         let (ty, errors, _diags) =
             check_multifile_with_aliases(files, &TypeAliasRegistry::default());
         (ty, errors)
     }
 
-    fn get_multifile_root(files: &[(&str, &str)]) -> OutputTy {
+    fn get_multifile_root(files: &[(&str, &str)]) -> RootTy {
         check_multifile(files).0
     }
 
-    fn get_multifile_result(
-        files: &[(&str, &str)],
-    ) -> (OutputTy, Vec<crate::imports::ImportError>) {
+    fn get_multifile_result(files: &[(&str, &str)]) -> (RootTy, Vec<crate::imports::ImportError>) {
         check_multifile(files)
     }
 
@@ -1601,7 +1840,7 @@ mod import_tests {
     #[test]
     fn import_literal_int() {
         let ty = get_multifile_root(&[("/main.nix", "import /foo.nix"), ("/foo.nix", "42")]);
-        assert_eq!(ty, arc_ty!(Int));
+        assert_eq!(ty, expected_ty!(Int));
     }
 
     // Import an attrset and select a field.
@@ -1611,7 +1850,7 @@ mod import_tests {
             ("/main.nix", "let lib = import /lib.nix; in lib.x"),
             ("/lib.nix", "{ x = 1; y = \"hello\"; }"),
         ]);
-        assert_eq!(ty, arc_ty!(Int));
+        assert_eq!(ty, expected_ty!(Int));
     }
 
     // Import a file exporting a polymorphic function, used at different types.
@@ -1630,12 +1869,16 @@ mod import_tests {
             ),
             ("/id.nix", "x: x"),
         ]);
-        match &ty {
+        match ty.output_ty() {
             OutputTy::AttrSet(attr) => {
                 let a = attr.fields.get("a").expect("field a");
                 let b = attr.fields.get("b").expect("field b");
-                assert_eq!(*a.0, arc_ty!(Int), "id 1 should be int");
-                assert_eq!(*b.0, arc_ty!(String), "id \"hello\" should be string");
+                assert_eq!(ty.child(*a), expected_ty!(Int), "id 1 should be int");
+                assert_eq!(
+                    ty.child(*b),
+                    expected_ty!(String),
+                    "id \"hello\" should be string"
+                );
             }
             _ => panic!("expected attrset, got: {ty}"),
         }
@@ -1649,7 +1892,7 @@ mod import_tests {
             ("/b.nix", "import /c.nix"),
             ("/c.nix", "42"),
         ]);
-        assert_eq!(ty, arc_ty!(Int));
+        assert_eq!(ty, expected_ty!(Int));
     }
 
     // Diamond imports: A imports B and C, both import D.
@@ -1673,12 +1916,12 @@ mod import_tests {
             ("/c.nix", "import /d.nix"),
             ("/d.nix", "42"),
         ]);
-        match &ty {
+        match ty.output_ty() {
             OutputTy::AttrSet(attr) => {
                 let from_b = attr.fields.get("fromB").expect("field fromB");
                 let from_c = attr.fields.get("fromC").expect("field fromC");
-                assert_eq!(*from_b.0, arc_ty!(Int));
-                assert_eq!(*from_c.0, arc_ty!(Int));
+                assert_eq!(ty.child(*from_b), expected_ty!(Int));
+                assert_eq!(ty.child(*from_c), expected_ty!(Int));
             }
             _ => panic!("expected attrset, got: {ty}"),
         }
@@ -1698,8 +1941,9 @@ mod import_tests {
         // Both files lack ephemeral stubs for each other, so imports resolve
         // to unconstrained type variables. The important thing is that
         // inference completes without panicking.
+        let ty = ty.resolve();
         assert!(
-            matches!(ty, OutputTy::TyVar(_)),
+            matches!(ty.output_ty(), OutputTy::TyVar(_)),
             "cyclic import should degrade to TyVar, got: {ty}"
         );
     }
@@ -1711,7 +1955,7 @@ mod import_tests {
         // `import p` where p is a variable — scanner can't resolve it,
         // so it falls through to the generic `import :: a -> b` builtin.
         assert!(
-            matches!(ty, OutputTy::TyVar(_)),
+            matches!(ty.output_ty(), OutputTy::TyVar(_)),
             "non-literal import should produce a type variable, got: {ty}"
         );
     }
@@ -1729,7 +1973,7 @@ mod import_tests {
         );
         // Import without resolution falls through to the generic builtin.
         assert!(
-            matches!(ty, OutputTy::TyVar(_)),
+            matches!(ty.output_ty(), OutputTy::TyVar(_)),
             "unresolved import should produce a type variable, got: {ty}"
         );
     }
@@ -1749,7 +1993,7 @@ mod import_tests {
         );
         // Falls through to the generic `import :: a -> b` builtin.
         assert!(
-            matches!(ty, OutputTy::TyVar(_)),
+            matches!(ty.output_ty(), OutputTy::TyVar(_)),
             "angle bracket import should produce a type variable, got: {ty}"
         );
     }
@@ -1761,7 +2005,7 @@ mod import_tests {
             ("/main.nix", "import /greeting.nix"),
             ("/greeting.nix", "\"hello world\""),
         ]);
-        assert_eq!(ty, arc_ty!(String));
+        assert_eq!(ty, expected_ty!(String));
     }
 
     // Import a lambda and apply it.
@@ -1775,7 +2019,7 @@ mod import_tests {
         // so the exported type is `number -> number -> number`.
         // Applying to two ints gives number (not pinned to int since the
         // imported OutputTy loses deferred overload context).
-        assert_eq!(ty, arc_ty!(Number));
+        assert_eq!(ty, expected_ty!(Number));
     }
 
     // Import with overloaded + produces unconstrained vars since deferred
@@ -1790,7 +2034,7 @@ mod import_tests {
         // and the deferred overload info is lost in the OutputTy export.
         // The result is a free type variable.
         assert!(
-            matches!(ty, OutputTy::TyVar(_)),
+            matches!(ty.output_ty(), OutputTy::TyVar(_)),
             "overloaded + across files produces unconstrained var, got: {ty}"
         );
     }
@@ -1854,16 +2098,14 @@ mod import_tests {
     fn check_multifile_with_aliases(
         files: &[(&str, &str)],
         aliases: &TypeAliasRegistry,
-    ) -> (
-        OutputTy,
-        Vec<crate::imports::ImportError>,
-        Vec<TixDiagnostic>,
-    ) {
+    ) -> (RootTy, Vec<crate::imports::ImportError>, Vec<TixDiagnostic>) {
+        use lang_ty::arena::OwnedTy;
+
         let (db, entry_file) = MultiFileTestDatabase::new(files);
 
         // Build ephemeral stubs by inferring all non-entry files first.
         // Process them in reverse order so transitive deps are available.
-        let mut ephemeral_stubs: HashMap<PathBuf, OutputTy> = HashMap::new();
+        let mut ephemeral_stubs: HashMap<PathBuf, OwnedTy> = HashMap::new();
         for &(path_str, _) in files.iter().skip(1).rev() {
             let dep_path = PathBuf::from(path_str);
             if let Some(dep_file) = db.load_file(&dep_path) {
@@ -1893,9 +2135,10 @@ mod import_tests {
                     dep_resolution.types,
                     Arc::default(),
                 );
-                let (dep_result, _diags, _timed_out) = dep_check.infer_prog_partial(dep_groups);
-                if let Some(root_ty) = dep_result.expr_ty_map.get(dep_module.entry_expr) {
-                    ephemeral_stubs.insert(dep_path, root_ty.clone());
+                let (dep_result, _diags, _bailed_out) = dep_check.infer_prog_partial(dep_groups);
+                if let Some(&root_ty) = dep_result.expr_ty_map.get(dep_module.entry_expr) {
+                    ephemeral_stubs
+                        .insert(dep_path, OwnedTy::new(dep_result.arena.clone(), root_ty));
                 }
             }
         }
@@ -1923,21 +2166,24 @@ mod import_tests {
             resolution.types,
             Arc::default(),
         );
-        let (result, diagnostics, _timed_out) = entry_check.infer_prog_partial(entry_groups);
+        let (result, diagnostics, _bailed_out) = entry_check.infer_prog_partial(entry_groups);
 
-        let root_ty = result
+        let root_ty = *result
             .expr_ty_map
             .get(module.entry_expr)
-            .expect("root expr should have a type")
-            .clone();
+            .expect("root expr should have a type");
 
-        (root_ty, errors, diagnostics)
+        (
+            RootTy::new(root_ty, result.arena.clone()),
+            errors,
+            diagnostics,
+        )
     }
 
     fn get_multifile_root_with_aliases(
         files: &[(&str, &str)],
         aliases: &TypeAliasRegistry,
-    ) -> OutputTy {
+    ) -> RootTy {
         let (ty, _errors, _diags) = check_multifile_with_aliases(files, aliases);
         ty
     }
@@ -1960,12 +2206,16 @@ mod import_tests {
             ),
             ("/mk.nix", "a: b: { x = a; y = b; }"),
         ]);
-        match &ty {
+        match ty.output_ty() {
             OutputTy::AttrSet(attr) => {
                 let x = attr.fields.get("x").expect("field x");
                 let y = attr.fields.get("y").expect("field y");
-                assert_eq!(*x.0, arc_ty!(Int), "first arg should be int");
-                assert_eq!(*y.0, arc_ty!(String), "second arg should be string");
+                assert_eq!(ty.child(*x), expected_ty!(Int), "first arg should be int");
+                assert_eq!(
+                    ty.child(*y),
+                    expected_ty!(String),
+                    "second arg should be string"
+                );
             }
             _ => panic!("expected attrset, got: {ty}"),
         }
@@ -1991,14 +2241,18 @@ mod import_tests {
             ),
             ("/id.nix", "x: x"),
         ]);
-        match &ty {
+        match ty.output_ty() {
             OutputTy::AttrSet(attr) => {
                 let a = attr.fields.get("a").expect("field a");
                 let b = attr.fields.get("b").expect("field b");
-                assert_eq!(*a.0, arc_ty!(Int), "id1 applied to int should be int");
                 assert_eq!(
-                    *b.0,
-                    arc_ty!(String),
+                    ty.child(*a),
+                    expected_ty!(Int),
+                    "id1 applied to int should be int"
+                );
+                assert_eq!(
+                    ty.child(*b),
+                    expected_ty!(String),
                     "id2 applied to string should be string"
                 );
             }
@@ -2018,9 +2272,9 @@ mod import_tests {
         // imported `a -> [a]`. After applying to int, the variable's lower
         // bound is int, but canonicalization may or may not collapse it
         // depending on polarity. Accept either [int] or [TyVar].
-        match &ty {
-            OutputTy::List(inner) => match inner.0.as_ref() {
-                i if *i == arc_ty!(Int) => { /* fully resolved */ }
+        match ty.output_ty() {
+            OutputTy::List(inner) => match &ty.arena[*inner] {
+                OutputTy::Primitive(PrimitiveTy::Int) => { /* fully resolved */ }
                 OutputTy::TyVar(_) => { /* variable survived — acceptable */ }
                 other => panic!("expected list element to be int or TyVar, got: {other:?}"),
             },
@@ -2033,7 +2287,8 @@ mod import_tests {
     #[test]
     fn import_polymorphic_unused() {
         let ty = get_multifile_root(&[("/main.nix", "import /id.nix"), ("/id.nix", "x: x")]);
-        match &ty {
+        let ty = ty.resolve();
+        match ty.output_ty() {
             OutputTy::Lambda { .. } => { /* good — polymorphic lambda preserved */ }
             _ => panic!("expected lambda type for unused polymorphic import, got: {ty}"),
         }
@@ -2054,13 +2309,19 @@ mod import_tests {
                 r#"x: if builtins.isNull x then 1 else "hello""#,
             ),
         ]);
-        match &ty {
+        let ty = ty.resolve();
+        match ty.output_ty() {
             OutputTy::Lambda { body, .. } => {
+                let body_ty = ty.child(*body);
                 // The body should be a union containing int and string.
-                match body.0.as_ref() {
+                match body_ty.output_ty() {
                     OutputTy::Union(members) => {
-                        let has_int = members.iter().any(|m| *m.0 == arc_ty!(Int));
-                        let has_string = members.iter().any(|m| *m.0 == arc_ty!(String));
+                        let has_int = members.iter().any(|m| {
+                            matches!(&body_ty.arena[*m], OutputTy::Primitive(PrimitiveTy::Int))
+                        });
+                        let has_string = members.iter().any(|m| {
+                            matches!(&body_ty.arena[*m], OutputTy::Primitive(PrimitiveTy::String))
+                        });
                         assert!(has_int, "union should contain int, got: {members:?}");
                         assert!(has_string, "union should contain string, got: {members:?}");
                     }
@@ -2083,10 +2344,14 @@ mod import_tests {
             ),
         ]);
         // Applying the union function should give us int | string.
-        match &ty {
+        match ty.output_ty() {
             OutputTy::Union(members) => {
-                let has_int = members.iter().any(|m| *m.0 == arc_ty!(Int));
-                let has_string = members.iter().any(|m| *m.0 == arc_ty!(String));
+                let has_int = members
+                    .iter()
+                    .any(|m| matches!(&ty.arena[*m], OutputTy::Primitive(PrimitiveTy::Int)));
+                let has_string = members
+                    .iter()
+                    .any(|m| matches!(&ty.arena[*m], OutputTy::Primitive(PrimitiveTy::String)));
                 assert!(has_int, "result union should contain int, got: {members:?}");
                 assert!(
                     has_string,
@@ -2115,12 +2380,16 @@ mod import_tests {
             ),
             ("/base.nix", r#"{ x = 1; y = "hello"; }"#),
         ]);
-        match &ty {
+        match ty.output_ty() {
             OutputTy::AttrSet(attr) => {
                 let a = attr.fields.get("a").expect("field a");
                 let b = attr.fields.get("b").expect("field b");
-                assert_eq!(*a.0, arc_ty!(Int), "x field should be int");
-                assert_eq!(*b.0, arc_ty!(String), "y field should be string");
+                assert_eq!(ty.child(*a), expected_ty!(Int), "x field should be int");
+                assert_eq!(
+                    ty.child(*b),
+                    expected_ty!(String),
+                    "y field should be string"
+                );
             }
             _ => panic!("expected attrset, got: {ty}"),
         }
@@ -2157,9 +2426,11 @@ mod import_tests {
         ]);
         // The function returns a union, so .val is `string | ~null` (both
         // branches contribute). The key assertion is no spurious TypeMismatch.
-        match &ty {
+        match ty.output_ty() {
             OutputTy::Union(members) => {
-                let has_string = members.iter().any(|m| *m.0 == arc_ty!(String));
+                let has_string = members
+                    .iter()
+                    .any(|m| matches!(&ty.arena[*m], OutputTy::Primitive(PrimitiveTy::String)));
                 assert!(has_string, "union should contain string, got: {ty}");
             }
             _ => panic!("expected union, got: {ty}"),
@@ -2204,7 +2475,8 @@ mod import_tests {
         // imported files. The imported type resolves structurally rather
         // than as Named("Foo"). In production, aliases come from StubConfig
         // and Named wrappers are preserved.
-        match &ty {
+        let ty = ty.resolve();
+        match ty.output_ty() {
             OutputTy::AttrSet(attr) => {
                 assert!(
                     attr.fields.contains_key("x"),
@@ -2255,7 +2527,7 @@ mod import_tests {
 
         assert_eq!(
             ty,
-            arc_ty!(Int),
+            expected_ty!(Int),
             "selecting .x from Named(Foo, {{ x: int }}) should produce int"
         );
     }
@@ -2313,8 +2585,8 @@ mod import_tests {
         );
 
         // main.nix is { pkgs } -> result. Result should have bubblewrap_helper field.
-        match &ty {
-            OutputTy::Lambda { body, .. } => match body.0.as_ref() {
+        match ty.output_ty() {
+            OutputTy::Lambda { body, .. } => match &ty.arena[*body] {
                 OutputTy::AttrSet(attr) => {
                     assert!(
                         attr.fields.contains_key("bubblewrap_helper"),
@@ -2325,6 +2597,129 @@ mod import_tests {
             },
             _ => panic!("expected function type, got: {ty}"),
         }
+    }
+
+    // ======================================================================
+    // Frozen import type tests — lazy materialization
+    // ======================================================================
+
+    // Import a large attrset and access only one field. The frozen type
+    // should materialize just that one field without interning the rest.
+    #[test]
+    fn frozen_import_large_attrset_single_field() {
+        // Build a Nix file with many fields but only access one.
+        let mut fields = String::new();
+        for i in 0..100 {
+            fields.push_str(&format!("field_{i} = {i}; "));
+        }
+        let lib_src = format!("{{ {fields} }}");
+
+        let ty = get_multifile_root(&[
+            ("/main.nix", "let lib = import /lib.nix; in lib.field_42"),
+            ("/lib.nix", &lib_src),
+        ]);
+        assert_eq!(ty, expected_ty!(Int));
+    }
+
+    // Import an attrset and access multiple fields — verify correct types.
+    #[test]
+    fn frozen_import_attrset_multiple_fields() {
+        let ty = get_multifile_root(&[
+            (
+                "/main.nix",
+                r#"
+                let lib = import /lib.nix;
+                in { a = lib.x; b = lib.y; }
+                "#,
+            ),
+            ("/lib.nix", r#"{ x = 1; y = "hello"; z = true; }"#),
+        ]);
+        match ty.output_ty() {
+            OutputTy::AttrSet(attr) => {
+                assert_eq!(ty.child(attr.fields["a"]), expected_ty!(Int));
+                assert_eq!(ty.child(attr.fields["b"]), expected_ty!(String));
+            }
+            _ => panic!("expected attrset, got: {ty}"),
+        }
+    }
+
+    // Import a non-attrset type (lambda) — frozen falls back to full interning.
+    #[test]
+    fn frozen_import_lambda_fallback() {
+        let ty = get_multifile_root(&[
+            ("/main.nix", "let f = import /f.nix; in f 42"),
+            ("/f.nix", "x: x"),
+        ]);
+        assert_eq!(ty, expected_ty!(Int));
+    }
+
+    // Import an attrset and access a missing field — should report error.
+    #[test]
+    fn frozen_import_missing_field_error() {
+        let (_, errors, diagnostics) = check_multifile_with_aliases(
+            &[
+                ("/main.nix", "let lib = import /lib.nix; in lib.missing"),
+                ("/lib.nix", "{ x = 1; }"),
+            ],
+            &TypeAliasRegistry::default(),
+        );
+        assert!(errors.is_empty());
+        let has_missing_field = diagnostics.iter().any(|d| {
+            matches!(
+                d.kind,
+                crate::diagnostic::TixDiagnosticKind::MissingField { .. }
+            )
+        });
+        assert!(
+            has_missing_field,
+            "should report missing field on frozen attrset, got diagnostics: {diagnostics:?}"
+        );
+    }
+
+    // Import a function returning a large attrset (>64 fields). The Frozen
+    // lambda decomposition should lazily materialize param/body instead of
+    // interning all fields eagerly. Verifies the result type is correct
+    // when the importer applies the function.
+    #[test]
+    fn frozen_import_large_lambda_lazy_decomposition() {
+        // Build a large attrset with >64 fields to trigger lazy decomposition.
+        let mut fields: Vec<String> = Vec::new();
+        for i in 0..80 {
+            fields.push(format!("f{i} = {i}"));
+        }
+        let attrset = format!("{{ {} }}", fields.join("; "));
+        let lib_src = format!("x: {attrset}");
+
+        let ty = get_multifile_root(&[
+            ("/main.nix", "let lib = import /lib.nix; in (lib 1).f0"),
+            ("/lib.nix", &lib_src),
+        ]);
+        assert_eq!(ty, expected_ty!(Int));
+    }
+
+    // Import a function returning a large attrset and verify that field
+    // access works correctly through the lazy Frozen decomposition path.
+    #[test]
+    fn frozen_import_large_lambda_field_access() {
+        let mut fields: Vec<String> = Vec::new();
+        for i in 0..80 {
+            fields.push(format!("f{i} = \"val{i}\""));
+        }
+        let attrset = format!("{{ {} }}", fields.join("; "));
+        let lib_src = format!("x: {attrset}");
+
+        let ty = get_multifile_root(&[
+            ("/main.nix", "let lib = import /lib.nix; in (lib 1).f42"),
+            ("/lib.nix", &lib_src),
+        ]);
+        assert_eq!(ty, expected_ty!(String));
+    }
+
+    // Import a primitive type — frozen falls back to full interning.
+    #[test]
+    fn frozen_import_primitive() {
+        let ty = get_multifile_root(&[("/main.nix", "import /n.nix"), ("/n.nix", "42")]);
+        assert_eq!(ty, expected_ty!(Int));
     }
 
     // ======================================================================
@@ -2345,12 +2740,13 @@ mod import_tests {
             ),
             ("/pkg.nix", "{ }: { name = \"hello\"; }"),
         ]);
-        match &ty {
+        let ty = ty.resolve();
+        match ty.output_ty() {
             OutputTy::AttrSet(attr) => {
-                let name = attr.fields.get("name").expect("field name");
+                let name = *attr.fields.get("name").expect("field name");
                 assert_eq!(
-                    *name.0,
-                    arc_ty!(String),
+                    ty.child(name),
+                    expected_ty!(String),
                     "callPackage should produce the function's return type"
                 );
             }
@@ -2372,12 +2768,13 @@ mod import_tests {
             ),
             ("/pkg.nix", "{ }: { version = 1; }"),
         ]);
-        match &ty {
+        let ty = ty.resolve();
+        match ty.output_ty() {
             OutputTy::AttrSet(attr) => {
-                let version = attr.fields.get("version").expect("field version");
+                let version = *attr.fields.get("version").expect("field version");
                 assert_eq!(
-                    *version.0,
-                    arc_ty!(Int),
+                    ty.child(version),
+                    expected_ty!(Int),
                     "callPackage via Select should produce the function's return type"
                 );
             }
@@ -2402,7 +2799,7 @@ mod import_tests {
         // returns it as-is since there's no Lambda to peel.
         assert_eq!(
             ty,
-            arc_ty!(Int),
+            expected_ty!(Int),
             "callPackage on non-function file should use file type as-is"
         );
     }
@@ -2450,6 +2847,46 @@ mod import_tests {
             "targets should include the outer Apply from callPackage"
         );
     }
+
+    // Regression: intern_output_ty without TyRef caching caused exponential
+    // blowup when the imported file's output type had DAG sharing (multiple
+    // attrset fields pointing to the same TyRef). This test creates a dep
+    // file whose output type with shared structure and verifies inference
+    // completes without OOM.
+    #[test]
+    fn callpackage_shared_output_type_no_oom() {
+        let ty = get_multifile_root(&[
+            (
+                "/main.nix",
+                r#"
+                let callPackage = x: x {};
+                in callPackage /pkg.nix {}
+                "#,
+            ),
+            (
+                "/pkg.nix",
+                r#"
+                { lib ? { id = x: x; mapAttrs = f: s: s; } }:
+                let
+                    mkOpt = default: { inherit default; type = "option"; };
+                    a = mkOpt 1;
+                    b = mkOpt 2;
+                    c = mkOpt 3;
+                    d = mkOpt "x";
+                    e = mkOpt true;
+                    f = mkOpt null;
+                    g = mkOpt 4;
+                    h = mkOpt 5;
+                in { inherit a b c d e f g h; }
+                "#,
+            ),
+        ]);
+        let ty = ty.resolve();
+        match ty.output_ty() {
+            OutputTy::AttrSet(_) => {}
+            _ => panic!("expected attrset, got: {ty}"),
+        }
+    }
 }
 
 // ==============================================================================
@@ -2481,7 +2918,7 @@ fn alias_named_in_annotation() {
     let ty = get_name_type_with_aliases(nix_src, "lib", &registry);
     // The type should be Named("Lib", ...) wrapping the structural attrset.
     assert!(
-        matches!(&ty, OutputTy::Named(name, _) if name == "Lib"),
+        matches!(ty.output_ty(), OutputTy::Named(name, _) if name == "Lib"),
         "annotated name should produce Named(\"Lib\", ...), got: {ty:?}"
     );
     // Display should show just the alias name.
@@ -2530,7 +2967,7 @@ fn alias_provenance_survives_extrusion() {
                     return inference
                         .expr_ty_map
                         .get(expr_id)
-                        .map(|ty| format!("{ty:?}"));
+                        .map(|ty| format!("{}", inference.arena.display(*ty)));
                 }
             }
             None
@@ -2583,7 +3020,7 @@ fn binding_type_with_annotated_lambda_param() {
     let ty = get_name_type_with_aliases(nix_src, "foo", &registry);
     // foo is a partial application of concatStringsSep: [string] -> string
     assert!(
-        matches!(&ty, OutputTy::Lambda { .. }),
+        matches!(ty.output_ty(), OutputTy::Lambda { .. }),
         "foo binding should be a lambda, got: {ty:?}"
     );
 }
@@ -2604,7 +3041,7 @@ fn alias_named_from_global_val_return() {
 
     let ty = get_inferred_root_with_aliases(nix_src, &registry);
     assert!(
-        matches!(&ty, OutputTy::Named(name, _) if name == "Derivation"),
+        matches!(ty.output_ty(), OutputTy::Named(name, _) if name == "Derivation"),
         "mkDerivation return should produce Named(\"Derivation\", ...), got: {ty:?}"
     );
     assert_eq!(format!("{ty}"), "Derivation");
@@ -2656,6 +3093,32 @@ diagnostic_msg!(
     contains "missing field `x`"
 );
 
+/// Regression: `//` (merge) should work when one side is wrapped in `Named`.
+/// nixpkgs pattern: `ffmpeg-base.meta // { description = "..." }` where
+/// ffmpeg-base.meta is a Named alias type.
+#[test]
+fn merge_through_named_type() {
+    let registry = registry_from_tix(
+        r#"
+        type Meta = { description: string, homepage: string };
+        val getMeta :: { ... } -> Meta;
+    "#,
+    );
+
+    let nix_src = indoc! { r#"
+        let meta = getMeta { x = 1; };
+        in meta // { description = "override"; }
+    "# };
+
+    let ty = get_inferred_root_with_aliases(nix_src, &registry);
+    let formatted = ty.to_string();
+    // Should merge successfully (produce an attrset), not error with E004.
+    assert!(
+        formatted.contains("description") && formatted.contains("homepage"),
+        "merge through Named should produce merged attrset, got: {formatted}"
+    );
+}
+
 // Let-binding flow: `let drv = mkDerivation { ... }; in drv` preserves the alias.
 #[test]
 fn alias_named_flows_through_let() {
@@ -2675,7 +3138,7 @@ fn alias_named_flows_through_let() {
 
     let ty = get_inferred_root_with_aliases(nix_src, &registry);
     assert!(
-        matches!(&ty, OutputTy::Named(name, _) if name == "Derivation"),
+        matches!(ty.output_ty(), OutputTy::Named(name, _) if name == "Derivation"),
         "let-bound drv should preserve Named(\"Derivation\", ...), got: {ty:?}"
     );
     assert_eq!(format!("{ty}"), "Derivation");
@@ -2688,7 +3151,6 @@ fn alias_named_flows_through_let() {
 use comment_parser::ParsedTy;
 use smol_str::SmolStr;
 use std::collections::HashMap;
-use std::sync::Arc;
 
 /// Helper to type-check a string with context args applied to the root lambda.
 pub fn check_str_with_context(
@@ -2720,30 +3182,28 @@ pub fn check_str_with_aliases_and_context(
 pub fn get_inferred_root_with_context(
     src: &str,
     context_args: HashMap<SmolStr, ParsedTy>,
-) -> OutputTy {
+) -> RootTy {
     let (module, result) = check_str_with_context(src, context_args);
-    result
-        .inference
-        .expect("inference should succeed")
+    let inference = result.inference.expect("inference should succeed");
+    let ty = *inference
         .expr_ty_map
         .get(module.entry_expr)
-        .expect("root expr should have a type")
-        .clone()
+        .expect("root expr should have a type");
+    RootTy::new(ty, inference.arena.clone())
 }
 
 pub fn get_inferred_root_with_aliases_and_context(
     src: &str,
     aliases: &TypeAliasRegistry,
     context_args: HashMap<SmolStr, ParsedTy>,
-) -> OutputTy {
+) -> RootTy {
     let (module, result) = check_str_with_aliases_and_context(src, aliases, context_args);
-    result
-        .inference
-        .expect("inference should succeed")
+    let inference = result.inference.expect("inference should succeed");
+    let ty = *inference
         .expr_ty_map
         .get(module.entry_expr)
-        .expect("root expr should have a type")
-        .clone()
+        .expect("root expr should have a type");
+    RootTy::new(ty, inference.arena.clone())
 }
 
 fn nixos_context_args() -> HashMap<SmolStr, ParsedTy> {
@@ -2763,13 +3223,13 @@ fn context_args_type_root_lambda_lib() {
 
     let ty = get_inferred_root_with_context(nix_src, ctx);
     // The root lambda returns `lib.id 42` which should be `int`.
-    match &ty {
+    match ty.output_ty() {
         OutputTy::Lambda { body, .. } => {
             assert_eq!(
-                *body.0,
-                arc_ty!(Int),
+                ty.child(*body),
+                expected_ty!(Int),
                 "lib.id 42 should infer as int with context, got: {}",
-                body.0
+                ty.arena.display(*body)
             );
         }
         _ => panic!("expected lambda type, got: {ty}"),
@@ -2792,13 +3252,13 @@ fn context_args_do_not_apply_to_inner_lambda() {
     // The root lambda's result is `inner { lib = 42; }`.
     // `inner` is `{ lib, ... }: lib` — an inner lambda that should NOT get
     // context args. So `inner { lib = 42; }` should infer as `int`.
-    match &ty {
+    match ty.output_ty() {
         OutputTy::Lambda { body, .. } => {
             assert_eq!(
-                *body.0,
-                arc_ty!(Int),
+                ty.child(*body),
+                expected_ty!(Int),
                 "inner lambda should not get context args, got: {}",
-                body.0
+                ty.arena.display(*body)
             );
         }
         _ => panic!("expected lambda type, got: {ty}"),
@@ -2822,9 +3282,9 @@ fn context_args_unknown_fields_ignored() {
     // Should not error — extra context args for names not in the pattern
     // are simply skipped.
     let ty = get_inferred_root_with_context(nix_src, ctx);
-    match &ty {
+    match ty.output_ty() {
         OutputTy::Lambda { body, .. } => {
-            assert_eq!(*body.0, arc_ty!(Int));
+            assert_eq!(ty.child(*body), expected_ty!(Int));
         }
         _ => panic!("expected lambda type, got: {ty}"),
     }
@@ -2893,25 +3353,26 @@ fn doc_comment_context_on_inner_lambda() {
     let inference = result.inference.expect("inference should succeed");
 
     // Look up mkModule's type — it's a let binding, so check name_ty_map.
-    let mk_module_ty = mod_
+    let mk_module_ref = mod_
         .names()
         .find_map(|(id, name)| {
             if name.text == "mkModule" {
-                inference.name_ty_map.get(id)
+                inference.name_ty_map.get(id).copied()
             } else {
                 None
             }
         })
         .expect("mkModule should have a type");
+    let mk_module_ty = RootTy::new(mk_module_ref, inference.arena.clone());
 
     // mkModule is a lambda, its body should return int (lib.id 42).
-    match mk_module_ty {
+    match mk_module_ty.output_ty() {
         OutputTy::Lambda { body, .. } => {
             assert_eq!(
-                *body.0,
-                arc_ty!(Int),
+                mk_module_ty.child(*body),
+                expected_ty!(Int),
                 "doc comment context should type lib.id 42 as int, got: {}",
-                body.0
+                mk_module_ty.arena.display(*body)
             );
         }
         _ => panic!("expected lambda, got: {mk_module_ty}"),
@@ -2929,9 +3390,9 @@ fn file_level_context_overrides_doc_comment_for_root() {
 
     // Even without a doc comment, the file-level context should type `lib`.
     let ty = get_inferred_root_with_context(nix_src, ctx);
-    match &ty {
+    match ty.output_ty() {
         OutputTy::Lambda { body, .. } => {
-            assert_eq!(*body.0, arc_ty!(Int));
+            assert_eq!(ty.child(*body), expected_ty!(Int));
         }
         _ => panic!("expected lambda type, got: {ty}"),
     }
@@ -2965,12 +3426,13 @@ fn context_args_preserve_alias_provenance() {
         .find(|(_, n)| n.text == "config")
         .map(|(id, _)| id)
         .expect("config name should exist");
-    let config_ty = inference
+    let config_ref = *inference
         .name_ty_map
         .get(config_name_id)
         .expect("config should have an inferred type");
+    let config_ty = RootTy::new(config_ref, inference.arena.clone());
 
-    match config_ty {
+    match config_ty.output_ty() {
         OutputTy::Named(name, _) => {
             assert_eq!(
                 name.as_str(),
@@ -2978,7 +3440,7 @@ fn context_args_preserve_alias_provenance() {
                 "config should be Named(\"NixosConfig\", ...), got Named(\"{name}\", ...)"
             );
         }
-        other => panic!("config should be Named(\"NixosConfig\", ...), got: {other}"),
+        other => panic!("config should be Named(\"NixosConfig\", ...), got: {other:?}"),
     }
 }
 
@@ -2993,14 +3455,14 @@ fn context_args_config_is_open_attrset() {
     let ty = get_inferred_root_with_context(nix_src, ctx);
     // config is typed as `{ ... }` (open attrset), so `config.networking`
     // should not produce a type error — it returns a free variable.
-    match &ty {
+    match ty.output_ty() {
         OutputTy::Lambda { body, .. } => {
             // The body should be a TyVar (since config is open and networking
             // is unconstrained).
             assert!(
-                matches!(&*body.0, OutputTy::TyVar(_)),
+                matches!(&ty.arena[*body], OutputTy::TyVar(_)),
                 "config.networking should be a free type var, got: {}",
-                body.0
+                ty.arena.display(*body)
             );
         }
         _ => panic!("expected lambda type, got: {ty}"),
@@ -3033,12 +3495,13 @@ fn callpackage_context_types_pkgs_parameter_as_alias() {
         .find(|(_, n)| n.text == "pkgs")
         .map(|(id, _)| id)
         .expect("pkgs name should exist");
-    let pkgs_ty = inference
+    let pkgs_ref = *inference
         .name_ty_map
         .get(pkgs_name_id)
         .expect("pkgs should have an inferred type");
+    let pkgs_ty = RootTy::new(pkgs_ref, inference.arena.clone());
 
-    match pkgs_ty {
+    match pkgs_ty.output_ty() {
         OutputTy::Named(name, _) => {
             assert_eq!(
                 name.as_str(),
@@ -3046,21 +3509,22 @@ fn callpackage_context_types_pkgs_parameter_as_alias() {
                 "pkgs should be Named(\"Pkgs\", ...), got Named(\"{name}\", ...)"
             );
         }
-        other => panic!("pkgs should be Named(\"Pkgs\", ...), got: {other}"),
+        other => panic!("pkgs should be Named(\"Pkgs\", ...), got: {other:?}"),
     }
 
     // The body should resolve to int: pkgs.lib is Lib, lib.id is a -> a, id 42 is int.
-    let root_ty = inference
+    let root_ref = *inference
         .expr_ty_map
         .get(module.entry_expr)
         .expect("root expr should have a type");
-    match root_ty {
+    let root_ty = RootTy::new(root_ref, inference.arena.clone());
+    match root_ty.output_ty() {
         OutputTy::Lambda { body, .. } => {
             assert_eq!(
-                *body.0,
-                arc_ty!(Int),
+                root_ty.child(*body),
+                expected_ty!(Int),
                 "pkgs.lib.id 42 should infer as int, got: {}",
-                body.0
+                root_ty.arena.display(*body)
             );
         }
         _ => panic!("expected lambda type, got: {root_ty}"),
@@ -3109,14 +3573,15 @@ fn callpackage_context_loads_pkgs_from_builtin_stubs_dir() {
             .run();
     let inference = result.inference.expect("inference should succeed");
 
-    let root_ty = inference
+    let root_ref = *inference
         .expr_ty_map
         .get(module.entry_expr)
         .expect("root expr should have a type");
-    match root_ty {
+    let root_ty = RootTy::new(root_ref, inference.arena.clone());
+    match root_ty.output_ty() {
         OutputTy::Lambda { body, .. } => {
             // The body is just `emilua`, which should be Derivation.
-            match body.0.as_ref() {
+            match &root_ty.arena[*body] {
                 OutputTy::Named(name, _) => {
                     assert_eq!(
                         name.as_str(),
@@ -3124,7 +3589,7 @@ fn callpackage_context_loads_pkgs_from_builtin_stubs_dir() {
                         "emilua should be Named(\"Derivation\", ...), got Named(\"{name}\", ...)"
                     );
                 }
-                other => panic!("emilua should be Named(\"Derivation\", ...), got: {other}"),
+                other => panic!("emilua should be Named(\"Derivation\", ...), got: {other:?}"),
             }
         }
         _ => panic!("expected lambda type, got: {root_ty}"),
@@ -3170,7 +3635,7 @@ test_case!(
 fn optional_field_default_null() {
     let nix_src = r#"({ name ? null }: name) {}"#;
     let ty = get_inferred_root(nix_src);
-    assert_eq!(ty, arc_ty!(Null));
+    assert_eq!(ty, expected_ty!(Null));
 }
 
 /// Inline call where a null-default field is provided with an attrset.
@@ -3179,7 +3644,14 @@ fn optional_field_default_null() {
 fn null_default_field_provided_attrset_inline() {
     let nix_src = r#"({ config ? null }: config) { config = { foo = 1; }; }"#;
     let ty = get_inferred_root(nix_src);
-    assert_eq!(ty, arc_ty!(union!(Null, { "foo": Int })));
+    let expected = {
+        let mut a = TypeArena::new();
+        let null = arc_ty!(&mut a, Null);
+        let foo_int = arc_ty!(&mut a, { "foo": Int });
+        let u = a.intern(OutputTy::Union(vec![null, foo_int]));
+        RootTy::new(u, Arc::new(a))
+    };
+    assert_eq!(ty, expected);
 }
 
 /// Let-bound function with null-default field, called with an attrset.
@@ -3193,7 +3665,7 @@ fn null_default_field_provided_attrset_let_bound() {
         in f { config = { foo = 1; }; }
     "};
     let ty = get_inferred_root(nix_src);
-    assert_eq!(ty, arc_ty!({ "foo": Int }));
+    assert_eq!(ty, expected_ty!({ "foo": Int }));
 }
 
 /// Let-bound function with null-default field, called without the field.
@@ -3209,7 +3681,7 @@ fn null_default_field_omitted_let_bound() {
     "};
     let ty = get_inferred_root(nix_src);
     assert!(
-        matches!(ty, OutputTy::TyVar(_)),
+        matches!(ty.output_ty(), OutputTy::TyVar(_)),
         "expected a free type variable, got: {ty:?}"
     );
 }
@@ -3254,7 +3726,7 @@ fn null_default_field_access_is_type_error() {
 fn null_default_with_required_field_inline() {
     let nix_src = r#"({ config ? null, name }: { inherit config name; }) { name = "hello"; }"#;
     let ty = get_inferred_root(nix_src);
-    assert_eq!(ty, arc_ty!({ "config": Null, "name": String }));
+    assert_eq!(ty, expected_ty!({ "config": Null, "name": String }));
 }
 
 /// Required fields still error when missing.
@@ -3295,7 +3767,7 @@ fn select_or_default_missing_field() {
     let nix_src = r#"let s = { x = 1; }; in s.y or "fallback""#;
     let ty = get_inferred_root(nix_src);
     // `y` is provably absent, so only the default contributes.
-    assert_eq!(ty, arc_ty!(String));
+    assert_eq!(ty, expected_ty!(String));
 }
 
 /// `x.field or default` on a closed attrset where the field IS present.
@@ -3304,7 +3776,14 @@ fn select_or_default_field_present() {
     let nix_src = r#"let s = { x = 1; }; in s.x or "fallback""#;
     let ty = get_inferred_root(nix_src);
     // Both the field type (int) and default type (string) contribute.
-    assert_eq!(ty, arc_ty!(union!(Int, String)));
+    let expected = {
+        let mut a = TypeArena::new();
+        let i = arc_ty!(&mut a, Int);
+        let s = arc_ty!(&mut a, String);
+        let u = a.intern(OutputTy::Union(vec![i, s]));
+        RootTy::new(u, Arc::new(a))
+    };
+    assert_eq!(ty, expected);
 }
 
 /// Multi-segment path with `or`: `x.a.b or default` where x = {}.
@@ -3312,7 +3791,7 @@ fn select_or_default_field_present() {
 fn select_or_default_deep_path_missing() {
     let nix_src = "let s = {}; in s.a.b or 0";
     let ty = get_inferred_root(nix_src);
-    assert_eq!(ty, arc_ty!(Int));
+    assert_eq!(ty, expected_ty!(Int));
 }
 
 /// `builtins.tryEval` pattern: accessing a field that doesn't exist in the
@@ -3322,7 +3801,7 @@ fn select_or_default_tryeval_absent_field() {
     // tryEval returns { success: bool, value: a } — no `error` field.
     let nix_src = r#"let r = builtins.tryEval 1; in r.error or "no error""#;
     let ty = get_inferred_root(nix_src);
-    assert_eq!(ty, arc_ty!(String));
+    assert_eq!(ty, expected_ty!(String));
 }
 
 /// `builtins.tryEval` pattern: accessing `.value` with `or` fallback.
@@ -3330,7 +3809,14 @@ fn select_or_default_tryeval_absent_field() {
 fn select_or_default_tryeval_present_field() {
     let nix_src = "let r = builtins.tryEval 1; in r.value or null";
     let ty = get_inferred_root(nix_src);
-    assert_eq!(ty, arc_ty!(union!(Int, Null)));
+    let expected = {
+        let mut a = TypeArena::new();
+        let i = arc_ty!(&mut a, Int);
+        let n = arc_ty!(&mut a, Null);
+        let u = a.intern(OutputTy::Union(vec![i, n]));
+        RootTy::new(u, Arc::new(a))
+    };
+    assert_eq!(ty, expected);
 }
 
 /// Select WITHOUT `or` on a closed attrset missing the field should still error.
@@ -3351,7 +3837,7 @@ fn select_or_default_open_attrset() {
     let ty = get_inferred_root(nix_src);
     // The function should infer without error. The parameter is open
     // (field access makes it { missing?: a, ... }) and result is a | string.
-    match &ty {
+    match ty.output_ty() {
         OutputTy::Lambda { .. } => {} // success — no error
         _ => panic!("expected lambda type, got: {ty}"),
     }
@@ -3361,10 +3847,10 @@ fn select_or_default_open_attrset() {
 // Type narrowing — null guards
 // ==============================================================================
 
-/// Helper: extract param and body from a lambda OutputTy, panicking otherwise.
-fn unwrap_lambda(ty: &OutputTy) -> (&OutputTy, &OutputTy) {
-    match ty {
-        OutputTy::Lambda { param, body } => (&param.0, &body.0),
+/// Helper: extract param and body from a lambda RootTy, panicking otherwise.
+fn unwrap_lambda(ty: &RootTy) -> (RootTy, RootTy) {
+    match ty.output_ty() {
+        OutputTy::Lambda { param, body } => (ty.child(*param), ty.child(*body)),
         _ => panic!("expected lambda type, got: {ty}"),
     }
 }
@@ -3380,7 +3866,7 @@ fn narrow_null_eq_else_field_access() {
     let (_param, body) = unwrap_lambda(&ty);
     // The unconstrained field var from x.name has no lower bounds, so
     // in positive position it's bottom and `null | bottom = null`.
-    assert_eq!(*body, arc_ty!(Null), "body should be null");
+    assert_eq!(body, expected_ty!(Null), "body should be null");
 }
 
 /// `if x != null then x.name else "default"` — then-branch narrows x to
@@ -3391,7 +3877,7 @@ fn narrow_null_neq_then_field_access() {
     let nix = r#"x: if x != null then x.name else "default""#;
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
-    assert_eq!(*body, arc_ty!(String), "body should be string");
+    assert_eq!(body, expected_ty!(String), "body should be string");
 }
 
 /// `if isNull x then 0 else x.y` — isNull builtin narrowing.
@@ -3401,7 +3887,7 @@ fn narrow_isnull_builtin() {
     let nix = "x: if isNull x then 0 else x.y";
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
-    assert_eq!(*body, arc_ty!(Int), "body should be int");
+    assert_eq!(body, expected_ty!(Int), "body should be int");
 }
 
 /// `if builtins.isNull x then 0 else x.y` — qualified builtin.
@@ -3411,7 +3897,7 @@ fn narrow_builtins_isnull() {
     let nix = "x: if builtins.isNull x then 0 else x.y";
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
-    assert_eq!(*body, arc_ty!(Int), "body should be int");
+    assert_eq!(body, expected_ty!(Int), "body should be int");
 }
 
 /// `if !isNull x then x.y else 0` — negation flips narrowing.
@@ -3421,7 +3907,7 @@ fn narrow_negated_isnull() {
     let nix = "x: if !(isNull x) then x.y else 0";
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
-    assert_eq!(*body, arc_ty!(Int), "body should be int");
+    assert_eq!(body, expected_ty!(Int), "body should be int");
 }
 
 /// `assert x != null; x.name` — assert narrows body so field access on
@@ -3435,12 +3921,12 @@ fn narrow_assert_not_null() {
     // Assert narrows x to non-null in the body. The result is whatever
     // x.name resolves to — a free type variable (no union with null).
     assert!(
-        !matches!(body, OutputTy::Primitive(PrimitiveTy::Null)),
+        !matches!(body.output_ty(), OutputTy::Primitive(PrimitiveTy::Null)),
         "assert-narrowed body should not be null, got: {body}"
     );
     // Should be a single type (TyVar from the field access), not a union.
     assert!(
-        matches!(body, OutputTy::TyVar(_)),
+        matches!(body.output_ty(), OutputTy::TyVar(_)),
         "assert-narrowed body should be a type variable (from field access), got: {body}"
     );
 }
@@ -3455,18 +3941,18 @@ fn narrow_null_eq_then_is_null() {
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
     // x in the then-branch is narrowed to null, else-branch returns int.
-    match body {
+    match body.output_ty() {
         OutputTy::Union(members) => {
             assert!(
                 members
                     .iter()
-                    .any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::Null))),
+                    .any(|m| matches!(&body.arena[*m], OutputTy::Primitive(PrimitiveTy::Null))),
                 "body should contain null, got: {body}"
             );
             assert!(
                 members
                     .iter()
-                    .any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::Int))),
+                    .any(|m| matches!(&body.arena[*m], OutputTy::Primitive(PrimitiveTy::Int))),
                 "body should contain int, got: {body}"
             );
             assert_eq!(members.len(), 2, "expected null | int, got: {body}");
@@ -3480,7 +3966,7 @@ fn narrow_null_eq_then_is_null() {
 #[test]
 fn narrow_no_interference_with_non_guard() {
     let ty = get_inferred_root(r#"if true then 1 else "hi""#);
-    match &ty {
+    match ty.output_ty() {
         OutputTy::Union(members) => {
             assert_eq!(members.len(), 2, "expected 2 union members, got: {ty}");
         }
@@ -3498,12 +3984,12 @@ fn narrow_nested_same_var() {
     let (_param, body) = unwrap_lambda(&ty);
     // Outer else: 0 (int). Outer then: inner if with x.y | 0.
     // The overall body should contain int.
-    match body {
+    match body.output_ty() {
         OutputTy::Union(members) => {
             assert!(
                 members
                     .iter()
-                    .any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::Int))),
+                    .any(|m| matches!(&body.arena[*m], OutputTy::Primitive(PrimitiveTy::Int))),
                 "nested narrowing body should contain int, got: {body}"
             );
         }
@@ -3520,7 +4006,7 @@ fn narrow_null_on_lhs() {
     let nix = "x: if null == x then 0 else x.y";
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
-    assert_eq!(*body, arc_ty!(Int), "body should be int");
+    assert_eq!(body, expected_ty!(Int), "body should be int");
 }
 
 /// Both branches produce concrete types: `if x == null then "was null" else 42`.
@@ -3530,18 +4016,18 @@ fn narrow_null_guard_concrete_branches() {
     let nix = r#"x: if x == null then "was null" else 42"#;
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
-    match body {
+    match body.output_ty() {
         OutputTy::Union(members) => {
             assert!(
                 members
                     .iter()
-                    .any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::String))),
+                    .any(|m| matches!(&body.arena[*m], OutputTy::Primitive(PrimitiveTy::String))),
                 "body should contain string, got: {body}"
             );
             assert!(
                 members
                     .iter()
-                    .any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::Int))),
+                    .any(|m| matches!(&body.arena[*m], OutputTy::Primitive(PrimitiveTy::Int))),
                 "body should contain int, got: {body}"
             );
         }
@@ -3565,7 +4051,7 @@ fn equality_does_not_constrain_operands() {
     // x.name succeeds — x gets constrained to { name: a, ... } by the
     // Select, not by the ==.
     assert!(
-        !matches!(body, OutputTy::Primitive(PrimitiveTy::Bool)),
+        !matches!(body.output_ty(), OutputTy::Primitive(PrimitiveTy::Bool)),
         "equality should not constrain operands, x.name should return non-bool field type, got: {ty}"
     );
 }
@@ -3586,7 +4072,7 @@ fn and_short_circuit_null_eq_then_field_access_fails() {
 fn cross_type_equality_succeeds() {
     let ty = get_inferred_root(r#"1 == "hi""#);
     assert!(
-        matches!(&ty, OutputTy::Primitive(PrimitiveTy::Bool)),
+        matches!(ty.output_ty(), OutputTy::Primitive(PrimitiveTy::Bool)),
         "cross-type equality should infer bool, got: {ty}"
     );
 }
@@ -3601,7 +4087,7 @@ fn equality_leaves_variable_unconstrained() {
     // x.name succeeds — x gets constrained to { name: a, ... } by the
     // field access, not by the equality comparison.
     assert!(
-        !matches!(body, OutputTy::Primitive(PrimitiveTy::Null)),
+        !matches!(body.output_ty(), OutputTy::Primitive(PrimitiveTy::Null)),
         "x should not be constrained to null by ==, got: {ty}"
     );
 }
@@ -3625,18 +4111,18 @@ fn narrow_null_eq_then_narrowed_else_concrete() {
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
     // Then: x is narrowed to null. Else: string literal.
-    match body {
+    match body.output_ty() {
         OutputTy::Union(members) => {
             assert!(
                 members
                     .iter()
-                    .any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::Null))),
+                    .any(|m| matches!(&body.arena[*m], OutputTy::Primitive(PrimitiveTy::Null))),
                 "body should contain null from then-branch, got: {body}"
             );
             assert!(
                 members
                     .iter()
-                    .any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::String))),
+                    .any(|m| matches!(&body.arena[*m], OutputTy::Primitive(PrimitiveTy::String))),
                 "body should contain string from else-branch, got: {body}"
             );
             assert_eq!(members.len(), 2, "expected null | string, got: {body}");
@@ -3659,7 +4145,7 @@ fn narrow_field_access_then_arithmetic() {
     // Then: 0 (int). Else: x.count + 1 — the + resolves with int on the
     // right, so x.count is constrained to Number. Result is Number.
     // The union of int and Number should simplify.
-    match body {
+    match body.output_ty() {
         OutputTy::Primitive(PrimitiveTy::Int) => {}
         OutputTy::Primitive(PrimitiveTy::Number) => {}
         OutputTy::Union(members) => {
@@ -3667,7 +4153,7 @@ fn narrow_field_access_then_arithmetic() {
             for m in members {
                 assert!(
                     matches!(
-                        &*m.0,
+                        &body.arena[*m],
                         OutputTy::Primitive(PrimitiveTy::Int)
                             | OutputTy::Primitive(PrimitiveTy::Number)
                             | OutputTy::Primitive(PrimitiveTy::Float)
@@ -3711,7 +4197,7 @@ fn narrow_eq_true_accepts_bool_arg() {
     "#};
     let ty = get_inferred_root(nix);
     assert!(
-        matches!(&ty, OutputTy::Primitive(PrimitiveTy::String)),
+        matches!(ty.output_ty(), OutputTy::Primitive(PrimitiveTy::String)),
         "block 2 3 null should type-check and return string, got: {ty}"
     );
 }
@@ -3723,18 +4209,18 @@ fn narrow_eq_true_then_is_bool() {
     let nix = "x: if x == true then x else 0";
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
-    match body {
+    match body.output_ty() {
         OutputTy::Union(members) => {
             assert!(
                 members
                     .iter()
-                    .any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::Bool))),
+                    .any(|m| matches!(&body.arena[*m], OutputTy::Primitive(PrimitiveTy::Bool))),
                 "body should contain bool from then-branch, got: {body}"
             );
             assert!(
                 members
                     .iter()
-                    .any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::Int))),
+                    .any(|m| matches!(&body.arena[*m], OutputTy::Primitive(PrimitiveTy::Int))),
                 "body should contain int from else-branch, got: {body}"
             );
         }
@@ -3748,12 +4234,12 @@ fn narrow_eq_false_then_is_bool() {
     let nix = "x: if x == false then x else 0";
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
-    match body {
+    match body.output_ty() {
         OutputTy::Union(members) => {
             assert!(
                 members
                     .iter()
-                    .any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::Bool))),
+                    .any(|m| matches!(&body.arena[*m], OutputTy::Primitive(PrimitiveTy::Bool))),
                 "body should contain bool, got: {body}"
             );
         }
@@ -3768,12 +4254,12 @@ fn narrow_neq_true_else_is_bool() {
     let nix = "x: if x != true then 0 else x";
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
-    match body {
+    match body.output_ty() {
         OutputTy::Union(members) => {
             assert!(
                 members
                     .iter()
-                    .any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::Bool))),
+                    .any(|m| matches!(&body.arena[*m], OutputTy::Primitive(PrimitiveTy::Bool))),
                 "else-branch should be bool, got: {body}"
             );
         }
@@ -3787,12 +4273,12 @@ fn narrow_true_on_lhs() {
     let nix = "x: if true == x then x else 0";
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
-    match body {
+    match body.output_ty() {
         OutputTy::Union(members) => {
             assert!(
                 members
                     .iter()
-                    .any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::Bool))),
+                    .any(|m| matches!(&body.arena[*m], OutputTy::Primitive(PrimitiveTy::Bool))),
                 "body should contain bool, got: {body}"
             );
         }
@@ -3806,18 +4292,18 @@ fn narrow_eq_int_literal() {
     let nix = r#"x: if x == 42 then x else "fallback""#;
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
-    match body {
+    match body.output_ty() {
         OutputTy::Union(members) => {
             assert!(
                 members
                     .iter()
-                    .any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::Int))),
+                    .any(|m| matches!(&body.arena[*m], OutputTy::Primitive(PrimitiveTy::Int))),
                 "then-branch should be int, got: {body}"
             );
             assert!(
                 members
                     .iter()
-                    .any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::String))),
+                    .any(|m| matches!(&body.arena[*m], OutputTy::Primitive(PrimitiveTy::String))),
                 "else-branch should be string, got: {body}"
             );
         }
@@ -3831,18 +4317,18 @@ fn narrow_eq_string_literal() {
     let nix = r#"x: if x == "hello" then x else 0"#;
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
-    match body {
+    match body.output_ty() {
         OutputTy::Union(members) => {
             assert!(
                 members
                     .iter()
-                    .any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::String))),
+                    .any(|m| matches!(&body.arena[*m], OutputTy::Primitive(PrimitiveTy::String))),
                 "then-branch should be string, got: {body}"
             );
             assert!(
                 members
                     .iter()
-                    .any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::Int))),
+                    .any(|m| matches!(&body.arena[*m], OutputTy::Primitive(PrimitiveTy::Int))),
                 "else-branch should be int, got: {body}"
             );
         }
@@ -3995,7 +4481,7 @@ fn wrapper_foldl_like_nixpkgs() {
     "};
     let (module, result) = check_str(src);
     let inference = result.expect("should not produce a type error");
-    let root = inference
+    let root = *inference
         .expr_ty_map
         .get(module.entry_expr)
         .expect("root type");
@@ -4003,9 +4489,9 @@ fn wrapper_foldl_like_nixpkgs() {
     // Verify the root is an attrset — the key assertion is that inference
     // succeeds without the "expected [X], got int" errors that occurred
     // before the fix.
-    match root {
+    match &inference.arena[root] {
         OutputTy::AttrSet { .. } => {}
-        other => panic!("expected attrset, got: {other}"),
+        other => panic!("expected attrset, got: {other:?}"),
     }
 }
 
@@ -4022,7 +4508,7 @@ fn narrow_hasattr_then_field_access() {
     let (_param, body) = unwrap_lambda(&ty);
     // Then-branch: x.name (unconstrained field var → bottom in positive pos).
     // Else-branch: "default" (string). Union collapses to string.
-    assert_eq!(*body, arc_ty!(String), "body should be string");
+    assert_eq!(body, expected_ty!(String), "body should be string");
 }
 
 /// Chained hasattr: `if x ? a then x.a else if x ? b then x.b else null`.
@@ -4034,7 +4520,11 @@ fn narrow_hasattr_chained() {
     let (_param, body) = unwrap_lambda(&ty);
     // All field vars are unconstrained → bottom. The else-else is null.
     // Union of bottom | bottom | null = null.
-    assert_eq!(*body, arc_ty!(Null), "chained hasattr body should be null");
+    assert_eq!(
+        body,
+        expected_ty!(Null),
+        "chained hasattr body should be null"
+    );
 }
 
 /// `if !(x ? name) then "default" else x.name` — negation flips narrowing,
@@ -4045,8 +4535,8 @@ fn narrow_hasattr_negated() {
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
     assert_eq!(
-        *body,
-        arc_ty!(String),
+        body,
+        expected_ty!(String),
         "negated hasattr body should be string"
     );
 }
@@ -4060,7 +4550,7 @@ fn narrow_hasattr_assert() {
     let (_param, body) = unwrap_lambda(&ty);
     // Assert applies then-branch narrowing. x.name produces a type var.
     assert!(
-        matches!(body, OutputTy::TyVar(_)),
+        matches!(body.output_ty(), OutputTy::TyVar(_)),
         "assert-narrowed hasattr body should be a type variable, got: {body}"
     );
 }
@@ -4073,7 +4563,7 @@ fn narrow_hasattr_dynamic_key_no_narrowing() {
     let ty = get_inferred_root(nix);
     // Should not crash; just verify it infers a lambda.
     assert!(
-        matches!(ty, OutputTy::Lambda { .. }),
+        matches!(ty.output_ty(), OutputTy::Lambda { .. }),
         "dynamic hasattr should still produce a lambda, got: {ty}"
     );
 }
@@ -4086,7 +4576,11 @@ fn narrow_hasattr_multi_key_no_narrowing() {
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
     // No narrowing applied, but both branches return int.
-    assert_eq!(*body, arc_ty!(Int), "multi-key hasattr body should be int");
+    assert_eq!(
+        body,
+        expected_ty!(Int),
+        "multi-key hasattr body should be int"
+    );
 }
 
 /// Narrowing + field access with arithmetic: `if x ? count then x.count + 1 else 0`.
@@ -4101,14 +4595,14 @@ fn narrow_hasattr_field_access_then_arithmetic() {
     "};
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
-    match body {
+    match body.output_ty() {
         OutputTy::Primitive(PrimitiveTy::Int) => {}
         OutputTy::Primitive(PrimitiveTy::Number) => {}
         OutputTy::Union(members) => {
             for m in members {
                 assert!(
                     matches!(
-                        &*m.0,
+                        &body.arena[*m],
                         OutputTy::Primitive(PrimitiveTy::Int)
                             | OutputTy::Primitive(PrimitiveTy::Number)
                             | OutputTy::Primitive(PrimitiveTy::Float)
@@ -4146,7 +4640,7 @@ fn narrow_not_hasfield_else_branch_typechecks() {
     // Should succeed without errors — the chained ? guards with a
     // let-bound union type were previously failing.
     assert!(
-        matches!(ty, OutputTy::Lambda { .. }),
+        matches!(ty.output_ty(), OutputTy::Lambda { .. }),
         "should produce a lambda, got: {ty}"
     );
 }
@@ -4159,7 +4653,11 @@ fn narrow_not_hasfield_negated_flip() {
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
     // else-branch has HasField narrowing (flipped), so x.name succeeds.
-    assert_eq!(*body, arc_ty!(String), "negated hasattr flip should work");
+    assert_eq!(
+        body,
+        expected_ty!(String),
+        "negated hasattr flip should work"
+    );
 }
 
 /// Chained `? attr` guards on a parameter (not let-bound) should
@@ -4177,7 +4675,7 @@ fn narrow_not_hasfield_chained_on_param() {
     "#};
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
-    assert_eq!(*body, arc_ty!(String), "chained hasattr on param");
+    assert_eq!(body, expected_ty!(String), "chained hasattr on param");
 }
 
 /// `builtins.hasAttr "field" x` else-branch should also produce
@@ -4196,7 +4694,7 @@ fn narrow_not_hasfield_builtins_hasattr() {
     let ty = get_inferred_root(nix);
     // Should succeed without errors.
     assert!(
-        matches!(ty, OutputTy::Lambda { .. }),
+        matches!(ty.output_ty(), OutputTy::Lambda { .. }),
         "builtins.hasAttr else-branch should typecheck, got: {ty}"
     );
 }
@@ -4211,7 +4709,7 @@ fn narrow_isstring_then_is_string() {
     let nix = r#"x: if isString x then builtins.stringLength x else 0"#;
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
-    assert_eq!(*body, arc_ty!(Int), "body should be int");
+    assert_eq!(body, expected_ty!(Int), "body should be int");
 }
 
 #[test]
@@ -4219,7 +4717,7 @@ fn narrow_isstring_then_is_string_ret() {
     let nix = r#"x: if isString x then x else "else case""#;
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
-    assert_eq!(*body, arc_ty!(String), "body should be string");
+    assert_eq!(body, expected_ty!(String), "body should be string");
 }
 
 /// `builtins.isString x` — qualified form should also work.
@@ -4228,7 +4726,7 @@ fn narrow_builtins_isstring() {
     let nix = r#"x: if builtins.isString x then builtins.stringLength x else 0"#;
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
-    assert_eq!(*body, arc_ty!(Int), "body should be int");
+    assert_eq!(body, expected_ty!(Int), "body should be int");
 }
 
 /// Locally aliased builtin: `let isString = builtins.isString; in ...`
@@ -4244,8 +4742,8 @@ fn narrow_isstring_local_alias() {
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
     assert_eq!(
-        *body,
-        arc_ty!(Int),
+        body,
+        expected_ty!(Int),
         "locally-aliased isString should narrow"
     );
 }
@@ -4260,8 +4758,8 @@ fn narrow_isstring_inherit_from_builtins() {
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
     assert_eq!(
-        *body,
-        arc_ty!(Int),
+        body,
+        expected_ty!(Int),
         "inherit-from-builtins isString should narrow"
     );
 }
@@ -4272,7 +4770,7 @@ fn narrow_isint_then_is_int() {
     let nix = "x: if isInt x then x + 1 else 0";
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
-    assert_eq!(*body, arc_ty!(Int), "body should be int");
+    assert_eq!(body, expected_ty!(Int), "body should be int");
 }
 
 /// `isBool x` — then-branch narrows x to bool.
@@ -4281,7 +4779,7 @@ fn narrow_isbool_then_is_bool() {
     let nix = "x: if isBool x then !x else false";
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
-    assert_eq!(*body, arc_ty!(Bool), "body should be bool");
+    assert_eq!(body, expected_ty!(Bool), "body should be bool");
 }
 
 /// `isFloat x` — then-branch narrows x to float.
@@ -4290,7 +4788,7 @@ fn narrow_isfloat_then_is_float() {
     let nix = "x: if isFloat x then x + 1.0 else 0.0";
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
-    assert_eq!(*body, arc_ty!(Float), "body should be float");
+    assert_eq!(body, expected_ty!(Float), "body should be float");
 }
 
 /// `!isString x` — negation flips narrowing.
@@ -4299,7 +4797,7 @@ fn narrow_negated_isstring() {
     let nix = r#"x: if !(isString x) then 0 else builtins.stringLength x"#;
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
-    assert_eq!(*body, arc_ty!(Int), "body should be int");
+    assert_eq!(body, expected_ty!(Int), "body should be int");
 }
 
 /// Else-branch of `isString x` should produce a fresh variable linked to
@@ -4316,13 +4814,13 @@ fn narrow_isstring_else_preserves_original() {
     let (_param, body) = unwrap_lambda(&ty);
     // Then: int. Else: unconstrained var from field access.
     // The union should contain int (the unconstrained var may simplify away).
-    match body {
+    match body.output_ty() {
         OutputTy::Primitive(PrimitiveTy::Int) => {}
         OutputTy::Union(members) => {
             assert!(
                 members
                     .iter()
-                    .any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::Int))),
+                    .any(|m| matches!(&body.arena[*m], OutputTy::Primitive(PrimitiveTy::Int))),
                 "body should contain int, got: {body}"
             );
         }
@@ -4341,7 +4839,7 @@ fn narrow_isstring_then_isint_nested() {
     "};
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
-    assert_eq!(*body, arc_ty!(Int), "body should be int");
+    assert_eq!(body, expected_ty!(Int), "body should be int");
 }
 
 // ==============================================================================
@@ -4356,13 +4854,13 @@ fn narrow_builtins_hasattr() {
     let (_param, body) = unwrap_lambda(&ty);
     // Then-branch: x.name (unconstrained var). Else-branch: string.
     // The union should contain string.
-    match body {
+    match body.output_ty() {
         OutputTy::Primitive(PrimitiveTy::String) => {}
         OutputTy::Union(members) => {
             assert!(
                 members
                     .iter()
-                    .any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::String))),
+                    .any(|m| matches!(&body.arena[*m], OutputTy::Primitive(PrimitiveTy::String))),
                 "body should contain string, got: {body}"
             );
         }
@@ -4376,13 +4874,13 @@ fn narrow_builtins_hasattr_negated() {
     let nix = r#"x: if !(builtins.hasAttr "name" x) then "default" else x.name"#;
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
-    match body {
+    match body.output_ty() {
         OutputTy::Primitive(PrimitiveTy::String) => {}
         OutputTy::Union(members) => {
             assert!(
                 members
                     .iter()
-                    .any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::String))),
+                    .any(|m| matches!(&body.arena[*m], OutputTy::Primitive(PrimitiveTy::String))),
                 "body should contain string, got: {body}"
             );
         }
@@ -4418,20 +4916,21 @@ fn narrow_hasfield_preserves_original_constraints() {
 /// OutputTy::Neg displays as `~null`, `~string`, etc.
 #[test]
 fn neg_display_primitive() {
-    assert_eq!(format!("{}", arc_ty!(neg!(Null))), "~null");
-    assert_eq!(format!("{}", arc_ty!(neg!(String))), "~string");
-    assert_eq!(format!("{}", arc_ty!(neg!(Int))), "~int");
-    assert_eq!(format!("{}", arc_ty!(neg!(Bool))), "~bool");
+    assert_eq!(format!("{}", expected_ty!(neg!(Null))), "~null");
+    assert_eq!(format!("{}", expected_ty!(neg!(String))), "~string");
+    assert_eq!(format!("{}", expected_ty!(neg!(Int))), "~int");
+    assert_eq!(format!("{}", expected_ty!(neg!(Bool))), "~bool");
 }
 
 /// Compound negation parenthesizes the inner type.
 #[test]
 fn neg_display_compound() {
-    let ty = OutputTy::Neg(lang_ty::TyRef::from(OutputTy::Union(vec![
-        lang_ty::TyRef::from(OutputTy::Primitive(PrimitiveTy::Int)),
-        lang_ty::TyRef::from(OutputTy::Primitive(PrimitiveTy::String)),
-    ])));
-    assert_eq!(format!("{ty}"), "~(int | string)");
+    let mut arena = TypeArena::new();
+    let int_ref = arc_ty!(&mut arena, Int);
+    let str_ref = arc_ty!(&mut arena, String);
+    let union_ref = arena.intern(OutputTy::Union(vec![int_ref, str_ref]));
+    let neg_ref = arena.intern(OutputTy::Neg(union_ref));
+    assert_eq!(format!("{}", arena.display(neg_ref)), "~(int | string)");
 }
 
 // ==============================================================================
@@ -4464,7 +4963,7 @@ fn narrow_nested_redundant_isstring() {
     let nix = r#"x: if isString x then (if isString x then builtins.stringLength x else 0) else 0"#;
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
-    assert_eq!(*body, arc_ty!(Int), "body should be int");
+    assert_eq!(body, expected_ty!(Int), "body should be int");
 }
 
 /// Nested different predicates: outer `!(isNull x)` adds ¬Null, inner
@@ -4478,13 +4977,13 @@ fn narrow_nested_different_pred() {
     let (_param, body) = unwrap_lambda(&ty);
     // Then-then: int (stringLength). Then-else: x (narrowed var).
     // Outer else: 0 (int). Body contains int at minimum.
-    match body {
+    match body.output_ty() {
         OutputTy::Primitive(PrimitiveTy::Int) => {}
         OutputTy::Union(members) => {
             assert!(
                 members
                     .iter()
-                    .any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::Int))),
+                    .any(|m| matches!(&body.arena[*m], OutputTy::Primitive(PrimitiveTy::Int))),
                 "body should contain int, got: {body}"
             );
         }
@@ -4503,7 +5002,7 @@ fn narrow_isattrs_then_field_access() {
     let nix = r#"x: if isAttrs x then x.name else "default""#;
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
-    assert_eq!(*body, arc_ty!(String), "body should be string");
+    assert_eq!(body, expected_ty!(String), "body should be string");
 }
 
 /// `builtins.isAttrs x` — qualified form.
@@ -4512,7 +5011,7 @@ fn narrow_builtins_isattrs() {
     let nix = r#"x: if builtins.isAttrs x then x.name else "default""#;
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
-    assert_eq!(*body, arc_ty!(String), "body should be string");
+    assert_eq!(body, expected_ty!(String), "body should be string");
 }
 
 /// `isAttrs x` then-branch: returning x preserves the attrset constraint.
@@ -4523,7 +5022,7 @@ fn narrow_isattrs_then_returns_attrset() {
     let (_param, body) = unwrap_lambda(&ty);
     // Both branches produce attrsets, so the result should be an attrset.
     assert!(
-        matches!(body, OutputTy::AttrSet(_)),
+        matches!(body.output_ty(), OutputTy::AttrSet(_)),
         "expected attrset, got: {body}"
     );
 }
@@ -4545,7 +5044,7 @@ fn narrow_builtins_islist() {
     let nix = r#"x: if builtins.isList x then builtins.length x else 0"#;
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
-    assert_eq!(*body, arc_ty!(Int), "length returns int");
+    assert_eq!(body, expected_ty!(Int), "length returns int");
 }
 
 /// `isFunction x` narrows x to a function in the then-branch, allowing
@@ -4580,7 +5079,7 @@ fn narrow_isattrs_local_alias() {
     "#;
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
-    assert_eq!(*body, arc_ty!(String), "body should be string");
+    assert_eq!(body, expected_ty!(String), "body should be string");
 }
 
 /// `inherit (builtins) isList` alias.
@@ -4592,7 +5091,7 @@ fn narrow_islist_inherit_alias() {
     "#;
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
-    assert_eq!(*body, arc_ty!(Int), "body should be int");
+    assert_eq!(body, expected_ty!(Int), "body should be int");
 }
 
 /// Negated compound predicate: `!(isAttrs x)` — else-branch should get
@@ -4602,7 +5101,7 @@ fn narrow_negated_isattrs() {
     let nix = r#"x: if !(isAttrs x) then "not an attrset" else x.name"#;
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
-    assert_eq!(*body, arc_ty!(String), "body should be string");
+    assert_eq!(body, expected_ty!(String), "body should be string");
 }
 
 // ==============================================================================
@@ -4682,13 +5181,14 @@ fn annotation_arity_mismatch_skipped_with_warning() {
         .expect("inference should succeed despite arity mismatch");
 
     // Root should be string (string + string = string).
-    let root_ty = inference
+    let root_ref = *inference
         .expr_ty_map
         .get(mod_.entry_expr)
         .expect("root should have a type");
+    let root_ty = RootTy::new(root_ref, inference.arena.clone());
     assert_eq!(
-        *root_ty,
-        arc_ty!(String),
+        root_ty,
+        expected_ty!(String),
         "root should be string, got: {root_ty}"
     );
 
@@ -4754,15 +5254,16 @@ fn annotation_with_union_skipped() {
         .inference
         .expect("inference should succeed with union annotation");
 
-    let root_ty = inference
+    let root_ref = *inference
         .expr_ty_map
         .get(mod_.entry_expr)
         .expect("root should have a type");
+    let root_ty = RootTy::new(root_ref, inference.arena.clone());
     // The body returns "list" (string) or value; with the call f "x" "hello",
     // the result should be string.
     assert_eq!(
-        *root_ty,
-        arc_ty!(String),
+        root_ty,
+        expected_ty!(String),
         "root should be string, got: {root_ty}"
     );
 
@@ -4799,8 +5300,8 @@ fn narrow_lib_types_isstring() {
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
     assert_eq!(
-        *body,
-        arc_ty!(String),
+        body,
+        expected_ty!(String),
         "lib.types.isString should narrow to string"
     );
 }
@@ -4827,8 +5328,8 @@ fn narrow_lib_isattrs() {
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
     assert_eq!(
-        *body,
-        arc_ty!(String),
+        body,
+        expected_ty!(String),
         "lib.isAttrs should narrow to attrset"
     );
 }
@@ -4843,8 +5344,8 @@ fn narrow_lib_types_islist() {
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
     assert_eq!(
-        *body,
-        arc_ty!(Int),
+        body,
+        expected_ty!(Int),
         "lib.types.isList should narrow to list"
     );
 }
@@ -4859,8 +5360,8 @@ fn narrow_negated_lib_types_isstring() {
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
     assert_eq!(
-        *body,
-        arc_ty!(String),
+        body,
+        expected_ty!(String),
         "negated lib.types.isString should narrow else to string"
     );
 }
@@ -4883,7 +5384,7 @@ fn narrow_contradictory_guards_no_crash() {
     let (_param, body) = unwrap_lambda(&ty);
     // The inner else returns 0 (int), the outer else returns "default" (string).
     // The contradictory branch returns 42 (int). Union of int | string.
-    match body {
+    match body.output_ty() {
         OutputTy::Union(_) => {}
         OutputTy::Primitive(PrimitiveTy::Int) => {}
         OutputTy::Primitive(PrimitiveTy::String) => {}
@@ -4921,7 +5422,7 @@ fn narrow_unrecognized_condition_no_narrowing() {
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
     assert!(
-        matches!(body, OutputTy::TyVar(_)),
+        matches!(body.output_ty(), OutputTy::TyVar(_)),
         "unrecognized predicate should not narrow — body should be TyVar, got: {body}"
     );
 }
@@ -4987,8 +5488,8 @@ fn narrow_select_chain_heuristic_activates() {
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
     assert_eq!(
-        *body,
-        OutputTy::Primitive(PrimitiveTy::Int),
+        body,
+        expected_ty!(Int),
         "select-chain heuristic should narrow — body should be int, got: {body}"
     );
 }
@@ -5004,7 +5505,7 @@ fn narrow_select_chain_non_predicate_no_narrowing() {
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
     assert!(
-        matches!(body, OutputTy::TyVar(_)),
+        matches!(body.output_ty(), OutputTy::TyVar(_)),
         "non-predicate leaf should not narrow — body should be TyVar, got: {body}"
     );
 }
@@ -5035,8 +5536,8 @@ fn narrow_optional_string_null_guard() {
     let ty = get_inferred_root_with_aliases(nix, &registry);
     let (_param, body) = unwrap_lambda(&ty);
     assert_eq!(
-        *body,
-        arc_ty!(String),
+        body,
+        expected_ty!(String),
         "optionalString with null guard should return string"
     );
 }
@@ -5055,7 +5556,7 @@ fn narrow_optional_attrs_null_guard() {
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
     assert!(
-        matches!(body, OutputTy::AttrSet(_)),
+        matches!(body.output_ty(), OutputTy::AttrSet(_)),
         "optionalAttrs should return attrset, got: {body}"
     );
 }
@@ -5102,7 +5603,7 @@ fn narrow_optional_string_no_guard() {
     let ty = get_inferred_root(nix);
     assert_eq!(
         ty,
-        arc_ty!(String),
+        expected_ty!(String),
         "optionalString true \"hello\" should be string"
     );
 }
@@ -5128,8 +5629,8 @@ fn narrow_optional_string_nested_select() {
     let ty = get_inferred_root_with_aliases(nix, &registry);
     let (_param, body) = unwrap_lambda(&ty);
     assert_eq!(
-        *body,
-        arc_ty!(String),
+        body,
+        expected_ty!(String),
         "lib.strings.optionalString with null guard should return string"
     );
 }
@@ -5144,8 +5645,8 @@ fn narrow_optional_string_bare_reference() {
     let ty = get_inferred_root_with_aliases(nix, &registry);
     let (_param, body) = unwrap_lambda(&ty);
     assert_eq!(
-        *body,
-        arc_ty!(String),
+        body,
+        expected_ty!(String),
         "bare optionalString with null guard should return string"
     );
 }
@@ -5161,8 +5662,8 @@ fn narrow_optional_string_isstring_guard() {
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
     assert_eq!(
-        *body,
-        arc_ty!(String),
+        body,
+        expected_ty!(String),
         "optionalString with isString guard should return string"
     );
 }
@@ -5201,13 +5702,18 @@ fn intersection_annotation_accepted() {
         .inference
         .expect("inference should succeed with intersection annotation");
 
-    let root_ty = inference
+    let root_ref = *inference
         .expr_ty_map
         .get(mod_.entry_expr)
         .expect("root should have a type");
+    let root_ty = RootTy::new(root_ref, inference.arena.clone());
     // The call `dispatch 42` infers from the body: isInt narrows to int,
     // x + 1 produces int.
-    assert_eq!(*root_ty, arc_ty!(Int), "root should be int, got: {root_ty}");
+    assert_eq!(
+        root_ty,
+        expected_ty!(Int),
+        "root should be int, got: {root_ty}"
+    );
 }
 
 /// The AnnotationUnchecked warning should be emitted for intersection-of-lambda
@@ -5314,8 +5820,8 @@ fn narrow_let_binding_under_null_guard() {
     // Should succeed without error — x is narrowed to non-null in the let.
     let (_param, body) = unwrap_lambda(&ty);
     assert_eq!(
-        *body,
-        arc_ty!(String),
+        body,
+        expected_ty!(String),
         "let binding under null guard should succeed, got: {body}"
     );
 }
@@ -5328,7 +5834,7 @@ fn narrow_assert_then_let_binding() {
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
     assert!(
-        matches!(body, OutputTy::TyVar(_)),
+        matches!(body.output_ty(), OutputTy::TyVar(_)),
         "assert-narrowed let binding body should be a type variable (from field access), got: {body}"
     );
 }
@@ -5348,8 +5854,8 @@ fn narrow_nested_let_bindings() {
     let (_param, body) = unwrap_lambda(&ty);
     // Should succeed: x is narrowed to non-null and has `name` field.
     assert_eq!(
-        *body,
-        arc_ty!(String),
+        body,
+        expected_ty!(String),
         "nested narrowing with let binding should succeed, got: {body}"
     );
 }
@@ -5403,7 +5909,7 @@ fn narrow_isint_then_add() {
     let nix = "x: if builtins.isInt x then x + 1 else 0";
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
-    assert_eq!(*body, arc_ty!(Int));
+    assert_eq!(body, expected_ty!(Int));
 }
 
 /// `x: if isNull x then 0 else x + 1` — else-branch has x narrowed to
@@ -5413,7 +5919,7 @@ fn narrow_isnull_else_add() {
     let nix = "x: if builtins.isNull x then 0 else x + 1";
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
-    assert_eq!(*body, arc_ty!(Int));
+    assert_eq!(body, expected_ty!(Int));
 }
 
 /// `x: y: if isInt x then (if isInt y then x + y else 0) else 0`
@@ -5423,8 +5929,8 @@ fn narrow_isint_nested_arithmetic() {
     let nix = "x: y: if builtins.isInt x then (if builtins.isInt y then x + y else 0) else 0";
     let ty = get_inferred_root(nix);
     let (_param, inner) = unwrap_lambda(&ty);
-    let (_param2, body) = unwrap_lambda(inner);
-    assert_eq!(*body, arc_ty!(Int));
+    let (_param2, body) = unwrap_lambda(&inner);
+    assert_eq!(body, expected_ty!(Int));
 }
 
 /// `x: if isString x then x + "suffix" else "default"` — isString narrows
@@ -5434,7 +5940,7 @@ fn narrow_isstring_then_concat() {
     let nix = r#"x: if builtins.isString x then x + "suffix" else "default""#;
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
-    assert_eq!(*body, arc_ty!(String));
+    assert_eq!(body, expected_ty!(String));
 }
 
 /// `x: if x ? count then x.count + 1 else 0` — `? count` narrows x to
@@ -5444,7 +5950,7 @@ fn narrow_hasattr_field_arithmetic() {
     let nix = "x: if x ? count then x.count + 1 else 0";
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
-    assert_eq!(*body, arc_ty!(Int));
+    assert_eq!(body, expected_ty!(Int));
 }
 
 // ==============================================================================
@@ -5463,7 +5969,7 @@ fn narrow_contradiction_isstring_then_isint() {
     let nix = "x: if builtins.isString x then (if builtins.isInt x then x else 0) else 0";
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
-    assert_eq!(*body, arc_ty!(Int));
+    assert_eq!(body, expected_ty!(Int));
 }
 
 /// `x: if !(isNull x) then (if isString x then stringLength x else 0) else 0`
@@ -5474,7 +5980,7 @@ fn narrow_non_contradiction_neg_null_string() {
     let nix = "x: if !(builtins.isNull x) then (if builtins.isString x then builtins.stringLength x else 0) else 0";
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
-    assert_eq!(*body, arc_ty!(Int));
+    assert_eq!(body, expected_ty!(Int));
 }
 
 /// `x: if isFloat x then (if !(isFloat x) then x else 0) else 0` —
@@ -5484,7 +5990,7 @@ fn narrow_contradiction_self_negated() {
     let nix = "x: if builtins.isFloat x then (if !(builtins.isFloat x) then x else 0) else 0";
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
-    assert_eq!(*body, arc_ty!(Int));
+    assert_eq!(body, expected_ty!(Int));
 }
 
 // ==============================================================================
@@ -5504,7 +6010,7 @@ fn cross_disjoint_attrset_neg_null() {
     // is narrowed to non-null. Passing an attrset as argument should succeed.
     let nix = r#"let f = x: if x != null then x.name else "default"; in f { name = "hello"; }"#;
     let ty = get_inferred_root(nix);
-    assert_eq!(ty, arc_ty!(String));
+    assert_eq!(ty, expected_ty!(String));
 }
 
 /// Chained narrowing: `if isAttrs x then ... else if isString x then ...`
@@ -5517,7 +6023,7 @@ fn cross_disjoint_chained_narrowing() {
     // All branches return int-ish: x.name is a TyVar, stringLength returns int, else is int.
     // The body should be some union or int — it should NOT error.
     assert!(
-        !matches!(body, OutputTy::Bottom),
+        !matches!(body.output_ty(), OutputTy::Bottom),
         "chained narrowing body should not be Bottom, got: {body}"
     );
 }
@@ -5549,7 +6055,7 @@ fn cross_disjoint_overlap_number_neg_int() {
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
     // The inner then-branch is contradictory (int & ~int), so body is int.
-    assert_eq!(*body, arc_ty!(Int));
+    assert_eq!(body, expected_ty!(Int));
 }
 
 // ==============================================================================
@@ -5571,7 +6077,7 @@ fn narrow_and_combinator_both_narrowed() {
     // Else-branch returns y (unconstrained). Body is union.
     let ty = get_inferred_root(nix);
     let (_param, inner) = unwrap_lambda(&ty);
-    let (_param2, _body) = unwrap_lambda(inner);
+    let (_param2, _body) = unwrap_lambda(&inner);
     // Just verify it type-checks without error.
 }
 
@@ -5589,7 +6095,7 @@ fn narrow_or_combinator_else_narrowed() {
     assert!(
         formatted.contains("~string")
             || formatted.contains("int")
-            || matches!(*body, OutputTy::Primitive(_)),
+            || matches!(body.output_ty(), OutputTy::Primitive(_)),
         "||: else-branch should contain narrowing info, got: {formatted}"
     );
 }
@@ -5603,14 +6109,14 @@ fn narrow_union_routing_null_into_union() {
     let nix = "x: if x == null then null else builtins.stringLength x";
     let ty = get_inferred_root(nix);
     let (_param, body) = unwrap_lambda(&ty);
-    match &*body {
+    match body.output_ty() {
         OutputTy::Union(members) => {
             let has_null = members
                 .iter()
-                .any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::Null)));
+                .any(|m| matches!(&body.arena[*m], OutputTy::Primitive(PrimitiveTy::Null)));
             let has_int = members
                 .iter()
-                .any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::Int)));
+                .any(|m| matches!(&body.arena[*m], OutputTy::Primitive(PrimitiveTy::Int)));
             assert!(
                 has_null && has_int,
                 "body should be null | int, got: {body}"
@@ -5631,7 +6137,7 @@ fn narrow_de_morgan_double_negation() {
     let formatted = body.to_string();
     // Else-branch has ¬null narrowing (from !(!(isNull)) = isNull, negated).
     assert!(
-        formatted.contains("~null") || matches!(*body, OutputTy::Primitive(_)),
+        formatted.contains("~null") || matches!(body.output_ty(), OutputTy::Primitive(_)),
         "double negation should preserve narrowing info, got: {formatted}"
     );
 }
@@ -5648,7 +6154,7 @@ fn narrow_inter_decomposition_no_spurious_error() {
     let (_param, body) = unwrap_lambda(&ty);
     assert!(
         matches!(
-            &*body,
+            body.output_ty(),
             OutputTy::Primitive(PrimitiveTy::Int) | OutputTy::Union(_)
         ),
         "body should be int or union with int, got: {body}"
@@ -5668,8 +6174,65 @@ fn narrow_and_combinator_mixed_predicates() {
     // x.name should succeed in then-branch because x has {name: β}.
     // Body should contain string (from "default" and x.name).
     assert!(
-        formatted.contains("string") || matches!(*body, OutputTy::Primitive(PrimitiveTy::String)),
+        formatted.contains("string")
+            || matches!(body.output_ty(), OutputTy::Primitive(PrimitiveTy::String)),
         "mixed &&: body should contain string type, got: {formatted}"
+    );
+}
+
+/// Regression: nested `? field` narrowing with `@args` pattern.
+/// `{ x ? 1, ... }@args: if args ? y then (if args ? z then args.z else 0) else 0`
+///
+/// When narrowing is nested (inner `? z` inside outer `? y` then-branch),
+/// the inner narrowing override should compose with the outer one so that
+/// field access works in the deeply-narrowed branch.
+///
+/// Previously, `compute_narrow_override` created `Inter(Inter(var, {y}), {z})`.
+/// MLstruct isolation would unwrap the nested Inter and add spurious `¬{y}`
+/// constraints to the base variable, causing false type errors.
+#[test]
+fn narrow_nested_hasattr_at_pattern() {
+    let nix = indoc! {"
+        { x ? 1, ... }@args:
+          if args ? y then
+            if args ? z then
+              args.z
+            else
+              0
+          else
+            0
+    "};
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert!(
+        matches!(
+            body.output_ty(),
+            OutputTy::Primitive(PrimitiveTy::Int) | OutputTy::Union(_)
+        ),
+        "nested hasattr with @ should not error, got: {body}"
+    );
+}
+
+/// Regression: `args ? pname && args ? version` with `@args` pattern.
+/// This is the `buildFHSEnv.nix` pattern from nixpkgs that was producing
+/// false `expected ~{ pname: ... }` errors.
+#[test]
+fn narrow_and_hasattr_at_pattern() {
+    let nix = indoc! {r#"
+        { profile ? "", ... }@args:
+        let
+          name = if (args ? pname && args ? version)
+            then "${args.pname}-${args.version}"
+            else args.name;
+        in
+        name
+    "#};
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(
+        body,
+        expected_ty!(String),
+        "&&-hasattr with @ should produce string, got: {body}"
     );
 }
 
@@ -5734,7 +6297,7 @@ fn has_field_missing_at_call_site() {
 fn has_field_uncalled_polymorphic_no_error() {
     let ty = get_inferred_root("x: x.y");
     assert!(
-        matches!(ty, OutputTy::Lambda { .. }),
+        matches!(ty.output_ty(), OutputTy::Lambda { .. }),
         "expected lambda, got: {ty}"
     );
 }
@@ -5953,7 +6516,7 @@ fn functor_attrset_callable() {
         obj 10
     "};
     let ty = get_inferred_root(nix);
-    assert_eq!(ty, arc_ty!(Int));
+    assert_eq!(ty, expected_ty!(Int));
 }
 
 /// An attrset with `__functor` can be passed where a function is expected.
@@ -5967,7 +6530,7 @@ fn functor_attrset_as_function_arg() {
         apply obj
     "};
     let ty = get_inferred_root(nix);
-    assert_eq!(ty, arc_ty!(Int));
+    assert_eq!(ty, expected_ty!(Int));
 }
 
 /// `__functor`'s `self` parameter receives the attrset itself, allowing
@@ -5981,7 +6544,7 @@ fn functor_self_accesses_fields() {
         obj 5
     "};
     let ty = get_inferred_root(nix);
-    assert_eq!(ty, arc_ty!(Int));
+    assert_eq!(ty, expected_ty!(Int));
 }
 
 /// An attrset without `__functor` cannot be called as a function.
@@ -6015,7 +6578,7 @@ fn or_short_circuit_null_guard() {
     let nix = "x: x == null || x + 1 > 0";
     let ty = get_inferred_root(nix);
     let (_, body) = unwrap_lambda(&ty);
-    assert_eq!(*body, arc_ty!(Bool));
+    assert_eq!(body, expected_ty!(Bool));
 }
 
 /// `&&` short-circuit: RHS of `&&` runs when LHS is true, so it gets
@@ -6026,7 +6589,7 @@ fn and_short_circuit_null_guard_field_access() {
     let nix = r#"x: (x != null) && (builtins.isString x.name)"#;
     let ty = get_inferred_root(nix);
     let (_, body) = unwrap_lambda(&ty);
-    assert_eq!(*body, arc_ty!(Bool));
+    assert_eq!(body, expected_ty!(Bool));
 }
 
 /// `||` with isNull: `isNull x || expr` — RHS gets else-branch narrowing
@@ -6036,7 +6599,7 @@ fn or_short_circuit_isnull() {
     let nix = "x: builtins.isNull x || x + 1 > 0";
     let ty = get_inferred_root(nix);
     let (_, body) = unwrap_lambda(&ty);
-    assert_eq!(*body, arc_ty!(Bool));
+    assert_eq!(body, expected_ty!(Bool));
 }
 
 /// `&&` with isString: `isString x && stringLength x > 0` — RHS gets
@@ -6046,7 +6609,7 @@ fn and_short_circuit_isstring() {
     let nix = "x: builtins.isString x && builtins.stringLength x > 0";
     let ty = get_inferred_root(nix);
     let (_, body) = unwrap_lambda(&ty);
-    assert_eq!(*body, arc_ty!(Bool));
+    assert_eq!(body, expected_ty!(Bool));
 }
 
 // ==============================================================================
@@ -6071,7 +6634,7 @@ fn narrow_null_let_bound_from_generalized_fn() {
         if index == null then 99 else index + 1
     "};
     let ty = get_inferred_root(nix);
-    assert_eq!(ty, arc_ty!(Int));
+    assert_eq!(ty, expected_ty!(Int));
 }
 
 /// Same pattern with a recursive function — the SCC grouping and generalization
@@ -6103,7 +6666,7 @@ fn narrow_null_let_bound_recursive_fn() {
 fn builtin_store_path() {
     let nix = "builtins.storePath /nix/store/abc";
     let ty = get_inferred_root(nix);
-    assert_eq!(ty, arc_ty!(Path));
+    assert_eq!(ty, expected_ty!(Path));
 }
 
 /// Stub-derived polymorphic types must be freshly instantiated at each use site.
@@ -6227,7 +6790,7 @@ fn inline_alias_orphan_block_comment() {
         in mkPair 1 "hello"
     "#});
     // Result should be an attrset with fst: int, snd: string
-    match &ty {
+    match ty.output_ty() {
         OutputTy::AttrSet(attr) => {
             assert!(attr.fields.contains_key("fst"));
             assert!(attr.fields.contains_key("snd"));
@@ -6246,7 +6809,7 @@ fn inline_alias_attached_to_binding() {
           wrap = value: { ok = true; inherit value; };
         in wrap 42
     "#});
-    match &ty {
+    match ty.output_ty() {
         OutputTy::AttrSet(attr) => {
             assert!(attr.fields.contains_key("ok"));
             assert!(attr.fields.contains_key("value"));
@@ -6265,7 +6828,7 @@ fn inline_alias_line_comment() {
           wrap = inner: { inherit inner; };
         in wrap 42
     "#});
-    match &ty {
+    match ty.output_ty() {
         OutputTy::AttrSet(attr) => {
             assert!(attr.fields.contains_key("inner"));
         }
@@ -6284,7 +6847,7 @@ fn inline_alias_multiple() {
           mkTriple = fst: snd: thd: { inherit fst snd thd; };
         in mkTriple 1 "two" 3.0
     "#});
-    match &ty {
+    match ty.output_ty() {
         OutputTy::AttrSet(attr) => {
             assert!(attr.fields.contains_key("fst"));
             assert!(attr.fields.contains_key("snd"));
@@ -6309,14 +6872,14 @@ fn inline_alias_shadows_stub() {
     "#};
     let ty = get_inferred_root_with_aliases(nix_src, &registry);
     // The result may be wrapped in Named("Thing", ...) due to alias provenance
-    let inner = match &ty {
+    let inner_ref = match ty.output_ty() {
         OutputTy::Named(name, inner) => {
             assert_eq!(name.as_str(), "Thing");
-            inner.0.as_ref()
+            *inner
         }
-        other => other,
+        _ => ty.ty,
     };
-    match inner {
+    match &ty.arena[inner_ref] {
         OutputTy::AttrSet(attr) => {
             assert!(
                 attr.fields.contains_key("new"),
@@ -6339,7 +6902,7 @@ fn inline_alias_ignores_normal_comments() {
         # type of x is int
         let x = 1; in x
     "});
-    assert_eq!(ty, arc_ty!(Int));
+    assert_eq!(ty, expected_ty!(Int));
 }
 
 /// Inline alias referenced by another inline alias.
@@ -6354,11 +6917,11 @@ fn inline_alias_references_another() {
         in mk 42
     "#});
     // Outer references Inner — both should be resolved
-    match &ty {
+    match ty.output_ty() {
         OutputTy::AttrSet(attr) => {
             assert!(attr.fields.contains_key("wrapped"));
         }
-        OutputTy::Named(_, inner) => match inner.0.as_ref() {
+        OutputTy::Named(_, inner) => match &ty.arena[*inner] {
             OutputTy::AttrSet(attr) => {
                 assert!(attr.fields.contains_key("wrapped"));
             }
@@ -6375,13 +6938,6 @@ fn inline_alias_references_another() {
 /// Helper: type-check with CheckBuilder (which includes lowering
 /// diagnostics) and return just the diagnostics.
 fn collect_diagnostics(src: &str) -> Vec<TixDiagnostic> {
-    collect_diagnostics_with_deadline(src, None)
-}
-
-fn collect_diagnostics_with_deadline(
-    src: &str,
-    deadline: Option<std::time::Instant>,
-) -> Vec<TixDiagnostic> {
     let (db, file) = TestDatabase::single_file(src).unwrap();
     let result = crate::CheckBuilder::from_db(
         &db,
@@ -6390,7 +6946,6 @@ fn collect_diagnostics_with_deadline(
         HashMap::new(),
         Arc::default(),
     )
-    .deadline(deadline)
     .run();
     result.diagnostics
 }
@@ -6546,7 +7101,7 @@ fn mkderivation_pname_version() {
     "# };
     let ty = get_inferred_root_with_aliases(nix_src, &registry);
     assert!(
-        matches!(&ty, lang_ty::OutputTy::Named(name, _) if name == "Derivation"),
+        matches!(ty.output_ty(), lang_ty::OutputTy::Named(name, _) if name == "Derivation"),
         "direct pname+version should produce Derivation, got: {ty}"
     );
 
@@ -6556,7 +7111,7 @@ fn mkderivation_pname_version() {
     "# };
     let ty2 = get_inferred_root_with_aliases(nix_src2, &registry);
     assert!(
-        matches!(&ty2, lang_ty::OutputTy::Named(name, _) if name == "Derivation"),
+        matches!(ty2.output_ty(), lang_ty::OutputTy::Named(name, _) if name == "Derivation"),
         "finalAttrs pname+version should produce Derivation, got: {ty2}"
     );
 }
@@ -6649,10 +7204,11 @@ fn pkgs_annotation_with_nested_union_resolves_field_access() {
     let (module, inference) = check_str_with_aliases(nix_src, &registry);
     let inference = inference.expect("should not produce a type error");
 
-    let root_ty = inference
+    let root_ref = *inference
         .expr_ty_map
         .get(module.entry_expr)
         .expect("root should have a type");
+    let root_ty = RootTy::new(root_ref, inference.arena.clone());
 
     let formatted = format!("{root_ty}");
     assert!(
@@ -6691,10 +7247,11 @@ fn non_function_let_binding_with_nested_union_resolves_field_access() {
     let (module, inference) = check_str_with_aliases(nix_src, &registry);
     let inference = inference.expect("should not produce a type error");
 
-    let root_ty = inference
+    let root_ref = *inference
         .expr_ty_map
         .get(module.entry_expr)
         .expect("root should have a type");
+    let root_ty = RootTy::new(root_ref, inference.arena.clone());
 
     let formatted = format!("{root_ty}");
     assert!(
@@ -6738,13 +7295,14 @@ fn function_union_annotation_still_skips() {
         .expect("inference should succeed with union-alias annotation on function");
 
     let mod_ = module(&db, file);
-    let root_ty = inference
+    let root_ref = *inference
         .expr_ty_map
         .get(mod_.entry_expr)
         .expect("root should have a type");
+    let root_ty = RootTy::new(root_ref, inference.arena.clone());
     assert_eq!(
-        *root_ty,
-        arc_ty!(String),
+        root_ty,
+        expected_ty!(String),
         "root should be string, got: {root_ty}"
     );
 
@@ -6776,15 +7334,15 @@ fn function_union_annotation_still_skips() {
 #[test]
 fn let_binding_preserves_union() {
     let ty = get_inferred_root(r#"let x = if true then 1 else "hi"; in x"#);
-    match &ty {
+    match ty.output_ty() {
         OutputTy::Union(members) => {
             assert_eq!(members.len(), 2, "expected 2 union members, got: {ty}");
             let has_int = members
                 .iter()
-                .any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::Int)));
+                .any(|m| matches!(&ty.arena[*m], OutputTy::Primitive(PrimitiveTy::Int)));
             let has_string = members
                 .iter()
-                .any(|m| matches!(&*m.0, OutputTy::Primitive(PrimitiveTy::String)));
+                .any(|m| matches!(&ty.arena[*m], OutputTy::Primitive(PrimitiveTy::String)));
             assert!(has_int, "union should contain int, got: {ty}");
             assert!(has_string, "union should contain string, got: {ty}");
         }
@@ -6822,14 +7380,10 @@ fn rec_failed_def_not_reinferred() {
         }
     "};
 
-    // Use a tight deadline to catch performance regression: the fixed version
-    // completes in <10ms, the broken version would take seconds.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    let diags = collect_diagnostics_with_deadline(nix, Some(deadline));
+    let diags = collect_diagnostics(nix);
 
-    // Should complete well within the deadline. The test itself is the perf
-    // assertion: if the re-inference bug regresses, this would either timeout
-    // or take an unreasonable time.
+    // The test itself is the perf assertion: if the re-inference bug
+    // regresses, this would take an unreasonable time.
     assert!(
         !diags.is_empty(),
         "should have type errors from mkValue's type mismatch"
@@ -6880,11 +7434,11 @@ fn intersection_annotation_in_stub_produces_concrete_inter() {
 
     let (module, inference) = check_str_with_aliases(nix_src, &registry);
     let inference = inference.expect("inference should succeed with intersection annotation");
-    let root_ty = inference
+    let root_ref = *inference
         .expr_ty_map
         .get(module.entry_expr)
         .expect("root type should exist");
-    let formatted = format!("{root_ty}");
+    let formatted = format!("{}", inference.arena.display(root_ref));
     assert!(
         formatted.contains("name") && formatted.contains("string"),
         "expected `name: string` in output, got: {formatted}"
@@ -6909,11 +7463,11 @@ fn extrude_caches_changed_concrete_types() {
 
     let (module, inference) = check_str(nix_src);
     let inference = inference.expect("inference should succeed");
-    let root_ty = inference
+    let root_ref = *inference
         .expr_ty_map
         .get(module.entry_expr)
         .expect("root type should exist");
-    let formatted = format!("{root_ty}");
+    let formatted = format!("{}", inference.arena.display(root_ref));
     // All three fields should be present with [int] type.
     for field in ["a", "b", "c"] {
         assert!(
@@ -6986,10 +7540,10 @@ fn functor_polymorphic_body() {
         let obj = { __functor = self: x: x; }; in { a = obj 1; b = obj \"hi\"; }
     "};
     let ty = get_inferred_root(nix);
-    match &ty {
+    match ty.output_ty() {
         OutputTy::AttrSet(attr) => {
-            assert_eq!(*attr.fields["a"].0, arc_ty!(Int));
-            assert_eq!(*attr.fields["b"].0, arc_ty!(String));
+            assert_eq!(ty.child(attr.fields["a"]), expected_ty!(Int));
+            assert_eq!(ty.child(attr.fields["b"]), expected_ty!(String));
         }
         _ => panic!("expected attrset, got: {ty}"),
     }
@@ -7002,88 +7556,7 @@ fn functor_chained_call() {
         let obj = { __functor = self: x: y: x + y; }; in obj 1 2
     "};
     let ty = get_inferred_root(nix);
-    assert_eq!(ty, arc_ty!(Int));
-}
-
-// ==============================================================================
-// Timeout / partial results
-// ==============================================================================
-
-/// A past deadline causes timed_out=true.
-#[test]
-fn timeout_produces_partial_results() {
-    use std::collections::HashMap;
-    use std::sync::Arc;
-    use std::time::{Duration, Instant};
-
-    let src = "let x = 1; y = 2; in x + y";
-    let (db, file) = lang_ast::tests::TestDatabase::single_file(src).unwrap();
-    let past = Instant::now() - Duration::from_secs(1);
-    let result = crate::CheckBuilder::from_db(
-        &db,
-        file,
-        Arc::new(TypeAliasRegistry::new()),
-        HashMap::new(),
-        Arc::new(HashMap::new()),
-    )
-    .deadline(Some(past))
-    .run();
-
-    assert!(
-        result.timed_out,
-        "should report timed_out with past deadline"
-    );
-}
-
-/// A pre-set cancel flag causes early exit.
-#[test]
-fn cancel_flag_stops_inference() {
-    use std::collections::HashMap;
-    use std::sync::atomic::AtomicBool;
-    use std::sync::Arc;
-
-    let src = "let x = 1; y = 2; in x + y";
-    let (db, file) = lang_ast::tests::TestDatabase::single_file(src).unwrap();
-    let cancel = Arc::new(AtomicBool::new(true));
-    let result = crate::CheckBuilder::from_db(
-        &db,
-        file,
-        Arc::new(TypeAliasRegistry::new()),
-        HashMap::new(),
-        Arc::new(HashMap::new()),
-    )
-    .cancel_flag(Some(cancel))
-    .run();
-
-    assert!(
-        result.timed_out,
-        "pre-set cancel flag should cause timed_out"
-    );
-}
-
-/// Timeout diagnostic lists missing bindings when not all were inferred.
-#[test]
-fn timeout_diagnostic_lists_missing_bindings() {
-    use std::collections::HashMap;
-    use std::sync::Arc;
-    use std::time::{Duration, Instant};
-
-    let src = "let a = 1; b = 2; c = 3; d = 4; e = 5; in a + b + c + d + e";
-    let (db, file) = lang_ast::tests::TestDatabase::single_file(src).unwrap();
-    let past = Instant::now() - Duration::from_secs(1);
-    let result = crate::CheckBuilder::from_db(
-        &db,
-        file,
-        Arc::new(TypeAliasRegistry::new()),
-        HashMap::new(),
-        Arc::new(HashMap::new()),
-    )
-    .deadline(Some(past))
-    .run();
-
-    assert!(result.timed_out, "should report timed_out");
-    // CheckBuilder.run() sets timed_out; the InferenceTimeout diagnostic is
-    // attached by the Salsa-level wrapper. Verify the flag is set.
+    assert_eq!(ty, expected_ty!(Int));
 }
 
 // ==============================================================================
@@ -7097,20 +7570,20 @@ fn with_polymorphic_env() {
     let nix = r#"f: with f; with { y = 1; }; { a = x; b = y; }"#;
     let ty = get_inferred_root(nix);
     // Should be a lambda — f is a parameter.
-    match &ty {
+    match ty.output_ty() {
         OutputTy::Lambda { body, .. } => {
-            match &*body.0 {
+            match &ty.arena[*body] {
                 OutputTy::AttrSet(attr) => {
                     assert!(attr.fields.contains_key("a"), "should have field a");
                     assert!(attr.fields.contains_key("b"), "should have field b");
                     // b should be int (from the inner with { y = 1; })
                     assert_eq!(
-                        *attr.fields["b"].0,
-                        arc_ty!(Int),
+                        ty.child(attr.fields["b"]),
+                        expected_ty!(Int),
                         "y should resolve to int from inner with"
                     );
                 }
-                other => panic!("expected attrset body, got: {other}"),
+                other => panic!("expected attrset body, got: {other:?}"),
             }
         }
         _ => panic!("expected lambda, got: {ty}"),
@@ -7132,7 +7605,7 @@ fn inter_both_vars_arithmetic() {
         in x + 1
     "#};
     let ty = get_inferred_root(nix);
-    assert_eq!(ty, arc_ty!(Int));
+    assert_eq!(ty, expected_ty!(Int));
 }
 
 /// Doc-comment annotation `a & b` on an attrset: field access works.
@@ -7145,7 +7618,7 @@ fn inter_both_vars_field_access() {
         in x.name
     "#};
     let ty = get_inferred_root(nix);
-    assert_eq!(ty, arc_ty!(String));
+    assert_eq!(ty, expected_ty!(String));
 }
 
 /// Doc-comment annotation `a & b` on a lambda: application works.
@@ -7158,5 +7631,5 @@ fn inter_both_vars_as_function() {
         in f 1
     "#};
     let ty = get_inferred_root(nix);
-    assert_eq!(ty, arc_ty!(Int));
+    assert_eq!(ty, expected_ty!(Int));
 }

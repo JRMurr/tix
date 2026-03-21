@@ -27,7 +27,7 @@ nix build .#                         # Build with nix
 tixc test/basic.nix             # Type-check a local .nix file
 tixc nixpkgs:lib/strings.nix    # Type-check a nixpkgs file (requires nix)
 tixc --release test/basic.nix   # Type-check with release build
-tixc --release --time --timeout 120 nixpkgs:lib/strings.nix --timing  # Release + RSS tracking + deadline
+tixc --release --time nixpkgs:lib/strings.nix --timing  # Release + RSS tracking
 nixpkgs-lib-test                              # Run tix on nixpkgs lib/ sequentially (requires nix)
 nixpkgs-lib-test --parallel                   # Parallel inference via `tix check` (requires nix)
 nixpkgs-lib-test --parallel --timing -j 4     # With timing + thread limit
@@ -36,7 +36,7 @@ nixpkgs-lib-test --parallel --release --timing  # Parallel + release + timing
 nixpkgs-test                                  # Run tix on ALL of nixpkgs (parallel, requires nix)
 nixpkgs-test pkgs/                            # Check only pkgs/ subdirectory
 nixpkgs-test --release --timing lib/ nixos/   # Check lib/ + nixos/ with timing
-nixpkgs-test --deadline 10 -j 4              # Custom deadline + thread limit
+nixpkgs-test -j 4                            # Custom thread limit
 ```
 
 

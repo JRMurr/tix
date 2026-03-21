@@ -42,6 +42,7 @@ impl TypeHead {
             Ty::Inter(_, _) => TypeHead::Inter,
             Ty::Union(_, _) => TypeHead::Union,
             Ty::Named(_, _) => TypeHead::Named,
+            Ty::Frozen(_) => TypeHead::Named, // conservative — rare path
         }
     }
 }
@@ -219,6 +220,7 @@ impl TypeTable {
                     self.variable_free.contains(a) && self.variable_free.contains(b)
                 }
                 Ty::Neg(i) | Ty::Named(_, i) => self.variable_free.contains(i),
+                Ty::Frozen(_) => true, // always variable-free (no TyIds)
             },
         };
         if children_vf {

@@ -153,7 +153,7 @@ Type-check all files in a project using the `tix.toml` configuration:
 tix check
 ```
 
-This discovers all `.nix` files, applies context from `tix.toml`, type-checks each file in parallel, and prints a summary. It also validates that file classifications match their configured contexts (e.g., warns if a NixOS module isn't in any `[context.nixos]` section).
+This discovers all `.nix` files, applies context from `tix.toml`, and type-checks them in parallel using layered inference. Files are sorted by their import dependencies so that types flow between files — if `a.nix` imports `b.nix`, `b.nix` is inferred first and `a.nix` gets its real type. It also validates that file classifications match their configured contexts (e.g., warns if a NixOS module isn't in any `[context.nixos]` section).
 
 ```bash
 tix check --verbose    # Show file classifications

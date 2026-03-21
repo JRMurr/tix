@@ -215,8 +215,6 @@ mod tests {
     fn parse_config_with_project_section() {
         let toml_str = r#"
             stubs = ["./stubs"]
-            deadline = 30
-
             [project]
             analyze = ["lib/*.nix"]
             exclude = ["vendor/**", "result"]
@@ -226,7 +224,6 @@ mod tests {
             stubs = ["@nixos"]
         "#;
         let config: TixConfig = toml::from_str(toml_str).expect("parse error");
-        assert_eq!(config.deadline, Some(30));
         let project = config.project.as_ref().unwrap();
         assert_eq!(project.analyze, vec!["lib/*.nix"]);
         assert_eq!(project.exclude, vec!["vendor/**", "result"]);

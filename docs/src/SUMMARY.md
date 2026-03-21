@@ -16,7 +16,7 @@
   - [E005: Unresolved Name](./diagnostics/e005.md)
   - [E006: Duplicate Key](./diagnostics/e006.md)
   - [E007: Import Not Found](./diagnostics/e007.md)
-  - [E008: Inference Timeout](./diagnostics/e008.md)
+  - [E008: Inference Aborted](./diagnostics/e008.md)
   - [E009: Annotation Arity Mismatch](./diagnostics/e009.md)
   - [E010: Annotation Not Verified](./diagnostics/e010.md)
   - [E011: Annotation Parse Error](./diagnostics/e011.md)

@@ -295,7 +295,7 @@ fn add_type_annotation_actions(
             continue;
         }
 
-        let ty_str = ty.to_string();
+        let ty_str = inference.arena.display(*ty).to_string();
         let name_text = &name.text;
 
         // Insert position: start of the line containing the name binding.

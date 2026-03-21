@@ -15,12 +15,10 @@
 // interactive requests (hover, completion) immediately.
 //
 // Cancellation: when a new edit arrives for a file that's currently being
-// analyzed, the in-flight analysis is cancelled via an Arc<AtomicBool> flag
-// that's checked periodically by the inference engine (alongside the existing
-// deadline mechanism). This avoids blocking the editor while waiting for a
-// 10-second timeout on a stale version of the file.
+// analyzed, the analysis loop checks the cancel flag between phases so it
+// can re-coalesce edits without waiting for inference to complete.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -63,6 +61,10 @@ enum AnalysisEvent {
     FileClosed { path: PathBuf },
     /// Re-analyze a file because one of its imports' ephemeral stub changed.
     ReanalyzeFile { path: PathBuf },
+    /// Batch warmup completed. Carry results for the analysis loop to merge.
+    WarmupComplete {
+        results: Vec<crate::warmup::WarmupFileResult>,
+    },
 }
 
 pub struct TixLanguageServer {
@@ -85,10 +87,6 @@ pub struct TixLanguageServer {
     /// InferenceData after type inference completes. Handlers read from
     /// this without ever locking the analysis mutex.
     snapshots: Arc<DashMap<PathBuf, FileSnapshot>>,
-    /// Queue for background analysis files from `[project] analyze` globs.
-    /// Processed one-at-a-time during idle periods (no pending user events),
-    /// ensuring user edits always take priority.
-    background_queue: Arc<Mutex<VecDeque<(PathBuf, String)>>>,
     /// Shared diagnostics config — the analysis loop reads this to determine
     /// what diagnostics to emit. Updated by `did_change_configuration`.
     diag_config: Arc<Mutex<DiagnosticsConfig>>,
@@ -99,6 +97,13 @@ pub struct TixLanguageServer {
 
 impl TixLanguageServer {
     pub fn new(client: Client, registry: TypeAliasRegistry, rss_limit_mb: Option<f64>) -> Self {
+        // Initialize rayon's global thread pool with 16 MB stacks, matching the
+        // CLI. Deep recursion on large files needs this to avoid stack overflow.
+        rayon::ThreadPoolBuilder::new()
+            .stack_size(16 * 1024 * 1024)
+            .build_global()
+            .ok(); // Ignored if pool already initialized.
+
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let mut analysis_state = AnalysisState::new(registry);
         analysis_state.rss_limit_mb = rss_limit_mb;
@@ -108,16 +113,14 @@ impl TixLanguageServer {
         // import resolution.
         let coordinator = Arc::clone(&analysis_state.coordinator);
 
-        let syntax_provider = Arc::new(crate::state::LspSyntaxProvider::new(
-            Arc::clone(&analysis_state.registry),
-            analysis_state.deadline_secs,
-        ));
+        let syntax_provider = Arc::new(crate::state::LspSyntaxProvider::new(Arc::clone(
+            &analysis_state.registry,
+        )));
 
         let state = Arc::new(Mutex::new(analysis_state));
         let pending_text = Arc::new(Mutex::new(HashMap::new()));
         let cancel_flag = Arc::new(AtomicBool::new(false));
         let snapshots = Arc::new(DashMap::new());
-        let background_queue = Arc::new(Mutex::new(VecDeque::new()));
         let diag_config = Arc::new(Mutex::new(DiagnosticsConfig::default()));
 
         // Spawn the analysis loop eagerly. Diagnostics default to enabled;
@@ -131,7 +134,6 @@ impl TixLanguageServer {
             pending_text.clone(),
             cancel_flag.clone(),
             snapshots.clone(),
-            background_queue.clone(),
             diag_config.clone(),
             coordinator,
             syntax_provider.clone(),
@@ -145,7 +147,6 @@ impl TixLanguageServer {
             cancel_flag,
             pending_text,
             snapshots,
-            background_queue,
             diag_config,
             syntax_provider,
         }
@@ -256,7 +257,6 @@ fn spawn_analysis_loop(
     pending_text: Arc<Mutex<HashMap<PathBuf, String>>>,
     cancel_flag: Arc<AtomicBool>,
     _snapshots: Arc<DashMap<PathBuf, FileSnapshot>>,
-    background_queue: Arc<Mutex<VecDeque<(PathBuf, String)>>>,
     diag_config: Arc<Mutex<DiagnosticsConfig>>,
     coordinator: Arc<lang_check::coordinator::InferenceCoordinator>,
     lsp_syntax_provider: Arc<crate::state::LspSyntaxProvider>,
@@ -303,7 +303,8 @@ fn spawn_analysis_loop(
                                 | AnalysisEvent::ReanalyzeFile { path } => {
                                     pending_diags.remove(path);
                                 }
-                                AnalysisEvent::FileClosed { .. } => {}
+                                AnalysisEvent::FileClosed { .. }
+                                | AnalysisEvent::WarmupComplete { .. } => {}
                             }
                             diag_timer = None;
                             Some(ev)
@@ -311,13 +312,6 @@ fn spawn_analysis_loop(
                         None => return,
                     }
                 }
-            } else if !background_queue.lock().is_empty() {
-                // Background queue has items — don't block indefinitely.
-                // Try to receive a user event; if none, fall through to
-                // the background queue processing below with empty changes.
-                // Yield first so the runtime can process incoming LSP messages.
-                tokio::task::yield_now().await;
-                rx.try_recv().ok()
             } else {
                 match rx.recv().await {
                     Some(ev) => Some(ev),
@@ -332,42 +326,16 @@ fn spawn_analysis_loop(
             // text per file matters.
             let mut changes: HashMap<PathBuf, String> = HashMap::new();
             let mut closed: Vec<PathBuf> = Vec::new();
+            let mut warmup_results: Vec<crate::warmup::WarmupFileResult> = Vec::new();
 
-            // Process the first event (None when the background queue woke us).
-            if let Some(first_event) = first_event {
-                match first_event {
-                    AnalysisEvent::FileChanged {
-                        path,
-                        text,
-                        version,
-                    } => {
-                        if let Some(v) = version {
-                            file_versions.insert(path.clone(), v);
-                        }
-                        changes.insert(path, text);
-                    }
-                    AnalysisEvent::FileClosed { path } => {
-                        closed.push(path);
-                    }
-                    AnalysisEvent::ReanalyzeFile { path } => {
-                        // Re-analysis: read the file's current text from the Salsa DB.
-                        let text = {
-                            let st = state.lock();
-                            st.files
-                                .get(&path)
-                                .map(|a| a.nix_file.contents(&st.db).to_owned())
-                        };
-                        if let Some(text) = text {
-                            changes.insert(path, text);
-                        } else {
-                            log::debug!("ReanalyzeFile for {:?}: file not in DB, skipping", path);
-                        }
-                    }
-                }
-            }
-
-            // Drain remaining (like RA's coalesce loop).
-            while let Ok(event) = rx.try_recv() {
+            // Helper closure: process a single AnalysisEvent into the
+            // appropriate accumulator.
+            let process_event = |event: AnalysisEvent,
+                                 changes: &mut HashMap<PathBuf, String>,
+                                 closed: &mut Vec<PathBuf>,
+                                 warmup_results: &mut Vec<crate::warmup::WarmupFileResult>,
+                                 file_versions: &mut HashMap<PathBuf, i32>,
+                                 state: &Mutex<AnalysisState>| {
                 match event {
                     AnalysisEvent::FileChanged {
                         path,
@@ -396,7 +364,34 @@ fn spawn_analysis_loop(
                             log::debug!("ReanalyzeFile for {:?}: file not in DB, skipping", path);
                         }
                     }
+                    AnalysisEvent::WarmupComplete { results } => {
+                        warmup_results.extend(results);
+                    }
                 }
+            };
+
+            // Process the first event (None when the background queue woke us).
+            if let Some(first_event) = first_event {
+                process_event(
+                    first_event,
+                    &mut changes,
+                    &mut closed,
+                    &mut warmup_results,
+                    &mut file_versions,
+                    &state,
+                );
+            }
+
+            // Drain remaining (like RA's coalesce loop).
+            while let Ok(event) = rx.try_recv() {
+                process_event(
+                    event,
+                    &mut changes,
+                    &mut closed,
+                    &mut warmup_results,
+                    &mut file_versions,
+                    &state,
+                );
             }
 
             // Handle closed files: remove from pending diagnostics, versions,
@@ -413,36 +408,82 @@ fn spawn_analysis_loop(
                 }
             }
 
-            // If no user-driven changes are pending, check the background
-            // queue for project analyze files. Process one at a time so user
-            // edits always take priority.
-            let is_background = changes.is_empty();
-            if is_background {
-                // Check RSS before dequeuing a background file. If memory
-                // pressure is high, skip background analysis to avoid OOM.
-                // Stop when RSS reaches the inference limit — any further
-                // files would bail out immediately anyway, just wasting
-                // memory on parsing without producing useful types.
-                let rss_limit = state.lock().rss_limit_mb;
-                if let Some(limit) = rss_limit {
-                    let rss = lang_check::rss_mb();
-                    if rss > limit {
-                        let remaining = background_queue.lock().len();
-                        if remaining > 0 {
-                            log::warn!(
-                                "skipping {remaining} background files: RSS {:.0}MB > {:.0}MB limit",
-                                rss,
-                                limit,
-                            );
-                            background_queue.lock().clear();
-                        }
+            // ── Warmup result merging ──
+            //
+            // If the batch warmup completed, merge its results into LSP state.
+            // Skip files that the user already opened/edited (they have fresher
+            // analysis from the normal event path).
+            if !warmup_results.is_empty() {
+                log::info!(
+                    "merging {} warmup results into LSP state",
+                    warmup_results.len()
+                );
+                let dc = diag_config.lock().clone();
+
+                for result in warmup_results {
+                    // Skip if user already opened this file (has a version).
+                    if file_versions.contains_key(&result.path) {
+                        log::debug!(
+                            "warmup: skipping {} (user already opened)",
+                            result.path.display()
+                        );
                         continue;
                     }
+
+                    // Skip if there's already a snapshot with inference data
+                    // (e.g. from demand-driven inference triggered by a user file).
+                    if _snapshots
+                        .get(&result.path)
+                        .is_some_and(|s| s.inference.is_some())
+                    {
+                        continue;
+                    }
+
+                    // Write snapshot to DashMap (handlers can read immediately).
+                    _snapshots.insert(result.path.clone(), result.to_snapshot());
+
+                    // Record import deps and store in legacy state.files.
+                    {
+                        let mut st = state.lock();
+                        st.record_import_deps(&result.path, &result.import_paths);
+                        // Signature is already in the coordinator (set during warmup).
+                        st.files.insert(result.path.clone(), result.file_analysis);
+                    }
+
+                    // Buffer diagnostics for quiescence publication.
+                    if dc.enable {
+                        if let Some(snap) = _snapshots.get(&result.path) {
+                            let root = snap.syntax.parsed.tree();
+                            let file_uri = Url::from_file_path(&result.path)
+                                .unwrap_or_else(|_| Url::parse("file:///unknown").unwrap());
+                            let mut diags = crate::diagnostics::to_lsp_diagnostics(
+                                &result.diagnostics,
+                                &snap.syntax.source_map,
+                                &snap.syntax.line_index,
+                                &root,
+                                &file_uri,
+                            );
+                            diags.extend(crate::diagnostics::unknown_type_diagnostics(
+                                &result.inference_data.check_result,
+                                &snap.syntax.module,
+                                &snap.syntax.source_map,
+                                &snap.syntax.line_index,
+                                &root,
+                                dc.unknown_type,
+                            ));
+                            pending_diags.insert(result.path.clone(), diags);
+                        }
+                    }
                 }
-                if let Some((path, text)) = background_queue.lock().pop_front() {
-                    log::debug!("background analysis: {}", path.display());
-                    changes.insert(path, text);
-                } else {
+
+                // Start the quiescence timer so diagnostics get published.
+                diag_timer = Some(Box::pin(tokio::time::sleep(Duration::from_millis(
+                    DIAGNOSTIC_QUIESCENCE_MS,
+                ))));
+
+                // If there are no user-driven changes to process, continue to
+                // the next loop iteration (publish diagnostics via quiescence).
+                if changes.is_empty() {
                     continue;
                 }
             }
@@ -510,7 +551,6 @@ fn spawn_analysis_loop(
                         &coordinator,
                         Some(&*lsp_syntax_provider),
                         &intermediate,
-                        Some(cancel_flag.clone()),
                     );
 
                 // Update DashMap with import data from Phase B.
@@ -520,16 +560,11 @@ fn spawn_analysis_loop(
                 }
 
                 // Phase C: Type inference (NO mutex held).
-                // For user-triggered files, skip the RSS limit so editing
-                // works even when RSS is high from background analysis.
-                // The RSS limit exists to prevent background processing
-                // from consuming unbounded memory, not to block active work.
+                // User-triggered files skip the RSS limit so editing works
+                // even when RSS is high. Background files go through warmup.
                 let mut inference_inputs = inference_inputs;
-                if !is_background {
-                    inference_inputs.core.rss_limit_mb = None;
-                }
-                let (check_result, infer_duration) =
-                    crate::state::run_inference(&inference_inputs, Some(cancel_flag.clone()));
+                inference_inputs.core.rss_limit_mb = None;
+                let (check_result, infer_duration) = crate::state::run_inference(&inference_inputs);
 
                 let was_cancelled = cancel_flag.load(Ordering::Relaxed);
                 let total = syntax_duration + import_duration + infer_duration;
@@ -569,20 +604,27 @@ fn spawn_analysis_loop(
 
                 // Extract root type and update ephemeral stub. If the stub
                 // changed, schedule re-analysis for all dependents.
-                let root_ty = file_analysis
+                // Build an OwnedTy from the TyRef + the inference arena so the
+                // type is self-contained (valid across file boundaries).
+                let root_ty: Option<lang_ty::OwnedTy> = file_analysis
                     .check_result
                     .inference
                     .as_ref()
-                    .and_then(|inf| inf.expr_ty_map.get(file_analysis.module.entry_expr))
-                    .cloned();
+                    .and_then(|inf| {
+                        inf.expr_ty_map
+                            .get(file_analysis.module.entry_expr)
+                            .map(|&ty_ref| {
+                                lang_ty::OwnedTy::new(std::sync::Arc::clone(&inf.arena), ty_ref)
+                            })
+                    });
 
                 let mut reanalyze_paths = Vec::new();
                 {
                     let mut st = state.lock();
                     st.files.insert(path.clone(), file_analysis);
                     st.record_import_deps(path, &import_paths);
-                    if let Some(ty) = root_ty {
-                        if st.update_ephemeral_stub(path, ty) {
+                    if let Some(owned_ty) = root_ty {
+                        if st.update_ephemeral_stub(path, owned_ty) {
                             reanalyze_paths = st.get_dependents(path);
                         }
                     }
@@ -734,11 +776,6 @@ impl LanguageServer for TixLanguageServer {
                                 }
                             }
 
-                            if let Some(secs) = project_cfg.deadline {
-                                log::info!("Inference deadline: {secs}s (from tix.toml)");
-                                state.deadline_secs = secs;
-                            }
-
                             // Apply diagnostics overrides from tix.toml (project
                             // config is the base; editor settings override later).
                             if let Some(diag_proj) = &project_cfg.diagnostics {
@@ -763,21 +800,54 @@ impl LanguageServer for TixLanguageServer {
                             self.syntax_provider
                                 .update_config(Some(project_cfg), Some(config_dir));
 
-                            // Queue background analysis for [project] analyze files.
-                            // These go into a separate low-priority queue — the analysis
-                            // loop processes them one-at-a-time only when no user events
-                            // are pending, ensuring user edits always take priority.
+                            // Spawn batch warmup for [project] analyze files.
+                            // Runs on spawn_blocking so the async analysis loop
+                            // stays responsive to user edits during warmup.
                             if !analyze_files.is_empty() {
                                 log::info!(
-                                    "Queuing {} project files for background analysis",
+                                    "Spawning batch warmup for {} project files",
                                     analyze_files.len()
                                 );
-                                let mut bg = self.background_queue.lock();
-                                for file_path in analyze_files {
-                                    if let Ok(text) = std::fs::read_to_string(&file_path) {
-                                        bg.push_back((file_path, text));
+                                let files: Vec<(PathBuf, String)> = analyze_files
+                                    .into_iter()
+                                    .filter_map(|p| {
+                                        std::fs::read_to_string(&p).ok().map(|t| (p, t))
+                                    })
+                                    .collect();
+
+                                let (
+                                    warmup_registry,
+                                    warmup_coordinator,
+                                    warmup_project_config,
+                                    warmup_config_dir,
+                                    warmup_rss_limit,
+                                ) = {
+                                    let st = self.state.lock();
+                                    (
+                                        Arc::clone(&st.registry),
+                                        Arc::clone(&st.coordinator),
+                                        st.project_config.clone(),
+                                        st.config_dir.clone(),
+                                        st.rss_limit_mb,
+                                    )
+                                };
+                                let event_tx = self.event_tx.clone();
+
+                                tokio::task::spawn_blocking(move || {
+                                    let results = crate::warmup::run_batch_warmup(
+                                        files,
+                                        warmup_registry,
+                                        &warmup_coordinator,
+                                        warmup_project_config.as_ref(),
+                                        warmup_config_dir.as_deref(),
+                                        warmup_rss_limit,
+                                    );
+                                    if !results.is_empty() {
+                                        event_tx
+                                            .send(AnalysisEvent::WarmupComplete { results })
+                                            .ok();
                                     }
-                                }
+                                });
                             }
                         }
                         Err(e) => {

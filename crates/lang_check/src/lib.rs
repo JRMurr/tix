@@ -4,6 +4,7 @@ pub(crate) mod collect;
 mod constrain;
 pub mod coordinator;
 pub mod diagnostic;
+pub mod file_graph;
 pub mod imports;
 mod infer;
 pub use infer::rss_mb;
@@ -26,12 +27,10 @@ use diagnostic::TixDiagnostic;
 use infer_expr::{PendingHasField, PendingMerge, PendingOverload, PendingWithFallback};
 use la_arena::ArenaMap;
 use lang_ast::{AstDb, Expr, ExprId, Module, NameId, NameResolution, NixFile, OverloadBinOp};
-use lang_ty::{OutputTy, PrimitiveTy, Ty};
+use lang_ty::{OutputTy, OwnedTy, PrimitiveTy, Ty, TyRef, TypeArena};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
 use thiserror::Error;
 use tracing::instrument;
 use type_table::TypeTable;
@@ -55,7 +54,7 @@ fn load_inline_aliases(
     }
 }
 
-#[instrument(level = "info", skip_all, name = "check_file")]
+#[instrument(level = "info", skip_all, name = "check_file", fields(file = lang_ast::display_path(&file.path(db)).as_str()))]
 #[salsa::tracked]
 pub fn check_file(db: &dyn AstDb, file: NixFile) -> Result<InferenceResult, Box<TixDiagnostic>> {
     check_file_with_aliases(db, file, &TypeAliasRegistry::default())
@@ -78,7 +77,7 @@ pub fn check_file_with_imports(
     db: &dyn AstDb,
     file: NixFile,
     aliases: Arc<TypeAliasRegistry>,
-    import_types: HashMap<ExprId, OutputTy>,
+    import_types: HashMap<ExprId, OwnedTy>,
 ) -> Result<InferenceResult, Box<TixDiagnostic>> {
     let module = lang_ast::module(db, file);
     let name_res = lang_ast::name_resolution(db, file);
@@ -155,19 +154,29 @@ impl From<TyId> for usize {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct InferenceResult {
-    pub name_ty_map: ArenaMap<NameId, OutputTy>,
-    pub expr_ty_map: ArenaMap<ExprId, OutputTy>,
+    pub arena: Arc<TypeArena>,
+    pub name_ty_map: ArenaMap<NameId, TyRef>,
+    pub expr_ty_map: ArenaMap<ExprId, TyRef>,
 }
 
+impl PartialEq for InferenceResult {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.arena, &other.arena)
+            && self.name_ty_map == other.name_ty_map
+            && self.expr_ty_map == other.expr_ty_map
+    }
+}
+impl Eq for InferenceResult {}
+
 impl InferenceResult {
-    pub fn ty_for_name(&self, name: NameId) -> Option<OutputTy> {
-        self.name_ty_map.get(name).cloned()
+    pub fn ty_for_name(&self, name: NameId) -> Option<TyRef> {
+        self.name_ty_map.get(name).copied()
     }
 
-    pub fn ty_for_expr(&self, expr: ExprId) -> Option<OutputTy> {
-        self.expr_ty_map.get(expr).cloned()
+    pub fn ty_for_expr(&self, expr: ExprId) -> Option<TyRef> {
+        self.expr_ty_map.get(expr).copied()
     }
 }
 
@@ -269,9 +278,9 @@ pub struct CheckResult {
     /// Display-ready diagnostics (errors + warnings) with human-readable type
     /// names via OutputTy.
     pub diagnostics: Vec<TixDiagnostic>,
-    /// Whether inference was aborted because the deadline was exceeded.
-    /// Consumers can use this to emit a user-visible timeout diagnostic.
-    pub timed_out: bool,
+    /// Whether inference was aborted due to memory pressure (RSS limit).
+    /// Consumers can use this to emit a user-visible diagnostic.
+    pub bailed_out: bool,
 }
 
 // ==============================================================================
@@ -283,7 +292,7 @@ pub struct CheckResult {
 /// cross-file types without re-inferring the dependency.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileSignature {
-    pub root_ty: OutputTy,
+    pub root_ty: OwnedTy,
 }
 
 /// Pre-import syntax data: everything needed for inference except resolved
@@ -298,7 +307,6 @@ pub struct SyntaxBundle {
     pub grouped_defs: lang_ast::GroupedDefs,
     pub registry: Arc<TypeAliasRegistry>,
     pub context_args: Arc<HashMap<smol_str::SmolStr, ParsedTy>>,
-    pub deadline_secs: Option<u64>,
 }
 
 // ==============================================================================
@@ -317,35 +325,31 @@ pub struct InferenceInputs {
     pub name_res: NameResolution,
     pub grouped_defs: lang_ast::GroupedDefs,
     pub registry: Arc<TypeAliasRegistry>,
-    pub import_types: HashMap<ExprId, OutputTy>,
+    pub import_types: HashMap<ExprId, OwnedTy>,
     pub import_diagnostics: Vec<TixDiagnostic>,
     pub context_args: Arc<HashMap<smol_str::SmolStr, ParsedTy>>,
-    /// Inference deadline in seconds. `None` means no deadline (CLI default).
-    pub deadline_secs: Option<u64>,
     /// RSS limit in MB. When process RSS exceeds this, inference bails out
     /// with partial results to avoid OOM from RLIMIT_AS. `None` means no
     /// RSS-based limit (CLI default).
     pub rss_limit_mb: Option<f64>,
+    /// File path for tracing span context. `None` is fine — the span field
+    /// will just be omitted.
+    pub file_path: Option<std::path::PathBuf>,
 }
 
 /// Run type inference using precomputed syntax data. Does not need the Salsa
-/// database. Consolidates the timeout-diagnostic logic shared by CLI and LSP.
-#[instrument(level = "info", skip_all, name = "run_inference")]
-pub fn run_inference(
-    inputs: &InferenceInputs,
-    cancel_flag: Option<Arc<AtomicBool>>,
-) -> CheckResult {
-    let mut check_result = CheckBuilder::from_inputs(inputs)
-        .cancel_flag(cancel_flag)
-        .run();
+/// database. Consolidates the bail-out diagnostic logic shared by CLI and LSP.
+#[instrument(level = "info", skip_all, name = "run_inference", fields(file = inputs.file_path.as_deref().map(lang_ast::display_path).unwrap_or_default().as_str()))]
+pub fn run_inference(inputs: &InferenceInputs) -> CheckResult {
+    let mut check_result = CheckBuilder::from_inputs(inputs).run();
 
     // Merge import diagnostics.
     check_result
         .diagnostics
         .extend(inputs.import_diagnostics.clone());
 
-    // If inference timed out, add timeout diagnostic.
-    if check_result.timed_out {
+    // If inference bailed out (RSS limit), add diagnostic.
+    if check_result.bailed_out {
         let missing_bindings: Vec<smol_str::SmolStr> = inputs
             .module
             .names()
@@ -367,11 +371,30 @@ pub fn run_inference(
             .collect();
         check_result.diagnostics.push(TixDiagnostic {
             at_expr: inputs.module.entry_expr,
-            kind: diagnostic::TixDiagnosticKind::InferenceTimeout { missing_bindings },
+            kind: diagnostic::TixDiagnosticKind::InferenceAborted { missing_bindings },
         });
     }
 
     check_result
+}
+
+/// Extract a compacted `FileSignature` from a `CheckResult`. Returns `None`
+/// if inference failed or the root expression has no type.
+///
+/// This is the shared logic used by both `tix check` (CLI) and the LSP batch
+/// warmup to build the `OwnedTy` that gets cached in `InferenceCoordinator`.
+pub fn extract_file_signature(
+    check_result: &CheckResult,
+    entry_expr: lang_ast::ExprId,
+) -> Option<FileSignature> {
+    check_result.inference.as_ref().and_then(|inf| {
+        inf.expr_ty_map
+            .get(entry_expr)
+            .copied()
+            .map(|root_ref| FileSignature {
+                root_ty: OwnedTy::new(inf.arena.clone(), root_ref).compact(),
+            })
+    })
 }
 
 // ==============================================================================
@@ -391,10 +414,8 @@ pub struct CheckBuilder {
     indices: lang_ast::ModuleIndices,
     grouped_defs: lang_ast::GroupedDefs,
     aliases: Arc<TypeAliasRegistry>,
-    import_types: HashMap<ExprId, OutputTy>,
+    import_types: HashMap<ExprId, OwnedTy>,
     context_args: Arc<HashMap<smol_str::SmolStr, ParsedTy>>,
-    deadline: Option<Instant>,
-    cancel_flag: Option<Arc<AtomicBool>>,
     rss_limit_mb: Option<f64>,
 }
 
@@ -404,7 +425,7 @@ impl CheckBuilder {
         db: &dyn AstDb,
         file: NixFile,
         aliases: Arc<TypeAliasRegistry>,
-        import_types: HashMap<ExprId, OutputTy>,
+        import_types: HashMap<ExprId, OwnedTy>,
         context_args: Arc<HashMap<smol_str::SmolStr, ParsedTy>>,
     ) -> Self {
         Self {
@@ -415,8 +436,6 @@ impl CheckBuilder {
             aliases,
             import_types,
             context_args,
-            deadline: None,
-            cancel_flag: None,
             rss_limit_mb: None,
         }
     }
@@ -430,7 +449,7 @@ impl CheckBuilder {
         indices: lang_ast::ModuleIndices,
         grouped_defs: lang_ast::GroupedDefs,
         aliases: Arc<TypeAliasRegistry>,
-        import_types: HashMap<ExprId, OutputTy>,
+        import_types: HashMap<ExprId, OwnedTy>,
         context_args: Arc<HashMap<smol_str::SmolStr, ParsedTy>>,
     ) -> Self {
         Self {
@@ -441,8 +460,6 @@ impl CheckBuilder {
             aliases,
             import_types,
             context_args,
-            deadline: None,
-            cancel_flag: None,
             rss_limit_mb: None,
         }
     }
@@ -450,9 +467,6 @@ impl CheckBuilder {
     /// Create a builder from an `InferenceInputs` bundle (used by
     /// `run_inference`).
     pub fn from_inputs(inputs: &InferenceInputs) -> Self {
-        let deadline = inputs
-            .deadline_secs
-            .map(|secs| Instant::now() + std::time::Duration::from_secs(secs));
         Self {
             module: inputs.module.clone(),
             name_res: inputs.name_res.clone(),
@@ -461,28 +475,8 @@ impl CheckBuilder {
             aliases: Arc::clone(&inputs.registry),
             import_types: inputs.import_types.clone(),
             context_args: Arc::clone(&inputs.context_args),
-            deadline,
-            cancel_flag: None,
             rss_limit_mb: inputs.rss_limit_mb,
         }
-    }
-
-    /// Set an optional inference deadline.
-    pub fn deadline(mut self, deadline: Option<Instant>) -> Self {
-        self.deadline = deadline;
-        self
-    }
-
-    /// Set a deadline as seconds from now.
-    pub fn deadline_secs(mut self, secs: u64) -> Self {
-        self.deadline = Some(Instant::now() + std::time::Duration::from_secs(secs));
-        self
-    }
-
-    /// Set an optional cancellation flag for cooperative early exit.
-    pub fn cancel_flag(mut self, flag: Option<Arc<AtomicBool>>) -> Self {
-        self.cancel_flag = flag;
-        self
     }
 
     /// Set an RSS limit in MB for memory-pressure early exit.
@@ -503,16 +497,10 @@ impl CheckBuilder {
             self.import_types,
             self.context_args,
         );
-        if let Some(d) = self.deadline {
-            check = check.with_deadline(d);
-        }
-        if let Some(flag) = self.cancel_flag {
-            check = check.with_cancel_flag(flag);
-        }
         if let Some(limit) = self.rss_limit_mb {
             check = check.with_rss_limit(limit);
         }
-        let (inference, mut diagnostics, timed_out) = check.infer_prog_partial(self.grouped_defs);
+        let (inference, mut diagnostics, bailed_out) = check.infer_prog_partial(self.grouped_defs);
 
         let lower_diags = diagnostic::lower_diagnostics_to_tix(
             &self.module.lower_diagnostics,
@@ -523,7 +511,7 @@ impl CheckBuilder {
         CheckResult {
             inference: Some(inference),
             diagnostics,
-            timed_out,
+            bailed_out,
         }
     }
 }
@@ -584,7 +572,7 @@ pub struct CheckCtx<'db> {
     /// Early-canonicalized types for names, captured at generalization time
     /// before use-site extrusions contaminate polymorphic variables with
     /// concrete bounds.
-    early_canonical: ArenaMap<NameId, OutputTy>,
+    early_canonical: ArenaMap<NameId, (TypeArena, TyRef)>,
 
     /// Type alias registry loaded from .tix declaration files.
     /// Wrapped in Arc for copy-on-write: most files share the registry
@@ -595,7 +583,7 @@ pub struct CheckCtx<'db> {
     /// Pre-computed types for resolved import expressions. When an Apply ExprId
     /// is in this map, its type comes from the imported file's root expression
     /// rather than from the generic `import :: a -> b` builtin signature.
-    import_types: HashMap<ExprId, OutputTy>,
+    import_types: HashMap<ExprId, OwnedTy>,
 
     /// Context argument types for the root lambda (from `tix.toml` context
     /// configuration). Maps parameter names (e.g. "config", "lib", "pkgs") to
@@ -617,33 +605,26 @@ pub struct CheckCtx<'db> {
     /// double-applying the annotation.
     pre_annotated_params: FxHashSet<NameId>,
 
-    /// Optional deadline for inference. Checked after each SCC group and
-    /// periodically during expression inference; if exceeded, remaining work
-    /// is skipped and partial results returned. Used by import resolution to
-    /// prevent a single file from blocking the LSP indefinitely.
-    deadline: Option<Instant>,
-
-    /// Operation counter for periodic deadline checks. Incremented in
+    /// Operation counter for periodic RSS checks. Incremented in
     /// constrain() (the main hotspot for cascading work). Checked every
-    /// DEADLINE_CHECK_INTERVAL operations to avoid Instant::now() syscall
-    /// overhead on every call.
+    /// RSS_CHECK_INTERVAL operations to avoid excessive procfs reads.
     op_counter: u32,
 
-    /// Set when a periodic deadline check fires. Once set, constrain()
+    /// Set when an RSS check fires. Once set, constrain()
     /// returns Ok(()) immediately, infer_expr short-circuits to a fresh
     /// variable, and extrude returns the original type as-is.
-    deadline_exceeded: bool,
+    bailed_out: bool,
 
-    /// External cancellation flag. Set by the LSP server when a newer edit
-    /// arrives for the same file, allowing in-flight inference to abort early.
-    /// Checked alongside `deadline_exceeded` in the same hot paths.
-    cancel_flag: Option<Arc<AtomicBool>>,
-
-    /// Optional RSS limit in MB. When set, `past_deadline()` periodically
+    /// Optional RSS limit in MB. When set, `should_bail()` periodically
     /// checks the process RSS and triggers early exit if it exceeds this
     /// threshold. This prevents OOM crashes from RLIMIT_AS by bailing out
     /// before virtual address space is exhausted (virtual >> RSS).
     rss_limit_mb: Option<f64>,
+
+    /// Tracks which expressions have already been inferred. Prevents O(N²)
+    /// re-evaluation of shared sub-expressions — e.g. `inherit (from) f1..fN`
+    /// where `from` is referenced by N Select expressions.
+    inferred_exprs: FxHashSet<ExprId>,
 }
 
 /// Count the function arity (number of arrows along the spine) of a ParsedTy.
@@ -679,7 +660,7 @@ impl<'db> CheckCtx<'db> {
         name_res: &'db NameResolution,
         binding_exprs: &'db HashMap<NameId, ExprId>,
         type_aliases: Arc<TypeAliasRegistry>,
-        import_types: HashMap<ExprId, OutputTy>,
+        import_types: HashMap<ExprId, OwnedTy>,
         context_args: Arc<HashMap<smol_str::SmolStr, ParsedTy>>,
     ) -> Self {
         Self {
@@ -697,60 +678,31 @@ impl<'db> CheckCtx<'db> {
             context_args,
             narrow_overrides: FxHashMap::default(),
             pre_annotated_params: FxHashSet::default(),
-            deadline: None,
             op_counter: 0,
-            deadline_exceeded: false,
-            cancel_flag: None,
+            bailed_out: false,
             rss_limit_mb: None,
+            inferred_exprs: FxHashSet::default(),
         }
     }
 
-    /// Set a deadline after which inference will bail out with partial results.
-    pub fn with_deadline(mut self, deadline: Instant) -> Self {
-        self.deadline = Some(deadline);
-        self
-    }
-
-    /// Attach an external cancellation flag. When the flag is set to `true`,
-    /// inference bails out with partial results — the same behavior as
-    /// deadline expiry.
-    pub fn with_cancel_flag(mut self, flag: Arc<AtomicBool>) -> Self {
-        self.cancel_flag = Some(flag);
-        self
-    }
-
     /// Set an RSS limit in MB. When RSS exceeds this threshold, inference
-    /// bails out with partial results — the same behavior as deadline expiry.
-    /// Used by the LSP to prevent OOM crashes from RLIMIT_AS.
+    /// bails out with partial results. Used by the LSP to prevent OOM
+    /// crashes from RLIMIT_AS.
     pub fn with_rss_limit(mut self, limit_mb: f64) -> Self {
         self.rss_limit_mb = Some(limit_mb);
         self
     }
 
-    /// How often (in constrain ops) to check RSS. Less frequent than the
-    /// time-based deadline check because `/proc/self/statm` is a procfs read.
+    /// How often (in constrain ops) to check RSS. `/proc/self/statm` is a
+    /// procfs read so we don't want to do it on every constrain call.
     const RSS_CHECK_INTERVAL: u32 = 4096;
 
-    /// Check whether the inference deadline has been exceeded, cancellation
-    /// was requested externally, or RSS exceeds the memory limit. Caches a
-    /// positive result in `deadline_exceeded` so subsequent checks are O(1).
-    fn past_deadline(&mut self) -> bool {
-        if self.deadline_exceeded {
+    /// Check whether inference should bail out due to memory pressure.
+    /// Caches a positive result in `bailed_out` so subsequent checks are O(1).
+    fn should_bail(&mut self) -> bool {
+        if self.bailed_out {
             return true;
         }
-        if self.deadline.is_some_and(|d| Instant::now() > d) {
-            self.deadline_exceeded = true;
-            return true;
-        }
-        if let Some(ref flag) = self.cancel_flag {
-            if flag.load(Ordering::Relaxed) {
-                self.deadline_exceeded = true;
-                return true;
-            }
-        }
-        // Periodic RSS check — less frequent than deadline to avoid
-        // excessive procfs reads. Checked when op_counter aligns with
-        // RSS_CHECK_INTERVAL (which is a multiple of DEADLINE_CHECK_INTERVAL).
         if let Some(limit) = self.rss_limit_mb {
             if self.op_counter.is_multiple_of(Self::RSS_CHECK_INTERVAL) {
                 let rss = infer::rss_mb();
@@ -760,7 +712,7 @@ impl<'db> CheckCtx<'db> {
                         rss,
                         limit,
                     );
-                    self.deadline_exceeded = true;
+                    self.bailed_out = true;
                     return true;
                 }
             }
@@ -838,64 +790,90 @@ impl<'db> CheckCtx<'db> {
     // OutputTy interning (import results → internal types)
     // ==========================================================================
 
-    /// Intern an OutputTy into this file's TypeStorage, creating fresh TyIds.
+    /// Intern an OwnedTy as a single frozen TyId. Instead of eagerly
+    /// converting the entire type tree into TyIds (O(N) allocations),
+    /// wraps it in `Ty::Frozen(OwnedTy)` — one allocation. Fields are
+    /// materialized on demand when `constrain` encounters the Frozen type.
+    fn intern_frozen_owned_ty(&mut self, owned: &OwnedTy) -> TyId {
+        self.alloc_concrete(Ty::Frozen(owned.clone()))
+    }
+
+    /// Intern an OwnedTy into this file's TypeStorage, creating fresh TyIds.
     ///
-    /// Each TyVar(n) in the OutputTy maps to a fresh variable (via a local
+    /// Each TyVar(n) in the OwnedTy maps to a fresh variable (via a local
     /// HashMap). This ensures imported types are fully isolated from the
     /// source file's TypeStorage — constraints applied in this file cannot
     /// propagate back to the imported file.
-    fn intern_output_ty(&mut self, ty: &OutputTy) -> TyId {
+    fn intern_output_ty(&mut self, owned: &OwnedTy) -> TyId {
         let mut var_map: HashMap<u32, TyId> = HashMap::new();
-        self.intern_output_ty_inner(ty, &mut var_map)
+        let mut ref_cache: HashMap<TyRef, TyId> = HashMap::new();
+        self.intern_output_ty_inner(&owned.arena, owned.root, &mut var_map, &mut ref_cache)
     }
 
-    fn intern_output_ty_inner(&mut self, ty: &OutputTy, var_map: &mut HashMap<u32, TyId>) -> TyId {
-        match ty {
+    fn intern_output_ty_inner(
+        &mut self,
+        arena: &TypeArena,
+        ty: TyRef,
+        var_map: &mut HashMap<u32, TyId>,
+        ref_cache: &mut HashMap<TyRef, TyId>,
+    ) -> TyId {
+        // Preserve DAG sharing: if we already interned this TyRef, reuse it.
+        // Without this, shared subtrees in the TypeArena expand exponentially
+        // (e.g. common.nix's output type caused a 1.5GB allocation on chromium).
+        if let Some(&cached) = ref_cache.get(&ty) {
+            return cached;
+        }
+
+        let result = match &arena[ty] {
             OutputTy::TyVar(n) => *var_map.entry(*n).or_insert_with(|| self.new_var()),
             OutputTy::Primitive(prim) => self.alloc_prim(*prim),
             OutputTy::List(inner) => {
-                let elem = self.intern_output_ty_inner(&inner.0, var_map);
+                let inner = *inner;
+                let elem = self.intern_output_ty_inner(arena, inner, var_map, ref_cache);
                 self.alloc_concrete(Ty::List(elem))
             }
             OutputTy::Lambda { param, body } => {
-                let p = self.intern_output_ty_inner(&param.0, var_map);
-                let b = self.intern_output_ty_inner(&body.0, var_map);
+                let (param, body) = (*param, *body);
+                let p = self.intern_output_ty_inner(arena, param, var_map, ref_cache);
+                let b = self.intern_output_ty_inner(arena, body, var_map, ref_cache);
                 self.alloc_concrete(Ty::Lambda { param: p, body: b })
             }
             OutputTy::AttrSet(attr) => {
+                let fields_vec: Vec<_> = attr.fields.iter().map(|(k, &v)| (k.clone(), v)).collect();
+                let dyn_ty = attr.dyn_ty;
+                let open = attr.open;
+                let optional_fields = attr.optional_fields.clone();
+
                 let mut fields = std::collections::BTreeMap::new();
-                for (k, v) in &attr.fields {
-                    let field_ty = self.intern_output_ty_inner(&v.0, var_map);
-                    fields.insert(k.clone(), field_ty);
+                for (k, v) in fields_vec {
+                    let field_ty = self.intern_output_ty_inner(arena, v, var_map, ref_cache);
+                    fields.insert(k, field_ty);
                 }
-                let dyn_ty = attr
-                    .dyn_ty
-                    .as_ref()
-                    .map(|d| self.intern_output_ty_inner(&d.0, var_map));
+                let dyn_ty =
+                    dyn_ty.map(|d| self.intern_output_ty_inner(arena, d, var_map, ref_cache));
                 self.alloc_concrete(Ty::AttrSet(lang_ty::AttrSetTy {
                     fields,
                     dyn_ty,
-                    open: attr.open,
-                    optional_fields: attr.optional_fields.clone(),
+                    open,
+                    optional_fields,
                 }))
             }
             // Union: create a fresh variable with each member as a lower bound.
-            // Record bounds directly without propagation — the OutputTy is
-            // already internally consistent, and constrain() would create
-            // spurious cross-links through shared type variables.
             OutputTy::Union(members) => {
+                let members = members.clone();
                 let var = self.new_var();
-                for m in members {
-                    let member_ty = self.intern_output_ty_inner(&m.0, var_map);
+                for m in &members {
+                    let member_ty = self.intern_output_ty_inner(arena, *m, var_map, ref_cache);
                     self.types.storage.add_lower_bound(var, member_ty);
                 }
                 var
             }
             // Intersection: create a fresh variable with each member as an upper bound.
             OutputTy::Intersection(members) => {
+                let members = members.clone();
                 let var = self.new_var();
-                for m in members {
-                    let member_ty = self.intern_output_ty_inner(&m.0, var_map);
+                for m in &members {
+                    let member_ty = self.intern_output_ty_inner(arena, *m, var_map, ref_cache);
                     self.types.storage.add_upper_bound(var, member_ty);
                 }
                 var
@@ -906,27 +884,30 @@ impl<'db> CheckCtx<'db> {
             // inner type from the exporting file. This prevents monomorphized
             // generics in dep files from polluting the importing file's types.
             OutputTy::Named(name, inner) => {
-                if let Some(alias_body) = self.type_aliases.get(name).cloned() {
+                let (name, inner) = (name.clone(), *inner);
+                if let Some(alias_body) = self.type_aliases.get(&name).cloned() {
                     let fresh_inner = self.intern_fresh_ty(alias_body);
-                    self.alloc_concrete(Ty::Named(name.clone(), fresh_inner))
+                    self.alloc_concrete(Ty::Named(name, fresh_inner))
                 } else {
-                    let inner_id = self.intern_output_ty_inner(&inner.0, var_map);
-                    self.alloc_concrete(Ty::Named(name.clone(), inner_id))
+                    let inner_id = self.intern_output_ty_inner(arena, inner, var_map, ref_cache);
+                    self.alloc_concrete(Ty::Named(name, inner_id))
                 }
             }
             // Negation: intern the inner type and wrap in Ty::Neg.
             OutputTy::Neg(inner) => {
-                let inner_id = self.intern_output_ty_inner(&inner.0, var_map);
+                let inner = *inner;
+                let inner_id = self.intern_output_ty_inner(arena, inner, var_map, ref_cache);
                 self.alloc_concrete(Ty::Neg(inner_id))
             }
-            // Bottom/Top: fresh unconstrained variables. The internal Ty
-            // representation has no ⊤/⊥ variants, but a fresh variable
-            // approximates them correctly: no bounds → unconstrained,
-            // which means "anything goes" (Top) or "nothing produced"
-            // (Bottom) depending on polarity during canonicalization.
+            // Bottom/Top: fresh unconstrained variables.
             OutputTy::Bottom => self.new_var(),
             OutputTy::Top => self.new_var(),
-        }
+            // Extern: wrap back as a Frozen type for inference.
+            OutputTy::Extern(owned) => self.intern_frozen_owned_ty(owned),
+        };
+
+        ref_cache.insert(ty, result);
+        result
     }
 
     /// If `name_id` has a doc comment type annotation (e.g. `/** type: x :: int */`),
