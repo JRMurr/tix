@@ -958,6 +958,8 @@ impl<'db> CheckCtx<'db> {
             // (Bottom) depending on polarity during canonicalization.
             OutputTy::Bottom => self.new_var(),
             OutputTy::Top => self.new_var(),
+            // Extern: wrap back as a Frozen type for inference.
+            OutputTy::Extern(owned) => self.intern_frozen_owned_ty(owned),
         }
     }
 

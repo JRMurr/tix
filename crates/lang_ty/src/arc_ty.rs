@@ -59,6 +59,11 @@ pub enum OutputTy {
     /// The universal (top) type. Displayed as `any`.
     #[debug("Top")]
     Top,
+
+    /// A type that lives in an external arena (zero-copy import from another file).
+    /// Treated as a leaf: no TyRef children in the owning arena.
+    #[debug("Extern({_0:?})")]
+    Extern(crate::arena::OwnedTy),
 }
 
 impl PartialOrd for OutputTy {
@@ -85,6 +90,7 @@ impl Ord for OutputTy {
                 OutputTy::Intersection(_) => 8,
                 OutputTy::Named(..) => 9,
                 OutputTy::Neg(_) => 10,
+                OutputTy::Extern(_) => 11,
             }
         }
 
@@ -117,6 +123,7 @@ impl Ord for OutputTy {
                 na.cmp(nb).then_with(|| ta.cmp(tb))
             }
             (OutputTy::Neg(a), OutputTy::Neg(b)) => a.cmp(b),
+            (OutputTy::Extern(a), OutputTy::Extern(b)) => a.cmp(b),
             _ => unreachable!(),
         }
     }
@@ -256,9 +263,11 @@ impl OutputTy {
     /// same variant structure.
     pub(crate) fn map_children(&self, f: &mut impl FnMut(TyRef) -> TyRef) -> OutputTy {
         match self {
-            OutputTy::TyVar(_) | OutputTy::Primitive(_) | OutputTy::Bottom | OutputTy::Top => {
-                self.clone()
-            }
+            OutputTy::TyVar(_)
+            | OutputTy::Primitive(_)
+            | OutputTy::Bottom
+            | OutputTy::Top
+            | OutputTy::Extern(_) => self.clone(),
             OutputTy::List(inner) => OutputTy::List(f(*inner)),
             OutputTy::Lambda { param, body } => OutputTy::Lambda {
                 param: f(*param),
@@ -292,7 +301,11 @@ impl OutputTy {
     /// Visit every direct child TyRef for read-only inspection.
     pub(crate) fn for_each_child(&self, f: &mut impl FnMut(TyRef)) {
         match self {
-            OutputTy::TyVar(_) | OutputTy::Primitive(_) | OutputTy::Bottom | OutputTy::Top => {}
+            OutputTy::TyVar(_)
+            | OutputTy::Primitive(_)
+            | OutputTy::Bottom
+            | OutputTy::Top
+            | OutputTy::Extern(_) => {}
             OutputTy::List(inner) => f(*inner),
             OutputTy::Lambda { param, body } => {
                 f(*param);
@@ -322,9 +335,11 @@ impl OutputTy {
         f: &mut impl FnMut(TyRef) -> ControlFlow<()>,
     ) -> ControlFlow<()> {
         match self {
-            OutputTy::TyVar(_) | OutputTy::Primitive(_) | OutputTy::Bottom | OutputTy::Top => {
-                ControlFlow::Continue(())
-            }
+            OutputTy::TyVar(_)
+            | OutputTy::Primitive(_)
+            | OutputTy::Bottom
+            | OutputTy::Top
+            | OutputTy::Extern(_) => ControlFlow::Continue(()),
             OutputTy::List(inner) => f(*inner),
             OutputTy::Lambda { param, body } => {
                 f(*param)?;

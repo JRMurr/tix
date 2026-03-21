@@ -478,7 +478,11 @@ mod tests {
 
     /// Helper: compare an OwnedTy to an OutputTy structurally.
     fn owned_ty_eq(owned: &OwnedTy, expected: &OutputTy) -> bool {
-        owned.get() == expected
+        let ty = owned.get();
+        match ty {
+            OutputTy::Extern(inner) => inner.get() == expected,
+            other => other == expected,
+        }
     }
 
     /// A test syntax provider that reads .nix files from disk and parses them

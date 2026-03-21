@@ -34,6 +34,21 @@ impl RootTy {
         &self.arena[self.ty]
     }
 
+    /// Resolve through Extern layers: if the root type is `Extern(owned)`,
+    /// return a RootTy pointing into the external arena. Otherwise return self.
+    /// This lets test code pattern-match on the actual structural type and
+    /// use `child()` with TyRef children from that type.
+    pub fn resolve(&self) -> RootTy {
+        if let OutputTy::Extern(owned) = &self.arena[self.ty] {
+            RootTy {
+                ty: owned.root,
+                arena: owned.arena.clone(),
+            }
+        } else {
+            self.clone()
+        }
+    }
+
     /// Create a RootTy for a child TyRef (shares the same arena).
     pub fn child(&self, child: TyRef) -> RootTy {
         RootTy {
@@ -138,6 +153,13 @@ fn ty_eq(a_arena: &TypeArena, a: TyRef, b_arena: &TypeArena, b: TyRef) -> bool {
                 an == bn && inner(a_arena, *ai, b_arena, *bi, visited)
             }
             (OutputTy::Neg(ai), OutputTy::Neg(bi)) => inner(a_arena, *ai, b_arena, *bi, visited),
+            // Extern: follow through to the external arena
+            (OutputTy::Extern(a_owned), _) => {
+                inner(&a_owned.arena, a_owned.root, b_arena, b, visited)
+            }
+            (_, OutputTy::Extern(b_owned)) => {
+                inner(a_arena, a, &b_owned.arena, b_owned.root, visited)
+            }
             _ => false,
         }
     }
@@ -1884,6 +1906,7 @@ mod import_tests {
         // Both files lack ephemeral stubs for each other, so imports resolve
         // to unconstrained type variables. The important thing is that
         // inference completes without panicking.
+        let ty = ty.resolve();
         assert!(
             matches!(ty.output_ty(), OutputTy::TyVar(_)),
             "cyclic import should degrade to TyVar, got: {ty}"
@@ -2229,6 +2252,7 @@ mod import_tests {
     #[test]
     fn import_polymorphic_unused() {
         let ty = get_multifile_root(&[("/main.nix", "import /id.nix"), ("/id.nix", "x: x")]);
+        let ty = ty.resolve();
         match ty.output_ty() {
             OutputTy::Lambda { .. } => { /* good — polymorphic lambda preserved */ }
             _ => panic!("expected lambda type for unused polymorphic import, got: {ty}"),
@@ -2250,16 +2274,18 @@ mod import_tests {
                 r#"x: if builtins.isNull x then 1 else "hello""#,
             ),
         ]);
+        let ty = ty.resolve();
         match ty.output_ty() {
             OutputTy::Lambda { body, .. } => {
+                let body_ty = ty.child(*body);
                 // The body should be a union containing int and string.
-                match &ty.arena[*body] {
+                match body_ty.output_ty() {
                     OutputTy::Union(members) => {
                         let has_int = members.iter().any(|m| {
-                            matches!(&ty.arena[*m], OutputTy::Primitive(PrimitiveTy::Int))
+                            matches!(&body_ty.arena[*m], OutputTy::Primitive(PrimitiveTy::Int))
                         });
                         let has_string = members.iter().any(|m| {
-                            matches!(&ty.arena[*m], OutputTy::Primitive(PrimitiveTy::String))
+                            matches!(&body_ty.arena[*m], OutputTy::Primitive(PrimitiveTy::String))
                         });
                         assert!(has_int, "union should contain int, got: {members:?}");
                         assert!(has_string, "union should contain string, got: {members:?}");
@@ -2414,6 +2440,7 @@ mod import_tests {
         // imported files. The imported type resolves structurally rather
         // than as Named("Foo"). In production, aliases come from StubConfig
         // and Named wrappers are preserved.
+        let ty = ty.resolve();
         match ty.output_ty() {
             OutputTy::AttrSet(attr) => {
                 assert!(
@@ -2678,6 +2705,7 @@ mod import_tests {
             ),
             ("/pkg.nix", "{ }: { name = \"hello\"; }"),
         ]);
+        let ty = ty.resolve();
         match ty.output_ty() {
             OutputTy::AttrSet(attr) => {
                 let name = *attr.fields.get("name").expect("field name");
@@ -2705,6 +2733,7 @@ mod import_tests {
             ),
             ("/pkg.nix", "{ }: { version = 1; }"),
         ]);
+        let ty = ty.resolve();
         match ty.output_ty() {
             OutputTy::AttrSet(attr) => {
                 let version = *attr.fields.get("version").expect("field version");

@@ -382,13 +382,8 @@ impl<'a> Canonicalizer<'a> {
                 OutputTy::Named(name.clone(), self.canonicalize_child(*inner, polarity))
             }
 
-            // Frozen: import the OwnedTy's arena subtree into our arena.
-            Ty::Frozen(owned) => {
-                let mut cache = FxHashMap::default();
-                let imported =
-                    import_from_arena(&mut self.arena, &owned.arena, owned.root, &mut cache);
-                self.arena[imported].clone()
-            }
+            // Frozen: zero-copy reference to the external arena.
+            Ty::Frozen(owned) => OutputTy::Extern(owned.clone()),
 
             // Intersection: canonicalize both members and flatten/normalize
             // using the same logic as variable bound expansion.

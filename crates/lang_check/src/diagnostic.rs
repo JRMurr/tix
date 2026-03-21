@@ -465,12 +465,8 @@ fn canonicalize_ty_structural(
             let c = child!(*inner, Polarity::Positive);
             arena.intern(OutputTy::Named(name.clone(), c))
         }
-        // Frozen types carry their own arena; import the reachable subtree
-        // into our local arena so all TyRefs are valid in the same arena.
-        lang_ty::Ty::Frozen(owned) => {
-            let mut cache = rustc_hash::FxHashMap::default();
-            lang_ty::arena::import_from_arena(arena, &owned.arena, owned.root, &mut cache)
-        }
+        // Frozen types carry their own arena; reference it zero-copy.
+        lang_ty::Ty::Frozen(owned) => arena.intern(OutputTy::Extern(owned.clone())),
     }
 }
 

@@ -95,7 +95,7 @@ fn analyze(
                     })
                     .or_insert_with(|| VarInfo::new(pol, type_path));
             }
-            OutputTy::Primitive(_) | OutputTy::Bottom | OutputTy::Top => {}
+            OutputTy::Primitive(_) | OutputTy::Bottom | OutputTy::Top | OutputTy::Extern(_) => {}
             OutputTy::List(inner) => {
                 let inner = *inner;
                 path.push(PathSegment::ListElem);
@@ -226,7 +226,7 @@ fn apply_simplification(
             let resolved = substitution.get(v).copied().unwrap_or(*v);
             arena.intern(OutputTy::TyVar(resolved))
         }
-        OutputTy::Primitive(_) | OutputTy::Bottom | OutputTy::Top => ty,
+        OutputTy::Primitive(_) | OutputTy::Bottom | OutputTy::Top | OutputTy::Extern(_) => ty,
         OutputTy::List(inner) => {
             let new_inner = apply_simplification(arena, *inner, substitution, removable);
             arena.intern(OutputTy::List(new_inner))

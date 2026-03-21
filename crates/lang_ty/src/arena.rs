@@ -105,6 +105,10 @@ impl TypeArena {
 
     /// Normalize all ty vars to start from 0 instead of the original indices.
     pub fn normalize_vars(&mut self, ty: TyRef) -> TyRef {
+        // Extern types are already finalized in their source arena.
+        if matches!(self[ty], OutputTy::Extern(_)) {
+            return ty;
+        }
         let free_vars = self.free_type_vars(ty);
 
         // Concrete types with no TyVar nodes are already normalized.
@@ -153,6 +157,9 @@ impl TypeArena {
     /// Like `normalize_vars`, but displays `?` when the entire type is a bare
     /// type variable (meaning "unconstrained / unknown").
     pub fn normalize_replacing_unknown(&mut self, ty: TyRef) -> TyRef {
+        if matches!(self[ty], OutputTy::Extern(_)) {
+            return ty;
+        }
         if matches!(self[ty], OutputTy::TyVar(_)) {
             return self.intern(OutputTy::TyVar(UNKNOWN_TYVAR));
         }
@@ -175,6 +182,16 @@ impl TypeArena {
         seen: &mut FxHashSet<u32>,
         visited: &mut FxHashSet<TyRef>,
     ) {
+        if let OutputTy::Extern(owned) = &self[ty] {
+            // Delegate to the external arena for its free vars.
+            let ext_vars = owned.arena.free_type_vars(owned.root);
+            for v in ext_vars {
+                if seen.insert(v) {
+                    result.push(v);
+                }
+            }
+            return;
+        }
         if let OutputTy::TyVar(x) = self[ty] {
             if seen.insert(x) {
                 result.push(x);
@@ -327,6 +344,9 @@ impl TypeArena {
     pub fn unwrap_named(&self, ty: TyRef) -> TyRef {
         match &self[ty] {
             OutputTy::Named(_, inner) => self.unwrap_named(*inner),
+            // Extern types may have Named at their root — but unwrapping
+            // would cross arena boundaries. Return as-is; callers that need
+            // to inspect the structure should match on Extern explicitly.
             _ => ty,
         }
     }
@@ -334,6 +354,9 @@ impl TypeArena {
     /// Recursively flatten, deduplicate, and sort Union/Intersection members
     /// for order-insensitive comparison.
     pub fn normalize_set_ops(&mut self, ty: TyRef) -> TyRef {
+        if matches!(self[ty], OutputTy::Extern(_)) {
+            return ty;
+        }
         let mut cache = FxHashMap::default();
         self.normalize_set_ops_cached(ty, &mut cache)
     }
@@ -427,6 +450,9 @@ impl TypeArena {
         visited: &mut FxHashSet<TyRef>,
     ) -> bool {
         let node = &self[ty];
+        if let OutputTy::Extern(owned) = node {
+            return owned.arena.any_node_matches(owned.root, pred);
+        }
         if pred(node) {
             return true;
         }
@@ -469,6 +495,9 @@ impl TypeArena {
 
         let node = self[ty].clone();
         stacker::maybe_grow(256 * 1024, 1024 * 1024, || match &node {
+            OutputTy::Extern(owned) => {
+                owned.arena.write_truncated(owned.root, buf, state, depth);
+            }
             OutputTy::TyVar(x) => {
                 state.push(buf, &tyvar_name(*x));
             }
@@ -681,6 +710,13 @@ fn compact_inner(
         return mapped;
     }
     let node = source[ty].clone();
+    // Extern nodes are preserved as-is: re-intern the Extern into the target
+    // arena, keeping the Arc reference to the external arena alive.
+    if matches!(node, OutputTy::Extern(_)) {
+        let new_ref = target.intern(node);
+        mapping.insert(ty, new_ref);
+        return new_ref;
+    }
     let new_node = node.map_children(&mut |child| compact_inner(source, child, target, mapping));
     let new_ref = target.intern(new_node);
     mapping.insert(ty, new_ref);
@@ -767,6 +803,20 @@ impl std::hash::Hash for OwnedTy {
     }
 }
 
+impl PartialOrd for OwnedTy {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for OwnedTy {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        let ptr_a = Arc::as_ptr(&self.arena) as usize;
+        let ptr_b = Arc::as_ptr(&other.arena) as usize;
+        ptr_a.cmp(&ptr_b).then_with(|| self.root.cmp(&other.root))
+    }
+}
+
 impl fmt::Display for OwnedTy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.arena.display(self.root))
@@ -790,6 +840,7 @@ impl fmt::Display for TypeDisplay<'_> {
 
 fn write_ty(arena: &TypeArena, ty: TyRef, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     stacker::maybe_grow(256 * 1024, 1024 * 1024, || match &arena[ty] {
+        OutputTy::Extern(owned) => write!(f, "{}", owned.arena.display(owned.root)),
         OutputTy::TyVar(x) => write!(f, "{}", tyvar_name(*x)),
         OutputTy::Primitive(p) => write!(f, "{p}"),
         OutputTy::List(inner) => {
