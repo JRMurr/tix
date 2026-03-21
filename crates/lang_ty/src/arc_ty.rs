@@ -364,14 +364,6 @@ impl OutputTy {
             OutputTy::Neg(inner) => f(*inner),
         }
     }
-
-    /// Unwrap Named wrappers given an arena to follow children.
-    /// Standalone version for cases where we have an &OutputTy but no arena
-    /// (e.g. in constrain.rs where we pattern-match on a cloned value).
-    pub fn unwrap_named_shallow(&self) -> &OutputTy {
-        // Without arena, can only unwrap one level.
-        self
-    }
 }
 
 impl std::fmt::Display for PrimitiveTy {

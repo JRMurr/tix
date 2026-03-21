@@ -79,8 +79,6 @@ pub fn run_batch_warmup(
 
     struct PreparedFile {
         path: PathBuf,
-        #[allow(dead_code)]
-        source_text: String,
         parsed: rnix::Parse<rnix::Root>,
         nix_file: lang_ast::NixFile,
         module: lang_ast::Module,
@@ -168,7 +166,6 @@ pub fn run_batch_warmup(
 
         prepared.push(PreparedFile {
             path: file_path.clone(),
-            source_text: source_text.clone(),
             parsed,
             nix_file,
             module,
@@ -267,30 +264,13 @@ pub fn run_batch_warmup(
         let check_result = lang_check::run_inference(&inputs, None);
 
         // Cache this file's signature for subsequent layers.
-        let root_ty: Option<lang_ty::OwnedTy> = check_result.inference.as_ref().and_then(|inf| {
-            inf.expr_ty_map
-                .get(pp.module.entry_expr)
-                .copied()
-                .map(|root_ref| lang_ty::OwnedTy::new(inf.arena.clone(), root_ref).compact())
-        });
-
-        if let Some(ref owned) = root_ty {
-            coordinator.set_signature(
-                &pp.path,
-                lang_check::FileSignature {
-                    root_ty: owned.clone(),
-                },
-            );
+        if let Some(sig) = lang_check::extract_file_signature(&check_result, pp.module.entry_expr) {
+            coordinator.set_signature(&pp.path, sig);
         }
 
         let diagnostics = check_result.diagnostics.clone();
 
-        let import_paths: Vec<PathBuf> = import_targets
-            .values()
-            .cloned()
-            .collect::<std::collections::HashSet<_>>()
-            .into_iter()
-            .collect();
+        let import_paths: Vec<PathBuf> = import_targets.values().cloned().collect();
 
         // Build LSP data structures.
         let syntax_data = SyntaxData {

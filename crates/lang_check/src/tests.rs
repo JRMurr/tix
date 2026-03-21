@@ -188,14 +188,6 @@ macro_rules! expected_ty {
     }};
 }
 
-/// Unwrap a Lambda from a RootTy, returning (param, body) as RootTy values.
-fn unwrap_lambda_root(ty: &RootTy) -> (RootTy, RootTy) {
-    match ty.output_ty() {
-        OutputTy::Lambda { param, body } => (ty.child(*param), ty.child(*body)),
-        _ => panic!("expected lambda type, got: {ty}"),
-    }
-}
-
 pub fn check_str(src: &str) -> (Module, Result<InferenceResult, Box<TixDiagnostic>>) {
     let (db, file) = TestDatabase::single_file(src).unwrap();
     let module = module(&db, file);

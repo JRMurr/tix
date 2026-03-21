@@ -388,6 +388,25 @@ pub fn run_inference(
     check_result
 }
 
+/// Extract a compacted `FileSignature` from a `CheckResult`. Returns `None`
+/// if inference failed or the root expression has no type.
+///
+/// This is the shared logic used by both `tix check` (CLI) and the LSP batch
+/// warmup to build the `OwnedTy` that gets cached in `InferenceCoordinator`.
+pub fn extract_file_signature(
+    check_result: &CheckResult,
+    entry_expr: lang_ast::ExprId,
+) -> Option<FileSignature> {
+    check_result.inference.as_ref().and_then(|inf| {
+        inf.expr_ty_map
+            .get(entry_expr)
+            .copied()
+            .map(|root_ref| FileSignature {
+                root_ty: OwnedTy::new(inf.arena.clone(), root_ref).compact(),
+            })
+    })
+}
+
 // ==============================================================================
 // CheckBuilder: extensible entry point for error-collecting type inference
 // ==============================================================================

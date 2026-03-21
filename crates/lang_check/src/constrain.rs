@@ -882,16 +882,9 @@ fn discriminant_matches(a: &Ty<TyId>, b: &Ty<TyId>) -> bool {
 ///
 /// See `lang_ty::disjoint::are_shapes_disjoint` for the full disjointness rules.
 fn are_types_disjoint(a: &Ty<TyId>, b: &Ty<TyId>) -> bool {
-    // Named is transparent — unwrap before checking disjointness.
-    if let Ty::Named(_, inner_a) = a {
-        // We can't dereference TyId here (no storage access), so Named
-        // conservatively falls through to Opaque below. This is sound but
-        // could be refined if needed.
-        let _ = inner_a;
-    }
-    if let Ty::Named(_, inner_b) = b {
-        let _ = inner_b;
-    }
+    // Named is transparent, but we can't dereference TyId here (no storage
+    // access), so Named conservatively falls through to Opaque below. This is
+    // sound but could be refined if needed.
 
     // Collect field keys as sorted slices — avoids building a throwaway
     // BTreeMap<SmolStr, ()> just to check key membership.

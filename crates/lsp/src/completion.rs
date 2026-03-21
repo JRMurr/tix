@@ -1167,7 +1167,6 @@ mod tests {
         // The lambda param type captures within-body constraints: at minimum
         // "name" (from `pkgs.name`). "src" comes from the call site which
         // may or may not survive rnix error recovery.
-        eprintln!("lambda_param_body completions: {names:?}");
         assert!(
             names.contains(&"name"),
             "should complete name from within-body constraint, got: {names:?}"
@@ -1183,7 +1182,6 @@ mod tests {
         let offset = find_offset(src, "pkgs.;") + 5;
         let items = complete_at(src, offset);
         let names = labels(&items);
-        eprintln!("pat_param completions: {names:?}");
         assert!(
             names.contains(&"name"),
             "should complete name from within-body usage, got: {names:?}"
@@ -1224,7 +1222,6 @@ mod tests {
             _ => Vec::new(),
         };
         let names = labels(&items);
-        eprintln!("alias_typed completions: {names:?}");
         assert!(
             names.contains(&"lib"),
             "should complete `lib` from Pkgs alias, got: {names:?}"
@@ -1571,7 +1568,6 @@ mod tests {
         let results = complete_at_markers(src);
         let names = labels(&results[&1]);
         // Should still offer callsite fields, not just identifier completion
-        eprintln!("callsite with partial ident: {names:?}");
         assert!(
             names.contains(&"enable"),
             "should complete enable, got: {names:?}"
@@ -2872,7 +2868,7 @@ mod tests {
             _ => {
                 // Generated stubs don't exist (CI or fresh clone without
                 // `just gen-stubs`). Skip rather than fail.
-                eprintln!("skipping: stubs/generated/nixos.tix not found (run `just gen-stubs`)");
+                println!("skipping: stubs/generated/nixos.tix not found (run `just gen-stubs`)");
                 return;
             }
         };

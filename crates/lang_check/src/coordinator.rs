@@ -306,11 +306,7 @@ impl InferenceCoordinator {
         let check_result = run_inference(&inputs, cancel_flag);
 
         // Extract root type as the file's signature.
-        let signature = check_result.inference.as_ref().and_then(|inf| {
-            let root_ref = inf.expr_ty_map.get(inputs.module.entry_expr).copied()?;
-            let owned = OwnedTy::new(inf.arena.clone(), root_ref).compact();
-            Some(FileSignature { root_ty: owned })
-        });
+        let signature = crate::extract_file_signature(&check_result, inputs.module.entry_expr);
 
         Some(CoordinatedResult {
             check_result,

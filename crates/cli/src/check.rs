@@ -80,8 +80,6 @@ struct RenderableResult {
     source_text: String,
     source_map: ModuleSourceMap,
     diagnostics: Vec<lang_check::diagnostic::TixDiagnostic>,
-    #[allow(dead_code)]
-    timed_out: bool,
 }
 
 /// Entry point for `tix check`.
@@ -359,7 +357,6 @@ pub fn run_check_project(
                     source_text: fm.source_text,
                     source_map: fm.source_map,
                     diagnostics: vec![],
-                    timed_out: false,
                 });
             }
         };
@@ -391,14 +388,10 @@ pub fn run_check_project(
         let check_result = lang_check::run_inference(&inputs, None);
 
         // Cache this file's signature for subsequent layers.
-        // Build an OwnedTy (compacted arena + root index) for cross-file type flow.
-        if let Some(owned) = check_result.inference.as_ref().and_then(|inf| {
-            inf.expr_ty_map
-                .get(inputs.module.entry_expr)
-                .copied()
-                .map(|root_ref| lang_ty::OwnedTy::new(inf.arena.clone(), root_ref).compact())
-        }) {
-            coordinator.set_signature(&fm.file_path, lang_check::FileSignature { root_ty: owned });
+        if let Some(sig) =
+            lang_check::extract_file_signature(&check_result, inputs.module.entry_expr)
+        {
+            coordinator.set_signature(&fm.file_path, sig);
         }
 
         tracing::info!(
@@ -409,14 +402,13 @@ pub fn run_check_project(
             "finished file"
         );
 
-        // Extract only diagnostics + timed_out. The heavy InferenceResult
-        // is dropped here, keeping memory bounded.
+        // Extract only diagnostics. The heavy InferenceResult is dropped
+        // here, keeping memory bounded.
         Some(RenderableResult {
             file_path: fm.file_path,
             source_text: fm.source_text,
             source_map: fm.source_map,
             diagnostics: check_result.diagnostics,
-            timed_out: check_result.timed_out,
         })
     };
 
