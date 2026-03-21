@@ -658,6 +658,11 @@ pub struct CheckCtx<'db> {
     /// threshold. This prevents OOM crashes from RLIMIT_AS by bailing out
     /// before virtual address space is exhausted (virtual >> RSS).
     rss_limit_mb: Option<f64>,
+
+    /// Tracks which expressions have already been inferred. Prevents O(N²)
+    /// re-evaluation of shared sub-expressions — e.g. `inherit (from) f1..fN`
+    /// where `from` is referenced by N Select expressions.
+    inferred_exprs: FxHashSet<ExprId>,
 }
 
 /// Count the function arity (number of arrows along the spine) of a ParsedTy.
@@ -716,6 +721,7 @@ impl<'db> CheckCtx<'db> {
             deadline_exceeded: false,
             cancel_flag: None,
             rss_limit_mb: None,
+            inferred_exprs: FxHashSet::default(),
         }
     }
 

@@ -69,6 +69,15 @@ impl CheckCtx<'_> {
             return Ok(self.new_var());
         }
 
+        // Fast path: if this expression was already inferred, return its
+        // pre-allocated slot (which was constrained equal to the result).
+        // This prevents O(N²) re-evaluation of shared sub-expressions —
+        // e.g. `inherit (from) f1..fN` where `from` is referenced by N
+        // Select expressions that each call infer_expr(from).
+        if !self.inferred_exprs.insert(e) {
+            return Ok(self.ty_for_expr(e));
+        }
+
         // Guard against stack overflow: infer_expr recurses through the AST
         // via infer_expr_inner, which can be very deep on large generated files
         // (e.g. hackage-packages.nix with 769k lines).
