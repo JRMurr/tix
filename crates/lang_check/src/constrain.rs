@@ -399,8 +399,10 @@ impl CheckCtx<'_> {
         ) {
             (true, false) => {
                 // Check: if b is concrete and provably disjoint from sup.
-                if matches!(self.types.storage.get(b), TypeEntry::Concrete(b_ty) if are_types_disjoint(b_ty, sup))
-                {
+                // For composed narrowing constraints (Inter(C1, C2)), check
+                // recursively — if any leaf of the intersection is disjoint
+                // from sup, the whole intersection is disjoint.
+                if self.is_disjoint_from_sup(b, sup) {
                     return Err(InferenceError::TypeMismatch(Box::new((
                         Ty::Inter(a, b),
                         sup.clone(),
@@ -422,8 +424,7 @@ impl CheckCtx<'_> {
                 self.constrain(a, target)
             }
             (false, true) => {
-                if matches!(self.types.storage.get(a), TypeEntry::Concrete(a_ty) if are_types_disjoint(a_ty, sup))
-                {
+                if self.is_disjoint_from_sup(a, sup) {
                     return Err(InferenceError::TypeMismatch(Box::new((
                         Ty::Inter(a, b),
                         sup.clone(),
@@ -451,6 +452,24 @@ impl CheckCtx<'_> {
                 self.constrain(a, sup_id)?;
                 self.constrain(b, sup_id)
             }
+        }
+    }
+
+    /// Check if a TyId (possibly a composed Inter from narrowing) is provably
+    /// disjoint from a super-type. For `Inter(A, B)`, if EITHER member is
+    /// disjoint from sup, the intersection is disjoint (since `A ∧ B ⊆ A`).
+    fn is_disjoint_from_sup(&self, id: TyId, sup: &Ty<TyId>) -> bool {
+        match self.types.storage.get(id) {
+            TypeEntry::Concrete(ty @ Ty::Inter(a, b)) => {
+                let (a, b) = (*a, *b);
+                // Check the Inter itself first (unlikely to match, but handles
+                // exotic cases). Then recurse into members.
+                are_types_disjoint(ty, sup)
+                    || self.is_disjoint_from_sup(a, sup)
+                    || self.is_disjoint_from_sup(b, sup)
+            }
+            TypeEntry::Concrete(ty) => are_types_disjoint(ty, sup),
+            _ => false,
         }
     }
 

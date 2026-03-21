@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use super::{CheckCtx, LocatedError, Polarity, TyId};
+use crate::storage::TypeEntry;
 use lang_ast::{
     nameres::ResolveResult, BinOP, BindingValue, Bindings, BoolBinOp, Expr, ExprBinOp, ExprId,
     InterpolPart, Literal, NameId, NormalBinOp, OverloadBinOp,
@@ -633,69 +634,94 @@ impl CheckCtx<'_> {
         // lower bounds, so `Inter(name_slot, ~Null)` correctly represents
         // "the original type minus null".
         //
-        // For nested narrowing (e.g. `if isAttrs x then if x ? y`), check
-        // existing overrides first so the inner narrowing builds on top.
-        let original_ty = if let Some(&overridden) = self.narrow_overrides.get(&binding.name) {
-            overridden
-        } else {
-            self.ty_for_name_direct(binding.name)
-        };
+        // For nested narrowing (e.g. `if isAttrs x then if x ? y`), we
+        // decompose any existing override into (base_var, existing_constraint)
+        // and compose the new constraint with the existing one, keeping the
+        // base variable at the top level of the Inter:
+        //
+        //   Inter(base_var, Inter(existing_constraint, new_constraint))
+        //
+        // This avoids creating Inter(Inter(var, C1), C2) which causes
+        // MLstruct variable isolation in constrain_lhs_inter to recursively
+        // unwrap and add spurious negation constraints to the base variable.
+        let (base_var, existing_constraint) =
+            if let Some(&overridden) = self.narrow_overrides.get(&binding.name) {
+                self.decompose_narrow_inter(overridden)
+            } else {
+                (self.ty_for_name_direct(binding.name), None)
+            };
 
-        match binding.predicate {
+        let new_constraint = match binding.predicate {
             crate::narrow::NarrowPredicate::IsType(prim) => {
                 // α ∧ PrimType — structural intersection with the primitive.
-                let prim_ty = self.alloc_prim(crate::narrow::narrow_prim_to_ty(prim));
-                self.alloc_concrete(Ty::Inter(original_ty, prim_ty))
+                self.alloc_prim(crate::narrow::narrow_prim_to_ty(prim))
             }
             crate::narrow::NarrowPredicate::IsNotType(prim) => {
                 // α ∧ ¬PrimType — structural intersection with negation.
                 let prim_ty = self.alloc_prim(crate::narrow::narrow_prim_to_ty(prim));
-                let neg_ty = self.alloc_concrete(Ty::Neg(prim_ty));
-                self.alloc_concrete(Ty::Inter(original_ty, neg_ty))
+                self.alloc_concrete(Ty::Neg(prim_ty))
             }
             crate::narrow::NarrowPredicate::HasField(ref field_name) => {
                 // α ∧ {field: β}
                 let fresh_field_var = self.new_var();
-                let constraint =
-                    self.alloc_single_field_open_attrset(field_name.clone(), fresh_field_var);
-                self.alloc_concrete(Ty::Inter(original_ty, constraint))
+                self.alloc_single_field_open_attrset(field_name.clone(), fresh_field_var)
             }
             crate::narrow::NarrowPredicate::NotHasField(ref field_name) => {
                 // α ∧ ¬{field: β, ...} — the variable does NOT have this field.
                 //
-                // Use the pre-allocated variable (not the resolved poly type)
-                // to ensure variable isolation works in constrain_lhs_inter.
-                // The poly_type_env entry may have been resolved to a concrete
-                // type (e.g. a closed attrset), which lacks the variable needed
-                // for MLstruct-style isolation.
+                // For NotHasField, always use the raw name slot as the base
+                // (not the existing override) to ensure variable isolation works
+                // in constrain_lhs_inter. The poly_type_env entry may have been
+                // resolved to a concrete type (e.g. a closed attrset), which
+                // lacks the variable needed for MLstruct-style isolation.
                 let var_ty = self.ty_for_name_direct(binding.name);
                 let fresh_field_var = self.new_var();
                 let has_field_ty =
                     self.alloc_single_field_open_attrset(field_name.clone(), fresh_field_var);
                 let neg = self.alloc_concrete(Ty::Neg(has_field_ty));
-                self.alloc_concrete(Ty::Inter(var_ty, neg))
+                return self.alloc_concrete(Ty::Inter(var_ty, neg));
             }
             crate::narrow::NarrowPredicate::IsAttrSet => {
                 // α ∧ {..}
-                let constraint = self.alloc_empty_open_attrset();
-                self.alloc_concrete(Ty::Inter(original_ty, constraint))
+                self.alloc_empty_open_attrset()
             }
             crate::narrow::NarrowPredicate::IsList => {
                 // α ∧ [β]
                 let elem_var = self.new_var();
-                let constraint = self.alloc_concrete(Ty::List(elem_var));
-                self.alloc_concrete(Ty::Inter(original_ty, constraint))
+                self.alloc_concrete(Ty::List(elem_var))
             }
             crate::narrow::NarrowPredicate::IsFunction => {
                 // α ∧ (β → γ)
                 let param_var = self.new_var();
                 let body_var = self.new_var();
-                let constraint = self.alloc_concrete(Ty::Lambda {
+                self.alloc_concrete(Ty::Lambda {
                     param: param_var,
                     body: body_var,
-                });
-                self.alloc_concrete(Ty::Inter(original_ty, constraint))
+                })
             }
+        };
+
+        // Compose: Inter(base_var, Inter(existing, new)) or Inter(base_var, new)
+        let combined = match existing_constraint {
+            Some(existing) => self.alloc_concrete(Ty::Inter(existing, new_constraint)),
+            None => new_constraint,
+        };
+        self.alloc_concrete(Ty::Inter(base_var, combined))
+    }
+
+    /// Decompose a narrowing override `Inter(base, constraint)` into its parts.
+    ///
+    /// After this fix, overrides always have the shape `Inter(var, C)` where
+    /// C may itself be `Inter(C1, C2)` from multiple composed narrowings.
+    /// Returns `(var, Some(C))` so the caller can compose additional
+    /// constraints with C.
+    ///
+    /// If the override is not an Inter (shouldn't happen in practice), returns
+    /// it as the base with no constraint.
+    fn decompose_narrow_inter(&self, ty: TyId) -> (TyId, Option<TyId>) {
+        match self.types.storage.get(ty) {
+            TypeEntry::Concrete(Ty::Inter(a, b)) => (*a, Some(*b)),
+            _ => (ty, None),
         }
     }
 

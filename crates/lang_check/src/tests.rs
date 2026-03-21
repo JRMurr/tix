@@ -6162,6 +6162,62 @@ fn narrow_and_combinator_mixed_predicates() {
     );
 }
 
+/// Regression: nested `? field` narrowing with `@args` pattern.
+/// `{ x ? 1, ... }@args: if args ? y then (if args ? z then args.z else 0) else 0`
+///
+/// When narrowing is nested (inner `? z` inside outer `? y` then-branch),
+/// the inner narrowing override should compose with the outer one so that
+/// field access works in the deeply-narrowed branch.
+///
+/// Previously, `compute_narrow_override` created `Inter(Inter(var, {y}), {z})`.
+/// MLstruct isolation would unwrap the nested Inter and add spurious `¬{y}`
+/// constraints to the base variable, causing false type errors.
+#[test]
+fn narrow_nested_hasattr_at_pattern() {
+    let nix = indoc! {"
+        { x ? 1, ... }@args:
+          if args ? y then
+            if args ? z then
+              args.z
+            else
+              0
+          else
+            0
+    "};
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert!(
+        matches!(
+            body.output_ty(),
+            OutputTy::Primitive(PrimitiveTy::Int) | OutputTy::Union(_)
+        ),
+        "nested hasattr with @ should not error, got: {body}"
+    );
+}
+
+/// Regression: `args ? pname && args ? version` with `@args` pattern.
+/// This is the `buildFHSEnv.nix` pattern from nixpkgs that was producing
+/// false `expected ~{ pname: ... }` errors.
+#[test]
+fn narrow_and_hasattr_at_pattern() {
+    let nix = indoc! {r#"
+        { profile ? "", ... }@args:
+        let
+          name = if (args ? pname && args ? version)
+            then "${args.pname}-${args.version}"
+            else args.name;
+        in
+        name
+    "#};
+    let ty = get_inferred_root(nix);
+    let (_param, body) = unwrap_lambda(&ty);
+    assert_eq!(
+        body,
+        expected_ty!(String),
+        "&&-hasattr with @ should produce string, got: {body}"
+    );
+}
+
 /// Regression test: cyclic narrowed variables with Inter wrappers should not
 /// cause infinite recursion (stack overflow) in the constraint solver.
 ///
