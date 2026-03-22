@@ -191,6 +191,7 @@ in
       RELEASE=0
       VERBOSE=0
       MEM_LIMIT_GB=16
+      FORMAT="json"
       DIRS=()
 
       while [[ $# -gt 0 ]]; do
@@ -212,6 +213,11 @@ in
             VERBOSE=1
             shift
             ;;
+          --format)
+            [[ $# -ge 2 ]] || { echo "ERROR: --format requires a value (json or human)" >&2; exit 2; }
+            FORMAT="$2"
+            shift 2
+            ;;
           --mem-limit)
             [[ $# -ge 2 ]] || { echo "ERROR: --mem-limit requires a value" >&2; exit 2; }
             MEM_LIMIT_GB="$2"
@@ -231,6 +237,7 @@ in
             echo "  --timing            Print per-phase timing and memory usage"
             echo "  --release           Build tix in release mode"
             echo "  --verbose, -v       Print file classifications"
+            echo "  --format <FORMAT>   Output format: json (default) or human"
             echo "  --mem-limit <GB>    Memory limit for tix process (default: 16)"
             echo "  --help, -h          Show this help"
             exit 0
@@ -261,13 +268,13 @@ in
       trap 'rm -rf "$WORK_DIR"' EXIT
 
       if [[ ''${#DIRS[@]} -eq 0 ]]; then
-        echo "Checking all of nixpkgs..."
+        echo "Checking all of nixpkgs..." >&2
         for entry in "$NIXPKGS_SRC"/*; do
           name="$(basename "$entry")"
           ln -s "$entry" "$WORK_DIR/$name"
         done
       else
-        echo "Checking: ''${DIRS[*]}"
+        echo "Checking: ''${DIRS[*]}" >&2
         for dir in "''${DIRS[@]}"; do
           top="''${dir%%/*}"
           src="$NIXPKGS_SRC/$top"
@@ -291,7 +298,7 @@ in
         ! -path '*/test/*' \
         ! -path '*/deprecated/*' \
         2>/dev/null | wc -l)
-      echo "Found ~''${NIX_COUNT} .nix files"
+      echo "Found ~''${NIX_COUNT} .nix files" >&2
 
       # Generate tix.toml.
       {
@@ -310,12 +317,12 @@ in
         echo "exclude = ${excludeToml}"
       } > "$WORK_DIR/tix.toml"
 
-      echo "---"
-      cat "$WORK_DIR/tix.toml"
-      echo "---"
+      echo "---" >&2
+      cat "$WORK_DIR/tix.toml" >&2
+      echo "---" >&2
 
-      # Build tix check args.
-      CHECK_ARGS=(check --config "$WORK_DIR/tix.toml")
+      # Build tix check args. --format is a top-level flag, must come before subcommand.
+      CHECK_ARGS=(--format "$FORMAT" check --config "$WORK_DIR/tix.toml")
       if [[ -n "$JOBS" ]]; then
         CHECK_ARGS+=(-j "$JOBS")
       fi
@@ -330,26 +337,36 @@ in
       export TIX_BUILTIN_STUBS
 
       LOG_FILE="/tmp/nixpkgs-test-$(date +%Y%m%d-%H%M%S).log"
-      echo "Memory limit: ''${MEM_LIMIT_GB} GB"
-      echo "Running: tix ''${CHECK_ARGS[*]}"
-      echo "Log file: $LOG_FILE"
-      echo "---"
+      echo "Memory limit: ''${MEM_LIMIT_GB} GB" >&2
+      echo "Running: tix ''${CHECK_ARGS[*]}" >&2
+      echo "Log file: $LOG_FILE" >&2
+      echo "---" >&2
 
       # tix check exits 1 on type errors (expected), only treat crashes
       # (exit >= 2) as failures.
+      #
+      # stdout (JSON/human output) goes to stdout and the log file.
+      # stderr (tix diagnostics, timing) goes to stderr and the log file.
       set +e
-      run_with_mem_limit "$MEM_LIMIT_GB" "$TIX_CLI" "''${CHECK_ARGS[@]}" 2>&1 | tee "$LOG_FILE"
+      run_with_mem_limit "$MEM_LIMIT_GB" "$TIX_CLI" "''${CHECK_ARGS[@]}" \
+        > >(tee "$LOG_FILE") 2> >(tee "$LOG_FILE.err" >&2)
       rc=''${PIPESTATUS[0]}
       set -e
 
+      # Merge stderr log into main log.
+      if [[ -f "$LOG_FILE.err" ]]; then
+        cat "$LOG_FILE.err" >> "$LOG_FILE"
+        rm -f "$LOG_FILE.err"
+      fi
+
       if [[ $rc -ge 2 ]]; then
-        echo ""
-        echo "tix check crashed (exit $rc)"
-        echo "Full log: $LOG_FILE"
+        echo "" >&2
+        echo "tix check crashed (exit $rc)" >&2
+        echo "Full log: $LOG_FILE" >&2
         exit 1
       fi
 
-      echo "Full log: $LOG_FILE"
+      echo "Full log: $LOG_FILE" >&2
       exit 0
     '';
   };

@@ -33,6 +33,7 @@ nixpkgs-test                                  # Run tix on ALL of nixpkgs (paral
 nixpkgs-test lib/                             # Check only lib/ subdirectory
 nixpkgs-test pkgs/                            # Check only pkgs/ subdirectory
 nixpkgs-test --release --timing lib/ nixos/   # Check lib/ + nixos/ with timing
+nixpkgs-test --format human lib/             # Human-readable output (default: json)
 nixpkgs-test -j 4                            # Custom thread limit
 ```
 
@@ -41,6 +42,16 @@ When debugging, always use `tixc` (available in the nix devShell) — it is safe
 ```bash
 tixc test/basic.nix             # local file
 tixc nixpkgs:lib/strings.nix    # nixpkgs subpath
+```
+
+`nixpkgs-test` defaults to `--format json` and sends all status messages to stderr, so stdout is clean JSON. Pipe to a file and use `jq` to inspect results efficiently:
+
+```bash
+nixpkgs-test lib/ > /tmp/results.json         # Capture JSON output
+jq '.summary' /tmp/results.json               # Quick summary (files_checked, errors, warnings)
+jq '.files[].file' /tmp/results.json          # List files with diagnostics
+jq '.files[] | select(.diagnostics | length > 0)' /tmp/results.json  # Files with issues
+jq '.files[] | select(.file | test("strings"))' /tmp/results.json    # Filter by filename
 ```
 
 **Note:** `tixc` and `nixpkgs-test` are Nix-built scripts (defined in `nix/scripts.nix`). The devShell caches them, so if you edit `nix/scripts.nix`, use `nix run .#tixc -- <args>` to test your changes immediately without waiting for direnv to reload.
