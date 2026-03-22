@@ -36,6 +36,13 @@ pub struct OptionLeaf {
     /// NixOS option description text, extracted from the option declaration.
     #[serde(default)]
     pub description: Option<String>,
+    /// True when the NixOS option has any `default` declared. We cannot
+    /// evaluate the default at extraction time (native Nix errors are
+    /// uncatchable), so the Rust code applies a heuristic: for `nullOr`
+    /// wrapping a "set-like" inner type (submodule, attrsOf, anything), a
+    /// default almost always means non-null (`{}`), so we strip `| null`.
+    #[serde(default, rename = "hasDefault")]
+    pub has_default: bool,
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
@@ -119,6 +126,11 @@ fn flatten_union(members: &[NixosTypeInfo]) -> Vec<&NixosTypeInfo> {
 /// Heuristic: a union is freeform if its flattened leaves (>= 4) include
 /// at least one `path` primitive, one `List`, and one `AttrsOf`/`Anything`.
 fn is_freeform_value_union(members: &[NixosTypeInfo]) -> bool {
+    // At low extraction depth, freeform format types (json/yaml/toml) collapse
+    // to a union of Anything members. Detect this and treat as freeform.
+    if !members.is_empty() && members.iter().all(|m| matches!(m, NixosTypeInfo::Anything)) {
+        return true;
+    }
     let leaves = flatten_union(members);
     if leaves.len() < 4 {
         return false;
@@ -133,6 +145,29 @@ fn is_freeform_value_union(members: &[NixosTypeInfo]) -> bool {
         .iter()
         .any(|m| matches!(m, NixosTypeInfo::AttrsOf { .. } | NixosTypeInfo::Anything));
     has_path && has_list && has_attrs
+}
+
+/// Check if a type is "set-like" — submodule, attrsOf, or freeform union.
+/// These types almost always have non-null defaults (`{}`) when a default
+/// is declared, making it safe to strip `| null` from their `nullOr` wrapper.
+/// Freeform value unions (from `pkgs.formats.json/yaml/toml`) are included
+/// because they represent flexible attrsets that always default to `{}`.
+/// At low extraction depth, freeform unions collapse to `Union [Anything, ...]`
+/// — we detect this by checking if all members are `Anything`.
+/// Note: standalone `Anything` is excluded because it's ambiguous at the
+/// `nullOr` level — with the depth-preserving `nullOr` extraction, primitives
+/// are always correctly extracted, so `Anything` inside `NullOr` only appears
+/// for genuinely complex types.
+fn is_set_like(ty: &NixosTypeInfo) -> bool {
+    match ty {
+        NixosTypeInfo::Submodule { .. } | NixosTypeInfo::AttrsOf { .. } => true,
+        NixosTypeInfo::Union { members } => {
+            is_freeform_value_union(members)
+                || (!members.is_empty()
+                    && members.iter().all(|m| matches!(m, NixosTypeInfo::Anything)))
+        }
+        _ => false,
+    }
 }
 
 /// Convert a NixOS type to a .tix type expression string.
@@ -283,7 +318,20 @@ fn options_to_attrset_ty_inner(
         let field_name = format_field_name(name);
         match node {
             OptionNode::Option(leaf) => {
-                let ty_str = type_to_tix(&leaf.type_info);
+                // Heuristic: for `nullOr` wrapping a set-like inner type
+                // (submodule, attrsOf, anything) with a default declared,
+                // the default is almost always non-null (`{}`), so we strip
+                // `| null` to avoid false positives on field access.
+                // Primitive nullOr types (bool, string, etc.) commonly default
+                // to null, so we keep `| null` for those.
+                let ty_str = if leaf.has_default {
+                    match &leaf.type_info {
+                        NixosTypeInfo::NullOr { elem } if is_set_like(elem) => type_to_tix(elem),
+                        other => type_to_tix(other),
+                    }
+                } else {
+                    type_to_tix(&leaf.type_info)
+                };
                 let mut lines = String::new();
 
                 // Emit doc comment if we have a description.
@@ -1481,6 +1529,7 @@ mod tests {
                     value: "bool".into(),
                 },
                 description: None,
+                has_default: false,
             }),
         );
         let ty = NixosTypeInfo::Submodule { options: opts };
@@ -1510,6 +1559,7 @@ mod tests {
                     value: "bool".into(),
                 },
                 description: None,
+                has_default: false,
             }),
         );
         opts.insert(
@@ -1520,6 +1570,7 @@ mod tests {
                     value: "int".into(),
                 },
                 description: None,
+                has_default: false,
             }),
         );
         let result = options_to_attrset_ty(&opts, 0);
@@ -1539,6 +1590,7 @@ mod tests {
                     value: "bool".into(),
                 },
                 description: None,
+                has_default: false,
             }),
         );
         let mut outer = BTreeMap::new();
@@ -1570,6 +1622,7 @@ mod tests {
                     value: "bool".into(),
                 },
                 description: None,
+                has_default: false,
             }),
         );
         openssh.insert(
@@ -1582,6 +1635,7 @@ mod tests {
                     }),
                 },
                 description: None,
+                has_default: false,
             }),
         );
         services.insert(
@@ -1614,6 +1668,7 @@ mod tests {
                                 value: "string".into(),
                             },
                             description: None,
+                            has_default: false,
                         }),
                     );
                     m.insert(
@@ -1630,6 +1685,7 @@ mod tests {
                                             value: "bool".into(),
                                         },
                                         description: None,
+                                        has_default: false,
                                     }),
                                 );
                                 fw.insert(
@@ -1642,6 +1698,7 @@ mod tests {
                                             }),
                                         },
                                         description: None,
+                                        has_default: false,
                                     }),
                                 );
                                 fw
@@ -1677,6 +1734,7 @@ mod tests {
                     }),
                 },
                 description: None,
+                has_default: false,
             }),
         );
         tree.insert(
@@ -1687,6 +1745,7 @@ mod tests {
                     elem: Box::new(NixosTypeInfo::Package),
                 },
                 description: None,
+                has_default: false,
             }),
         );
         tree.insert(
@@ -1699,6 +1758,7 @@ mod tests {
                     }),
                 },
                 description: None,
+                has_default: false,
             }),
         );
 
@@ -1709,6 +1769,172 @@ mod tests {
                 tix_content, e
             );
         });
+    }
+
+    // -------------------------------------------------------------------------
+    // nullOr + default: strip | null for set-like inner types
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn nullor_set_like_with_default_strips_null() {
+        // nullOr (submodule {...}) with has_default: true → strip | null
+        let mut tree = BTreeMap::new();
+        tree.insert(
+            "configuration".to_string(),
+            OptionNode::Option(OptionLeaf {
+                _is_option: true,
+                type_info: NixosTypeInfo::NullOr {
+                    elem: Box::new(NixosTypeInfo::Submodule {
+                        options: {
+                            let mut m = BTreeMap::new();
+                            m.insert(
+                                "server".to_string(),
+                                OptionNode::Option(OptionLeaf {
+                                    _is_option: true,
+                                    type_info: NixosTypeInfo::Primitive {
+                                        value: "string".into(),
+                                    },
+                                    description: None,
+                                    has_default: false,
+                                }),
+                            );
+                            m
+                        },
+                    }),
+                },
+                description: None,
+                has_default: true,
+            }),
+        );
+
+        let attrset = options_to_attrset_ty(&tree, 0);
+        assert!(
+            !attrset.contains("| null"),
+            "Expected no `| null` for nullOr submodule with default:\n{attrset}"
+        );
+        assert!(
+            attrset.contains("server: string"),
+            "Expected inner submodule fields to be rendered:\n{attrset}"
+        );
+    }
+
+    #[test]
+    fn nullor_primitive_with_default_keeps_null() {
+        // nullOr string with has_default: true → keep | null
+        // (primitive nullOr options commonly default to null)
+        let mut tree = BTreeMap::new();
+        tree.insert(
+            "setting".to_string(),
+            OptionNode::Option(OptionLeaf {
+                _is_option: true,
+                type_info: NixosTypeInfo::NullOr {
+                    elem: Box::new(NixosTypeInfo::Primitive {
+                        value: "string".into(),
+                    }),
+                },
+                description: None,
+                has_default: true,
+            }),
+        );
+
+        let attrset = options_to_attrset_ty(&tree, 0);
+        assert!(
+            attrset.contains("string | null"),
+            "Expected `| null` for nullOr primitive even with default:\n{attrset}"
+        );
+    }
+
+    #[test]
+    fn nullor_without_default_keeps_null() {
+        // nullOr (submodule) without default → keep | null
+        let mut tree = BTreeMap::new();
+        tree.insert(
+            "configuration".to_string(),
+            OptionNode::Option(OptionLeaf {
+                _is_option: true,
+                type_info: NixosTypeInfo::NullOr {
+                    elem: Box::new(NixosTypeInfo::Anything),
+                },
+                description: None,
+                has_default: false,
+            }),
+        );
+
+        let attrset = options_to_attrset_ty(&tree, 0);
+        assert!(
+            attrset.contains("| null"),
+            "Expected `| null` for nullOr anything without default:\n{attrset}"
+        );
+    }
+
+    #[test]
+    fn nullor_anything_with_default_keeps_null() {
+        // nullOr (anything) with default → keep | null
+        // Anything is a depth-limit fallback, could be any type.
+        let mut tree = BTreeMap::new();
+        tree.insert(
+            "settings".to_string(),
+            OptionNode::Option(OptionLeaf {
+                _is_option: true,
+                type_info: NixosTypeInfo::NullOr {
+                    elem: Box::new(NixosTypeInfo::Anything),
+                },
+                description: None,
+                has_default: true,
+            }),
+        );
+
+        let attrset = options_to_attrset_ty(&tree, 0);
+        assert!(
+            attrset.contains("| null"),
+            "Expected `| null` for nullOr anything (depth-limit fallback):\n{attrset}"
+        );
+    }
+
+    #[test]
+    fn nullor_attrs_of_with_default_strips_null() {
+        // nullOr (attrsOf string) with default → strip | null
+        let mut tree = BTreeMap::new();
+        tree.insert(
+            "settings".to_string(),
+            OptionNode::Option(OptionLeaf {
+                _is_option: true,
+                type_info: NixosTypeInfo::NullOr {
+                    elem: Box::new(NixosTypeInfo::AttrsOf {
+                        elem: Box::new(NixosTypeInfo::Primitive {
+                            value: "string".into(),
+                        }),
+                    }),
+                },
+                description: None,
+                has_default: true,
+            }),
+        );
+
+        let attrset = options_to_attrset_ty(&tree, 0);
+        assert!(
+            !attrset.contains("| null"),
+            "Expected no `| null` for nullOr attrsOf with default:\n{attrset}"
+        );
+    }
+
+    #[test]
+    fn deserialize_has_default() {
+        let json = r#"{
+            "_isOption": true,
+            "typeInfo": {"type": "nullOr", "elem": {"type": "primitive", "value": "string"}},
+            "hasDefault": true
+        }"#;
+        let leaf: OptionLeaf = serde_json::from_str(json).unwrap();
+        assert!(leaf.has_default);
+
+        // Without the field — should default to false.
+        let json_no_default = r#"{
+            "_isOption": true,
+            "typeInfo": {"type": "nullOr", "elem": {"type": "primitive", "value": "string"}}
+        }"#;
+        let leaf2: OptionLeaf = serde_json::from_str(json_no_default).unwrap();
+        assert!(!leaf2.has_default);
     }
 
     #[test]
@@ -1729,6 +1955,7 @@ mod tests {
                                 value: "bool".into(),
                             },
                             description: None,
+                            has_default: false,
                         }),
                     );
                     m
@@ -1805,6 +2032,7 @@ mod tests {
                     value: "bool".into(),
                 },
                 description: None,
+                has_default: false,
             }),
         );
         tree.insert(
@@ -1821,6 +2049,7 @@ mod tests {
                                 value: "string".into(),
                             },
                             description: None,
+                            has_default: false,
                         }),
                     );
                     m.insert(
@@ -1831,6 +2060,7 @@ mod tests {
                                 value: "path".into(),
                             },
                             description: None,
+                            has_default: false,
                         }),
                     );
                     m.insert(
@@ -1841,6 +2071,7 @@ mod tests {
                                 elem: Box::new(NixosTypeInfo::Package),
                             },
                             description: None,
+                            has_default: false,
                         }),
                     );
                     m
@@ -1939,6 +2170,7 @@ mod tests {
                     value: "string".into(),
                 },
                 description: None,
+                has_default: false,
             }),
         );
 
@@ -1977,6 +2209,7 @@ mod tests {
                     value: "bool".into(),
                 },
                 description: Some("Whether to enable the service.".to_string()),
+                has_default: false,
             }),
         );
         tree.insert(
@@ -1987,6 +2220,7 @@ mod tests {
                     value: "int".into(),
                 },
                 description: None,
+                has_default: false,
             }),
         );
 
@@ -2024,6 +2258,7 @@ mod tests {
                     value: "bool".into(),
                 },
                 description: Some("Whether to enable OpenSSH.".to_string()),
+                has_default: false,
             }),
         );
         tree.insert(
@@ -2078,6 +2313,7 @@ mod tests {
                     value: "bool".into(),
                 },
                 description: Some("Whether to enable.".to_string()),
+                has_default: false,
             }),
         );
 

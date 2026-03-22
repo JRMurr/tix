@@ -26,10 +26,9 @@ let
     let
       name = optType.name or "";
     in
-    if depth <= 0 then { type = "anything"; }
 
-    # --- Primitive types ---
-    else if name == "str" || name == "separatedString" || name == "lines"
+    # --- Primitive types (extracted regardless of depth) ---
+    if name == "str" || name == "separatedString" || name == "lines"
             || name == "commas" || name == "envVar" || name == "nonEmptyStr" then
       { type = "primitive"; value = "string"; }
 
@@ -48,9 +47,20 @@ let
     else if name == "path" then
       { type = "primitive"; value = "path"; }
 
-    # --- Package type (a derivation) ---
+    # --- Package type (a derivation, no recursion needed) ---
     else if name == "package" then
       { type = "package"; }
+
+    # --- Enum (no recursion needed) ---
+    else if name == "enum" then
+      { type = "enum"; }
+
+    # --- Anything/raw (no recursion needed) ---
+    else if name == "anything" || name == "raw" || name == "unspecified" then
+      { type = "anything"; }
+
+    # --- Depth limit for compound types ---
+    else if depth <= 0 then { type = "anything"; }
 
     # --- Compound types ---
     else if name == "listOf" then
@@ -61,8 +71,11 @@ let
       let inner = builtins.tryEval (extractType (depth - 1) optType.nestedTypes.elemType);
       in { type = "attrsOf"; elem = if inner.success then inner.value else { type = "anything"; }; }
 
+    # nullOr is a thin wrapper — don't decrease depth so the inner type
+    # gets accurate extraction. This matters for deciding whether to
+    # strip `| null` (e.g. `nullOr path` vs `nullOr (attrsOf ...)`).
     else if name == "nullOr" then
-      let inner = builtins.tryEval (extractType (depth - 1) optType.nestedTypes.elemType);
+      let inner = builtins.tryEval (extractType depth optType.nestedTypes.elemType);
       in { type = "nullOr"; elem = if inner.success then inner.value else { type = "anything"; }; }
 
     else if name == "either" || name == "oneOf" then
@@ -73,9 +86,6 @@ let
         (if left.success then left.value else null)
         (if right.success then right.value else null)
       ]; }
-
-    else if name == "enum" then
-      { type = "enum"; }
 
     else if name == "submodule" then
       let
@@ -100,9 +110,6 @@ let
       # coercedTo wraps a final type — extract it
       let inner = builtins.tryEval (extractType depth optType.nestedTypes.finalType);
       in if inner.success then inner.value else { type = "anything"; }
-
-    else if name == "anything" || name == "raw" || name == "unspecified" then
-      { type = "anything"; }
 
     # --- Fallback ---
     else
@@ -157,7 +164,13 @@ let
               value = {
                 _isOption = true;
                 typeInfo = if typeInfo.success then typeInfo.value else { type = "anything"; };
-              } // (if desc != null then { description = desc; } else {});
+                # Whether the option has any default declared. We do NOT
+                # evaluate v.default because some defaults trigger uncatchable
+                # native Nix errors (e.g. hardware.nvidia.open references an
+                # unavailable package). The Rust stub generator uses this flag
+                # together with the inner type to decide whether to strip | null.
+              } // (if v ? default then { hasDefault = true; } else {})
+                // (if desc != null then { description = desc; } else {});
             }]
           else if builtins.isAttrs v then
             [{

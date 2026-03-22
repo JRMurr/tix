@@ -150,6 +150,12 @@ Intentional O(n^2) trade-offs, acceptable for typical Nix code sizes:
   No way to auto-derive `@context` from internal libraries.
 - **No watch mode in CLI** (requires external `watchexec`).
 - **gen-stubs nixos is slow** (full `nix eval`, no incremental).
+- **`builtins.tryEval` cannot catch native Nix type errors** (e.g. attribute
+  access on null). This prevents evaluating `v.default` for options whose
+  defaults reference unavailable packages (like `hardware.nvidia.open`).
+  The `hasDefault` heuristic + `is_set_like` inner-type check works around
+  this, but a proper fix would require Nix-level improvements or a separate
+  evaluation pass.
 - **Inference aborted diagnostic** says what's missing but not how to fix it.
 - **No workspace/multi-root LSP support.**
 - **No CONTRIBUTING.md** for potential contributors.
