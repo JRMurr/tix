@@ -29,12 +29,8 @@ tixc test/basic.nix             # Type-check a local .nix file
 tixc nixpkgs:lib/strings.nix    # Type-check a nixpkgs file (requires nix)
 tixc --release test/basic.nix   # Type-check with release build
 tixc --release --time nixpkgs:lib/strings.nix --timing  # Release + RSS tracking
-nixpkgs-lib-test                              # Run tix on nixpkgs lib/ sequentially (requires nix)
-nixpkgs-lib-test --parallel                   # Parallel inference via `tix check` (requires nix)
-nixpkgs-lib-test --parallel --timing -j 4     # With timing + thread limit
-nixpkgs-lib-test --release                    # Run with optimized release build
-nixpkgs-lib-test --parallel --release --timing  # Parallel + release + timing
 nixpkgs-test                                  # Run tix on ALL of nixpkgs (parallel, requires nix)
+nixpkgs-test lib/                             # Check only lib/ subdirectory
 nixpkgs-test pkgs/                            # Check only pkgs/ subdirectory
 nixpkgs-test --release --timing lib/ nixos/   # Check lib/ + nixos/ with timing
 nixpkgs-test -j 4                            # Custom thread limit
@@ -47,7 +43,7 @@ tixc test/basic.nix             # local file
 tixc nixpkgs:lib/strings.nix    # nixpkgs subpath
 ```
 
-**Note:** `tixc`, `nixpkgs-test`, and `nixpkgs-lib-test` are Nix-built scripts (defined in `nix/scripts.nix`). The devShell caches them, so if you edit `nix/scripts.nix`, use `nix run .#tixc -- <args>` to test your changes immediately without waiting for direnv to reload.
+**Note:** `tixc` and `nixpkgs-test` are Nix-built scripts (defined in `nix/scripts.nix`). The devShell caches them, so if you edit `nix/scripts.nix`, use `nix run .#tixc -- <args>` to test your changes immediately without waiting for direnv to reload.
 
 ### Profiling with stubs
 

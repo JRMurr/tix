@@ -92,7 +92,6 @@
                 tix-lsp-dev
                 scripts.tixc
                 scripts.nixpkgs-test
-                scripts.nixpkgs-lib-test
 
                 # common
                 pkgs.just
@@ -107,7 +106,7 @@
             stubs = tix-stubs;
             with-stubs = tix-with-stubs;
             inherit tix-code tix-code-dev tix-code-release;
-            inherit (scripts) tixc nixpkgs-test nixpkgs-lib-test;
+            inherit (scripts) tixc nixpkgs-test;
             docs = pkgs.stdenv.mkDerivation {
               name = "tix-docs";
               src = ./docs;

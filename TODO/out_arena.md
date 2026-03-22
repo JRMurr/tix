@@ -117,6 +117,6 @@ Once all tests compile:
 1. `cargo nextest run` — all existing tests pass (semantic behavior unchanged)
 2. `./scripts/pbt.sh 50000` — PBT passes with arena-backed types
 3. `tixc --timing test/strings.nix` — RSS should drop significantly (target: <500 MB from ~1.2 GB)
-4. `nixpkgs-lib-test --parallel --release --timing` — verify no regression in type results, check RSS
+4. `nixpkgs-test --release --timing lib/` — verify no regression in type results, check RSS
 5. `nixpkgs-test --release --timing -j 4` — target: should not OOM at 16 GB
 6. LSP e2e tests pass: `cargo nextest run -p tix-lsp`
