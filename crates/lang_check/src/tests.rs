@@ -1049,6 +1049,28 @@ test_case!(
     Path
 );
 
+// When a string interpolation is used where a path is expected, the diagnostic
+// should include a hint about using path concatenation with `+`.
+diagnostic_msg!(
+    string_interpolation_as_path_hint,
+    r#"let
+      /** type: f :: path -> int */
+      f = x: 42;
+    in f "${toString 1}/bar""#,
+    contains "string interpolation always produces"
+);
+
+// A plain string (not interpolation) used where a path is expected should NOT
+// get the interpolation hint.
+diagnostic_msg!(
+    plain_string_as_path_no_hint,
+    r#"let
+      /** type: f :: path -> int */
+      f = x: 42;
+    in f "hello""#,
+    not contains "string interpolation"
+);
+
 // Regression: indented multi-line strings without interpolation should infer
 // as string (not panic in get_str_literal). See code review issue #13.
 test_case!(

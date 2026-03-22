@@ -36,6 +36,7 @@ pub fn code_actions(
 
     // -- Diagnostic-driven actions --
     add_missing_field_actions(analysis, params, root, uri, &mut actions);
+    add_path_concatenation_actions(analysis, params, root, uri, &mut actions);
 
     // -- Position-driven actions --
     add_type_annotation_actions(analysis, params, root, uri, &mut actions);
@@ -240,6 +241,117 @@ fn find_attrset_insert_point(
         });
 
     Some((close_pos, indent))
+}
+
+// ==============================================================================
+// "Use path concatenation" quick fix
+// ==============================================================================
+//
+// When a StringInterpolation is used where a path is expected (E001 with the
+// path-coercion hint), offer to rewrite `"${expr}/suffix"` to `(expr + "/suffix")`.
+// This handles the common case where the interpolation starts with a single
+// expression followed by a literal suffix.
+
+fn add_path_concatenation_actions(
+    analysis: &FileSnapshot,
+    params: &CodeActionParams,
+    root: &rnix::Root,
+    uri: &Url,
+    actions: &mut Vec<CodeActionOrCommand>,
+) {
+    let request_range = params.range;
+
+    let empty_diags = Vec::new();
+    let diagnostics = analysis
+        .any_inference()
+        .map(|inf| &inf.check_result.diagnostics)
+        .unwrap_or(&empty_diags);
+
+    for diag in diagnostics {
+        // Only handle TypeMismatch with the path-coercion hint.
+        let hint = match &diag.kind {
+            TixDiagnosticKind::TypeMismatch { hint: Some(h), .. }
+                if h.contains("string interpolation") =>
+            {
+                h
+            }
+            _ => continue,
+        };
+
+        // Find the source range of the diagnostic expression.
+        let ptr = match analysis.syntax.source_map.node_for_expr(diag.at_expr) {
+            Some(ptr) => ptr,
+            None => continue,
+        };
+        let node = ptr.to_node(root.syntax());
+        let diag_range = analysis.syntax.line_index.range(node.text_range());
+
+        if !ranges_overlap(diag_range, request_range) {
+            continue;
+        }
+
+        // The node should be a Str (rnix string node). Parse its interpolation
+        // parts to find the pattern: ${expr} followed by a literal suffix.
+        let str_node = match rnix::ast::Str::cast(node.clone()) {
+            Some(s) => s,
+            None => continue,
+        };
+
+        let parts: Vec<_> = str_node.parts().collect();
+
+        // We handle the simple case: one interpolation part at the start,
+        // followed by one literal part. E.g. "${expr}/suffix".
+        if parts.len() != 2 {
+            continue;
+        }
+
+        let expr_text = match &parts[0] {
+            rnix::ast::InterpolPart::Interpolation(interp) => {
+                let expr_node = match interp.expr() {
+                    Some(e) => e,
+                    None => continue,
+                };
+                expr_node.syntax().text().to_string()
+            }
+            _ => continue,
+        };
+
+        let suffix = match &parts[1] {
+            rnix::ast::InterpolPart::Literal(lit) => lit.clone(),
+            _ => continue,
+        };
+
+        // Build the replacement: (expr + "/suffix")
+        let replacement = format!("({expr_text} + \"{suffix}\")");
+
+        let edit = TextEdit {
+            range: diag_range,
+            new_text: replacement.clone(),
+        };
+
+        let mut changes = std::collections::HashMap::new();
+        changes.insert(uri.clone(), vec![edit]);
+
+        let lsp_diag = Diagnostic {
+            range: diag_range,
+            severity: Some(DiagnosticSeverity::ERROR),
+            source: Some("tix".to_string()),
+            message: format!("{}\nhint: {hint}", diag.kind),
+            ..Default::default()
+        };
+
+        actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+            title: "Use path concatenation instead of string interpolation".to_string(),
+            kind: Some(CodeActionKind::QUICKFIX),
+            diagnostics: Some(vec![lsp_diag]),
+            edit: Some(WorkspaceEdit {
+                changes: Some(changes),
+                ..Default::default()
+            }),
+            is_preferred: Some(true),
+            ..Default::default()
+        }));
+    }
 }
 
 // ==============================================================================
@@ -768,6 +880,75 @@ mod tests {
             all_edits[0].new_text.is_empty(),
             "removal edit should have empty new_text, got: {:?}",
             all_edits[0].new_text
+        );
+    }
+
+    // ======================================================================
+    // "Use path concatenation" tests
+    // ======================================================================
+
+    #[test]
+    fn path_concatenation_offers_quick_fix() {
+        let src = indoc! {r#"
+            let
+              /** type: f :: path -> int */
+              f = x: 42;
+            in f "${toString 1}/bar"
+            #    ^1
+        "#};
+        let actions = actions_at_marker(src, 1);
+        let titles = action_titles(&actions);
+
+        assert!(
+            titles.iter().any(|t| t.contains("path concatenation")),
+            "expected 'path concatenation' action, got: {titles:?}"
+        );
+    }
+
+    #[test]
+    fn path_concatenation_produces_correct_edit() {
+        let src = indoc! {r#"
+            let
+              /** type: f :: path -> int */
+              f = x: 42;
+            in f "${toString 1}/bar"
+            #    ^1
+        "#};
+        let actions = actions_at_marker(src, 1);
+        let edit = edit_for_title(&actions, "path concatenation")
+            .expect("should have an edit for path concatenation");
+
+        let changes = edit.changes.unwrap();
+        let all_edits: Vec<_> = changes.values().flat_map(|v| v.iter()).collect();
+        assert!(!all_edits.is_empty());
+
+        let new_text = &all_edits[0].new_text;
+        assert!(
+            new_text.contains("toString 1"),
+            "replacement should preserve the interpolated expression, got: {new_text}"
+        );
+        assert!(
+            new_text.contains("+ \"/bar\""),
+            "replacement should use path concatenation with suffix, got: {new_text}"
+        );
+    }
+
+    #[test]
+    fn no_path_concatenation_for_plain_string() {
+        // A plain string literal (not interpolation) should not get the action.
+        let src = indoc! {r#"
+            let
+              /** type: f :: path -> int */
+              f = x: 42;
+            in f "hello"
+            #    ^1
+        "#};
+        let actions = actions_at_marker(src, 1);
+        let titles = action_titles(&actions);
+
+        assert!(
+            !titles.iter().any(|t| t.contains("path concatenation")),
+            "should not offer path concatenation for plain string, got: {titles:?}"
         );
     }
 

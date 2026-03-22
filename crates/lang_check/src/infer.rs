@@ -152,7 +152,8 @@ impl CheckCtx<'_> {
         // Convert internal errors and warnings to display-ready diagnostics
         // while we still have access to the TypeStorage for canonicalization.
         let warnings = std::mem::take(&mut self.warnings);
-        let mut diagnostics = diagnostic::errors_to_diagnostics(&errors, &self.types.storage);
+        let mut diagnostics =
+            diagnostic::errors_to_diagnostics(&errors, &self.types.storage, self.module);
         diagnostics.extend(diagnostic::warnings_to_diagnostics(&warnings));
 
         // Check memory pressure before canonicalization. Canonicalization can

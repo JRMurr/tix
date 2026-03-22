@@ -11,7 +11,7 @@
 use std::fmt;
 use std::sync::Arc;
 
-use lang_ast::{AstPtr, ExprId, OverloadBinOp};
+use lang_ast::{AstPtr, Expr, ExprId, Module, OverloadBinOp};
 use lang_ty::{DisplayConfig, OutputTy, OwnedTy, TypeArena};
 use smol_str::SmolStr;
 
@@ -78,6 +78,8 @@ pub enum TixDiagnosticKind {
     TypeMismatch {
         expected: DiagTy,
         actual: DiagTy,
+        /// Optional hint for the user (e.g. suggesting path concatenation).
+        hint: Option<String>,
     },
     MissingField {
         field: SmolStr,
@@ -202,13 +204,21 @@ impl fmt::Display for TixDiagnosticKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let dc = DisplayConfig::diagnostic();
         match self {
-            TixDiagnosticKind::TypeMismatch { expected, actual } => {
+            TixDiagnosticKind::TypeMismatch {
+                expected,
+                actual,
+                hint,
+            } => {
                 write!(
                     f,
                     "type mismatch: expected `{}`, got `{}`",
                     expected.display_truncated(&dc),
                     actual.display_truncated(&dc)
-                )
+                )?;
+                if let Some(hint) = hint {
+                    write!(f, "\nhint: {hint}")?;
+                }
+                Ok(())
             }
             TixDiagnosticKind::MissingField {
                 field,
@@ -475,20 +485,59 @@ fn make_diag_ty(arena: Arc<TypeArena>, ty: lang_ty::TyRef) -> DiagTy {
     DiagTy(OwnedTy::new(arena, ty))
 }
 
+/// Check whether a TypeMismatch(expected=path, actual=string) occurred on a
+/// StringInterpolation expression, and if so, return a hint suggesting path
+/// concatenation with `+`.
+fn type_mismatch_hint(
+    arena: &TypeArena,
+    expected: lang_ty::TyRef,
+    actual: lang_ty::TyRef,
+    at_expr: ExprId,
+    module: &Module,
+) -> Option<String> {
+    use lang_ty::PrimitiveTy;
+
+    let is_expected_path = matches!(arena.get(expected), OutputTy::Primitive(PrimitiveTy::Path));
+    let is_actual_string = matches!(arena.get(actual), OutputTy::Primitive(PrimitiveTy::String));
+
+    if is_expected_path
+        && is_actual_string
+        && matches!(&module[at_expr], Expr::StringInterpolation(_))
+    {
+        return Some(
+            "string interpolation always produces `string`; \
+             use `path + \"/suffix\"` to preserve the `path` type"
+                .to_string(),
+        );
+    }
+
+    None
+}
+
 /// Convert a single `LocatedError` into a `TixDiagnostic`.
 ///
 /// Each error gets its own arena so that diagnostics are fully self-contained
 /// and can be stored, cloned, or compared without keeping the TypeStorage alive.
-fn error_to_diagnostic(error: &LocatedError, table: &TypeStorage) -> TixDiagnostic {
+fn error_to_diagnostic(
+    error: &LocatedError,
+    table: &TypeStorage,
+    module: &Module,
+) -> TixDiagnostic {
     let kind = match &error.payload {
         InferenceError::TypeMismatch(pair) => {
             let mut arena = TypeArena::new();
             let actual = canonicalize_ty_structural(&pair.0, table, &mut arena);
             let expected = canonicalize_ty_structural(&pair.1, table, &mut arena);
             let arena = Arc::new(arena);
+
+            // When expected=path and actual=string, check if the expression is
+            // a StringInterpolation — suggest using path concatenation instead.
+            let hint = type_mismatch_hint(&arena, expected, actual, error.at_expr, module);
+
             TixDiagnosticKind::TypeMismatch {
                 expected: make_diag_ty(Arc::clone(&arena), expected),
                 actual: make_diag_ty(Arc::clone(&arena), actual),
+                hint,
             }
         }
         InferenceError::MissingField { field, available } => {
@@ -558,10 +607,14 @@ fn warning_to_diagnostic(warning: &LocatedWarning) -> TixDiagnostic {
 }
 
 /// Convert a batch of `LocatedError`s into `TixDiagnostic`s.
-pub fn errors_to_diagnostics(errors: &[LocatedError], table: &TypeStorage) -> Vec<TixDiagnostic> {
+pub fn errors_to_diagnostics(
+    errors: &[LocatedError],
+    table: &TypeStorage,
+    module: &Module,
+) -> Vec<TixDiagnostic> {
     errors
         .iter()
-        .map(|e| error_to_diagnostic(e, table))
+        .map(|e| error_to_diagnostic(e, table, module))
         .collect()
 }
 
@@ -671,6 +724,7 @@ mod tests {
         let kind = TixDiagnosticKind::TypeMismatch {
             expected: prim_owned(lang_ty::PrimitiveTy::String),
             actual: prim_owned(lang_ty::PrimitiveTy::Int),
+            hint: None,
         };
         assert_eq!(
             kind.to_string(),
@@ -803,6 +857,7 @@ mod tests {
             TixDiagnosticKind::TypeMismatch {
                 expected: prim_owned(lang_ty::PrimitiveTy::Int),
                 actual: prim_owned(lang_ty::PrimitiveTy::String),
+                hint: None,
             }
             .code(),
             "E001"
@@ -837,6 +892,7 @@ mod tests {
         let kind = TixDiagnosticKind::TypeMismatch {
             expected: prim_owned(lang_ty::PrimitiveTy::Int),
             actual: prim_owned(lang_ty::PrimitiveTy::String),
+            hint: None,
         };
         assert_eq!(
             kind.docs_url(),
@@ -858,6 +914,7 @@ mod tests {
         assert!(!TixDiagnosticKind::TypeMismatch {
             expected: prim_owned(lang_ty::PrimitiveTy::Int),
             actual: prim_owned(lang_ty::PrimitiveTy::String),
+            hint: None,
         }
         .is_warning());
     }
