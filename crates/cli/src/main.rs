@@ -2,6 +2,7 @@ mod check;
 mod config;
 mod gen_stubs;
 mod init;
+pub mod json_output;
 mod timing;
 
 use std::collections::HashMap;
@@ -14,7 +15,17 @@ use std::{error::Error, path::PathBuf};
 /// CLI responsive on huge files like nixpkgs all-packages.nix.
 const MAX_RENDERED_DIAGNOSTICS: usize = 200;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+
+/// Output format for diagnostics and type information.
+#[derive(Clone, Debug, Default, ValueEnum)]
+pub enum OutputFormat {
+    /// Human-readable colored output (default)
+    #[default]
+    Human,
+    /// Machine-readable JSON
+    Json,
+}
 use lang_ast::{module_and_source_maps, name_resolution, RootDatabase};
 use lang_check::aliases::TypeAliasRegistry;
 use lang_check::diagnostic::{TixDiagnostic, TixDiagnosticKind};
@@ -66,6 +77,10 @@ struct Cli {
     /// Show complete types without truncation
     #[arg(long)]
     full_types: bool,
+
+    /// Output format: human (default) or json
+    #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+    format: OutputFormat,
 }
 
 #[derive(Subcommand, Debug)]
@@ -271,7 +286,14 @@ fn main() -> Result<(), Box<dyn Error>> {
             verbose,
             jobs,
             timing,
-        }) => check::run_check_project(config_path, no_default_stubs, verbose, jobs, timing),
+        }) => check::run_check_project(
+            config_path,
+            no_default_stubs,
+            verbose,
+            jobs,
+            timing,
+            args.format.clone(),
+        ),
         Some(Command::GenStubs { source }) => run_gen_stubs(source),
         Some(Command::GenStub {
             file_path,
@@ -335,6 +357,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 args.config_path,
                 args.timing,
                 args.full_types,
+                args.format,
             )
         }
     }
@@ -808,6 +831,7 @@ fn run_check(
     config_path: Option<PathBuf>,
     show_timing: bool,
     full_types: bool,
+    format: OutputFormat,
 ) -> Result<(), Box<dyn Error>> {
     let mut timer = timing::Timer::new(show_timing);
 
@@ -1007,40 +1031,111 @@ fn run_check(
         });
     }
 
-    // Render diagnostics with miette for source context.
     let source_text = std::fs::read_to_string(&file_path)?;
-    let (error_count, _warning_count) =
-        render_diagnostics(&file_path, &source_text, &result.diagnostics, &source_map);
 
-    if error_count > 0 {
-        std::process::exit(1);
+    // Collect binding types and root type (shared by both output modes).
+    let display_config = if full_types {
+        lang_ty::DisplayConfig::full()
+    } else {
+        lang_ty::DisplayConfig::cli()
+    };
+
+    let (bindings_map, root_type_str) =
+        collect_bindings_and_root(&result, &module, &display_config);
+
+    match format {
+        OutputFormat::Human => {
+            let (error_count, _warning_count) =
+                render_diagnostics(&file_path, &source_text, &result.diagnostics, &source_map);
+
+            if error_count > 0 {
+                std::process::exit(1);
+            }
+
+            timer.mark("diagnostics");
+
+            if result.inference.is_some() {
+                println!("Bindings:");
+                for (name, ty_str) in &bindings_map {
+                    println!("  {name} :: {ty_str}");
+                }
+                match &root_type_str {
+                    Some(root) => println!("\nRoot type:\n  {root}"),
+                    None => {
+                        eprintln!("error: could not infer type for root expression");
+                        std::process::exit(1);
+                    }
+                }
+            }
+        }
+        OutputFormat::Json => {
+            let (file_result, error_count, warning_count) = json_output::diagnostics_to_json(
+                &file_path,
+                &source_text,
+                &result.diagnostics,
+                &source_map,
+            );
+
+            timer.mark("diagnostics");
+
+            let output = json_output::JsonOutput {
+                version: 1,
+                files: vec![file_result],
+                summary: json_output::JsonSummary {
+                    files_checked: 1,
+                    errors: error_count,
+                    warnings: warning_count,
+                },
+                bindings: if bindings_map.is_empty() {
+                    None
+                } else {
+                    Some(bindings_map)
+                },
+                root_type: root_type_str,
+            };
+
+            json_output::write_json_output(&output)?;
+
+            if error_count > 0 {
+                std::process::exit(1);
+            }
+        }
     }
 
-    timer.mark("diagnostics");
+    timer.summary();
 
-    // If inference succeeded, print binding types and root type.
+    Ok(())
+}
+
+/// Collect deduplicated binding types and root type from inference results.
+/// Returns `(bindings_map, root_type_string)`. Both are empty/None if inference
+/// didn't produce results.
+fn collect_bindings_and_root(
+    result: &lang_check::CheckResult,
+    module: &lang_ast::Module,
+    display_config: &lang_ty::DisplayConfig,
+) -> (std::collections::BTreeMap<String, String>, Option<String>) {
+    let mut bindings = std::collections::BTreeMap::new();
+    let mut root_type = None;
+
     if let Some(inference) = &result.inference {
-        // Print per-name types (the let-bindings, function params, etc.).
-        // Deduplicate by name text since the same name can appear multiple times
-        // (e.g. a lambda pattern field `config` and a return attrset key `config`).
-        // Prefer definitions (PatField, Param, LetIn) over PlainAttrset keys,
-        // then prefer types without unions/intersections (cleaner early-canonical form).
+        // Deduplicate by name text. Prefer definitions (PatField, Param, LetIn)
+        // over PlainAttrset keys, then prefer types without unions/intersections.
         let mut seen =
             std::collections::BTreeMap::<String, (lang_ast::NameKind, lang_ty::TyRef)>::new();
         for (name_id, name) in module.names() {
             if let Some(ty) = inference.name_ty_map.get(name_id).copied() {
                 seen.entry(name.text.to_string())
                     .and_modify(|(existing_kind, existing_ty)| {
-                        // Prefer definitions over plain attrset keys.
                         if !existing_kind.is_definition() && name.kind.is_definition() {
                             *existing_kind = name.kind;
                             *existing_ty = ty;
                         } else if existing_kind.is_definition() && !name.kind.is_definition() {
-                            // Keep the existing definition type.
+                            // Keep existing definition type.
                         } else if inference.arena.contains_union_or_intersection(ty)
                             && !inference.arena.contains_union_or_intersection(*existing_ty)
                         {
-                            // Keep the existing (cleaner) one.
+                            // Keep existing (cleaner) one.
                         } else if !inference.arena.contains_union_or_intersection(ty)
                             && inference.arena.contains_union_or_intersection(*existing_ty)
                         {
@@ -1052,36 +1147,29 @@ fn run_check(
             }
         }
 
-        let display_config = if full_types {
-            lang_ty::DisplayConfig::full()
-        } else {
-            lang_ty::DisplayConfig::cli()
-        };
-
-        println!("Bindings:");
         for (name, (_kind, ty)) in &seen {
-            println!(
-                "  {name} :: {}",
-                inference.arena.display_truncated(*ty, &display_config)
+            bindings.insert(
+                name.clone(),
+                inference
+                    .arena
+                    .display_truncated(*ty, display_config)
+                    .to_string(),
             );
         }
 
-        // Print the root expression type.
-        match inference.expr_ty_map.get(module.entry_expr).copied() {
-            Some(root_ty) => println!(
-                "\nRoot type:\n  {}",
-                inference.arena.display_truncated(root_ty, &display_config)
-            ),
-            None => {
-                eprintln!("error: could not infer type for root expression");
-                std::process::exit(1);
-            }
-        }
+        root_type = inference
+            .expr_ty_map
+            .get(module.entry_expr)
+            .copied()
+            .map(|ty| {
+                inference
+                    .arena
+                    .display_truncated(ty, display_config)
+                    .to_string()
+            });
     }
 
-    timer.summary();
-
-    Ok(())
+    (bindings, root_type)
 }
 
 // =============================================================================

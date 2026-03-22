@@ -156,6 +156,49 @@ tix check -j 4         # Limit to 4 parallel inference threads
 
 Exit code is 1 if any type errors are found, 0 otherwise (config warnings don't affect the exit code).
 
+### Machine-readable output
+
+For CI pipelines and tool integration, use `--format json` to get structured JSON output on stdout:
+
+```bash
+tix my-file.nix --format json
+tix check --format json
+```
+
+The JSON schema includes diagnostics with file paths, 1-indexed line/column locations, severity, error codes, and documentation URLs. Single-file mode also includes inferred bindings and the root type.
+
+```json
+{
+  "version": 1,
+  "files": [
+    {
+      "file": "my-file.nix",
+      "diagnostics": [
+        {
+          "severity": "error",
+          "code": "E001",
+          "message": "type mismatch: expected `string`, got `int`",
+          "line": 5,
+          "column": 3,
+          "end_line": 5,
+          "end_column": 8,
+          "url": "https://jrmurr.github.io/tix/diagnostics/e001.html"
+        }
+      ]
+    }
+  ],
+  "summary": {
+    "files_checked": 1,
+    "errors": 1,
+    "warnings": 0
+  },
+  "bindings": { "x": "int" },
+  "root_type": "int"
+}
+```
+
+The `bindings` and `root_type` fields are only present in single-file mode. The `version` field allows for future schema evolution.
+
 ### Full type output
 
 By default, large types are truncated for readability (fields, union members, nesting depth, and total characters are bounded). To see complete types without truncation:

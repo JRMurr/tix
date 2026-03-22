@@ -24,8 +24,9 @@ use lang_check::SyntaxBundle;
 use rayon::prelude::*;
 
 use crate::config::{self, TixConfig};
+use crate::json_output;
 use crate::timing;
-use crate::{build_registry, load_stubs, render_diagnostics};
+use crate::{build_registry, load_stubs, render_diagnostics, OutputFormat};
 
 // ==============================================================================
 // CliSyntaxProvider: pre-extracted bundles with Salsa fallback
@@ -89,6 +90,7 @@ pub fn run_check_project(
     verbose: bool,
     jobs: Option<usize>,
     show_timing: bool,
+    format: OutputFormat,
 ) -> Result<(), Box<dyn Error>> {
     let mut timer = timing::Timer::new(show_timing);
 
@@ -526,38 +528,74 @@ pub fn run_check_project(
     let mut total_errors = 0usize;
     let mut total_warnings = 0usize;
 
-    for result in &results {
-        if !result.diagnostics.is_empty() {
-            let (errors, warnings) = render_diagnostics(
-                &result.file_path,
-                &result.source_text,
-                &result.diagnostics,
-                &result.source_map,
+    match format {
+        OutputFormat::Human => {
+            for result in &results {
+                if !result.diagnostics.is_empty() {
+                    let (errors, warnings) = render_diagnostics(
+                        &result.file_path,
+                        &result.source_text,
+                        &result.diagnostics,
+                        &result.source_map,
+                    );
+                    total_errors += errors;
+                    total_warnings += warnings;
+                }
+            }
+
+            // Print config validation warnings.
+            if !config_warnings.is_empty() {
+                eprintln!();
+                for warning in &config_warnings {
+                    eprintln!("warning: {warning}");
+                }
+            }
+
+            // Print summary.
+            eprintln!(
+                "\nChecked {} files: {} errors, {} warnings",
+                files_count, total_errors, total_warnings
             );
-            total_errors += errors;
-            total_warnings += warnings;
+
+            if !config_warnings.is_empty() {
+                eprintln!(
+                    "  ({} config suggestions — run with --verbose for details)",
+                    config_warnings.len()
+                );
+            }
         }
-    }
+        OutputFormat::Json => {
+            let mut json_files = Vec::with_capacity(results.len());
 
-    // Print config validation warnings.
-    if !config_warnings.is_empty() {
-        eprintln!();
-        for warning in &config_warnings {
-            eprintln!("warning: {warning}");
+            for result in &results {
+                let (file_result, errors, warnings) = json_output::diagnostics_to_json(
+                    &result.file_path,
+                    &result.source_text,
+                    &result.diagnostics,
+                    &result.source_map,
+                );
+                total_errors += errors;
+                total_warnings += warnings;
+                // Only include files that have diagnostics.
+                if !file_result.diagnostics.is_empty() {
+                    json_files.push(file_result);
+                }
+            }
+
+            let output = json_output::JsonOutput {
+                version: 1,
+                files: json_files,
+                summary: json_output::JsonSummary {
+                    files_checked: files_count,
+                    errors: total_errors,
+                    warnings: total_warnings,
+                },
+                bindings: None,
+                root_type: None,
+            };
+
+            json_output::write_json_output(&output)?;
         }
-    }
-
-    // Print summary.
-    eprintln!(
-        "\nChecked {} files: {} errors, {} warnings",
-        files_count, total_errors, total_warnings
-    );
-
-    if !config_warnings.is_empty() {
-        eprintln!(
-            "  ({} config suggestions — run with --verbose for details)",
-            config_warnings.len()
-        );
     }
 
     timer.mark("render");

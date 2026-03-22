@@ -17,6 +17,7 @@ cargo nextest run -p lang_check      # Test a specific crate
 cargo nextest run -E 'test(test_name)'  # Run a single test by name
 cargo nextest run -p cli --run-ignored only -E 'test(nixpkgs_lib)'  # Run ignored integration test
 cargo run --bin tix test/basic.nix  # Type-check a Nix file
+cargo run --bin tix -- --format json test/basic.nix  # JSON output for CI/tools
 cargo fmt                            # Format (uses .rustfmt.toml)
 cargo clippy                         # Lint
 ./scripts/pbt.sh                     # Property-based tests (50k cases default)
