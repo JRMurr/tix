@@ -145,6 +145,10 @@ enum Command {
         /// Print per-phase timing and memory usage
         #[arg(long)]
         timing: bool,
+
+        /// Output format: human (default) or json
+        #[arg(long, value_enum)]
+        format: Option<OutputFormat>,
     },
 
     /// Verify that a .tix stub matches the inferred type of a Nix file
@@ -286,13 +290,14 @@ fn main() -> Result<(), Box<dyn Error>> {
             verbose,
             jobs,
             timing,
+            format,
         }) => check::run_check_project(
             config_path,
             no_default_stubs,
             verbose,
             jobs,
             timing,
-            args.format.clone(),
+            format.unwrap_or(args.format.clone()),
         ),
         Some(Command::GenStubs { source }) => run_gen_stubs(source),
         Some(Command::GenStub {
