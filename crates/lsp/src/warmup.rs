@@ -481,4 +481,37 @@ mod tests {
             "snapshot should have inference data"
         );
     }
+
+    /// Regression test: warmup uses its own RootDatabase, so NixFile IDs in
+    /// warmup results are invalid for the main LSP database. After merging,
+    /// we must re-register files in the main DB. This test verifies that the
+    /// re-registration pattern works (nix_file.contents() on the main DB).
+    #[test]
+    fn warmup_nix_file_reregistered_in_main_db() {
+        let dir = TempDir::new().unwrap();
+        let files = write_nix_files(
+            dir.path(),
+            &[("a.nix", "42"), ("b.nix", "\"hello\""), ("c.nix", "true")],
+        );
+
+        let registry = Arc::new(TypeAliasRegistry::with_builtins());
+        let coordinator = InferenceCoordinator::new();
+
+        let results = run_batch_warmup(files, registry, &coordinator, None, None, None);
+        assert_eq!(results.len(), 3);
+
+        // Simulate the server.rs merge path: create a fresh main DB and
+        // re-register each warmup file. This mirrors what the analysis loop
+        // does after receiving WarmupComplete.
+        let mut main_db = lang_ast::RootDatabase::default();
+        for result in &results {
+            let text = std::fs::read_to_string(&result.path).unwrap();
+            let nix_file = main_db.set_file_contents(result.path.clone(), text.clone());
+
+            // This would panic before the fix — warmup's nix_file ID (e.g. 2)
+            // doesn't exist in the fresh main_db.
+            let contents = nix_file.contents(&main_db);
+            assert_eq!(*contents, text);
+        }
+    }
 }

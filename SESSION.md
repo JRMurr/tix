@@ -91,6 +91,12 @@ by design, or informational notes.
 
 - No tests for chain re-analysis (A->B->C): requires full async analysis loop.
 
+- `reload_registry` (state.rs) still uses `nix_file.contents(&self.db)` which has
+  the same cross-DB salsa ID issue for warmup-merged files. Less likely to trigger
+  since config reload usually happens after the user opens files (re-registering
+  them in the main DB), but could panic if config is reloaded before any file is
+  opened manually.
+
 - `nix build .#stubs` emits `system.stateVersion is not set` warning.
 
 - Home Manager flake mode (`gen-stubs home-manager --flake`) untested end-to-end.

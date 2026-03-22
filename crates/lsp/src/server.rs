@@ -446,8 +446,20 @@ fn spawn_analysis_loop(
                     {
                         let mut st = state.lock();
                         st.record_import_deps(&result.path, &result.import_paths);
+
+                        // The warmup used its own independent RootDatabase, so
+                        // result.file_analysis.nix_file is a salsa ID valid only
+                        // in that temporary DB. Re-register the file in the main
+                        // DB so later code (ReanalyzeFile, reload_registry) can
+                        // call nix_file.contents(&self.db) without panicking.
+                        let mut file_analysis = result.file_analysis;
+                        if let Ok(text) = std::fs::read_to_string(&result.path) {
+                            file_analysis.nix_file =
+                                st.db.set_file_contents(result.path.clone(), text);
+                        }
+
                         // Signature is already in the coordinator (set during warmup).
-                        st.files.insert(result.path.clone(), result.file_analysis);
+                        st.files.insert(result.path.clone(), file_analysis);
                     }
 
                     // Buffer diagnostics for quiescence publication.
