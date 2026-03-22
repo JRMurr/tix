@@ -1214,6 +1214,22 @@ impl CheckCtx<'_> {
         let lhs_unwrapped = lhs_concrete.map(|t| unwrap_named(t, &self.types.storage));
         let rhs_unwrapped = rhs_concrete.map(|t| unwrap_named(t, &self.types.storage));
 
+        // Frozen types (from cross-file imports) wrap an OutputTy in a single
+        // TyId. Intern them into the inference type table so the AttrSet match
+        // below can see through the wrapper.
+        let lhs_unwrapped = if let Some(Ty::Frozen(owned)) = &lhs_unwrapped {
+            let interned = self.intern_output_ty(owned);
+            self.types.find_concrete(interned)
+        } else {
+            lhs_unwrapped
+        };
+        let rhs_unwrapped = if let Some(Ty::Frozen(owned)) = &rhs_unwrapped {
+            let interned = self.intern_output_ty(owned);
+            self.types.find_concrete(interned)
+        } else {
+            rhs_unwrapped
+        };
+
         match (lhs_unwrapped, rhs_unwrapped) {
             (Some(Ty::AttrSet(lhs_attr)), Some(Ty::AttrSet(rhs_attr))) => {
                 let merged = lhs_attr.merge(rhs_attr);

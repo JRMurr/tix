@@ -42,11 +42,14 @@ by design, or informational notes.
   builtin predicate. Affects nixpkgs modules using `with lib;` pattern (e.g.,
   privoxy.nix, knot.nix). Would need `is_builtin_call` to handle WithExprs.
 
-- **`//` merge errors on cross-file types**: E004 "both sides must be attrsets"
-  fires on patterns like `ffmpeg-base.meta // { ... }` where the LHS type comes
-  from a callPackage/import that doesn't resolve to a concrete AttrSet during
-  deferred merge resolution. The diagnostic renders resolved bounds (showing both
-  sides as attrsets), but at resolution time the types are still variables.
+- **`//` merge errors on cross-file variable types**: E004 "both sides must be
+  attrsets" can fire on patterns like `ffmpeg-base.meta // { ... }` where the LHS
+  type comes from a callPackage/import that doesn't resolve to a concrete AttrSet
+  during deferred merge resolution. The Named-wrapping case (type aliases) was
+  fixed in `bd01f7d`, the Frozen-wrapping case (cross-file imports) was fixed by
+  interning Frozen types in `try_resolve_merge`, but the unresolved-variable case
+  remains: the diagnostic renders resolved bounds (showing both sides as attrsets),
+  but at resolution time the types are still variables.
 
 - **`int + int` produces `InvalidBinOp` in isolated warmup context**: When running
   inference via `run_inference()` on `let b = import ./b.nix; in b + 1` where b.nix
@@ -67,9 +70,7 @@ by design, or informational notes.
 
 - `miette` in `lang_ast` should be dev-dependency only.
 
-- `BindingValueKind::ImplicitSet` (`lower.rs`): never constructed, dead code.
-
-- `collect.rs` is ~1756 lines — could benefit from phase separation.
+- `collect.rs` is ~2300 lines — could benefit from phase separation.
 
 - Dynamic attrset keys not tracked in recursive sets (`nameres.rs`): could cause
   incorrect SCC grouping in edge cases.
@@ -101,14 +102,6 @@ by design, or informational notes.
 
 - Home Manager flake mode (`gen-stubs home-manager --flake`) untested end-to-end.
 
-### PBT Flakiness
-
-`test_combined_typing` can produce non-deterministic failures where two independent
-unconstrained lambda params get the same or different TyVar indices depending on
-HashMap iteration order. The test doesn't call `normalize_vars` on the actual result,
-so it's sensitive to exact TyVar numbering from inference. Regression seeds are saved
-in `proptest-regressions/pbt/mod.txt` but may not reproduce reliably.
-
 ### Known Performance Characteristics
 
 Intentional O(n^2) trade-offs, acceptable for typical Nix code sizes:
@@ -124,13 +117,11 @@ Intentional O(n^2) trade-offs, acceptable for typical Nix code sizes:
 
 ### Cross-File Inference (InferenceCoordinator)
 
-- **Batch mode skips signature caching** (OOM fix): `tix check` no longer
-  stores root OutputTy in the coordinator during parallel inference. Accumulating
-  40k+ OutputTy values caused OOM. Opportunistic cross-file resolution is
-  disabled until memory-budgeted caching is implemented (e.g., LRU eviction,
-  size-capped entries, or only caching types for files that are imported).
-- TODO: Demand-inferred files accumulate in the coordinator cache indefinitely.
-  Add LRU eviction for memory-constrained environments.
+- Layered inference (`tix check`) caches file signatures between layers with
+  ref-counted eviction (signatures are dropped once all importers are processed).
+  This avoids the earlier OOM from accumulating 40k+ OutputTy values, but there
+  is no LRU eviction for demand-inferred files in the LSP coordinator cache —
+  those accumulate indefinitely.
 
 ### Remaining Optimization Opportunities
 

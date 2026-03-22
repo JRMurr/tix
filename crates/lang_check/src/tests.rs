@@ -2826,6 +2826,56 @@ mod import_tests {
         );
     }
 
+    // Regression: merging a callPackage result (Ty::Frozen from cross-file
+    // inference) with an attrset literal should succeed, not produce E004.
+    #[test]
+    fn callpackage_result_merge_with_attrset() {
+        let (ty, _errors, diagnostics) = check_multifile_with_aliases(
+            &[
+                (
+                    "/main.nix",
+                    r#"
+                    let
+                        callPackage = x: x {};
+                        mine = callPackage /pkgs.nix {};
+                    in mine // { extra = true; }
+                    "#,
+                ),
+                ("/pkgs.nix", r#"{ }: { name = "hello"; version = 1; }"#),
+            ],
+            &TypeAliasRegistry::default(),
+        );
+
+        let type_errors: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| {
+                matches!(
+                    d.kind,
+                    crate::diagnostic::TixDiagnosticKind::InvalidAttrMerge { .. }
+                )
+            })
+            .collect();
+        assert!(
+            type_errors.is_empty(),
+            "merging Frozen attrset with literal attrset should not produce E004, got: {type_errors:?}"
+        );
+
+        // The merged result should contain fields from both sides.
+        match ty.output_ty() {
+            OutputTy::AttrSet(attr) => {
+                assert!(
+                    attr.fields.contains_key("name"),
+                    "merged attrset should contain 'name' from imported file"
+                );
+                assert!(
+                    attr.fields.contains_key("extra"),
+                    "merged attrset should contain 'extra' from literal"
+                );
+            }
+            _ => panic!("expected attrset from merge, got: {ty}"),
+        }
+    }
+
     // Verify that callPackage patterns populate import_targets for the
     // path literal and outer Apply expression.
     #[test]
