@@ -40,16 +40,16 @@ pub fn generate_stubs(config: &StubsGenerateConfig, config_dir: &Path) -> Result
         .map(|src| resolve_nix_source(src, config_dir))
         .transpose()?;
 
-    log::info!("Resolved nixpkgs: {}", nixpkgs_path.display());
-    log::info!("Resolved tix: {}", tix_path.display());
+    log::debug!("Resolved nixpkgs: {}", nixpkgs_path.display());
+    log::debug!("Resolved tix: {}", tix_path.display());
     if let Some(ref hm) = hm_path {
-        log::info!("Resolved home-manager: {}", hm.display());
+        log::debug!("Resolved home-manager: {}", hm.display());
     }
 
     // Check the lightweight file cache before invoking nix.
     let cache_key = compute_cache_key(&nixpkgs_path, &tix_path, hm_path.as_deref());
     if let Some(cached) = check_cache(&cache_key) {
-        log::info!("Using cached stubs: {}", cached.display());
+        log::debug!("Using cached stubs: {}", cached.display());
         return Ok(cached);
     }
 

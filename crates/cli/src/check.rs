@@ -376,7 +376,7 @@ pub fn run_check_project(
         let (_, fm) = metadata_map.remove(path)?;
 
         let expr_count = expr_counts.get(path).copied().unwrap_or(0);
-        tracing::info!(
+        tracing::debug!(
             file = %lang_ast::display_path(&fm.file_path),
             exprs = expr_count,
             rss_mb = format_args!("{:.0}", lang_check::rss_mb()),
@@ -428,7 +428,7 @@ pub fn run_check_project(
             coordinator.set_signature(&fm.file_path, sig);
         }
 
-        tracing::info!(
+        tracing::debug!(
             file = %lang_ast::display_path(&fm.file_path),
             rss_mb = format_args!("{:.0}", lang_check::rss_mb()),
             diags = check_result.diagnostics.len(),
@@ -447,7 +447,7 @@ pub fn run_check_project(
     };
 
     for (layer_idx, layer) in layers.iter().enumerate() {
-        tracing::info!(
+        tracing::debug!(
             layer = layer_idx,
             files = layer.len(),
             rss_mb = format_args!("{:.0}", lang_check::rss_mb()),

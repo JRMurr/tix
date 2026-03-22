@@ -492,7 +492,7 @@ impl TypeAliasRegistry {
         if let Some(ref dir) = self.builtin_stubs_dir {
             let path = dir.join(format!("{name}.tix"));
             if path.is_file() {
-                log::info!("Loading context stubs for @{name} from {}", path.display());
+                log::debug!("Loading context stubs for @{name} from {}", path.display());
                 return Some(match std::fs::read_to_string(&path) {
                     Ok(source) => {
                         let result = self.load_context_stubs(&source);

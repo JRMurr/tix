@@ -122,7 +122,7 @@ impl CheckCtx<'_> {
                 .iter()
                 .map(|d| self.module[d.name()].text.as_str().to_owned())
                 .collect();
-            let err = log_if_slow!(50, self.infer_scc_group(group), |elapsed| log::info!(
+            let err = log_if_slow!(50, self.infer_scc_group(group), |elapsed| log::debug!(
                 "SCC group {i}/{n_groups} ({}) took {:.1}ms (slots: {}, RSS: {:.0}MB)",
                 group_names.join(", "),
                 elapsed.as_secs_f64() * 1000.0,
@@ -135,7 +135,7 @@ impl CheckCtx<'_> {
         }
 
         if !self.should_bail() {
-            let root_err = log_if_slow!(10, self.infer_root(), |elapsed| log::info!(
+            let root_err = log_if_slow!(10, self.infer_root(), |elapsed| log::debug!(
                 "infer_root took {:.1}ms (cache: {}, slots: {}, RSS: {:.0}MB)",
                 elapsed.as_secs_f64() * 1000.0,
                 self.types.constrain_cache.len(),
@@ -395,7 +395,7 @@ impl CheckCtx<'_> {
         }
 
         let scc_elapsed = scc_start.elapsed();
-        log::info!(
+        log::debug!(
             "SCC group: {} defs, {:.1}ms, cache {} → {}, slots {} → {}, carried overloads: {}",
             scc_size,
             scc_elapsed.as_secs_f64() * 1000.0,
@@ -1275,7 +1275,7 @@ impl CheckCtx<'_> {
         let vf_after = self.types.variable_free.len();
         let elapsed = t_compact.elapsed();
         if pinned > 0 || pruned > 0 || elapsed.as_millis() > 5 {
-            log::info!(
+            log::debug!(
                 "  compact_scc_graph: {:.1}ms, pinned {}, deduped {}, variable_free {} → {}, carried pruned {}",
                 elapsed.as_secs_f64() * 1000.0,
                 pinned,
