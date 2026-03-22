@@ -485,9 +485,13 @@ fn make_diag_ty(arena: Arc<TypeArena>, ty: lang_ty::TyRef) -> DiagTy {
     DiagTy(OwnedTy::new(arena, ty))
 }
 
-/// Check whether a TypeMismatch(expected=path, actual=string) occurred on a
-/// StringInterpolation expression, and if so, return a hint suggesting path
-/// concatenation with `+`.
+/// Check whether a TypeMismatch deserves a contextual hint and, if so, return
+/// one. Currently recognised cases:
+///
+/// 1. **expected=path, actual=string on a StringInterpolation** — suggest path
+///    concatenation with `+`.
+/// 2. **expected=string, actual=non-string** — suggest `toString` (and
+///    `"${...}"` when the actual type supports Nix string interpolation).
 fn type_mismatch_hint(
     arena: &TypeArena,
     expected: lang_ty::TyRef,
@@ -497,6 +501,7 @@ fn type_mismatch_hint(
 ) -> Option<String> {
     use lang_ty::PrimitiveTy;
 
+    // Case 1: string interpolation used where path is expected.
     let is_expected_path = matches!(arena.get(expected), OutputTy::Primitive(PrimitiveTy::Path));
     let is_actual_string = matches!(arena.get(actual), OutputTy::Primitive(PrimitiveTy::String));
 
@@ -511,7 +516,46 @@ fn type_mismatch_hint(
         );
     }
 
+    // Case 2: non-string passed where string is expected (Nix coercion).
+    let is_expected_string = matches!(
+        arena.get(expected),
+        OutputTy::Primitive(PrimitiveTy::String)
+    );
+    if is_expected_string && !is_actual_string {
+        if supports_string_interpolation(arena, actual) {
+            return Some(
+                "Nix coerces this type to `string` implicitly; \
+                 use `toString expr` or `\"${...}\"` to make the conversion explicit"
+                    .to_string(),
+            );
+        } else {
+            return Some(
+                "Nix coerces this type to `string` implicitly; \
+                 use `toString expr` to make the conversion explicit"
+                    .to_string(),
+            );
+        }
+    }
+
     None
+}
+
+/// Whether a type supports Nix's `"${expr}"` string interpolation.
+///
+/// In Nix, interpolation works for strings, paths, and derivations (attrsets
+/// with `outPath`). It does NOT work for int, bool, float, null, lists, or
+/// lambdas — those require an explicit `toString` call.
+fn supports_string_interpolation(arena: &TypeArena, ty: lang_ty::TyRef) -> bool {
+    match arena.get(ty) {
+        OutputTy::Primitive(lang_ty::PrimitiveTy::String)
+        | OutputTy::Primitive(lang_ty::PrimitiveTy::Path)
+        | OutputTy::AttrSet(_) => true,
+        OutputTy::Named(_, inner) => supports_string_interpolation(arena, *inner),
+        OutputTy::Union(members) => members
+            .iter()
+            .all(|m| supports_string_interpolation(arena, *m)),
+        _ => false,
+    }
 }
 
 /// Convert a single `LocatedError` into a `TixDiagnostic`.

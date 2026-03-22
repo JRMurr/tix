@@ -1187,6 +1187,65 @@ diagnostic_msg!(
     not contains "string interpolation"
 );
 
+// When a non-string type is passed where string is expected, the diagnostic
+// should include a hint about Nix's implicit string coercion.
+
+// Derivation-like attrset passed as string: hint should suggest both toString
+// and string interpolation (since attrsets support interpolation in Nix).
+diagnostic_msg!(
+    string_coercion_hint_attrset,
+    r#"let
+      /** type: f :: string -> int */
+      f = x: 42;
+    in f { outPath = "/nix/store/foo"; name = "foo"; }"#,
+    contains "toString"
+);
+diagnostic_msg!(
+    string_coercion_hint_attrset_interpolation,
+    r#"let
+      /** type: f :: string -> int */
+      f = x: 42;
+    in f { outPath = "/nix/store/foo"; name = "foo"; }"#,
+    contains "${...}"
+);
+
+// Int passed as string: hint should suggest toString but NOT interpolation
+// (ints don't support string interpolation in Nix).
+diagnostic_msg!(
+    string_coercion_hint_int_tostring,
+    r#"let
+      /** type: f :: string -> int */
+      f = x: 42;
+    in f 123"#,
+    contains "toString"
+);
+diagnostic_msg!(
+    string_coercion_hint_int_no_interpolation,
+    r#"let
+      /** type: f :: string -> int */
+      f = x: 42;
+    in f 123"#,
+    not contains "${...}"
+);
+
+// Path passed as string: hint should suggest both toString and interpolation.
+diagnostic_msg!(
+    string_coercion_hint_path,
+    r#"let
+      /** type: f :: string -> int */
+      f = x: 42;
+    in f ./foo"#,
+    contains "toString"
+);
+diagnostic_msg!(
+    string_coercion_hint_path_interpolation,
+    r#"let
+      /** type: f :: string -> int */
+      f = x: 42;
+    in f ./foo"#,
+    contains "${...}"
+);
+
 // Regression: indented multi-line strings without interpolation should infer
 // as string (not panic in get_str_literal). See code review issue #13.
 test_case!(
