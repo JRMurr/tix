@@ -1,12 +1,16 @@
 use indoc::indoc;
-use lang_ast::{module, tests::TestDatabase, Expr, Module};
+use lang_ast::tests::MultiFileTestDatabase;
+use lang_ast::{module, tests::TestDatabase, AstDb, Expr, Module};
 use lang_ty::arbitrary::{intern_raw, RawTy};
-use lang_ty::arena::TyRef;
+use lang_ty::arena::{OwnedTy, TyRef};
 use lang_ty::{arc_ty, OutputTy, PrimitiveTy, TypeArena};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::aliases::TypeAliasRegistry;
 use crate::diagnostic::{TixDiagnostic, TixDiagnosticKind};
+use crate::imports::resolve_import_types_from_stubs;
 use crate::{check_file_with_aliases, InferenceResult};
 
 use super::check_file;
@@ -246,6 +250,118 @@ pub fn expect_diagnostic_kind(src: &str, expected: TixDiagnosticKind) {
     let error = get_check_error(src);
 
     assert_eq!(error, expected)
+}
+
+// ==============================================================================
+// Multi-file inference helpers
+// ==============================================================================
+
+/// Infer a multi-file project with a custom TypeAliasRegistry.
+///
+/// Pre-infers all dependency files (in order) to build ephemeral stubs,
+/// then infers the entry file with those stubs. This models the LSP's
+/// progressive analysis: as files are opened, their types become available
+/// to other files.
+pub fn check_multifile_with_aliases(
+    files: &[(&str, &str)],
+    aliases: &TypeAliasRegistry,
+) -> (RootTy, Vec<crate::imports::ImportError>, Vec<TixDiagnostic>) {
+    let (db, entry_file) = MultiFileTestDatabase::new(files);
+
+    // Build ephemeral stubs by inferring all non-entry files first.
+    // Process them in reverse order so transitive deps are available.
+    let mut ephemeral_stubs: HashMap<PathBuf, OwnedTy> = HashMap::new();
+    for &(path_str, _) in files.iter().skip(1).rev() {
+        let dep_path = PathBuf::from(path_str);
+        if let Some(dep_file) = db.load_file(&dep_path) {
+            let dep_module = lang_ast::module(&db, dep_file);
+            let dep_name_res = lang_ast::name_resolution(&db, dep_file);
+            let dep_base = dep_path.parent().unwrap_or(Path::new("/"));
+
+            // Use already-built ephemeral stubs for this dep's imports too.
+            let dep_resolution = resolve_import_types_from_stubs(
+                &dep_module,
+                &dep_name_res,
+                dep_base,
+                &ephemeral_stubs,
+            );
+
+            // Use partial inference (like the real coordinator) so that dep
+            // files with type errors still produce ephemeral stubs.
+            let dep_indices = lang_ast::module_indices(&db, dep_file);
+            let dep_groups = lang_ast::group_def(&db, dep_file);
+            let dep_aliases = crate::load_inline_aliases(Arc::new(aliases.clone()), &dep_module);
+            let dep_check = crate::CheckCtx::new(
+                &dep_module,
+                &dep_name_res,
+                &dep_indices.binding_expr,
+                dep_aliases,
+                dep_resolution.types,
+                Arc::default(),
+            );
+            let (dep_result, _diags, _bailed_out) = dep_check.infer_prog_partial(dep_groups);
+            if let Some(&root_ty) = dep_result.expr_ty_map.get(dep_module.entry_expr) {
+                ephemeral_stubs.insert(dep_path, OwnedTy::new(dep_result.arena.clone(), root_ty));
+            }
+        }
+    }
+
+    // Now infer the entry file with ephemeral stubs from all deps.
+    let module = lang_ast::module(&db, entry_file);
+    let name_res = lang_ast::name_resolution(&db, entry_file);
+    let entry_path = PathBuf::from(files[0].0);
+    let base_dir = entry_path.parent().unwrap_or(Path::new("/"));
+
+    let resolution =
+        resolve_import_types_from_stubs(&module, &name_res, base_dir, &ephemeral_stubs);
+    let errors = resolution.errors;
+
+    // Use partial inference for the entry file too, so tests can inspect
+    // the root type even when there are type errors (matches real coordinator).
+    let entry_indices = lang_ast::module_indices(&db, entry_file);
+    let entry_groups = lang_ast::group_def(&db, entry_file);
+    let entry_aliases = crate::load_inline_aliases(Arc::new(aliases.clone()), &module);
+    let entry_check = crate::CheckCtx::new(
+        &module,
+        &name_res,
+        &entry_indices.binding_expr,
+        entry_aliases,
+        resolution.types,
+        Arc::default(),
+    );
+    let (result, diagnostics, _bailed_out) = entry_check.infer_prog_partial(entry_groups);
+
+    let root_ty = *result
+        .expr_ty_map
+        .get(module.entry_expr)
+        .expect("root expr should have a type");
+
+    (
+        RootTy::new(root_ty, result.arena.clone()),
+        errors,
+        diagnostics,
+    )
+}
+
+pub fn check_multifile(files: &[(&str, &str)]) -> (RootTy, Vec<crate::imports::ImportError>) {
+    let (ty, errors, _diags) = check_multifile_with_aliases(files, &TypeAliasRegistry::default());
+    (ty, errors)
+}
+
+pub fn get_multifile_root(files: &[(&str, &str)]) -> RootTy {
+    check_multifile(files).0
+}
+
+pub fn get_multifile_result(files: &[(&str, &str)]) -> (RootTy, Vec<crate::imports::ImportError>) {
+    check_multifile(files)
+}
+
+pub fn get_multifile_root_with_aliases(
+    files: &[(&str, &str)],
+    aliases: &TypeAliasRegistry,
+) -> RootTy {
+    let (ty, _errors, _diags) = check_multifile_with_aliases(files, aliases);
+    ty
 }
 
 macro_rules! test_case {
@@ -1827,36 +1943,17 @@ test_case!(
 // ==============================================================================
 
 mod import_tests {
-    use lang_ast::tests::MultiFileTestDatabase;
-    use lang_ast::AstDb;
     use lang_ty::{arc_ty, OutputTy, PrimitiveTy, TypeArena};
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
-    use super::RootTy;
+    use super::{
+        check_multifile_with_aliases, get_multifile_result, get_multifile_root,
+        get_multifile_root_with_aliases, MultiFileTestDatabase, RootTy,
+    };
     use crate::aliases::TypeAliasRegistry;
-    use crate::diagnostic::TixDiagnostic;
     use crate::imports::resolve_import_types_from_stubs;
-
-    /// Infer a multi-file project using the stubs-based model.
-    ///
-    /// For each dependency file (not the entry file), we infer it standalone
-    /// and collect its root type into an ephemeral stubs map. Then we infer
-    /// the entry file using those ephemeral stubs.
-    fn check_multifile(files: &[(&str, &str)]) -> (RootTy, Vec<crate::imports::ImportError>) {
-        let (ty, errors, _diags) =
-            check_multifile_with_aliases(files, &TypeAliasRegistry::default());
-        (ty, errors)
-    }
-
-    fn get_multifile_root(files: &[(&str, &str)]) -> RootTy {
-        check_multifile(files).0
-    }
-
-    fn get_multifile_result(files: &[(&str, &str)]) -> (RootTy, Vec<crate::imports::ImportError>) {
-        check_multifile(files)
-    }
 
     // Import a file that evaluates to a literal int.
     #[test]
@@ -2105,109 +2202,6 @@ mod import_tests {
         assert!(has_apply, "targets should include the Apply expression");
         assert!(has_reference, "targets should include the import Reference");
         assert!(has_path_literal, "targets should include the path Literal");
-    }
-
-    // ======================================================================
-    // Helper: check_multifile with a custom TypeAliasRegistry
-    // ======================================================================
-
-    /// Infer a multi-file project with a custom TypeAliasRegistry.
-    ///
-    /// Pre-infers all dependency files (in order) to build ephemeral stubs,
-    /// then infers the entry file with those stubs. This models the LSP's
-    /// progressive analysis: as files are opened, their types become available
-    /// to other files.
-    fn check_multifile_with_aliases(
-        files: &[(&str, &str)],
-        aliases: &TypeAliasRegistry,
-    ) -> (RootTy, Vec<crate::imports::ImportError>, Vec<TixDiagnostic>) {
-        use lang_ty::arena::OwnedTy;
-
-        let (db, entry_file) = MultiFileTestDatabase::new(files);
-
-        // Build ephemeral stubs by inferring all non-entry files first.
-        // Process them in reverse order so transitive deps are available.
-        let mut ephemeral_stubs: HashMap<PathBuf, OwnedTy> = HashMap::new();
-        for &(path_str, _) in files.iter().skip(1).rev() {
-            let dep_path = PathBuf::from(path_str);
-            if let Some(dep_file) = db.load_file(&dep_path) {
-                let dep_module = lang_ast::module(&db, dep_file);
-                let dep_name_res = lang_ast::name_resolution(&db, dep_file);
-                let dep_base = dep_path.parent().unwrap_or(Path::new("/"));
-
-                // Use already-built ephemeral stubs for this dep's imports too.
-                let dep_resolution = resolve_import_types_from_stubs(
-                    &dep_module,
-                    &dep_name_res,
-                    dep_base,
-                    &ephemeral_stubs,
-                );
-
-                // Use partial inference (like the real coordinator) so that dep
-                // files with type errors still produce ephemeral stubs.
-                let dep_indices = lang_ast::module_indices(&db, dep_file);
-                let dep_groups = lang_ast::group_def(&db, dep_file);
-                let dep_aliases =
-                    crate::load_inline_aliases(Arc::new(aliases.clone()), &dep_module);
-                let dep_check = crate::CheckCtx::new(
-                    &dep_module,
-                    &dep_name_res,
-                    &dep_indices.binding_expr,
-                    dep_aliases,
-                    dep_resolution.types,
-                    Arc::default(),
-                );
-                let (dep_result, _diags, _bailed_out) = dep_check.infer_prog_partial(dep_groups);
-                if let Some(&root_ty) = dep_result.expr_ty_map.get(dep_module.entry_expr) {
-                    ephemeral_stubs
-                        .insert(dep_path, OwnedTy::new(dep_result.arena.clone(), root_ty));
-                }
-            }
-        }
-
-        // Now infer the entry file with ephemeral stubs from all deps.
-        let module = lang_ast::module(&db, entry_file);
-        let name_res = lang_ast::name_resolution(&db, entry_file);
-        let entry_path = PathBuf::from(files[0].0);
-        let base_dir = entry_path.parent().unwrap_or(Path::new("/"));
-
-        let resolution =
-            resolve_import_types_from_stubs(&module, &name_res, base_dir, &ephemeral_stubs);
-        let errors = resolution.errors;
-
-        // Use partial inference for the entry file too, so tests can inspect
-        // the root type even when there are type errors (matches real coordinator).
-        let entry_indices = lang_ast::module_indices(&db, entry_file);
-        let entry_groups = lang_ast::group_def(&db, entry_file);
-        let entry_aliases = crate::load_inline_aliases(Arc::new(aliases.clone()), &module);
-        let entry_check = crate::CheckCtx::new(
-            &module,
-            &name_res,
-            &entry_indices.binding_expr,
-            entry_aliases,
-            resolution.types,
-            Arc::default(),
-        );
-        let (result, diagnostics, _bailed_out) = entry_check.infer_prog_partial(entry_groups);
-
-        let root_ty = *result
-            .expr_ty_map
-            .get(module.entry_expr)
-            .expect("root expr should have a type");
-
-        (
-            RootTy::new(root_ty, result.arena.clone()),
-            errors,
-            diagnostics,
-        )
-    }
-
-    fn get_multifile_root_with_aliases(
-        files: &[(&str, &str)],
-        aliases: &TypeAliasRegistry,
-    ) -> RootTy {
-        let (ty, _errors, _diags) = check_multifile_with_aliases(files, aliases);
-        ty
     }
 
     // ======================================================================
@@ -3222,7 +3216,6 @@ fn alias_named_flows_through_let() {
 
 use comment_parser::ParsedTy;
 use smol_str::SmolStr;
-use std::collections::HashMap;
 
 /// Helper to type-check a string with context args applied to the root lambda.
 pub fn check_str_with_context(

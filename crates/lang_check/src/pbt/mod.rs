@@ -24,6 +24,7 @@
 //   from the arb_prim strategy. Path literals require valid filesystem syntax
 //   and Uri is rarely used.
 
+mod frozen;
 mod stub_compose;
 
 use std::collections::{BTreeMap, HashSet};
@@ -41,7 +42,7 @@ use smol_str::SmolStr;
 
 use crate::tests::{check_str, check_str_with_aliases, get_inferred_root, raw_to_root};
 
-type NixTextStr = String;
+pub(super) type NixTextStr = String;
 
 fn arb_bool_str() -> impl Strategy<Value = NixTextStr> {
     let leaf = any::<bool>().prop_map(|b| b.to_string());
@@ -147,7 +148,7 @@ fn wrap_in_attr(val: NixTextStr) -> impl Strategy<Value = NixTextStr> {
     )
 }
 
-fn prim_ty_to_string(prim: PrimitiveTy) -> impl Strategy<Value = NixTextStr> {
+pub(super) fn prim_ty_to_string(prim: PrimitiveTy) -> impl Strategy<Value = NixTextStr> {
     let leaf: BoxedStrategy<NixTextStr> = match prim {
         PrimitiveTy::Null => Just("null".to_string()).boxed(),
         PrimitiveTy::Bool => arb_bool_str().boxed(),
@@ -162,7 +163,7 @@ fn prim_ty_to_string(prim: PrimitiveTy) -> impl Strategy<Value = NixTextStr> {
     leaf
 }
 
-fn non_type_modifying_transform(text: NixTextStr) -> impl Strategy<Value = NixTextStr> {
+pub(super) fn non_type_modifying_transform(text: NixTextStr) -> impl Strategy<Value = NixTextStr> {
     prop_oneof![
         Just(text.clone()),
         wrap_in_let(text.clone()),
@@ -244,7 +245,7 @@ fn text_from_raw_ty(ty: &RawTy) -> impl Strategy<Value = NixTextStr> {
     inner.prop_flat_map(non_type_modifying_transform).boxed()
 }
 
-fn attr_strat(
+pub(super) fn attr_strat(
     inner: impl Strategy<Value = (RawTy, NixTextStr)>,
 ) -> impl Strategy<Value = (RawTy, NixTextStr)> {
     let single_attr = prop::collection::vec((arb_smol_str_ident(), inner), 1..5).prop_filter_map(
@@ -305,7 +306,7 @@ fn prim_assert_builtin(prim: PrimitiveTy) -> &'static str {
     }
 }
 
-fn func_strat<S: Strategy<Value = (RawTy, NixTextStr)> + Clone>(
+pub(super) fn func_strat<S: Strategy<Value = (RawTy, NixTextStr)> + Clone>(
     inner: S,
 ) -> impl Strategy<Value = (RawTy, NixTextStr)> {
     // "fully_known" — param is a primitive, constrained via assertion builtin.
@@ -345,7 +346,7 @@ fn func_strat<S: Strategy<Value = (RawTy, NixTextStr)> + Clone>(
     prop_oneof![fully_known, generic]
 }
 
-fn arb_nix_text(args: RecursiveParams) -> impl Strategy<Value = (RawTy, NixTextStr)> {
+pub(super) fn arb_nix_text(args: RecursiveParams) -> impl Strategy<Value = (RawTy, NixTextStr)> {
     let leaf = any::<PrimitiveTy>()
         .prop_flat_map(|prim| (Just(RawTy::Primitive(prim)), prim_ty_to_string(prim)));
 

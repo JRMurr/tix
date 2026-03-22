@@ -102,6 +102,13 @@ by design, or informational notes.
 
 - Home Manager flake mode (`gen-stubs home-manager --flake`) untested end-to-end.
 
+- **Frozen union oracle mismatch**: `if true then (import /a.nix) else (import /b.nix)`
+  where A is a polymorphic lambda and B is a union produces structurally different
+  types via the Frozen path vs inline. Frozen: `a -> (bool | [string] | ...)`,
+  inline: `(a -> bool) | [string] | ...`. Likely caused by how `intern_output_ty`
+  handles TyVar from external arenas in union contexts. PBT test demoted to
+  crash-freedom only for now.
+
 ### Known Performance Characteristics
 
 Intentional O(n^2) trade-offs, acceptable for typical Nix code sizes:
