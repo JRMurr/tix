@@ -149,12 +149,18 @@ impl CheckCtx<'_> {
             log::warn!("skipping infer_root due to memory pressure");
         }
 
+        // Validate string interpolation sub-expressions now that all types
+        // are as resolved as they'll get. Emit diagnostics for types that
+        // Nix cannot interpolate (int, bool, float, null, list, lambda).
+        let interpolation_diagnostics = self.check_interpolation_types();
+
         // Convert internal errors and warnings to display-ready diagnostics
         // while we still have access to the TypeStorage for canonicalization.
         let warnings = std::mem::take(&mut self.warnings);
         let mut diagnostics =
             diagnostic::errors_to_diagnostics(&errors, &self.types.storage, self.module);
         diagnostics.extend(diagnostic::warnings_to_diagnostics(&warnings));
+        diagnostics.extend(interpolation_diagnostics);
 
         // Check memory pressure before canonicalization. Canonicalization can
         // easily double RSS (it creates OutputTy for every expression), so if
@@ -1397,9 +1403,66 @@ impl CheckCtx<'_> {
         }
     }
 
+    // ==========================================================================
+    // Post-inference string interpolation validation
+    // ==========================================================================
+    //
+    // Nix's `"${expr}"` only works for strings, paths, and derivations (attrsets
+    // with `outPath`). Types like int, bool, float, null, lists, and lambdas
+    // cause a runtime error. This pass checks all interpolated sub-expressions
+    // after inference when types are maximally resolved.
+
+    fn check_interpolation_types(&self) -> Vec<diagnostic::TixDiagnostic> {
+        use lang_ast::{Expr, InterpolPart};
+
+        let mut diagnostics = Vec::new();
+
+        for (_, expr) in self.module.exprs() {
+            let parts = match expr {
+                Expr::StringInterpolation(parts) | Expr::PathInterpolation(parts) => parts,
+                _ => continue,
+            };
+
+            for part in parts.iter() {
+                let expr_id = match part {
+                    InterpolPart::Interpol(id) => *id,
+                    InterpolPart::Literal(_) => continue,
+                };
+
+                let ty_id = self.ty_for_expr(expr_id);
+                let concrete = match self.types.find_concrete_through_inter(ty_id) {
+                    Some(ty) => ty,
+                    // Type variable — can't tell, skip.
+                    None => continue,
+                };
+
+                let is_interpolable = is_type_interpolable(&self.types, &concrete);
+
+                if !is_interpolable {
+                    // Canonicalize the type for the diagnostic message.
+                    let (arena, ty_ref) = crate::collect::canonicalize_standalone(
+                        &self.types.storage,
+                        ty_id,
+                        crate::Polarity::Positive,
+                    );
+                    let arena = Arc::new(arena);
+                    diagnostics.push(diagnostic::TixDiagnostic {
+                        at_expr: expr_id,
+                        kind: diagnostic::TixDiagnosticKind::InvalidInterpolation {
+                            actual: diagnostic::DiagTy(lang_ty::OwnedTy::new(arena, ty_ref)),
+                        },
+                    });
+                }
+            }
+        }
+
+        diagnostics
+    }
+
     /// If `name_slot` (a variable) has a Named lower bound from a type
     /// annotation, wrap `poly_ty` in the same Named. This ensures extrusion
     /// preserves the alias name at usage sites.
+    ///
     fn wrap_named_if_annotated(&mut self, name_slot: TyId, poly_ty: TyId) -> TyId {
         if let Some(v) = self.types.storage.get_var(name_slot) {
             for &lb in &v.lower_bounds.clone() {
@@ -1410,5 +1473,32 @@ impl CheckCtx<'_> {
             }
         }
         poly_ty
+    }
+}
+
+/// Whether a concrete type can be used in Nix string interpolation.
+///
+/// In Nix, `"${expr}"` works for strings, paths, and attrsets (derivations).
+/// It does NOT work for int, bool, float, null, lists, or lambdas.
+fn is_type_interpolable(types: &crate::type_table::TypeTable, ty: &lang_ty::Ty<TyId>) -> bool {
+    use lang_ty::{PrimitiveTy, Ty};
+
+    match ty {
+        Ty::Primitive(PrimitiveTy::String) | Ty::Primitive(PrimitiveTy::Path) | Ty::AttrSet(_) => {
+            true
+        }
+        Ty::Named(_, inner) => match types.find_concrete_through_inter(*inner) {
+            Some(ref inner_ty) => is_type_interpolable(types, inner_ty),
+            None => true, // Unresolved inner type — give benefit of the doubt.
+        },
+        // Frozen types come from imports/stubs — can't inspect cheaply,
+        // assume interpolable (derivations are common).
+        Ty::Frozen(_) => true,
+        // Union/Inter: could be partially interpolable, skip to avoid
+        // false positives.
+        Ty::Union(..) | Ty::Inter(..) => true,
+        // Everything else (int, bool, float, null, list, lambda, neg, tyvar)
+        // is not interpolable.
+        _ => false,
     }
 }

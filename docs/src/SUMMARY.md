@@ -23,6 +23,7 @@
   - [E012: Angle Bracket Import](./diagnostics/e012.md)
   - [E013: Imported File Not Analyzed](./diagnostics/e013.md)
   - [E014: Unknown Type](./diagnostics/e014.md)
+  - [E015: Invalid String Interpolation](./diagnostics/e015.md)
 
 ---
 

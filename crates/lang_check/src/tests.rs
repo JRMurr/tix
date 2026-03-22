@@ -1135,8 +1135,43 @@ test_case!(
     String
 );
 
-// Sub-expressions are inferred independently; the overall expression is always string.
-test_case!(interpolation_non_string_expr, "\"count: ${1 + 2}\"", String);
+// Interpolating a non-string, non-path, non-attrset expression should error.
+diagnostic_msg!(
+    interpolation_non_string_expr,
+    "\"count: ${1 + 2}\"",
+    contains "cannot be used in string interpolation"
+);
+
+// Bool and null should also error in interpolation.
+diagnostic_msg!(
+    interpolation_bool_errors,
+    "\"${true}\"",
+    contains "cannot be used in string interpolation"
+);
+diagnostic_msg!(
+    interpolation_null_errors,
+    "\"${null}\"",
+    contains "cannot be used in string interpolation"
+);
+// Indirect: variable bound to int should also error.
+diagnostic_msg!(
+    interpolation_int_via_variable,
+    "let x = 42; in \"${x}\"",
+    contains "cannot be used in string interpolation"
+);
+
+// Interpolating string, path, or attrset should succeed (Nix supports these).
+test_case!(
+    interpolation_string_ok,
+    "let s = \"hello\"; in \"${s}\"",
+    String
+);
+test_case!(interpolation_path_ok, "let p = ./foo; in \"${p}\"", String);
+test_case!(
+    interpolation_attrset_ok,
+    "let d = { outPath = \"/nix/store/foo\"; }; in \"${d}\"",
+    String
+);
 
 test_case!(
     interpolation_nested,

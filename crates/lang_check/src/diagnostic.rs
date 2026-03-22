@@ -145,13 +145,20 @@ pub enum TixDiagnosticKind {
     ImportUnresolved {
         path: String,
     },
+    /// A type that cannot be used in Nix string interpolation (`"${expr}"`).
+    /// Nix only supports interpolation for strings, paths, and derivations
+    /// (attrsets with `outPath`). Types like int, bool, float, null, lists,
+    /// and lambdas require an explicit `toString` call.
+    InvalidInterpolation {
+        actual: DiagTy,
+    },
 }
 
 // ==============================================================================
 // Diagnostic Error Codes
 // ==============================================================================
 //
-// Every diagnostic has a stable error code (E001–E014) that appears in CLI
+// Every diagnostic has a stable error code (E001–E015) that appears in CLI
 // output (`error[E001]: ...`) and as a clickable link in the LSP.  Once
 // assigned, a code never changes meaning — new diagnostics get new codes.
 
@@ -174,6 +181,7 @@ impl TixDiagnosticKind {
             TixDiagnosticKind::AnnotationParseError { .. } => "E011",
             TixDiagnosticKind::AngleBracketImport { .. } => "E012",
             TixDiagnosticKind::ImportUnresolved { .. } => "E013",
+            TixDiagnosticKind::InvalidInterpolation { .. } => "E015",
         }
     }
 
@@ -295,6 +303,14 @@ impl fmt::Display for TixDiagnosticKind {
                 write!(
                     f,
                     "imported file `{path}` has not been analyzed — add it to [project] analyze in tix.toml or open it in the editor"
+                )
+            }
+            TixDiagnosticKind::InvalidInterpolation { actual } => {
+                write!(
+                    f,
+                    "`{}` cannot be used in string interpolation; \
+                     use `toString` to convert it explicitly",
+                    actual.display_truncated(&dc)
                 )
             }
             TixDiagnosticKind::InferenceAborted { missing_bindings } => {

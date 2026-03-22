@@ -18,3 +18,4 @@ Every tix diagnostic has a stable error code. Codes never change meaning once as
 | [E012](./e012.md) | Warning | Angle bracket import |
 | [E013](./e013.md) | Hint | Imported file not analyzed |
 | [E014](./e014.md) | Configurable | Type could not be inferred |
+| [E015](./e015.md) | Error | Invalid string interpolation |

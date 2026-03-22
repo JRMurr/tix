@@ -38,6 +38,7 @@ pub fn code_actions(
     add_missing_field_actions(analysis, params, root, uri, &mut actions);
     add_path_concatenation_actions(analysis, params, root, uri, &mut actions);
     add_string_coercion_actions(analysis, params, root, uri, &mut actions);
+    add_invalid_interpolation_actions(analysis, params, root, uri, &mut actions);
 
     // -- Position-driven actions --
     add_type_annotation_actions(analysis, params, root, uri, &mut actions);
@@ -452,6 +453,76 @@ fn add_string_coercion_actions(
                 ..Default::default()
             }));
         }
+    }
+}
+
+// ==============================================================================
+// "Wrap in toString" for invalid interpolation (E015)
+// ==============================================================================
+//
+// When a non-interpolable type (int, bool, etc.) is used in `"${expr}"`,
+// offer to wrap it in `toString`.
+
+fn add_invalid_interpolation_actions(
+    analysis: &FileSnapshot,
+    params: &CodeActionParams,
+    root: &rnix::Root,
+    uri: &Url,
+    actions: &mut Vec<CodeActionOrCommand>,
+) {
+    let request_range = params.range;
+
+    let empty_diags = Vec::new();
+    let diagnostics = analysis
+        .any_inference()
+        .map(|inf| &inf.check_result.diagnostics)
+        .unwrap_or(&empty_diags);
+
+    for diag in diagnostics {
+        if !matches!(&diag.kind, TixDiagnosticKind::InvalidInterpolation { .. }) {
+            continue;
+        }
+
+        let ptr = match analysis.syntax.source_map.node_for_expr(diag.at_expr) {
+            Some(ptr) => ptr,
+            None => continue,
+        };
+        let node = ptr.to_node(root.syntax());
+        let diag_range = analysis.syntax.line_index.range(node.text_range());
+
+        if !ranges_overlap(diag_range, request_range) {
+            continue;
+        }
+
+        let expr_text = node.text().to_string();
+        let new_text = format!("toString {expr_text}");
+
+        let edit = TextEdit {
+            range: diag_range,
+            new_text,
+        };
+        let mut changes = std::collections::HashMap::new();
+        changes.insert(uri.clone(), vec![edit]);
+
+        let lsp_diag = Diagnostic {
+            range: diag_range,
+            severity: Some(DiagnosticSeverity::ERROR),
+            source: Some("tix".to_string()),
+            message: diag.kind.to_string(),
+            ..Default::default()
+        };
+
+        actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+            title: "Wrap in `toString`".to_string(),
+            kind: Some(CodeActionKind::QUICKFIX),
+            diagnostics: Some(vec![lsp_diag]),
+            edit: Some(WorkspaceEdit {
+                changes: Some(changes),
+                ..Default::default()
+            }),
+            is_preferred: Some(true),
+            ..Default::default()
+        }));
     }
 }
 
@@ -1136,6 +1207,42 @@ mod tests {
         assert!(
             !titles.iter().any(|t| t.contains("toString")),
             "should not offer toString when arg is already string, got: {titles:?}"
+        );
+    }
+
+    // ======================================================================
+    // "Wrap in toString" for invalid interpolation (E015) tests
+    // ======================================================================
+
+    #[test]
+    fn invalid_interpolation_offers_tostring() {
+        let src = indoc! {r#"
+            "hello ${42}"
+            #        ^1
+        "#};
+        let actions = actions_at_marker(src, 1);
+        let titles = action_titles(&actions);
+
+        assert!(
+            titles.iter().any(|t| t.contains("toString")),
+            "expected 'toString' action for int in interpolation, got: {titles:?}"
+        );
+    }
+
+    #[test]
+    fn invalid_interpolation_tostring_edit() {
+        let src = indoc! {r#"
+            "hello ${42}"
+            #        ^1
+        "#};
+        let actions = actions_at_marker(src, 1);
+        let edit = edit_for_title(&actions, "toString").expect("should have toString edit");
+
+        let changes = edit.changes.unwrap();
+        let all_edits: Vec<_> = changes.values().flat_map(|v| v.iter()).collect();
+        assert_eq!(
+            all_edits[0].new_text, "toString 42",
+            "should wrap in toString inside interpolation"
         );
     }
 
