@@ -3123,6 +3123,71 @@ mod import_tests {
             _ => panic!("expected attrset, got: {ty}"),
         }
     }
+
+    // Regression: overload resolver must see through Frozen wrappers when a
+    // field from a cross-file import is used in a `+` expression. Without
+    // unwrapping, Frozen(string) fails the Ty::Primitive pattern match and
+    // produces a spurious "cannot apply `+` to `string` and `string`" error.
+    #[test]
+    fn import_frozen_string_concat() {
+        let ty = get_multifile_root(&[
+            (
+                "/main.nix",
+                r#"
+                let lib = import /lib.nix;
+                in lib.cflags + " --extra-flag"
+                "#,
+            ),
+            ("/lib.nix", r#"{ cflags = "--default"; }"#),
+        ]);
+        assert_eq!(ty, expected_ty!(String));
+    }
+
+    // Regression: frozen field used in `//` merge + string concat — mirrors
+    // the pattern `toolchain_ // { cppflags = toolchain_.cflags + "..."; }`.
+    #[test]
+    fn import_frozen_string_concat_with_merge() {
+        let ty = get_multifile_root(&[
+            (
+                "/main.nix",
+                r#"
+                let
+                    tc = import /tc.nix;
+                in tc // {
+                    cppflags = tc.cflags + " --std=c++20";
+                }
+                "#,
+            ),
+            ("/tc.nix", r#"{ cflags = "--default"; stdenv = true; }"#),
+        ]);
+        match ty.output_ty() {
+            OutputTy::AttrSet(attr) => {
+                let cppflags = attr.fields.get("cppflags").expect("field cppflags");
+                assert_eq!(
+                    ty.child(*cppflags),
+                    expected_ty!(String),
+                    "cppflags should be string"
+                );
+            }
+            _ => panic!("expected attrset, got: {ty}"),
+        }
+    }
+
+    // Frozen int field used in arithmetic.
+    #[test]
+    fn import_frozen_int_arithmetic() {
+        let ty = get_multifile_root(&[
+            (
+                "/main.nix",
+                r#"
+                let lib = import /lib.nix;
+                in lib.x + lib.y
+                "#,
+            ),
+            ("/lib.nix", "{ x = 1; y = 2; }"),
+        ]);
+        assert_eq!(ty, expected_ty!(Int));
+    }
 }
 
 // ==============================================================================

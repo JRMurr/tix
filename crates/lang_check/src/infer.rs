@@ -1006,6 +1006,38 @@ impl CheckCtx<'_> {
         let lhs_concrete = self.types.find_concrete_through_inter(c.lhs);
         let rhs_concrete = self.types.find_concrete_through_inter(c.rhs);
 
+        // Named is transparent — unwrap before matching, just like
+        // try_resolve_merge and constrain do.
+        let unwrap_named = |ty: Ty<TyId>, storage: &crate::storage::TypeStorage| -> Ty<TyId> {
+            let mut current = ty;
+            while let Ty::Named(_, inner) = &current {
+                match storage.get(*inner) {
+                    crate::storage::TypeEntry::Concrete(c) => current = c.clone(),
+                    _ => break,
+                }
+            }
+            current
+        };
+
+        let lhs_concrete = lhs_concrete.map(|t| unwrap_named(t, &self.types.storage));
+        let rhs_concrete = rhs_concrete.map(|t| unwrap_named(t, &self.types.storage));
+
+        // Frozen types (from cross-file imports) wrap an OutputTy in a
+        // single TyId. Intern them so the Primitive match below can see
+        // through the wrapper.
+        let lhs_concrete = if let Some(Ty::Frozen(owned)) = &lhs_concrete {
+            let interned = self.intern_output_ty(owned);
+            self.types.find_concrete(interned)
+        } else {
+            lhs_concrete
+        };
+        let rhs_concrete = if let Some(Ty::Frozen(owned)) = &rhs_concrete {
+            let interned = self.intern_output_ty(owned);
+            self.types.find_concrete(interned)
+        } else {
+            rhs_concrete
+        };
+
         // ---- Phase 1: Full Resolution — both operands concrete ----
 
         if let (Some(lhs_ty), Some(rhs_ty)) = (&lhs_concrete, &rhs_concrete) {
