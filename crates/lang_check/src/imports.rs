@@ -11,12 +11,17 @@
 // derivation). Since callPackage applies the dependency-injection argument, we
 // peel one Lambda layer to get the return type.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
+use comment_parser::{ParsedTy, ParsedTyRef, TypeVarValue};
 use lang_ast::nameres::ResolveResult;
 use lang_ast::{Expr, ExprId, Literal, Module, NameResolution};
-use lang_ty::{OutputTy, OwnedTy};
+use lang_ty::{AttrSetTy, OutputTy, OwnedTy, TypeArena};
+use smol_str::SmolStr;
+
+use crate::aliases::{parsed_ty_to_output_ty, TypeAliasRegistry};
 
 // ==============================================================================
 // Import Scanning
@@ -319,6 +324,50 @@ pub struct ImportResolution {
 // Import Type Resolution
 // ==============================================================================
 
+// ==============================================================================
+// Angle Bracket Import Resolution
+// ==============================================================================
+
+/// Resolve a recognized angle bracket import path to a type using the stubs
+/// registry. Returns `None` for unrecognized paths.
+///
+/// Known mappings:
+/// - `<nixpkgs>` → `{ ... } -> Pkgs` (the nixpkgs top-level function)
+/// - `<nixpkgs/lib>` → `Lib` (the lib attrset)
+fn resolve_angle_bracket_type(path: &str, registry: &TypeAliasRegistry) -> Option<OwnedTy> {
+    let inner = path.strip_prefix('<')?.strip_suffix('>')?;
+
+    let parsed_ty = match inner {
+        "nixpkgs" => {
+            // `import <nixpkgs>` evaluates default.nix which is a function:
+            //   { config ? {}, overlays ? [], system ? builtins.currentSystem, ... } -> Pkgs
+            // We model this as `{ ... } -> Pkgs` (open attrset → Pkgs).
+            registry.get("Pkgs")?; // Only resolve if Pkgs alias is loaded
+            ParsedTy::Lambda {
+                param: ParsedTyRef::from(ParsedTy::AttrSet(AttrSetTy {
+                    fields: BTreeMap::new(),
+                    dyn_ty: None,
+                    open: true,
+                    optional_fields: BTreeSet::new(),
+                })),
+                body: ParsedTyRef::from(ParsedTy::TyVar(TypeVarValue::Reference(SmolStr::from(
+                    "Pkgs",
+                )))),
+            }
+        }
+        "nixpkgs/lib" => {
+            registry.get("Lib")?;
+            ParsedTy::TyVar(TypeVarValue::Reference(SmolStr::from("Lib")))
+        }
+        _ => return None,
+    };
+
+    let mut arena = TypeArena::new();
+    let output_ty = parsed_ty_to_output_ty(&parsed_ty, registry, &mut arena, 0);
+    let root = arena.intern(output_ty);
+    Some(OwnedTy::new(Arc::new(arena), root))
+}
+
 /// Resolve import types using a caller-provided lookup function.
 ///
 /// For each scanned import target path:
@@ -333,6 +382,7 @@ pub fn resolve_import_types<F>(
     name_res: &NameResolution,
     base_dir: &Path,
     lookup: F,
+    registry: Option<&TypeAliasRegistry>,
 ) -> ImportResolution
 where
     F: Fn(&Path) -> Option<OwnedTy>,
@@ -363,8 +413,22 @@ where
         .collect();
 
     let mut types = HashMap::new();
-    let mut errors: Vec<ImportError> = scanned.angle_bracket;
+    let mut errors: Vec<ImportError> = Vec::new();
     let mut targets = HashMap::new();
+
+    // Attempt to resolve recognized angle bracket imports (e.g. <nixpkgs>)
+    // to known type aliases. Unresolved ones become E012 warnings.
+    for ab_import in scanned.angle_bracket {
+        if let ImportErrorKind::AngleBracketImport(ref path) = ab_import.kind {
+            if let Some(registry) = registry {
+                if let Some(resolved_ty) = resolve_angle_bracket_type(path, registry) {
+                    types.insert(ab_import.at_expr, resolved_ty);
+                    continue;
+                }
+            }
+        }
+        errors.push(ab_import);
+    }
 
     // ---- Literal imports ----
     for (apply_expr_id, target_path) in scanned.resolved {
@@ -466,10 +530,15 @@ pub fn resolve_import_types_from_stubs(
     name_res: &NameResolution,
     base_dir: &Path,
     ephemeral_stubs: &HashMap<PathBuf, OwnedTy>,
+    registry: Option<&TypeAliasRegistry>,
 ) -> ImportResolution {
-    resolve_import_types(module, name_res, base_dir, |p| {
-        ephemeral_stubs.get(p).cloned()
-    })
+    resolve_import_types(
+        module,
+        name_res,
+        base_dir,
+        |p| ephemeral_stubs.get(p).cloned(),
+        registry,
+    )
 }
 
 /// Convert import resolution errors into `TixDiagnostic`s for rendering in

@@ -264,8 +264,11 @@ impl InferenceCoordinator {
 
         // Scan for imports and demand each dependency's type from the cache.
         // Dependencies that aren't cached yet are inferred recursively.
-        let import_resolution =
-            resolve_import_types(&bundle.module, &bundle.name_res, base_dir, |dep_path| {
+        let import_resolution = resolve_import_types(
+            &bundle.module,
+            &bundle.name_res,
+            base_dir,
+            |dep_path| {
                 // Try the cache first (fast path).
                 if let Some(sig) = self.get_signature(dep_path) {
                     return Some(sig);
@@ -273,7 +276,9 @@ impl InferenceCoordinator {
                 // Demand-driven: infer the dependency.
                 let dep_result = self.demand_file(dep_path, syntax_provider)?;
                 dep_result.signature.map(|s| s.root_ty)
-            });
+            },
+            Some(&bundle.registry),
+        );
 
         let import_diagnostics = import_errors_to_diagnostics(&import_resolution.errors);
 
@@ -349,8 +354,15 @@ impl InferenceCoordinator {
         module: &lang_ast::Module,
         name_res: &lang_ast::NameResolution,
         base_dir: &Path,
+        registry: Option<&crate::aliases::TypeAliasRegistry>,
     ) -> crate::imports::ImportResolution {
-        resolve_import_types(module, name_res, base_dir, |p| self.get_signature(p))
+        resolve_import_types(
+            module,
+            name_res,
+            base_dir,
+            |p| self.get_signature(p),
+            registry,
+        )
     }
 
     // =========================================================================

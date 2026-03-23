@@ -423,8 +423,13 @@ fn run_gen_stub(
     let base_dir = file_path.parent().unwrap_or(std::path::Path::new("/"));
 
     // Infer with stubs-only (no ephemeral stubs for gen-stub).
-    let import_resolution =
-        resolve_import_types_from_stubs(&module, &name_res, base_dir, &HashMap::new());
+    let import_resolution = resolve_import_types_from_stubs(
+        &module,
+        &name_res,
+        base_dir,
+        &HashMap::new(),
+        Some(&registry),
+    );
 
     let result = lang_check::CheckBuilder::from_db(
         &db,
@@ -563,8 +568,13 @@ fn run_verify_stubs(
     let name_res = lang_ast::name_resolution(&db, file);
     let base_dir = file_path.parent().unwrap_or(std::path::Path::new("/"));
 
-    let import_resolution =
-        resolve_import_types_from_stubs(&module, &name_res, base_dir, &HashMap::new());
+    let import_resolution = resolve_import_types_from_stubs(
+        &module,
+        &name_res,
+        base_dir,
+        &HashMap::new(),
+        Some(&registry),
+    );
 
     let registry = Arc::new(registry);
     let result = lang_check::CheckBuilder::from_db(
@@ -984,12 +994,17 @@ fn run_check(
     };
 
     // Resolve imports using the coordinator (demand-driven).
-    let import_resolution =
-        lang_check::imports::resolve_import_types(&module, &name_res, base_dir, |dep_path| {
+    let import_resolution = lang_check::imports::resolve_import_types(
+        &module,
+        &name_res,
+        base_dir,
+        |dep_path| {
             // Demand the dependency's type from the coordinator.
             let result = coordinator.demand_file(dep_path, &syntax_provider)?;
             result.signature.map(|s| s.root_ty)
-        });
+        },
+        Some(&registry),
+    );
 
     let import_diagnostics = import_errors_to_diagnostics(&import_resolution.errors);
     timer.mark("import-resolution");

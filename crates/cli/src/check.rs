@@ -402,8 +402,12 @@ pub fn run_check_project(
 
         // Resolve imports from the coordinator cache. Prior layers'
         // signatures are available; intra-SCC imports get ⊤.
-        let import_resolution =
-            coordinator.resolve_imports(&bundle.module, &bundle.name_res, base_dir);
+        let import_resolution = coordinator.resolve_imports(
+            &bundle.module,
+            &bundle.name_res,
+            base_dir,
+            Some(&bundle.registry),
+        );
         let import_diagnostics =
             lang_check::imports::import_errors_to_diagnostics(&import_resolution.errors);
 

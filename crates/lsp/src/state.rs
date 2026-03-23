@@ -285,6 +285,7 @@ pub fn resolve_imports_phase_b(
             let result = coordinator.demand_file(dep_path, provider)?;
             result.signature.map(|s| s.root_ty)
         },
+        Some(&intermediate.registry),
     );
 
     let import_diagnostics = import_errors_to_diagnostics(&import_resolution.errors);
@@ -500,9 +501,9 @@ impl AnalysisState {
         // -- Phase 3: Import resolution (stubs-based, O(1) lookup) --
         let t0 = Instant::now();
         let base_dir = path.parent().unwrap_or(std::path::Path::new("/"));
-        let import_resolution = self
-            .coordinator
-            .resolve_imports(&module, &name_res, base_dir);
+        let import_resolution =
+            self.coordinator
+                .resolve_imports(&module, &name_res, base_dir, Some(&self.registry));
 
         let import_diagnostics = import_errors_to_diagnostics(&import_resolution.errors);
 
@@ -728,6 +729,7 @@ impl AnalysisState {
             &intermediate.module,
             &intermediate.name_res,
             base_dir,
+            Some(&intermediate.registry),
         );
 
         let import_diagnostics = import_errors_to_diagnostics(&import_resolution.errors);

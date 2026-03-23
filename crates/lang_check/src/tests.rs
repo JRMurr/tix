@@ -284,6 +284,7 @@ pub fn check_multifile_with_aliases(
                 &dep_name_res,
                 dep_base,
                 &ephemeral_stubs,
+                Some(aliases),
             );
 
             // Use partial inference (like the real coordinator) so that dep
@@ -312,8 +313,13 @@ pub fn check_multifile_with_aliases(
     let entry_path = PathBuf::from(files[0].0);
     let base_dir = entry_path.parent().unwrap_or(Path::new("/"));
 
-    let resolution =
-        resolve_import_types_from_stubs(&module, &name_res, base_dir, &ephemeral_stubs);
+    let resolution = resolve_import_types_from_stubs(
+        &module,
+        &name_res,
+        base_dir,
+        &ephemeral_stubs,
+        Some(aliases),
+    );
     let errors = resolution.errors;
 
     // Use partial inference for the entry file too, so tests can inspect
@@ -2211,6 +2217,66 @@ mod import_tests {
         );
     }
 
+    // When stubs are loaded, `import <nixpkgs> {}` resolves to the Pkgs type
+    // instead of producing an E012 warning.
+    #[test]
+    fn import_nixpkgs_resolves_to_pkgs() {
+        let aliases = TypeAliasRegistry::with_builtins();
+        let (ty, errors, _diags) =
+            check_multifile_with_aliases(&[("/main.nix", "import <nixpkgs> { }")], &aliases);
+        // No angle bracket errors — resolved via stubs.
+        assert!(
+            !errors.iter().any(|e| matches!(
+                &e.kind,
+                crate::imports::ImportErrorKind::AngleBracketImport(_)
+            )),
+            "expected no AngleBracketImport error, got: {:?}",
+            errors.iter().map(|e| &e.kind).collect::<Vec<_>>()
+        );
+        // Result should not be an unconstrained type variable.
+        assert!(
+            !matches!(ty.output_ty(), OutputTy::TyVar(_)),
+            "import <nixpkgs> {{}} should resolve to Pkgs, got: {ty}"
+        );
+    }
+
+    // `import <nixpkgs/lib>` resolves to the Lib type alias.
+    #[test]
+    fn import_nixpkgs_lib_resolves_to_lib() {
+        let aliases = TypeAliasRegistry::with_builtins();
+        let (ty, errors, _diags) =
+            check_multifile_with_aliases(&[("/main.nix", "import <nixpkgs/lib>")], &aliases);
+        assert!(
+            !errors.iter().any(|e| matches!(
+                &e.kind,
+                crate::imports::ImportErrorKind::AngleBracketImport(_)
+            )),
+            "expected no AngleBracketImport error, got: {:?}",
+            errors.iter().map(|e| &e.kind).collect::<Vec<_>>()
+        );
+        let ty_str = format!("{ty}");
+        assert!(
+            ty_str.contains("Lib"),
+            "import <nixpkgs/lib> should resolve to Lib, got: {ty_str}"
+        );
+    }
+
+    // Unknown angle bracket imports still produce E012.
+    #[test]
+    fn import_unknown_angle_bracket_still_warns() {
+        let aliases = TypeAliasRegistry::with_builtins();
+        let (_ty, errors, _diags) =
+            check_multifile_with_aliases(&[("/main.nix", "import <unstable> { }")], &aliases);
+        assert!(
+            errors.iter().any(|e| matches!(
+                &e.kind,
+                crate::imports::ImportErrorKind::AngleBracketImport(p) if p == "<unstable>"
+            )),
+            "expected AngleBracketImport error for <unstable>, got: {:?}",
+            errors.iter().map(|e| &e.kind).collect::<Vec<_>>()
+        );
+    }
+
     // Import a string.
     #[test]
     fn import_string() {
@@ -2264,8 +2330,13 @@ mod import_tests {
         let module = lang_ast::module(&db, entry_file);
         let name_res = lang_ast::name_resolution(&db, entry_file);
 
-        let resolution =
-            resolve_import_types_from_stubs(&module, &name_res, Path::new("/"), &HashMap::new());
+        let resolution = resolve_import_types_from_stubs(
+            &module,
+            &name_res,
+            Path::new("/"),
+            &HashMap::new(),
+            None,
+        );
 
         // There should be exactly 3 target entries: Apply, fun (Reference), arg (Literal).
         assert_eq!(
@@ -2982,8 +3053,13 @@ mod import_tests {
         let module = lang_ast::module(&db, entry_file);
         let name_res = lang_ast::name_resolution(&db, entry_file);
 
-        let resolution =
-            resolve_import_types_from_stubs(&module, &name_res, Path::new("/"), &HashMap::new());
+        let resolution = resolve_import_types_from_stubs(
+            &module,
+            &name_res,
+            Path::new("/"),
+            &HashMap::new(),
+            None,
+        );
 
         // The callPackage pattern should produce target entries for the path
         // literal and the outer Apply.

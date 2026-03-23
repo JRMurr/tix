@@ -219,7 +219,8 @@ pub fn run_batch_warmup(
         // Resolve imports from coordinator cache. Prior layers' signatures
         // are available; intra-SCC imports within the same layer get ⊤.
         let base_dir = pp.path.parent().unwrap_or(Path::new("/"));
-        let import_resolution = coordinator.resolve_imports(&pp.module, &pp.name_res, base_dir);
+        let import_resolution =
+            coordinator.resolve_imports(&pp.module, &pp.name_res, base_dir, Some(&registry));
         let import_diagnostics = import_errors_to_diagnostics(&import_resolution.errors);
 
         let import_targets = import_resolution.targets;
