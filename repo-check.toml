@@ -1,0 +1,73 @@
+# repo-check.toml — repos to test tix against
+#
+# Run: cargo run --bin tix-repo-check -- run
+# List: cargo run --bin tix-repo-check -- list
+
+[settings]
+cache_dir = ".repo-check-cache"
+timeout_secs = 120
+
+# -- Tiny repos (fast sanity checks) --
+
+[[repo]]
+name = "flake-utils"
+url = "https://github.com/numtide/flake-utils"
+
+[[repo]]
+name = "nix-colors"
+url = "https://github.com/Misterio77/nix-colors"
+
+# -- Small repos --
+
+[[repo]]
+name = "sops-nix"
+url = "https://github.com/Mic92/sops-nix"
+
+[[repo]]
+name = "disko"
+url = "https://github.com/nix-community/disko"
+
+# -- Medium repos --
+
+[[repo]]
+name = "nix-darwin"
+url = "https://github.com/LnL7/nix-darwin"
+
+[[repo]]
+name = "nixos-hardware"
+url = "https://github.com/NixOS/nixos-hardware"
+
+[[repo]]
+name = "stylix"
+url = "https://github.com/danth/stylix"
+
+[[repo]]
+name = "devenv"
+url = "https://github.com/cachix/devenv"
+
+# -- Large repos --
+
+[[repo]]
+name = "home-manager"
+url = "https://github.com/nix-community/home-manager"
+
+[[repo]]
+name = "nixvim"
+url = "https://github.com/nix-community/nixvim"
+
+[[repo]]
+name = "dream2nix"
+url = "https://github.com/nix-community/dream2nix"
+
+# -- nixpkgs lib (subdir only) --
+
+[[repo]]
+name = "nixpkgs-lib"
+url = "https://github.com/NixOS/nixpkgs"
+rev = "nixos-unstable"
+subdir = "lib"
+skip_init = true
+tix_toml = """
+[project]
+exclude = ["**/tests/**", "**/test/**"]
+"""

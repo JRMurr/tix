@@ -21,3 +21,7 @@ docs/mermaid-init.js
 
 /tmp
 .claude/worktrees/
+
+# repo-check ecosystem testing
+.repo-check-cache/
+repo-check-results/

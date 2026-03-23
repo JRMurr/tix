@@ -6,6 +6,7 @@ members = [
     "crates/lang_ast",
     "crates/lang_ty",
     "crates/lsp",
+    "crates/repo_check",
 ]
 resolver = "2"
 

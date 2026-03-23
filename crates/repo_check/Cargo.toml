@@ -1,0 +1,17 @@
+[package]
+name = "repo_check"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = { version = "4.2", features = ["derive"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+
+[[bin]]
+name = "tix-repo-check"
+path = "src/main.rs"
