@@ -186,6 +186,7 @@ mod tests {
             init: None,
             check: None,
             check_stats: None,
+            diagnostics: vec![],
         }
     }
 

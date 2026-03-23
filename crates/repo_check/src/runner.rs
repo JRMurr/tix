@@ -33,6 +33,7 @@ pub fn run_repo(
                 init: None,
                 check: None,
                 check_stats: None,
+                diagnostics: vec![],
             };
         }
     };
@@ -53,6 +54,7 @@ pub fn run_repo(
             init: None,
             check: None,
             check_stats: None,
+            diagnostics: vec![],
         };
     }
 
@@ -69,10 +71,18 @@ pub fn run_repo(
     write_tix_toml(entry, init_stdout.as_deref(), &tix_toml_path);
 
     // Phase 4: Check
-    let (check_result, check_stats) = check_phase(tix_path, &work_dir, &tix_toml_path, timeout);
+    let mut check = check_phase(tix_path, &work_dir, &tix_toml_path, timeout);
+
+    // Strip absolute work_dir prefix from diagnostic file paths to keep them relative.
+    let work_dir_prefix = format!("{}/", work_dir.display());
+    for fd in &mut check.diagnostics {
+        if let Some(rel) = fd.file.strip_prefix(&work_dir_prefix) {
+            fd.file = rel.to_string();
+        }
+    }
 
     // Phase 5: Classify outcome
-    let outcome = classify_outcome(&init_result, &check_result);
+    let outcome = classify_outcome(&init_result, &check.phase);
 
     RepoResult {
         name: entry.name.clone(),
@@ -80,8 +90,9 @@ pub fn run_repo(
         rev_resolved: Some(rev_resolved),
         outcome,
         init: init_result,
-        check: Some(check_result),
-        check_stats,
+        check: Some(check.phase),
+        check_stats: check.stats,
+        diagnostics: check.diagnostics,
     }
 }
 
@@ -160,12 +171,18 @@ fn minimal_tix_toml() -> String {
     "[project]\nexclude = [\"**/tests/**\", \"**/test/**\"]\n".to_string()
 }
 
+struct CheckPhaseResult {
+    phase: PhaseResult,
+    stats: Option<CheckStats>,
+    diagnostics: Vec<results::FileDiagnostics>,
+}
+
 fn check_phase(
     tix_path: &Path,
     work_dir: &Path,
     tix_toml_path: &Path,
     timeout: Duration,
-) -> (PhaseResult, Option<CheckStats>) {
+) -> CheckPhaseResult {
     let config_arg = tix_toml_path.display().to_string();
     let args = vec!["--format", "json", "check", "--config", &config_arg];
 
@@ -173,35 +190,43 @@ fn check_phase(
         Ok(o) => o,
         Err(msg) => {
             eprintln!("  check spawn error: {msg}");
-            return (
-                PhaseResult {
+            return CheckPhaseResult {
+                phase: PhaseResult {
                     exit_code: -1,
                     duration_secs: 0.0,
                     panicked: false,
                     timed_out: false,
                     stderr: Some(msg),
                 },
-                None,
-            );
+                stats: None,
+                diagnostics: vec![],
+            };
         }
     };
 
     let panicked = results::detect_panic(&output.stderr);
-    let stats = results::parse_check_json(&output.stdout);
+    let parsed = results::parse_check_json(&output.stdout);
 
-    let phase = PhaseResult {
-        exit_code: output.exit_code,
-        duration_secs: output.duration.as_secs_f64(),
-        panicked,
-        timed_out: output.timed_out,
-        stderr: if panicked || output.timed_out {
-            Some(truncate_string(&output.stderr, 4096))
-        } else {
-            None
-        },
+    let (stats, diagnostics) = match parsed {
+        Some(o) => (Some(o.stats), o.diagnostics),
+        None => (None, vec![]),
     };
 
-    (phase, stats)
+    CheckPhaseResult {
+        phase: PhaseResult {
+            exit_code: output.exit_code,
+            duration_secs: output.duration.as_secs_f64(),
+            panicked,
+            timed_out: output.timed_out,
+            stderr: if panicked || output.timed_out {
+                Some(truncate_string(&output.stderr, 4096))
+            } else {
+                None
+            },
+        },
+        stats,
+        diagnostics,
+    }
 }
 
 fn classify_outcome(init_result: &Option<PhaseResult>, check_result: &PhaseResult) -> RepoOutcome {
@@ -240,6 +265,7 @@ fn skipped_result(entry: &RepoEntry) -> RepoResult {
         init: None,
         check: None,
         check_stats: None,
+        diagnostics: vec![],
     }
 }
 

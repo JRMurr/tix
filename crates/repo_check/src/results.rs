@@ -33,6 +33,9 @@ pub struct RepoResult {
     pub check: Option<PhaseResult>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub check_stats: Option<CheckStats>,
+    /// Per-file diagnostics from the check phase (only files with diagnostics).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<FileDiagnostics>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -82,6 +85,27 @@ pub struct CheckStats {
 }
 
 // ==============================================================================
+// Per-file diagnostics (captured from tix JSON output)
+// ==============================================================================
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct FileDiagnostics {
+    pub file: String,
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Diagnostic {
+    pub severity: String,
+    pub code: String,
+    pub message: String,
+    pub line: u64,
+    pub column: u64,
+    pub end_line: u64,
+    pub end_column: u64,
+}
+
+// ==============================================================================
 // Summary
 // ==============================================================================
 
@@ -122,8 +146,14 @@ impl Summary {
 // Helpers — parse tix check JSON output
 // ==============================================================================
 
-/// Parse the JSON output from `tix --format json check` and extract stats.
-pub fn parse_check_json(json_str: &str) -> Option<CheckStats> {
+/// Parsed output from `tix --format json check`.
+pub struct CheckOutput {
+    pub stats: CheckStats,
+    pub diagnostics: Vec<FileDiagnostics>,
+}
+
+/// Parse the JSON output from `tix --format json check` and extract stats + diagnostics.
+pub fn parse_check_json(json_str: &str) -> Option<CheckOutput> {
     let val: serde_json::Value = serde_json::from_str(json_str).ok()?;
 
     let summary = val.get("summary")?;
@@ -131,25 +161,63 @@ pub fn parse_check_json(json_str: &str) -> Option<CheckStats> {
     let errors = summary.get("errors")?.as_u64()? as usize;
     let warnings = summary.get("warnings")?.as_u64()? as usize;
 
-    // Count error codes from per-file diagnostics.
     let mut error_codes: BTreeMap<String, usize> = BTreeMap::new();
+    let mut diagnostics: Vec<FileDiagnostics> = Vec::new();
+
     if let Some(files) = val.get("files").and_then(|f| f.as_array()) {
         for file in files {
+            let file_path = file
+                .get("file")
+                .and_then(|f| f.as_str())
+                .unwrap_or("")
+                .to_string();
+
             if let Some(diags) = file.get("diagnostics").and_then(|d| d.as_array()) {
+                let mut file_diags = Vec::new();
                 for diag in diags {
                     if let Some(code) = diag.get("code").and_then(|c| c.as_str()) {
                         *error_codes.entry(code.to_string()).or_default() += 1;
                     }
+                    file_diags.push(Diagnostic {
+                        severity: diag
+                            .get("severity")
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("unknown")
+                            .to_string(),
+                        code: diag
+                            .get("code")
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        message: diag
+                            .get("message")
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        line: diag.get("line").and_then(|n| n.as_u64()).unwrap_or(0),
+                        column: diag.get("column").and_then(|n| n.as_u64()).unwrap_or(0),
+                        end_line: diag.get("end_line").and_then(|n| n.as_u64()).unwrap_or(0),
+                        end_column: diag.get("end_column").and_then(|n| n.as_u64()).unwrap_or(0),
+                    });
+                }
+                if !file_diags.is_empty() {
+                    diagnostics.push(FileDiagnostics {
+                        file: file_path,
+                        diagnostics: file_diags,
+                    });
                 }
             }
         }
     }
 
-    Some(CheckStats {
-        files_checked,
-        errors,
-        warnings,
-        error_codes,
+    Some(CheckOutput {
+        stats: CheckStats {
+            files_checked,
+            errors,
+            warnings,
+            error_codes,
+        },
+        diagnostics,
     })
 }
 
@@ -214,22 +282,27 @@ mod tests {
             }
         }"#;
 
-        let stats = parse_check_json(json).unwrap();
-        assert_eq!(stats.files_checked, 10);
-        assert_eq!(stats.errors, 3);
-        assert_eq!(stats.warnings, 1);
-        assert_eq!(stats.error_codes.get("E001"), Some(&2));
-        assert_eq!(stats.error_codes.get("E003"), Some(&1));
-        assert_eq!(stats.error_codes.get("W001"), Some(&1));
+        let output = parse_check_json(json).unwrap();
+        assert_eq!(output.stats.files_checked, 10);
+        assert_eq!(output.stats.errors, 3);
+        assert_eq!(output.stats.warnings, 1);
+        assert_eq!(output.stats.error_codes.get("E001"), Some(&2));
+        assert_eq!(output.stats.error_codes.get("E003"), Some(&1));
+        assert_eq!(output.stats.error_codes.get("W001"), Some(&1));
+        assert_eq!(output.diagnostics.len(), 2);
+        assert_eq!(output.diagnostics[0].file, "lib/strings.nix");
+        assert_eq!(output.diagnostics[0].diagnostics.len(), 3);
+        assert_eq!(output.diagnostics[1].diagnostics[0].code, "E003");
     }
 
     #[test]
     fn parse_check_json_handles_empty() {
         let json =
             r#"{"version":1,"files":[],"summary":{"files_checked":0,"errors":0,"warnings":0}}"#;
-        let stats = parse_check_json(json).unwrap();
-        assert_eq!(stats.files_checked, 0);
-        assert!(stats.error_codes.is_empty());
+        let output = parse_check_json(json).unwrap();
+        assert_eq!(output.stats.files_checked, 0);
+        assert!(output.stats.error_codes.is_empty());
+        assert!(output.diagnostics.is_empty());
     }
 
     #[test]
@@ -260,6 +333,7 @@ mod tests {
                 init: None,
                 check: None,
                 check_stats: None,
+                diagnostics: vec![],
             },
             RepoResult {
                 name: "b".into(),
@@ -269,6 +343,7 @@ mod tests {
                 init: None,
                 check: None,
                 check_stats: None,
+                diagnostics: vec![],
             },
             RepoResult {
                 name: "c".into(),
@@ -278,6 +353,7 @@ mod tests {
                 init: None,
                 check: None,
                 check_stats: None,
+                diagnostics: vec![],
             },
         ];
         let s = Summary::from_results(&results);

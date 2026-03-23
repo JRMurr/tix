@@ -40,9 +40,9 @@ enum Command {
         #[arg(long, value_delimiter = ',')]
         only: Option<Vec<String>>,
 
-        /// Build tix in release mode
+        /// Build tix in debug mode instead of release
         #[arg(long)]
-        release: bool,
+        debug: bool,
 
         /// Per-repo timeout in seconds (overrides manifest)
         #[arg(long)]
@@ -85,7 +85,7 @@ fn main() {
             tix_path,
             output,
             only,
-            release,
+            debug,
             timeout,
             reuse_cache,
         } => cmd_run(
@@ -93,7 +93,7 @@ fn main() {
             tix_path.as_deref(),
             output.as_deref(),
             only.as_deref(),
-            release,
+            !debug,
             timeout,
             reuse_cache,
         ),
