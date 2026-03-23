@@ -278,10 +278,35 @@ pub fn resolve_analyze_globs(config: &ProjectConfig, config_dir: &Path) -> Vec<P
         }
     };
 
+    // Build an exclude GlobSet from `[project] exclude` patterns so that
+    // excluded files (e.g. `**/Cargo.nix`) are never returned even when
+    // matched by `analyze` globs.
+    let exclude_set = if !section.exclude.is_empty() {
+        let mut exc_builder = globset::GlobSetBuilder::new();
+        for pattern in &section.exclude {
+            if let Ok(glob) = globset::GlobBuilder::new(pattern)
+                .literal_separator(true)
+                .build()
+            {
+                exc_builder.add(glob);
+            }
+        }
+        exc_builder.build().ok()
+    } else {
+        None
+    };
+
     // Walk the config directory recursively, matching .nix files.
     let mut paths = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    walk_dir_matching(config_dir, config_dir, &glob_set, &mut seen, &mut paths);
+    walk_dir_matching(
+        config_dir,
+        config_dir,
+        &glob_set,
+        &exclude_set,
+        &mut seen,
+        &mut paths,
+    );
     paths
 }
 
@@ -295,6 +320,7 @@ fn walk_dir_matching(
     dir: &Path,
     root: &Path,
     glob_set: &globset::GlobSet,
+    exclude_set: &Option<globset::GlobSet>,
     seen: &mut std::collections::HashSet<PathBuf>,
     out: &mut Vec<PathBuf>,
 ) {
@@ -306,9 +332,22 @@ fn walk_dir_matching(
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            walk_dir_matching(&path, root, glob_set, seen, out);
+            // Skip excluded directories.
+            if let Some(ref gs) = exclude_set {
+                let relative = path.strip_prefix(root).unwrap_or(&path);
+                if gs.is_match(relative) {
+                    continue;
+                }
+            }
+            walk_dir_matching(&path, root, glob_set, exclude_set, seen, out);
         } else if path.is_file() && path.extension().is_some_and(|e| e == "nix") {
             let relative = path.strip_prefix(root).unwrap_or(&path);
+            // Skip excluded files.
+            if let Some(ref gs) = exclude_set {
+                if gs.is_match(relative) {
+                    continue;
+                }
+            }
             if glob_set.is_match(relative) {
                 // Canonicalize so background-queue paths match uri_to_path()
                 // (which also canonicalizes). Without this, symlinked dirs
@@ -375,6 +414,33 @@ mod tests {
         let result = resolve_analyze_globs(&config, dir.path());
         assert_eq!(result.len(), 1, "should only match top-level lib/ files");
         assert!(result[0].ends_with("top.nix"));
+    }
+
+    #[test]
+    fn analyze_respects_project_exclude() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib_dir = dir.path().join("lib");
+        std::fs::create_dir(&lib_dir).unwrap();
+        std::fs::write(lib_dir.join("strings.nix"), "42").unwrap();
+        std::fs::write(lib_dir.join("Cargo.nix"), "42").unwrap();
+        std::fs::write(dir.path().join("default.nix"), "42").unwrap();
+        std::fs::write(dir.path().join("Cargo.nix"), "42").unwrap();
+
+        let config = ProjectConfig {
+            project: Some(ProjectSection {
+                analyze: vec!["**/*.nix".to_string()],
+                exclude: vec!["**/Cargo.nix".to_string()],
+            }),
+            ..Default::default()
+        };
+        let result = resolve_analyze_globs(&config, dir.path());
+        // Cargo.nix files should be excluded even though **/*.nix matches them.
+        assert_eq!(result.len(), 2, "should exclude both Cargo.nix files");
+        assert!(
+            result.iter().all(|p| !p.ends_with("Cargo.nix")),
+            "no Cargo.nix should be in the results: {:?}",
+            result
+        );
     }
 
     #[test]
