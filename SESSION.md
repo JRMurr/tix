@@ -57,6 +57,10 @@ by design, or informational notes.
   with both operands typed as `int`. May be related to overload resolution seeing
   the import's type after coordinator lookup vs direct inference.
 
+- **Angle bracket subpaths beyond `<nixpkgs>` and `<nixpkgs/lib>`** are not
+  resolved. Paths like `<nixpkgs/nixos/lib/eval-config.nix>` still produce
+  E012. Could be extended by mapping more subpaths to appropriate types.
+
 ### Minor Untracked Items
 
 - `test/strings.nix`: `nameFromURL :: String -> String` annotation has wrong arity
