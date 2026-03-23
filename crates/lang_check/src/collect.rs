@@ -26,6 +26,26 @@ use lang_ty::{
 
 use Polarity::{Negative, Positive};
 
+/// Polarity tracker for co-occurring variable detection. bit 0 = Positive,
+/// bit 1 = Negative. A variable visited at both is co-occurring.
+#[derive(Clone, Copy, Default)]
+struct PolarityBits(u8);
+
+impl PolarityBits {
+    fn add(self, pol: Polarity) -> Self {
+        PolarityBits(
+            self.0
+                | match pol {
+                    Positive => 1,
+                    Negative => 2,
+                },
+        )
+    }
+    fn is_both(self) -> bool {
+        self.0 == 3
+    }
+}
+
 // ==============================================================================
 // Canonicalizer — shared canonicalization engine
 // ==============================================================================
@@ -60,6 +80,15 @@ struct Canonicalizer<'a> {
     /// Set when a deadline check fires. Once set, canonicalize() returns
     /// TyVar immediately for all subsequent calls.
     bailed_out: bool,
+    /// Variables that appear at both positive and negative polarity in the
+    /// type graph. These are preserved as TyVars alongside their bounds
+    /// in the canonicalized output, maintaining polymorphism for cross-file
+    /// function signatures (SimpleSub §4).
+    cooccurring: FxHashSet<TyId>,
+    /// Polarity tracker: records which polarities each variable was visited at
+    /// during canonicalization. Used to detect co-occurring variables for the
+    /// two-pass strategy.
+    var_polarities: FxHashMap<TyId, PolarityBits>,
 }
 
 impl<'a> Canonicalizer<'a> {
@@ -72,12 +101,29 @@ impl<'a> Canonicalizer<'a> {
             deadline: None,
             op_counter: 0,
             bailed_out: false,
+            cooccurring: FxHashSet::default(),
+            var_polarities: FxHashMap::default(),
         }
     }
 
     fn with_deadline(mut self, deadline: Instant) -> Self {
         self.deadline = Some(deadline);
         self
+    }
+
+    fn with_cooccurring(mut self, cooccurring: FxHashSet<TyId>) -> Self {
+        self.cooccurring = cooccurring;
+        self
+    }
+
+    /// Extract the set of variables that were visited at both polarities
+    /// during canonicalization. Used by the two-pass strategy.
+    fn detected_cooccurring(&self) -> FxHashSet<TyId> {
+        self.var_polarities
+            .iter()
+            .filter(|(_, bits)| bits.is_both())
+            .map(|(&id, _)| id)
+            .collect()
     }
 
     /// Canonicalize and return an arena-interned TyRef. When the same
@@ -164,11 +210,58 @@ impl<'a> Canonicalizer<'a> {
                 return self.canonicalize(named_id, polarity);
             }
 
+            // Track which polarities this variable is visited at.
+            self.var_polarities
+                .entry(ty_id)
+                .and_modify(|bits| *bits = bits.add(polarity))
+                .or_insert_with(|| PolarityBits::default().add(polarity));
+
+            let is_cooccurring = self.cooccurring.contains(&ty_id);
+
             let bounds = match polarity {
                 Positive => v.lower_bounds.clone(),
                 Negative => v.upper_bounds.clone(),
             };
-            self.expand_bounds(&bounds, ty_id, polarity)
+
+            if is_cooccurring {
+                // Co-occurring variable: preserve as TyVar alongside bounds.
+                // This maintains polymorphism — the simplifier will remove
+                // the variable later if it turns out to be polar-only in the
+                // final OutputTy.
+                //
+                // Filter out variable bounds: infer_expr links every expression
+                // result to a pre-allocated expr-slot variable via
+                // constrain_equal, creating cycles (A <: B <: A). These resolve
+                // to lower-bound expansions via the display heuristic, which
+                // would incorrectly constrain the parameter (e.g., `a & null`
+                // instead of just `a`). Only concrete bounds (from actual usage
+                // constraints like `x + 1` → Number) are meaningful here.
+                let concrete_bounds: SmallVec<[TyId; 4]> = bounds
+                    .iter()
+                    .copied()
+                    .filter(|&b| !matches!(self.table.get(b), TypeEntry::Variable(_)))
+                    .collect();
+
+                if concrete_bounds.is_empty() {
+                    // No concrete bounds in this polarity — just the variable.
+                    return OutputTy::TyVar(ty_id.0);
+                }
+                let expanded = self.expand_bounds(&concrete_bounds, ty_id, polarity);
+                match &expanded {
+                    // Bounds expanded to nothing informative — just the variable.
+                    OutputTy::TyVar(_) | OutputTy::Bottom => OutputTy::TyVar(ty_id.0),
+                    _ => {
+                        let var_ref = self.arena.intern(OutputTy::TyVar(ty_id.0));
+                        let bounds_ref = self.arena.intern(expanded);
+                        match polarity {
+                            Positive => OutputTy::Union(vec![var_ref, bounds_ref]),
+                            Negative => OutputTy::Intersection(vec![var_ref, bounds_ref]),
+                        }
+                    }
+                }
+            } else {
+                self.expand_bounds(&bounds, ty_id, polarity)
+            }
         } else {
             let ty = match self.table.get(ty_id) {
                 TypeEntry::Concrete(ty) => ty.clone(),
@@ -489,12 +582,27 @@ pub fn canonicalize_standalone_with_deadline(
     polarity: Polarity,
     deadline: Option<Instant>,
 ) -> (TypeArena, TyRef) {
+    // Two-pass strategy for co-occurring variable detection:
+    // Pass 1: canonicalize normally, tracking variable polarities.
     let mut canon = Canonicalizer::new(table);
     if let Some(d) = deadline {
         canon = canon.with_deadline(d);
     }
     let ty = canon.canonicalize_child(ty_id, polarity);
-    (canon.arena, ty)
+    let cooccurring = canon.detected_cooccurring();
+
+    if cooccurring.is_empty() {
+        // No co-occurring vars — pass 1 result is correct.
+        (canon.arena, ty)
+    } else {
+        // Pass 2: re-canonicalize preserving co-occurring variables.
+        let mut canon2 = Canonicalizer::new(table).with_cooccurring(cooccurring);
+        if let Some(d) = deadline {
+            canon2 = canon2.with_deadline(d);
+        }
+        let ty2 = canon2.canonicalize_child(ty_id, polarity);
+        (canon2.arena, ty2)
+    }
 }
 
 // ==============================================================================
@@ -1178,6 +1286,12 @@ impl<'db> Collector<'db> {
         } else {
             None
         };
+        // Create a Canonicalizer. Co-occurring variable detection happens via
+        // the two-pass strategy in canonicalize_standalone (for early canonical
+        // snapshots). For finalize_inference's shared canonicalizer, co-occurring
+        // vars are detected per-standalone call; the shared canonicalizer here
+        // uses normal expansion (names prefer early canonical, and expressions
+        // are call-site results that don't need co-occurring preservation).
         let mut canon = Canonicalizer::new(&self.ctx.types.storage);
         if let Some(d) = canon_deadline {
             canon = canon.with_deadline(d);

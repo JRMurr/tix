@@ -3993,6 +3993,78 @@ fn optional_field_display() {
 }
 
 // =============================================================================
+// Co-occurring variable preservation (polymorphic defaults)
+// =============================================================================
+
+/// A let-bound function with a null default should preserve its polymorphism
+/// in the name-level canonical type. The type of `f` should be
+/// `{ config?: a } -> a | null`, NOT `{ config?: null } -> null`.
+#[test]
+fn null_default_function_is_polymorphic() {
+    let nix_src = indoc! {"
+        let
+          f = { config ? null }: config;
+        in f
+    "};
+    let ty = get_name_type(nix_src, "f");
+    let display = format!("{ty}");
+    // The return type should contain a type variable unioned with null,
+    // not just "null".
+    assert!(
+        !display.ends_with("-> null"),
+        "f should not collapse to -> null (should be polymorphic), got: {display}"
+    );
+    assert!(
+        display.contains("| null"),
+        "f's return type should include '| null' for the default, got: {display}"
+    );
+    // The parameter type should NOT have `& null` — the default only affects
+    // the return type, not the parameter constraint.
+    assert!(
+        !display.contains("& null"),
+        "config param should not have '& null' constraint, got: {display}"
+    );
+}
+
+/// Same as above but with an integer default.
+#[test]
+fn int_default_function_is_polymorphic() {
+    let nix_src = indoc! {"
+        let
+          f = { x ? 0 }: x;
+        in f
+    "};
+    let ty = get_name_type(nix_src, "f");
+    let display = format!("{ty}");
+    assert!(
+        !display.ends_with("-> int"),
+        "f should not collapse to -> int (should be polymorphic), got: {display}"
+    );
+    assert!(
+        display.contains("| int"),
+        "f's return type should include '| int' for the default, got: {display}"
+    );
+}
+
+/// A function that passes a null-defaulted param through to the result
+/// should preserve polymorphism in both param and result positions.
+#[test]
+fn null_default_passthrough_polymorphic() {
+    let nix_src = indoc! {"
+        let
+          f = { config ? null }: { result = config; };
+        in f
+    "};
+    let ty = get_name_type(nix_src, "f");
+    let display = format!("{ty}");
+    // The result field type should include a variable | null
+    assert!(
+        display.contains("| null"),
+        "f's result field should include '| null', got: {display}"
+    );
+}
+
+// =============================================================================
 // Select-or-default (`x.field or default`)
 // =============================================================================
 
