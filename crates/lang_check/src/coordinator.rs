@@ -959,4 +959,97 @@ mod tests {
             }
         }
     }
+
+    /// Regression test: `{ binaries ? null }` should accept non-null callers
+    /// across file boundaries. The default `null` lower bound must not
+    /// collapse the parameter type to `null` in the exported signature.
+    #[test]
+    fn optional_null_default_cross_file() {
+        use crate::file_graph;
+
+        let dir = tempfile::tempdir().unwrap();
+
+        // Library: function with optional parameter defaulting to null
+        let lib_path = write_nix(
+            dir.path(),
+            "lib.nix",
+            r#"{ package, binaries ? null }:
+  if binaries == null then
+    package
+  else
+    builtins.concatStringsSep " " binaries"#,
+        );
+
+        // Caller: passes an explicit list for binaries — must NOT be a type error
+        let call_contents = format!(
+            r#"let
+  wrap-bin = import {};
+  result = wrap-bin {{
+    package = "hello";
+    binaries = ["foo" "bar"];
+  }};
+  result_default = wrap-bin {{
+    package = "world";
+  }};
+in
+{{ inherit result result_default; }}"#,
+            lib_path.display()
+        );
+        let call_path = write_nix(dir.path(), "call.nix", &call_contents);
+
+        // Build the import edge map.
+        let mut import_edges = HashMap::new();
+        import_edges.insert(call_path.clone(), vec![lib_path.clone()]);
+        import_edges.insert(lib_path.clone(), vec![]);
+
+        // Build layers and infer.
+        let layers = file_graph::build_file_layers(&import_edges);
+        let provider = TestSyntaxProvider::new();
+        let coord = InferenceCoordinator::new();
+
+        for layer in &layers {
+            for path in layer {
+                let result = coord
+                    .demand_file(path, &provider)
+                    .expect("inference should succeed");
+                if let Some(sig) = result.signature {
+                    coord.set_signature(path, sig);
+                }
+            }
+        }
+
+        // Check the lib signature: binaries should accept [string] | null, not just null.
+        let lib_sig = coord
+            .get_signature(&lib_path)
+            .expect("lib.nix should have a signature");
+        let sig_str = format!("{lib_sig}");
+        assert!(
+            !sig_str.contains("null &") && !sig_str.contains("& null"),
+            "lib.nix signature should be `{{ binaries?: [string] | null, ... }} -> string`, \
+             not contain `null &` intersection, but got: {sig_str}"
+        );
+
+        // The caller file must have zero type errors.
+        let call_result = coord
+            .demand_file(&call_path, &provider)
+            .expect("call.nix inference should succeed");
+        let errors: Vec<_> = call_result
+            .check_result
+            .diagnostics
+            .iter()
+            .filter(|d| {
+                matches!(
+                    d.kind,
+                    crate::diagnostic::TixDiagnosticKind::TypeMismatch { .. }
+                )
+            })
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "optional `? null` parameter should accept non-null callers across files, \
+             but got {} type error(s): {:?}",
+            errors.len(),
+            errors,
+        );
+    }
 }

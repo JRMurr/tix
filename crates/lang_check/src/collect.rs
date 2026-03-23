@@ -223,25 +223,30 @@ impl<'a> Canonicalizer<'a> {
                 Negative => v.upper_bounds.clone(),
             };
 
+            // Filter out variable bounds: infer_expr links every expression
+            // result to a pre-allocated expr-slot variable via
+            // constrain_equal, creating cycles (A <: B <: A). These cyclic
+            // variable bounds carry propagated information from the OPPOSITE
+            // polarity (e.g., a parameter's lower bound `null` from `? null`
+            // propagates to the expr-slot, which then appears as an upper
+            // bound of the parameter). When the empty-fallback heuristic
+            // expands the expr-slot's lower bounds, this opposite-polarity
+            // information leaks in, causing incorrect types like
+            // `null & ([string] | null)` instead of `[string] | null`.
+            //
+            // Only concrete bounds (from actual usage constraints like
+            // `x + 1` → Number) are meaningful for canonicalization.
+            let concrete_bounds: SmallVec<[TyId; 4]> = bounds
+                .iter()
+                .copied()
+                .filter(|&b| !matches!(self.table.get(b), TypeEntry::Variable(_)))
+                .collect();
+
             if is_cooccurring {
                 // Co-occurring variable: preserve as TyVar alongside bounds.
                 // This maintains polymorphism — the simplifier will remove
                 // the variable later if it turns out to be polar-only in the
                 // final OutputTy.
-                //
-                // Filter out variable bounds: infer_expr links every expression
-                // result to a pre-allocated expr-slot variable via
-                // constrain_equal, creating cycles (A <: B <: A). These resolve
-                // to lower-bound expansions via the display heuristic, which
-                // would incorrectly constrain the parameter (e.g., `a & null`
-                // instead of just `a`). Only concrete bounds (from actual usage
-                // constraints like `x + 1` → Number) are meaningful here.
-                let concrete_bounds: SmallVec<[TyId; 4]> = bounds
-                    .iter()
-                    .copied()
-                    .filter(|&b| !matches!(self.table.get(b), TypeEntry::Variable(_)))
-                    .collect();
-
                 if concrete_bounds.is_empty() {
                     // No concrete bounds in this polarity — just the variable.
                     return OutputTy::TyVar(ty_id.0);
@@ -259,8 +264,17 @@ impl<'a> Canonicalizer<'a> {
                         }
                     }
                 }
-            } else {
+            } else if concrete_bounds.is_empty() {
+                // No concrete bounds — use the full bounds list for the
+                // empty-fallback heuristic (which may inspect opposite-polarity
+                // bounds for display purposes). The variable bounds don't
+                // cause harm here because expand_bounds_empty_fallback only
+                // reads the original variable from storage.
                 self.expand_bounds(&bounds, ty_id, polarity)
+            } else {
+                // Has concrete bounds — use only those to avoid the
+                // opposite-polarity leakage from expr-slot variables.
+                self.expand_bounds(&concrete_bounds, ty_id, polarity)
             }
         } else {
             let ty = match self.table.get(ty_id) {
