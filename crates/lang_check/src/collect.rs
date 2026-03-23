@@ -1392,10 +1392,31 @@ impl<'db> Collector<'db> {
             expr_ty_map.insert(self.ctx.module.entry_expr, normalized);
         }
 
+        // Compute a co-occurring-aware type for the entry expression,
+        // used as the cross-file signature (FileSignature). Uses the
+        // standalone two-pass canonicalization which detects co-occurring
+        // variables within this specific type graph.
+        let file_sig_ty = if !bailed_out {
+            let entry_ty = self.ctx.ty_for_expr(self.ctx.module.entry_expr);
+            let (sig_arena, sig_ref) = canonicalize_standalone_with_deadline(
+                &self.ctx.types.storage,
+                entry_ty,
+                Positive,
+                canon_deadline,
+            );
+            let mut import_cache = FxHashMap::default();
+            let imported = import_from_arena(&mut arena, &sig_arena, sig_ref, &mut import_cache);
+            let normalized = arena.normalize_vars(imported);
+            Some(normalized)
+        } else {
+            None
+        };
+
         InferenceResult {
             arena: std::sync::Arc::new(arena),
             name_ty_map,
             expr_ty_map,
+            file_sig_ty,
         }
     }
 }

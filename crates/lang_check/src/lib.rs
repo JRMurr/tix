@@ -159,6 +159,10 @@ pub struct InferenceResult {
     pub arena: Arc<TypeArena>,
     pub name_ty_map: ArenaMap<NameId, TyRef>,
     pub expr_ty_map: ArenaMap<ExprId, TyRef>,
+    /// Entry expression type with co-occurring variable preservation.
+    /// Used by `extract_file_signature` for cross-file polymorphism.
+    /// `None` when no co-occurring variables were detected (use expr_ty_map).
+    pub file_sig_ty: Option<TyRef>,
 }
 
 impl PartialEq for InferenceResult {
@@ -388,12 +392,15 @@ pub fn extract_file_signature(
     entry_expr: lang_ast::ExprId,
 ) -> Option<FileSignature> {
     check_result.inference.as_ref().and_then(|inf| {
-        inf.expr_ty_map
-            .get(entry_expr)
-            .copied()
-            .map(|root_ref| FileSignature {
-                root_ty: OwnedTy::new(inf.arena.clone(), root_ref).compact(),
-            })
+        // Prefer the co-occurring-aware file signature type when available.
+        // This preserves polymorphism for cross-file function signatures
+        // (e.g., `{ param ? null }: param` exports as `{ param?: a } -> a | null`).
+        let root_ref = inf
+            .file_sig_ty
+            .or_else(|| inf.expr_ty_map.get(entry_expr).copied())?;
+        Some(FileSignature {
+            root_ty: OwnedTy::new(inf.arena.clone(), root_ref).compact(),
+        })
     })
 }
 
