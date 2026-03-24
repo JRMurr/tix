@@ -108,11 +108,10 @@ pub fn hover(
             if let Some(&ty_ref) = inference.expr_ty_map.get(expr_id) {
                 let range = analysis.syntax.line_index.range(node.text_range());
 
-                // Determine normalization mode: if this expression is a
-                // Reference to a Param/PatField, use regular normalization
-                // (letters for genuine polymorphism). Otherwise use
-                // unknown-replacing normalization (`?` for unknowns).
-                let is_param_ref = match &analysis.syntax.module[expr_id] {
+                // If this expression is a Reference to a Param/PatField,
+                // extract the resolved NameId for potential name_ty_map
+                // fallback and to choose the right normalization mode.
+                let param_name_id = match &analysis.syntax.module[expr_id] {
                     Expr::Reference(_) => analysis
                         .syntax
                         .name_res
@@ -121,10 +120,10 @@ pub fn hover(
                             ResolveResult::Definition(nid) => Some(*nid),
                             _ => None,
                         })
-                        .map(|nid| is_param_kind(analysis.syntax.module[nid].kind))
-                        .unwrap_or(false),
-                    _ => false,
+                        .filter(|&nid| is_param_kind(analysis.syntax.module[nid].kind)),
+                    _ => None,
                 };
+                let is_param_ref = param_name_id.is_some();
                 let dc = lang_ty::DisplayConfig::hover();
                 // normalize_replacing_unknown / normalize_vars both need &mut
                 // TypeArena; clone to a temporary to avoid mutating the shared Arc.
@@ -135,7 +134,26 @@ pub fn hover(
                     } else {
                         tmp.normalize_replacing_unknown(ty_ref)
                     };
-                    tmp.display_truncated(normalized, &dc)
+
+                    // Same-level parameter references degrade in expr_ty_map:
+                    // - Un-narrowed refs get only the default's type as a
+                    //   concrete lower bound (e.g. `null` from `? null`)
+                    // - Narrowed refs lose even that and become bare TyVar
+                    // In both cases, fall back to name_ty_map which has the
+                    // correct full type from early canonicalization.
+                    if is_param_ref
+                        && matches!(tmp[normalized], OutputTy::TyVar(_) | OutputTy::Primitive(_))
+                    {
+                        if let Some(name_ty) =
+                            param_name_id.and_then(|nid| inference.name_ty_map.get(nid).copied())
+                        {
+                            tmp.display_truncated(name_ty, &dc)
+                        } else {
+                            tmp.display_truncated(normalized, &dc)
+                        }
+                    } else {
+                        tmp.display_truncated(normalized, &dc)
+                    }
                 };
 
                 // For Reference expressions (variable uses), look up decl_doc
@@ -979,6 +997,57 @@ mod tests {
         assert!(
             !type_text.contains("?"),
             "reference to param should show letter, got: {type_text}"
+        );
+    }
+
+    #[test]
+    fn hover_param_ref_with_default_shows_full_type() {
+        // Hovering on a USE of a pattern field with `? null` should show
+        // the full type (including structural info and null), not just `null`.
+        let src = indoc! {"
+            let
+              f = { x ? null }:
+                if x != null then x.enabled else false;
+            in f
+            # ^1 is on the `x` in `x != null` (un-narrowed reference)
+        "};
+        // Position on the `x` in `x != null`
+        let offset = find_offset(src, "if x") + 3;
+        let t = TestAnalysis::new(src);
+        let h = hover_at(&t, offset).expect("hover on x reference");
+        let (type_text, _) = hover_parts(&h);
+
+        // Should show the full param type with both structural info and null,
+        // not just bare `null` or bare `a`.
+        assert!(
+            type_text.contains("null") && type_text.contains("enabled"),
+            "param ref should show full type with null and structural info, got: {type_text}"
+        );
+    }
+
+    #[test]
+    fn hover_param_ref_in_narrowed_branch_shows_full_type() {
+        // Even inside a narrowing branch, the hover shows the full parameter
+        // type from name_ty_map (expr_ty_map degrades to a bare TyVar for
+        // same-level param references regardless of narrowing). This is a
+        // known limitation — showing narrowed types at hover time would
+        // require additional infrastructure.
+        let src = indoc! {"
+            let
+              f = { x ? null }:
+                if x != null then x.enabled else false;
+            in f
+        "};
+        // Position on the `x` in `x.enabled` (inside then-branch)
+        let offset = find_offset(src, "then x") + 5;
+        let t = TestAnalysis::new(src);
+        let h = hover_at(&t, offset).expect("hover on x reference");
+        let (type_text, _) = hover_parts(&h);
+
+        // Should show the full param type, not a bare type variable
+        assert!(
+            type_text.contains("enabled"),
+            "param ref in narrowed branch should show structural type, got: {type_text}"
         );
     }
 
