@@ -36,7 +36,7 @@ use crate::storage::TypeEntry;
 use lang_ast::nameres::{DependentGroup, GroupedDefs};
 use lang_ast::Expr;
 use lang_ty::simplify::simplify;
-use lang_ty::{AttrSetTy, PrimitiveTy, Ty};
+use lang_ty::{AttrSetTy, OutputTy, PrimitiveTy, Ty, TyRef, TypeArena};
 
 /// Read current process RSS from /proc/self/statm (Linux). Returns MB, or 0
 /// on non-Linux platforms.
@@ -57,6 +57,33 @@ enum OverloadProgress {
     PartialProgress,
     /// No new constraints could be added — operands are still unknown.
     NoProgress,
+}
+
+/// Walk an OutputTy function type to extract the AttrSet field types from
+/// the parameter position. Returns a map of field name → TyRef within
+/// the same arena, or None if the type isn't a function with an AttrSet param.
+fn extract_lambda_param_fields(
+    arena: &TypeArena,
+    func_ty: TyRef,
+) -> Option<std::collections::BTreeMap<smol_str::SmolStr, TyRef>> {
+    let mut ty = &arena[func_ty];
+    // Unwrap Named wrappers
+    while let OutputTy::Named(_, inner) = ty {
+        ty = &arena[*inner];
+    }
+    let param_ref = match ty {
+        OutputTy::Lambda { param, .. } => *param,
+        _ => return None,
+    };
+    // Unwrap Named on param
+    let mut param_ty = &arena[param_ref];
+    while let OutputTy::Named(_, inner) = param_ty {
+        param_ty = &arena[*inner];
+    }
+    match param_ty {
+        OutputTy::AttrSet(attr) => Some(attr.fields.clone()),
+        _ => None,
+    }
 }
 
 impl CheckCtx<'_> {
@@ -343,6 +370,39 @@ impl CheckCtx<'_> {
             let simplified = simplify(&mut arena, ty);
             self.early_canonical.insert(name_id, (arena, simplified));
         }
+
+        // Also capture early canonical for lambda parameter names by extracting
+        // their field types from the enclosing function's early canonical.
+        // Without this, PatField names only get late-canonicalized in positive
+        // polarity, which shows only lower bounds (e.g. just `null` for `? null`
+        // defaults instead of `null | { ... }`). The function's early canonical
+        // has the correct type because the parameter variable appears in both
+        // polarities within the function type, triggering co-occurring variable
+        // detection.
+        for def in &group {
+            let expr = self.module[def.expr()].clone();
+            let Expr::Lambda { pat: Some(pat), .. } = &expr else {
+                continue;
+            };
+            let Some((func_arena, func_ty)) = self.early_canonical.get(def.name()) else {
+                continue;
+            };
+            let func_arena = func_arena.clone();
+            let func_ty = *func_ty;
+
+            let Some(field_types) = extract_lambda_param_fields(&func_arena, func_ty) else {
+                continue;
+            };
+            for &(opt_name, _default) in pat.fields.iter() {
+                let Some(name_id) = opt_name else { continue };
+                let field_text = &self.module[name_id].text;
+                if let Some(&field_tyref) = field_types.get(field_text) {
+                    self.early_canonical
+                        .insert(name_id, (func_arena.clone(), field_tyref));
+                }
+            }
+        }
+
         log::debug!(
             "  early canonicalization: {:.1}ms for {} names",
             canon_start.elapsed().as_secs_f64() * 1000.0,

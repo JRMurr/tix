@@ -4129,6 +4129,50 @@ fn null_default_passthrough_polymorphic() {
     );
 }
 
+/// When hovering a parameter with `? null` inside the function body,
+/// name_ty_map should show the full type (e.g. `null | { ... }`), not
+/// just the default's type (`null`). The function-level type (early
+/// canonical) gets this right, but the parameter name's own entry in
+/// name_ty_map was being late-canonicalized in positive polarity, which
+/// only expands lower bounds — and the only lower bound is `null`.
+#[test]
+fn param_with_null_default_name_ty_not_just_null() {
+    let nix_src = indoc! {"
+        let
+          f = { nixProxy ? null }:
+            if nixProxy != null
+            then nixProxy.enabled
+            else false;
+        in f
+    "};
+    let (module, inference) = check_str(nix_src);
+    let inference = inference.expect("should not produce a type error");
+
+    // Find the PatField name for `nixProxy`
+    let nix_proxy_ty = module
+        .names()
+        .find_map(|(id, name)| {
+            if name.text == "nixProxy" && name.kind == lang_ast::NameKind::PatField {
+                inference.name_ty_map.get(id).copied()
+            } else {
+                None
+            }
+        })
+        .expect("nixProxy PatField should exist in name_ty_map");
+
+    let display = format!("{}", inference.arena.display(nix_proxy_ty));
+    // The parameter type should NOT be just "null" — it should include the
+    // structural type from body usage (e.g. `null | { enabled: a }`).
+    assert_ne!(
+        display, "null",
+        "nixProxy param should not show as bare 'null', got: {display}"
+    );
+    assert!(
+        display.contains("null"),
+        "nixProxy param should mention null (from the default), got: {display}"
+    );
+}
+
 // =============================================================================
 // Select-or-default (`x.field or default`)
 // =============================================================================
