@@ -8005,3 +8005,135 @@ fn inter_both_vars_as_function() {
     let ty = get_inferred_root(nix);
     assert_eq!(ty, expected_ty!(Int));
 }
+
+// ==============================================================================
+// SCC error recovery — bindings after a type error should still get types
+// ==============================================================================
+
+/// Helper: run partial inference (tolerates errors) and look up a name's type.
+fn get_name_type_partial(src: &str, name: &str) -> Option<RootTy> {
+    let (db, file) = TestDatabase::single_file(src).unwrap();
+    let module = module(&db, file);
+    let groups = lang_ast::group_def(&db, file);
+    let name_res = lang_ast::name_resolution(&db, file);
+    let indices = lang_ast::module_indices(&db, file);
+    let aliases = crate::load_inline_aliases(Arc::new(TypeAliasRegistry::default()), &module);
+    let check = crate::CheckCtx::new(
+        &module,
+        &name_res,
+        &indices.binding_expr,
+        aliases,
+        HashMap::new(),
+        Arc::default(),
+    );
+    let (result, _diags, _bailed_out) = check.infer_prog_partial(groups);
+
+    let mut best: Option<TyRef> = None;
+    for (name_id, name_data) in module.names() {
+        if name_data.text == name {
+            if let Some(&ty) = result.name_ty_map.get(name_id) {
+                let is_better = match best {
+                    None => true,
+                    Some(prev) => {
+                        !result.arena.contains_union_or_intersection(ty)
+                            && result.arena.contains_union_or_intersection(prev)
+                    }
+                };
+                if is_better {
+                    best = Some(ty);
+                }
+            }
+        }
+    }
+    best.map(|ty| RootTy::new(ty, result.arena.clone()))
+}
+
+/// When one binding in a let block has a type error, other bindings in the
+/// same SCC group should still receive their inferred types.
+#[test]
+fn scc_error_recovery_independent_bindings() {
+    let nix = indoc! {"
+        let
+            good1 = 1 + 2;
+            bad = \"hello\" + 1;
+            good2 = \"foo\" + \"bar\";
+        in { inherit good1 bad good2; }
+    "};
+
+    let good1 = get_name_type_partial(nix, "good1");
+    let good2 = get_name_type_partial(nix, "good2");
+
+    assert_eq!(good1.expect("good1 should have a type"), expected_ty!(Int),);
+    assert_eq!(
+        good2.expect("good2 should have a type"),
+        expected_ty!(String),
+    );
+}
+
+/// A type error in a function's body should not prevent the function from
+/// having a type. The function should still get a function type even if
+/// its body has errors, so that callers don't cascade to `a`.
+#[test]
+fn scc_error_recovery_function_body_error() {
+    let nix = indoc! {"
+        let
+            helper =
+                { args }:
+                let
+                    render = x: x + 1;
+                    result = render \"bad\";
+                    good = 1 + 2;
+                in good;
+            test = helper { args = 42; };
+        in { inherit helper test; }
+    "};
+
+    let helper = get_name_type_partial(nix, "helper");
+    let test = get_name_type_partial(nix, "test");
+
+    assert!(
+        helper.is_some(),
+        "helper should have a type even if its body has an error"
+    );
+    assert!(
+        test.is_some(),
+        "test should have a type even if helper's body has an error"
+    );
+}
+
+/// Matches the real-world pattern: a function parameter has `? null` default,
+/// and a binding inside the body accesses a field on it without narrowing.
+/// The type error on that binding should not collapse the entire function
+/// or prevent later bindings in the same let from getting types.
+#[test]
+fn scc_error_recovery_null_param_field_access() {
+    let nix = indoc! {"
+        let
+            f =
+                { nixProxy ? null }:
+                let
+                    enabled = nixProxy != null;
+                    # This errors: accessing .foo on a potentially-null value
+                    bad = if enabled then (nixProxy.foo or \"none\") else \"none\";
+                    good = \"hello\" + \" world\";
+                in good;
+            test = f {};
+        in { inherit f test; }
+    "};
+
+    let f_ty = get_name_type_partial(nix, "f");
+    let test_ty = get_name_type_partial(nix, "test");
+
+    // f should have a function type, not collapse to `a`
+    let f_ty = f_ty.expect("f should have a type despite body error");
+    assert!(
+        format!("{f_ty}").contains("->"),
+        "f should be a function type, got: {f_ty}"
+    );
+
+    // test should get a type from calling f
+    assert!(
+        test_ty.is_some(),
+        "test should have a type despite f's body error"
+    );
+}

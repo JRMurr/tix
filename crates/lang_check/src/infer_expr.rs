@@ -169,6 +169,12 @@ impl CheckCtx<'_> {
                     self.new_var()
                 };
 
+                // Track pattern/body errors for deferred reporting. If errors
+                // occur during pattern or body inference, we still produce a
+                // Lambda type (with a fresh return type if the body failed) so
+                // that callers see a function type instead of `a`.
+                let mut lambda_error: Option<LocatedError> = None;
+
                 if let Some(pat) = &pat {
                     // Determine context args for this lambda. Two sources:
                     // - File-level context (from tix.toml) applies only to the root lambda
@@ -184,7 +190,16 @@ impl CheckCtx<'_> {
                     let mut optional = BTreeSet::new();
 
                     for &(name, default_expr) in pat.fields.iter() {
-                        let default_ty = default_expr.map(|e| self.infer_expr(e)).transpose()?;
+                        let default_ty = match default_expr.map(|e| self.infer_expr(e)).transpose()
+                        {
+                            Ok(ty) => ty,
+                            Err(err) => {
+                                if lambda_error.is_none() {
+                                    lambda_error = Some(err);
+                                }
+                                None
+                            }
+                        };
                         let Some(name) = name else { continue };
                         let name_ty = self.ty_for_name_direct(name);
                         // Lift pattern field names to current level for generalization.
@@ -192,19 +207,31 @@ impl CheckCtx<'_> {
                             .storage
                             .set_var_level(name_ty, self.types.storage.current_level);
                         if let Some(default_ty) = default_ty {
-                            self.constrain_at(default_ty, name_ty)?;
+                            if let Err(err) = self.constrain_at(default_ty, name_ty) {
+                                if lambda_error.is_none() {
+                                    lambda_error = Some(err);
+                                }
+                            }
                         }
                         // Apply doc comment type annotations and context args, unless
                         // this name was already pre-annotated before SCC groups
                         // (to avoid double-applying and creating redundant constraint paths).
                         let field_text = self.module[name].text.clone();
                         if !self.pre_annotated_params.contains(&name) {
-                            self.apply_type_annotation(name, name_ty)?;
+                            if let Err(err) = self.apply_type_annotation(name, name_ty) {
+                                if lambda_error.is_none() {
+                                    lambda_error = Some(err);
+                                }
+                            }
 
                             if let Some(ref ctx_args) = effective_context {
                                 if let Some(ctx_ty) = ctx_args.get(&field_text).cloned() {
                                     let interned = self.intern_fresh_ty(ctx_ty);
-                                    self.constrain_equal(interned, name_ty)?;
+                                    if let Err(err) = self.constrain_equal(interned, name_ty) {
+                                        if lambda_error.is_none() {
+                                            lambda_error = Some(err);
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -224,14 +251,38 @@ impl CheckCtx<'_> {
                         optional_fields: optional,
                     }));
 
-                    self.constrain_equal(param_ty, attr)?;
+                    if let Err(err) = self.constrain_equal(param_ty, attr) {
+                        if lambda_error.is_none() {
+                            lambda_error = Some(err);
+                        }
+                    }
                 }
 
-                let body_ty = self.infer_expr(body)?;
-                Ok(self.alloc_concrete(Ty::Lambda {
+                let body_ty = match self.infer_expr(body) {
+                    Ok(ty) => ty,
+                    Err(err) => {
+                        if lambda_error.is_none() {
+                            lambda_error = Some(err);
+                        }
+                        // Use a fresh unconstrained tyvar for the return type
+                        // so the lambda still has a function type.
+                        self.new_var()
+                    }
+                };
+
+                let lambda_ty = self.alloc_concrete(Ty::Lambda {
                     param: param_ty,
                     body: body_ty,
-                }))
+                });
+
+                // If any errors were deferred, store them for later reporting
+                // but return the lambda type so callers see a function type
+                // rather than a collapsed `a`.
+                if let Some(err) = lambda_error {
+                    self.deferred_errors.push(err);
+                }
+
+                Ok(lambda_ty)
             }
 
             Expr::BinOp { lhs, rhs, op } => {

@@ -567,6 +567,11 @@ pub struct CheckCtx<'db> {
     /// Warnings accumulated during inference (e.g. unresolved names).
     warnings: Vec<LocatedWarning>,
 
+    /// Errors from lambda pattern/body inference where we chose to continue
+    /// with a best-effort type rather than abort. Collected alongside the
+    /// normal errors at the end of inference.
+    deferred_errors: Vec<LocatedError>,
+
     types: TypeTable,
 
     /// Maps generalized names to their polymorphic TyId.
@@ -676,6 +681,7 @@ impl<'db> CheckCtx<'db> {
             binding_exprs,
             current_expr: module.entry_expr,
             warnings: Vec::new(),
+            deferred_errors: Vec::new(),
             types: TypeTable::with_capacity(module.names().len() + module.exprs().len()),
             poly_type_env: ArenaMap::new(),
             deferred: DeferredConstraints::default(),

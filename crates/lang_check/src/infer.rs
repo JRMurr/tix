@@ -122,16 +122,15 @@ impl CheckCtx<'_> {
                 .iter()
                 .map(|d| self.module[d.name()].text.as_str().to_owned())
                 .collect();
-            let err = log_if_slow!(50, self.infer_scc_group(group), |elapsed| log::debug!(
-                "SCC group {i}/{n_groups} ({}) took {:.1}ms (slots: {}, RSS: {:.0}MB)",
-                group_names.join(", "),
-                elapsed.as_secs_f64() * 1000.0,
-                self.types.storage.len(),
-                rss_mb(),
-            ));
-            if let Some(err) = err {
-                errors.push(err);
-            }
+            let group_errors =
+                log_if_slow!(50, self.infer_scc_group(group), |elapsed| log::debug!(
+                    "SCC group {i}/{n_groups} ({}) took {:.1}ms (slots: {}, RSS: {:.0}MB)",
+                    group_names.join(", "),
+                    elapsed.as_secs_f64() * 1000.0,
+                    self.types.storage.len(),
+                    rss_mb(),
+                ));
+            errors.extend(group_errors);
         }
 
         if !self.should_bail() {
@@ -156,6 +155,8 @@ impl CheckCtx<'_> {
 
         // Convert internal errors and warnings to display-ready diagnostics
         // while we still have access to the TypeStorage for canonicalization.
+        // Include deferred errors from lambda error recovery.
+        errors.extend(std::mem::take(&mut self.deferred_errors));
         let warnings = std::mem::take(&mut self.warnings);
         let mut diagnostics =
             diagnostic::errors_to_diagnostics(&errors, &self.types.storage, self.module);
@@ -263,12 +264,12 @@ impl CheckCtx<'_> {
         None
     }
 
-    /// Infer an SCC group, returning any error that occurred. Cleanup (level
+    /// Infer an SCC group, returning any errors that occurred. Cleanup (level
     /// exit, deferred overload bookkeeping, poly_type_env updates) always runs
     /// regardless of whether inference succeeded — this prevents level counter
     /// imbalance and ensures successfully-inferred names within the group are
     /// still recorded.
-    fn infer_scc_group(&mut self, group: DependentGroup) -> Option<LocatedError> {
+    fn infer_scc_group(&mut self, group: DependentGroup) -> Vec<LocatedError> {
         let scc_start = std::time::Instant::now();
         let scc_size = group.len();
         let cache_before = self.types.constrain_cache.len();
@@ -294,7 +295,7 @@ impl CheckCtx<'_> {
             self.lift_expr_slots(def.expr());
         }
 
-        let (inferred, error) = self.infer_scc_group_inner(&group);
+        let (inferred, errors) = self.infer_scc_group_inner(&group);
 
         // --- Cleanup always runs, even on error ---
 
@@ -391,7 +392,7 @@ impl CheckCtx<'_> {
         // triggering a massive cascade of extrusions and constraint propagation
         // (e.g. gvariant.nix's `mkValue` creates 580K+ type slots when
         // re-inferred because it extrudes every other poly function).
-        if error.is_some() {
+        if !errors.is_empty() {
             for def in &group {
                 let name_id = def.name();
                 if !inferred_names.contains(&name_id) && !self.poly_type_env.contains_idx(name_id) {
@@ -417,18 +418,19 @@ impl CheckCtx<'_> {
                 .sum::<usize>(),
         );
 
-        error
+        errors
     }
 
-    /// Fallible inner logic for SCC group inference. Returns the successfully-
-    /// inferred (name, ty) pairs and an optional error. Inference stops at the
-    /// first error within the group, but names inferred before that point are
-    /// still returned.
+    /// Inner logic for SCC group inference. Returns the inferred (name, ty)
+    /// pairs and any errors that occurred. Inference continues past errors —
+    /// a failed binding gets a fresh unconstrained tyvar so that downstream
+    /// references don't cascade into further phantom errors.
     fn infer_scc_group_inner(
         &mut self,
         group: &DependentGroup,
-    ) -> (Vec<(lang_ast::NameId, TyId)>, Option<LocatedError>) {
+    ) -> (Vec<(lang_ast::NameId, TyId)>, Vec<LocatedError>) {
         let mut inferred: Vec<(lang_ast::NameId, TyId)> = Vec::new();
+        let mut errors: Vec<LocatedError> = Vec::new();
         let infer_start = std::time::Instant::now();
 
         for def in group {
@@ -455,7 +457,19 @@ impl CheckCtx<'_> {
                 }
                 Err(err) => {
                     self.restore_narrow_overrides(saved);
-                    return (inferred, Some(err));
+                    // Record the error but continue with remaining defs.
+                    // Use a fresh unconstrained tyvar so downstream refs
+                    // get a valid (overly permissive) type rather than
+                    // cascading errors.
+                    errors.push(err);
+                    let name_id = def.name();
+                    let fresh = self.new_var();
+                    let name_slot = self.ty_for_name_direct(name_id);
+                    // Best-effort: link the fresh var to the name slot.
+                    // Ignore any error here — we're already in error recovery.
+                    let _ = self.constrain_equal(fresh, name_slot);
+                    inferred.push((name_id, fresh));
+                    continue;
                 }
             };
             let name_id = def.name();
@@ -468,12 +482,16 @@ impl CheckCtx<'_> {
             // Link the pre-allocated name slot to the inferred type.
             let name_slot = self.ty_for_name_direct(name_id);
             if let Err(err) = self.constrain_equal(ty, name_slot) {
-                return (inferred, Some(err));
+                errors.push(err);
+                inferred.push((name_id, ty));
+                continue;
             }
 
             // Check for type annotations in doc comments.
             if let Err(err) = self.apply_type_annotation(name_id, ty) {
-                return (inferred, Some(err));
+                errors.push(err);
+                inferred.push((name_id, ty));
+                continue;
             }
 
             inferred.push((name_id, ty));
@@ -490,14 +508,14 @@ impl CheckCtx<'_> {
         // type information from the entire SCC group.
         let resolve_start = std::time::Instant::now();
         if let Err(err) = self.resolve_pending() {
-            return (inferred, Some(err));
+            errors.push(err);
         }
         log::debug!(
             "  resolve_pending: {:.1}ms",
             resolve_start.elapsed().as_secs_f64() * 1000.0,
         );
 
-        (inferred, None)
+        (inferred, errors)
     }
 
     // ==========================================================================

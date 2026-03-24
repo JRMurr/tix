@@ -61,6 +61,11 @@ by design, or informational notes.
   resolved. Paths like `<nixpkgs/nixos/lib/eval-config.nix>` still produce
   E012. Could be extended by mapping more subpaths to appropriate types.
 
+- **Narrowing through variable binding** (`enabled = x != null; if enabled then x.foo`)
+  does not narrow `x`. Only direct `if x != null then x.foo` works. This means
+  functions with `? null` defaults must use direct conditions, not intermediate
+  boolean bindings, to avoid false type errors on field access.
+
 ### Minor Untracked Items
 
 - `test/strings.nix`: `nameFromURL :: String -> String` annotation has wrong arity
