@@ -20,7 +20,9 @@ use lang_ast::{
 use lang_check::aliases::TypeAliasRegistry;
 use lang_check::coordinator::{InferenceCoordinator, SyntaxProvider};
 use lang_check::diagnostic::{TixDiagnostic, TixDiagnosticKind};
-use lang_check::imports::{import_errors_to_diagnostics, resolve_import_types};
+use lang_check::imports::{
+    import_errors_to_diagnostics, resolve_import_types, scan_type_import_paths,
+};
 #[cfg(test)]
 use lang_check::InferenceResult;
 use lang_check::{CheckResult, SyntaxBundle};
@@ -302,6 +304,27 @@ pub fn resolve_imports_phase_b(
 
     let import_duration = t0.elapsed();
 
+    // Scan doc comments for cross-file type references and resolve them.
+    let type_import_paths = scan_type_import_paths(&intermediate.module);
+    let mut imported_type_exports = HashMap::new();
+    let mut typeof_import_types = HashMap::new();
+    for path_str in &type_import_paths {
+        let resolved = base_dir.join(path_str);
+        let canonical = resolved.canonicalize().unwrap_or(resolved);
+
+        if let Some(provider) = syntax_provider {
+            if let Some(exports) = coordinator.demand_type_exports(&canonical, provider) {
+                if !exports.is_empty() {
+                    imported_type_exports.insert(canonical.clone(), exports);
+                }
+            }
+        }
+
+        if let Some(sig) = coordinator.get_signature(&canonical) {
+            typeof_import_types.insert(canonical, sig);
+        }
+    }
+
     let inference_inputs = LspInferenceInputs {
         core: lang_check::InferenceInputs {
             module: intermediate.module.clone(),
@@ -314,9 +337,9 @@ pub fn resolve_imports_phase_b(
             context_args: intermediate.context_args.clone(),
             rss_limit_mb: intermediate.rss_limit_mb,
             file_path: Some(intermediate.path.clone()),
-            imported_type_exports: HashMap::new(),
-            typeof_import_types: HashMap::new(),
-            file_base_dir: None,
+            imported_type_exports,
+            typeof_import_types,
+            file_base_dir: file_dir.clone(),
         },
         nix_file: intermediate.nix_file,
         line_index: intermediate.line_index.clone(),
@@ -763,7 +786,7 @@ impl AnalysisState {
                 file_path: Some(intermediate.path.clone()),
                 imported_type_exports: HashMap::new(),
                 typeof_import_types: HashMap::new(),
-                file_base_dir: None,
+                file_base_dir: file_dir.clone(),
             },
             nix_file: intermediate.nix_file,
             line_index: intermediate.line_index.clone(),
