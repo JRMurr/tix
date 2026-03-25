@@ -251,7 +251,7 @@ proptest! {
         let positions = interesting_positions(analysis, &t.root);
         for ip in &positions {
             let pos = snapshot.syntax.line_index.position(ip.byte_offset());
-            let _ = completion(&snapshot, pos, &t.root, &docs, &snapshot.syntax.line_index);
+            let _ = completion(&snapshot, pos, &t.root, &docs, &snapshot.syntax.line_index, None);
         }
     }
 

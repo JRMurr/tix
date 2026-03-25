@@ -61,6 +61,7 @@ pub fn completion(
     root: &rnix::Root,
     docs: &DocIndex,
     line_index: &LineIndex,
+    file_path: Option<&std::path::Path>,
 ) -> Option<CompletionResponse> {
     let inference = analysis.inference_result();
     let offset = line_index.offset(pos);
@@ -107,7 +108,7 @@ pub fn completion(
         }
 
         // Try binding type completion (cursor inside `{ }` of an annotated let binding).
-        if let Some(items) = try_binding_type_completion(analysis, inf, &token, docs) {
+        if let Some(items) = try_binding_type_completion(analysis, inf, &token, docs, file_path) {
             if !items.is_empty() {
                 return Some(CompletionResponse::Array(items));
             }
@@ -698,6 +699,7 @@ fn try_binding_type_completion(
     inference: &lang_check::InferenceResult,
     token: &rowan::SyntaxToken<rnix::NixLanguage>,
     _docs: &DocIndex,
+    file_path: Option<&std::path::Path>,
 ) -> Option<Vec<CompletionItem>> {
     let node = token.parent()?;
 
@@ -758,7 +760,8 @@ fn try_binding_type_completion(
 
     // Try to get expected fields from the doc comment annotation directly.
     // This is the authoritative source of "what fields should be here".
-    let (expected_fields, anno_arena) = resolve_annotation_fields(analysis, &binding_name).unzip();
+    let (expected_fields, anno_arena) =
+        resolve_annotation_fields(analysis, &binding_name, file_path).unzip();
 
     // Fall back to the inferred type if no annotation found.
     let inference_arena = &*inference.arena;
@@ -810,9 +813,13 @@ fn try_binding_type_completion(
 /// Resolve annotation fields directly from doc comments when the inferred type
 /// doesn't have fields (e.g., annotation applied after early-canonical snapshot).
 /// Returns the fields and a temporary arena containing their types.
+///
+/// `file_path` is needed to resolve `import("./path.nix").TypeName` annotations
+/// relative to the current file's directory.
 fn resolve_annotation_fields(
     analysis: &FileSnapshot,
     binding_name: &str,
+    file_path: Option<&std::path::Path>,
 ) -> Option<(BTreeMap<SmolStr, TyRef>, Arc<lang_ty::TypeArena>)> {
     // Find the NameId for this binding.
     let (name_id, _) = analysis
@@ -842,11 +849,18 @@ fn resolve_annotation_fields(
 
     let parsed_ty = annotation_ty?;
 
+    // If the annotation is an ImportType, resolve it by reading the target
+    // file's type exports from disk. This handles cross-file annotations like
+    // `import("./config.nix").Config` without depending on inference having
+    // resolved the import first.
+    let resolved_ty = resolve_import_type_annotation(&parsed_ty, file_path);
+    let effective_ty = resolved_ty.as_ref().unwrap_or(&parsed_ty);
+
     // Convert ParsedTy to OutputTy in a temporary arena.
     let registry = lang_check::aliases::TypeAliasRegistry::default();
     let mut arena = lang_ty::TypeArena::new();
     let output_ty =
-        lang_check::aliases::parsed_ty_to_output_ty(&parsed_ty, &registry, &mut arena, 0);
+        lang_check::aliases::parsed_ty_to_output_ty(effective_ty, &registry, &mut arena, 0);
     let root = arena.intern(output_ty);
     let arena = Arc::new(arena);
 
@@ -856,6 +870,49 @@ fn resolve_annotation_fields(
     }
 
     Some((fields, arena))
+}
+
+/// Resolve a `ParsedTy::ImportType(path, name)` by reading the target file
+/// from disk and extracting the named type alias. Returns `None` if the
+/// annotation is not an ImportType or resolution fails.
+fn resolve_import_type_annotation(
+    ty: &comment_parser::ParsedTy,
+    file_path: Option<&std::path::Path>,
+) -> Option<comment_parser::ParsedTy> {
+    let comment_parser::ParsedTy::ImportType(import_path, type_name) = ty else {
+        return None;
+    };
+    let base_dir = file_path?.parent()?;
+    let target = base_dir.join(import_path);
+    let target_src = std::fs::read_to_string(&target).ok()?;
+
+    // Scan doc comment blocks (/** ... */) for type alias declarations.
+    // This avoids depending on the full lower pipeline, which is private
+    // to lang_ast and requires a Salsa database.
+    extract_type_alias_from_source(&target_src, type_name)
+}
+
+/// Extract a named type alias from Nix source by scanning `/** ... */` blocks.
+fn extract_type_alias_from_source(
+    source: &str,
+    type_name: &str,
+) -> Option<comment_parser::ParsedTy> {
+    let mut search_from = 0;
+    while let Some(start) = source[search_from..].find("/**") {
+        let abs_start = search_from + start + 3; // skip "/**"
+        if let Some(end) = source[abs_start..].find("*/") {
+            let comment_text = source[abs_start..abs_start + end].trim();
+            if let Some((name, body)) = comment_parser::parse_inline_type_alias(comment_text) {
+                if name == type_name {
+                    return Some(body);
+                }
+            }
+            search_from = abs_start + end + 2;
+        } else {
+            break;
+        }
+    }
+    None
 }
 
 // ==============================================================================
@@ -1202,7 +1259,14 @@ mod tests {
         let pos = analysis.syntax.line_index.position(offset);
         let docs = DocIndex::new();
 
-        match completion(&analysis, pos, &t.root, &docs, &analysis.syntax.line_index) {
+        match completion(
+            &analysis,
+            pos,
+            &t.root,
+            &docs,
+            &analysis.syntax.line_index,
+            None,
+        ) {
             Some(CompletionResponse::Array(items)) => items,
             _ => Vec::new(),
         }
@@ -1225,11 +1289,17 @@ mod tests {
             .into_iter()
             .map(|(num, offset)| {
                 let pos = analysis.syntax.line_index.position(offset);
-                let items =
-                    match completion(&analysis, pos, &t.root, &docs, &analysis.syntax.line_index) {
-                        Some(CompletionResponse::Array(items)) => items,
-                        _ => Vec::new(),
-                    };
+                let items = match completion(
+                    &analysis,
+                    pos,
+                    &t.root,
+                    &docs,
+                    &analysis.syntax.line_index,
+                    None,
+                ) {
+                    Some(CompletionResponse::Array(items)) => items,
+                    _ => Vec::new(),
+                };
                 (num, items)
             })
             .collect()
@@ -1399,7 +1469,14 @@ mod tests {
         let pos = analysis.syntax.line_index.position(markers[&1]);
         let docs = DocIndex::new();
 
-        let items = match completion(&analysis, pos, &t.root, &docs, &analysis.syntax.line_index) {
+        let items = match completion(
+            &analysis,
+            pos,
+            &t.root,
+            &docs,
+            &analysis.syntax.line_index,
+            None,
+        ) {
             Some(CompletionResponse::Array(items)) => items,
             _ => Vec::new(),
         };
@@ -1444,7 +1521,14 @@ mod tests {
         let pos = fresh_line_index.position(dot_offset);
         let docs = DocIndex::new();
 
-        let items = match completion(&stale_analysis, pos, &fresh_root, &docs, &fresh_line_index) {
+        let items = match completion(
+            &stale_analysis,
+            pos,
+            &fresh_root,
+            &docs,
+            &fresh_line_index,
+            None,
+        ) {
             Some(CompletionResponse::Array(items)) => items,
             _ => Vec::new(),
         };
@@ -1565,7 +1649,14 @@ mod tests {
         let docs = DocIndex::new();
 
         let pos = fresh_line_index.position(markers[&1]);
-        let items = match completion(&stale_analysis, pos, &fresh_root, &docs, &fresh_line_index) {
+        let items = match completion(
+            &stale_analysis,
+            pos,
+            &fresh_root,
+            &docs,
+            &fresh_line_index,
+            None,
+        ) {
             Some(CompletionResponse::Array(items)) => items,
             _ => Vec::new(),
         };
@@ -1604,7 +1695,14 @@ mod tests {
         let docs = DocIndex::new();
 
         let pos = fresh_line_index.position(markers[&1]);
-        let items = match completion(&stale_analysis, pos, &fresh_root, &docs, &fresh_line_index) {
+        let items = match completion(
+            &stale_analysis,
+            pos,
+            &fresh_root,
+            &docs,
+            &fresh_line_index,
+            None,
+        ) {
             Some(CompletionResponse::Array(items)) => items,
             _ => Vec::new(),
         };
@@ -1810,6 +1908,77 @@ mod tests {
         );
     }
 
+    #[test]
+    fn binding_type_completion_import_type() {
+        // Cross-file import type annotation: the annotation references a type
+        // alias declared in another file via import("./config.nix").Config.
+        let temp_dir =
+            std::env::temp_dir().join(format!("tix_import_type_test_{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let temp_dir = temp_dir.canonicalize().unwrap();
+
+        // Write the config file with a Config type alias.
+        let config_src = indoc! {r#"
+            /**
+              type Config = { name: string, debug: bool, port: int, ... };
+            */
+            { name, debug ? false, port ? 8080, ... }:
+            {
+                greeting = "Hello, ${name}!";
+            }
+        "#};
+        std::fs::write(temp_dir.join("config.nix"), config_src).unwrap();
+
+        // Write the app file that imports Config.
+        let app_src = indoc! {r#"
+            let
+                /**
+                  type: cfg :: import("./config.nix").Config
+                */
+                cfg = {  };
+            #           ^1
+            in cfg
+        "#};
+        let app_path = temp_dir.join("app.nix");
+        std::fs::write(&app_path, app_src).unwrap();
+
+        let mut state = AnalysisState::new(TypeAliasRegistry::default());
+        state.update_file(app_path.clone(), app_src.to_string());
+
+        let analysis = state.get_file(&app_path).unwrap().to_snapshot();
+        let root = rnix::Root::parse(app_src).tree();
+        let markers = parse_markers(app_src);
+        let docs = &state.registry.docs;
+        let pos = analysis.syntax.line_index.position(markers[&1]);
+        let items = match completion(
+            &analysis,
+            pos,
+            &root,
+            docs,
+            &analysis.syntax.line_index,
+            Some(&app_path),
+        ) {
+            Some(CompletionResponse::Array(items)) => items,
+            _ => Vec::new(),
+        };
+
+        let names = labels(&items);
+        assert!(
+            names.contains(&"name"),
+            "should complete name from imported Config type, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"debug"),
+            "should complete debug from imported Config type, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"port"),
+            "should complete port from imported Config type, got: {names:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
     // ------------------------------------------------------------------
     // Identifier completion
     // ------------------------------------------------------------------
@@ -1911,11 +2080,17 @@ mod tests {
             .into_iter()
             .map(|(num, offset)| {
                 let pos = fresh_line_index.position(offset);
-                let items =
-                    match completion(&stale_analysis, pos, &fresh_root, &docs, &fresh_line_index) {
-                        Some(CompletionResponse::Array(items)) => items,
-                        _ => Vec::new(),
-                    };
+                let items = match completion(
+                    &stale_analysis,
+                    pos,
+                    &fresh_root,
+                    &docs,
+                    &fresh_line_index,
+                    None,
+                ) {
+                    Some(CompletionResponse::Array(items)) => items,
+                    _ => Vec::new(),
+                };
                 (num, items)
             })
             .collect()
@@ -2224,11 +2399,17 @@ mod tests {
             .into_iter()
             .map(|(num, offset)| {
                 let pos = analysis.syntax.line_index.position(offset);
-                let items =
-                    match completion(&analysis, pos, &root, docs, &analysis.syntax.line_index) {
-                        Some(CompletionResponse::Array(items)) => items,
-                        _ => Vec::new(),
-                    };
+                let items = match completion(
+                    &analysis,
+                    pos,
+                    &root,
+                    docs,
+                    &analysis.syntax.line_index,
+                    None,
+                ) {
+                    Some(CompletionResponse::Array(items)) => items,
+                    _ => Vec::new(),
+                };
                 (num, items)
             })
             .collect()
@@ -2727,6 +2908,7 @@ mod tests {
                         &root,
                         docs,
                         &analysis.syntax.line_index,
+                        Some(&path),
                     ) {
                         Some(CompletionResponse::Array(items)) => items,
                         _ => Vec::new(),
@@ -3146,7 +3328,14 @@ mod tests {
         let docs = &state.registry.docs;
         let markers = parse_markers(src);
         let pos = analysis.syntax.line_index.position(markers[&1]);
-        let items = match completion(&analysis, pos, &root, docs, &analysis.syntax.line_index) {
+        let items = match completion(
+            &analysis,
+            pos,
+            &root,
+            docs,
+            &analysis.syntax.line_index,
+            None,
+        ) {
             Some(CompletionResponse::Array(items)) => items,
             _ => Vec::new(),
         };
@@ -3223,11 +3412,17 @@ mod tests {
             .into_iter()
             .map(|(num, offset)| {
                 let pos = analysis.syntax.line_index.position(offset);
-                let items =
-                    match completion(&analysis, pos, &root, docs, &analysis.syntax.line_index) {
-                        Some(CompletionResponse::Array(items)) => items,
-                        _ => Vec::new(),
-                    };
+                let items = match completion(
+                    &analysis,
+                    pos,
+                    &root,
+                    docs,
+                    &analysis.syntax.line_index,
+                    None,
+                ) {
+                    Some(CompletionResponse::Array(items)) => items,
+                    _ => Vec::new(),
+                };
                 (num, items)
             })
             .collect()

@@ -1190,6 +1190,7 @@ impl LanguageServer for TixLanguageServer {
                 &root,
                 &docs,
                 &line_index,
+                Some(&path),
             ))
         } else {
             let root = snap_ref.syntax.parsed.tree();
@@ -1199,6 +1200,7 @@ impl LanguageServer for TixLanguageServer {
                 &root,
                 &docs,
                 &snap_ref.syntax.line_index,
+                Some(&path),
             ))
         }
     }
