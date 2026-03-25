@@ -86,12 +86,22 @@ The same syntax works in doc comments and `.tix` stub files.
 | `{ name: string, ... }` | Open attrset |
 | `{ _: int }` | Dynamic field type (all values are `int`) |
 
+| `typeof varname` | Inferred type of a binding |
+| `typeof import("./path.nix")` | Inferred root type of another file |
+| `import("./path.nix").Name` | Type declaration from another file |
+| `Param(T)` | Parameter type of a function type |
+| `Return(T)` | Return type of a function type |
+| `T.key` | Field type from an attrset type |
+
 Precedence (low to high): `->` then `|` then `&` then atoms. Use parens to override.
 
 ```
 (int | string) -> bool        # function from union to bool
 (int -> int) & (string -> string)  # intersection of two function types
+Param(typeof f)               # parameter type of f
 ```
+
+See [Cross-File Types](./cross-file-types.md) for details on `typeof`, type operators, and cross-file type imports.
 
 ### Uppercase primitives
 

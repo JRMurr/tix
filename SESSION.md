@@ -131,6 +131,24 @@ Intentional O(n^2) trade-offs, acceptable for typical Nix code sizes:
 - **Conservative union routing** (`constrain.rs`): when both union members are
   variables, constraints are routed to both. Sound but may create unnecessary bounds.
 
+### Type-Level Operators & Cross-File Types
+
+- **Phase 4b (partial inference) not yet implemented**: `type Scope = typeof scope;`
+  exported from one file and imported by another via `import("./path.nix").Scope`
+  requires partial inference of the exporting file (just the SCC containing `scope`).
+  The existing `infer_prog_partial` loop already supports early exit — need to add
+  `infer_prog_up_to_group(stop_idx)` and wire it into a coordinator
+  `demand_type_exports()` method with TypeExportSlot caching.
+
+- **Coordinator integration**: The CheckCtx `imported_type_exports` and
+  `typeof_import_types` fields are populated in tests but not yet by the coordinator.
+  Need to wire `extract_type_exports` into `compute_file` and scan doc comments for
+  cross-file type references during import resolution.
+
+- **Diagnostics for type operator errors**: Param of non-function, Return of
+  non-function, field access on non-attrset, unknown typeof name, etc. all silently
+  degrade to fresh variables. Should emit proper diagnostics with E0XX codes.
+
 ### Cross-File Inference (InferenceCoordinator)
 
 - Layered inference (`tix check`) caches file signatures between layers with

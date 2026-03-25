@@ -4,6 +4,7 @@
 - [Getting Started](./getting-started.md)
 - [Type System](./type-system.md)
 - [Type Annotations](./annotations.md)
+- [Cross-File Types](./cross-file-types.md)
 - [Stubs](./stubs.md)
 - [Configuration](./configuration.md)
 - [LSP](./lsp.md)
