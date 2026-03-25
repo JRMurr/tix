@@ -245,6 +245,9 @@ pub fn run_batch_warmup(
             context_args: pp.context_args.clone(),
             rss_limit_mb,
             file_path: Some(pp.path.clone()),
+            imported_type_exports: HashMap::new(),
+            typeof_import_types: HashMap::new(),
+            file_base_dir: None,
         };
 
         let check_result = lang_check::run_inference(&inputs);

@@ -8975,6 +8975,9 @@ fn run_partial_inference_basic() {
         context_args: Arc::default(),
         rss_limit_mb: None,
         file_path: None,
+        imported_type_exports: HashMap::new(),
+        typeof_import_types: HashMap::new(),
+        file_base_dir: None,
     };
 
     let mut target_names = HashSet::new();
@@ -8991,4 +8994,49 @@ fn run_partial_inference_basic() {
         display.contains("mkDeriv"),
         "scope type should contain mkDeriv field: {display}"
     );
+}
+
+#[test]
+fn scan_type_import_paths_inline_alias() {
+    let nix = indoc! {"
+        /**
+            type Config = import(\"./a.nix\").Config;
+        */
+        let x = 42; in x
+    "};
+    let (db, file) = TestDatabase::single_file(nix).unwrap();
+    let module = lang_ast::module(&db, file);
+    let paths = crate::imports::scan_type_import_paths(&module);
+    assert!(
+        paths.contains("./a.nix"),
+        "should find import path: {paths:?}"
+    );
+}
+
+#[test]
+fn scan_type_import_paths_per_binding() {
+    let nix = indoc! {"
+        let
+            /**
+                type: x :: import(\"./b.nix\").MyType
+            */
+            x = 42;
+        in x
+    "};
+    let (db, file) = TestDatabase::single_file(nix).unwrap();
+    let module = lang_ast::module(&db, file);
+    let paths = crate::imports::scan_type_import_paths(&module);
+    assert!(
+        paths.contains("./b.nix"),
+        "should find import path: {paths:?}"
+    );
+}
+
+#[test]
+fn scan_type_import_paths_none() {
+    let nix = "let x = 42; in x";
+    let (db, file) = TestDatabase::single_file(nix).unwrap();
+    let module = lang_ast::module(&db, file);
+    let paths = crate::imports::scan_type_import_paths(&module);
+    assert!(paths.is_empty());
 }

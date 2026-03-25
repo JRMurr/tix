@@ -611,6 +611,13 @@ pub struct InferenceInputs {
     /// File path for tracing span context. `None` is fine — the span field
     /// will just be omitted.
     pub file_path: Option<std::path::PathBuf>,
+    /// Type exports from other files, keyed by canonical path → name → ParsedTy.
+    /// Populated by the coordinator when cross-file type imports are detected.
+    pub imported_type_exports: HashMap<std::path::PathBuf, HashMap<smol_str::SmolStr, ParsedTy>>,
+    /// Inferred root types of other files for `typeof import("path")`.
+    pub typeof_import_types: HashMap<std::path::PathBuf, OwnedTy>,
+    /// Base directory for resolving relative paths in type annotations.
+    pub file_base_dir: Option<std::path::PathBuf>,
 }
 
 /// Run type inference using precomputed syntax data. Does not need the Salsa
@@ -696,6 +703,9 @@ pub struct CheckBuilder {
     import_types: HashMap<ExprId, OwnedTy>,
     context_args: Arc<HashMap<smol_str::SmolStr, ParsedTy>>,
     rss_limit_mb: Option<f64>,
+    imported_type_exports: HashMap<PathBuf, HashMap<smol_str::SmolStr, ParsedTy>>,
+    typeof_import_types: HashMap<PathBuf, OwnedTy>,
+    file_base_dir: Option<PathBuf>,
 }
 
 impl CheckBuilder {
@@ -716,6 +726,9 @@ impl CheckBuilder {
             import_types,
             context_args,
             rss_limit_mb: None,
+            imported_type_exports: HashMap::new(),
+            typeof_import_types: HashMap::new(),
+            file_base_dir: None,
         }
     }
 
@@ -740,6 +753,9 @@ impl CheckBuilder {
             import_types,
             context_args,
             rss_limit_mb: None,
+            imported_type_exports: HashMap::new(),
+            typeof_import_types: HashMap::new(),
+            file_base_dir: None,
         }
     }
 
@@ -755,6 +771,9 @@ impl CheckBuilder {
             import_types: inputs.import_types.clone(),
             context_args: Arc::clone(&inputs.context_args),
             rss_limit_mb: inputs.rss_limit_mb,
+            imported_type_exports: inputs.imported_type_exports.clone(),
+            typeof_import_types: inputs.typeof_import_types.clone(),
+            file_base_dir: inputs.file_base_dir.clone(),
         }
     }
 
@@ -778,6 +797,15 @@ impl CheckBuilder {
         );
         if let Some(limit) = self.rss_limit_mb {
             check = check.with_rss_limit(limit);
+        }
+        if !self.imported_type_exports.is_empty() {
+            check = check.with_imported_type_exports(self.imported_type_exports);
+        }
+        if let Some(dir) = self.file_base_dir {
+            check = check.with_file_base_dir(dir);
+        }
+        if !self.typeof_import_types.is_empty() {
+            check = check.with_typeof_import_types(self.typeof_import_types);
         }
         let (inference, mut diagnostics, bailed_out) = check.infer_prog_partial(self.grouped_defs);
 

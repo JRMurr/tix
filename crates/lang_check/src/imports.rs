@@ -572,3 +572,65 @@ pub fn import_errors_to_diagnostics(
         })
         .collect()
 }
+
+// ==============================================================================
+// Type Import Path Scanning
+// ==============================================================================
+
+/// Scan a Module for file paths referenced in type-level annotations
+/// (`import("path").TypeName` and `typeof import("path")`). Returns the set
+/// of relative paths found in doc comments and inline type aliases.
+pub fn scan_type_import_paths(module: &Module) -> HashSet<String> {
+    let mut paths = HashSet::new();
+
+    // From inline type aliases (e.g. `/** type Scope = import("./a.nix").Config; */`)
+    for alias_source in &module.inline_type_aliases {
+        if let Some((_name, body)) = comment_parser::parse_inline_type_alias(alias_source) {
+            collect_import_paths_from_parsed_ty(&body, &mut paths);
+        }
+    }
+
+    // From per-binding type annotations (e.g. `/** type: x :: import("./a.nix").Config */`)
+    for doc in module.type_dec_map.all_doc_strings() {
+        if let Ok(decls) = comment_parser::parse_and_collect(doc) {
+            for decl in &decls {
+                collect_import_paths_from_parsed_ty(&decl.type_expr, &mut paths);
+            }
+        }
+    }
+
+    paths
+}
+
+fn collect_import_paths_from_parsed_ty(ty: &ParsedTy, out: &mut HashSet<String>) {
+    match ty {
+        ParsedTy::ImportType(path, _) | ParsedTy::TypeOfImport(path) => {
+            out.insert(path.clone());
+        }
+        ParsedTy::Param(inner) | ParsedTy::Return(inner) | ParsedTy::FieldAccess(inner, _) => {
+            collect_import_paths_from_parsed_ty(&inner.0, out);
+        }
+        ParsedTy::Lambda { param, body } => {
+            collect_import_paths_from_parsed_ty(&param.0, out);
+            collect_import_paths_from_parsed_ty(&body.0, out);
+        }
+        ParsedTy::List(inner) => {
+            collect_import_paths_from_parsed_ty(&inner.0, out);
+        }
+        ParsedTy::AttrSet(attr) => {
+            for val in attr.fields.values() {
+                collect_import_paths_from_parsed_ty(&val.0, out);
+            }
+            if let Some(dyn_ty) = &attr.dyn_ty {
+                collect_import_paths_from_parsed_ty(&dyn_ty.0, out);
+            }
+        }
+        ParsedTy::Union(members) | ParsedTy::Intersection(members) => {
+            for m in members {
+                collect_import_paths_from_parsed_ty(&m.0, out);
+            }
+        }
+        // TypeOf(name) references a local binding, not a file path
+        _ => {}
+    }
+}

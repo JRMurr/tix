@@ -301,6 +301,9 @@ impl InferenceCoordinator {
             context_args: bundle.context_args,
             rss_limit_mb: None,
             file_path: Some(path.to_path_buf()),
+            imported_type_exports: HashMap::new(),
+            typeof_import_types: HashMap::new(),
+            file_base_dir: None,
         };
 
         let check_result = run_inference(&inputs);

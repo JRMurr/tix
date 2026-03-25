@@ -423,6 +423,9 @@ pub fn run_check_project(
             context_args: bundle.context_args,
             rss_limit_mb: None,
             file_path: Some(fm.file_path.clone()),
+            imported_type_exports: std::collections::HashMap::new(),
+            typeof_import_types: std::collections::HashMap::new(),
+            file_base_dir: None,
         };
 
         let check_result = lang_check::run_inference(&inputs);
