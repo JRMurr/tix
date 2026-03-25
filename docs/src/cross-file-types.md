@@ -70,7 +70,9 @@ Import a type declaration from another file's doc comments:
 args: args.name
 ```
 
-This only reads the target file's doc comment type declarations — it does **not** require inference of the target file. No cycle risk with runtime imports.
+If the type declaration is a simple type (e.g. `{ name: string }`), this only reads the target file's doc comments — no inference required.
+
+If the type declaration uses `typeof` (e.g. `type Scope = typeof scope;`), Tix runs **partial inference** on the target file — only the SCC groups needed to infer the referenced binding. This breaks potential cycles: even if file A imports file B at runtime, file B can still import A's type exports as long as the `typeof` target doesn't depend on B.
 
 ### `typeof import("./path.nix")`
 
