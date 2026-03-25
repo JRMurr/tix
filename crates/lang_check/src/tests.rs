@@ -8506,6 +8506,111 @@ fn import_type_basic() {
     assert_eq!(format!("{root}"), "int");
 }
 
+// ==============================================================================
+// Cross-file typeof import: typeof import("./path.nix")
+// ==============================================================================
+
+/// typeof import("/a.nix") should resolve to the inferred root type.
+#[test]
+fn typeof_import_basic() {
+    use std::path::PathBuf;
+
+    // Simulate file A inferred as int
+    let mut arena = lang_ty::TypeArena::new();
+    let int_ref = arena.intern(lang_ty::OutputTy::Primitive(lang_ty::PrimitiveTy::Int));
+    let owned = lang_ty::OwnedTy::new(Arc::new(arena), int_ref);
+
+    let mut typeof_imports = std::collections::HashMap::new();
+    typeof_imports.insert(PathBuf::from("/a.nix"), owned);
+
+    let nix = indoc! {r#"
+        let
+            /**
+                type: x :: typeof import("/a.nix")
+            */
+            x = 42;
+        in x
+    "#};
+
+    let (db, file) = TestDatabase::single_file(nix).unwrap();
+    let module = lang_ast::module(&db, file);
+    let name_res = lang_ast::name_resolution(&db, file);
+    let indices = lang_ast::module_indices(&db, file);
+    let groups = lang_ast::group_def(&db, file);
+    let aliases =
+        crate::load_inline_aliases(Arc::new(crate::aliases::TypeAliasRegistry::new()), &module);
+
+    let check = crate::CheckCtx::new(
+        &module,
+        &name_res,
+        &indices.binding_expr,
+        aliases,
+        std::collections::HashMap::new(),
+        Arc::default(),
+    )
+    .with_typeof_import_types(typeof_imports)
+    .with_file_base_dir(PathBuf::from("/"));
+
+    let (result, diagnostics, _) = check.infer_prog_partial(groups);
+    assert!(
+        diagnostics.is_empty(),
+        "matching types should have no diagnostics: {diagnostics:?}"
+    );
+    let ty = *result
+        .expr_ty_map
+        .get(module.entry_expr)
+        .expect("should have root type");
+    let root = RootTy::new(ty, result.arena.clone());
+    assert_eq!(format!("{root}"), "int");
+}
+
+/// typeof import("/a.nix") constrains: if A inferred as int, but body is string → error.
+#[test]
+fn typeof_import_constrains() {
+    use std::path::PathBuf;
+
+    let mut arena = lang_ty::TypeArena::new();
+    let int_ref = arena.intern(lang_ty::OutputTy::Primitive(lang_ty::PrimitiveTy::Int));
+    let owned = lang_ty::OwnedTy::new(Arc::new(arena), int_ref);
+
+    let mut typeof_imports = std::collections::HashMap::new();
+    typeof_imports.insert(PathBuf::from("/a.nix"), owned);
+
+    let nix = indoc! {r#"
+        let
+            /**
+                type: x :: typeof import("/a.nix")
+            */
+            x = "hello";
+        in x
+    "#};
+
+    let (db, file) = TestDatabase::single_file(nix).unwrap();
+    let module = lang_ast::module(&db, file);
+    let name_res = lang_ast::name_resolution(&db, file);
+    let indices = lang_ast::module_indices(&db, file);
+    let groups = lang_ast::group_def(&db, file);
+    let aliases =
+        crate::load_inline_aliases(Arc::new(crate::aliases::TypeAliasRegistry::new()), &module);
+
+    let check = crate::CheckCtx::new(
+        &module,
+        &name_res,
+        &indices.binding_expr,
+        aliases,
+        std::collections::HashMap::new(),
+        Arc::default(),
+    )
+    .with_typeof_import_types(typeof_imports)
+    .with_file_base_dir(PathBuf::from("/"));
+
+    let (_, diagnostics, _) = check.infer_prog_partial(groups);
+    assert!(
+        !diagnostics.is_empty(),
+        "typeof import is int, but x = \"hello\" is string — should error"
+    );
+}
+
 /// extract_type_exports correctly pulls type aliases from doc comments.
 #[test]
 fn extract_type_exports_basic() {

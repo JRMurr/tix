@@ -660,6 +660,10 @@ pub struct CheckCtx<'db> {
 
     /// Base directory for resolving relative import paths in type annotations.
     file_base_dir: Option<PathBuf>,
+
+    /// Inferred root types of other files, for resolving `typeof import("path")`.
+    /// Populated by the coordinator from FileSignature results.
+    typeof_import_types: HashMap<PathBuf, OwnedTy>,
 }
 
 /// Count the function arity (number of arrows along the spine) of a ParsedTy.
@@ -720,6 +724,7 @@ impl<'db> CheckCtx<'db> {
             inferred_exprs: FxHashSet::default(),
             imported_type_exports: HashMap::new(),
             file_base_dir: None,
+            typeof_import_types: HashMap::new(),
         }
     }
 
@@ -735,6 +740,12 @@ impl<'db> CheckCtx<'db> {
     /// Set the base directory for resolving relative paths in type imports.
     pub fn with_file_base_dir(mut self, dir: PathBuf) -> Self {
         self.file_base_dir = Some(dir);
+        self
+    }
+
+    /// Set inferred file types for resolving `typeof import("path")`.
+    pub fn with_typeof_import_types(mut self, types: HashMap<PathBuf, OwnedTy>) -> Self {
+        self.typeof_import_types = types;
         self
     }
 
@@ -1401,8 +1412,19 @@ impl<'db> CheckCtx<'db> {
                 self.new_var()
             }
 
-            // typeof import("./path.nix") — resolved in Phase 5.
-            ParsedTy::TypeOfImport(_) => self.new_var(),
+            // typeof import("./path.nix") — resolve to the inferred root type
+            // of another file.
+            ParsedTy::TypeOfImport(path) => {
+                if let Some(base) = &self.file_base_dir {
+                    let resolved = base.join(path);
+                    if let Some(owned_ty) = self.typeof_import_types.get(&resolved).cloned() {
+                        return self.intern_frozen_owned_ty(&owned_ty);
+                    }
+                }
+                // Unresolved — degrade to fresh var.
+                // TODO: emit diagnostic
+                self.new_var()
+            }
         }
     }
 
