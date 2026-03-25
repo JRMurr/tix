@@ -8386,6 +8386,147 @@ fn field_access_on_alias() {
     assert_eq!(format!("{ty}"), "string");
 }
 
+// ==============================================================================
+// Cross-file type imports: import("./path.nix").TypeName
+// ==============================================================================
+
+/// import("./a.nix").Config should resolve to the declared type.
+/// If the body mismatches, it should error.
+#[test]
+fn import_type_constrains() {
+    use std::path::PathBuf;
+
+    // Simulate file A declaring `type Config = { x: int };`
+    let mut exports = std::collections::HashMap::new();
+    let config_ty = comment_parser::ParsedTy::AttrSet(lang_ty::AttrSetTy {
+        fields: [(
+            smol_str::SmolStr::from("x"),
+            comment_parser::ParsedTyRef::from(comment_parser::ParsedTy::Primitive(
+                lang_ty::PrimitiveTy::Int,
+            )),
+        )]
+        .into_iter()
+        .collect(),
+        dyn_ty: None,
+        open: false,
+        optional_fields: std::collections::BTreeSet::new(),
+    });
+    exports.insert(smol_str::SmolStr::from("Config"), config_ty);
+
+    let mut imported_exports = std::collections::HashMap::new();
+    imported_exports.insert(PathBuf::from("/a.nix"), exports);
+
+    // File B: annotate x with import("/a.nix").Config, but x = "hello" (string)
+    let nix = indoc! {r#"
+        let
+            /**
+                type: x :: import("/a.nix").Config
+            */
+            x = "hello";
+        in x
+    "#};
+
+    let (db, file) = TestDatabase::single_file(nix).unwrap();
+    let module = lang_ast::module(&db, file);
+    let name_res = lang_ast::name_resolution(&db, file);
+    let indices = lang_ast::module_indices(&db, file);
+    let groups = lang_ast::group_def(&db, file);
+    let aliases =
+        crate::load_inline_aliases(Arc::new(crate::aliases::TypeAliasRegistry::new()), &module);
+
+    let check = crate::CheckCtx::new(
+        &module,
+        &name_res,
+        &indices.binding_expr,
+        aliases,
+        std::collections::HashMap::new(),
+        Arc::default(),
+    )
+    .with_imported_type_exports(imported_exports)
+    .with_file_base_dir(PathBuf::from("/"));
+
+    let (result, diagnostics, _) = check.infer_prog_partial(groups);
+    // Config is { x: int } but x = "hello" is string — should produce diagnostics
+    assert!(
+        !diagnostics.is_empty() || result.expr_ty_map.get(module.entry_expr).is_none(),
+        "import type mismatch should produce error or diagnostic"
+    );
+}
+
+/// import("./a.nix").Config resolves correctly when types match.
+#[test]
+fn import_type_basic() {
+    use std::path::PathBuf;
+
+    let mut exports = std::collections::HashMap::new();
+    let config_ty = comment_parser::ParsedTy::Primitive(lang_ty::PrimitiveTy::Int);
+    exports.insert(smol_str::SmolStr::from("MyInt"), config_ty);
+
+    let mut imported_exports = std::collections::HashMap::new();
+    imported_exports.insert(PathBuf::from("/a.nix"), exports);
+
+    let nix = indoc! {r#"
+        let
+            /**
+                type: x :: import("/a.nix").MyInt
+            */
+            x = 42;
+        in x
+    "#};
+
+    let (db, file) = TestDatabase::single_file(nix).unwrap();
+    let module = lang_ast::module(&db, file);
+    let name_res = lang_ast::name_resolution(&db, file);
+    let indices = lang_ast::module_indices(&db, file);
+    let groups = lang_ast::group_def(&db, file);
+    let aliases =
+        crate::load_inline_aliases(Arc::new(crate::aliases::TypeAliasRegistry::new()), &module);
+
+    let check = crate::CheckCtx::new(
+        &module,
+        &name_res,
+        &indices.binding_expr,
+        aliases,
+        std::collections::HashMap::new(),
+        Arc::default(),
+    )
+    .with_imported_type_exports(imported_exports)
+    .with_file_base_dir(PathBuf::from("/"));
+
+    let (result, diagnostics, _) = check.infer_prog_partial(groups);
+    assert!(
+        diagnostics.is_empty(),
+        "matching types should not produce diagnostics: {diagnostics:?}"
+    );
+    let ty = *result
+        .expr_ty_map
+        .get(module.entry_expr)
+        .expect("should have root type");
+    let root = RootTy::new(ty, result.arena.clone());
+    assert_eq!(format!("{root}"), "int");
+}
+
+/// extract_type_exports correctly pulls type aliases from doc comments.
+#[test]
+fn extract_type_exports_basic() {
+    let nix = indoc! {"
+        /**
+            type Config = { x: int };
+        */
+        let
+            x = 42;
+        in x
+    "};
+    let (db, file) = TestDatabase::single_file(nix).unwrap();
+    let module = lang_ast::module(&db, file);
+    let exports = crate::extract_type_exports(&module);
+    assert!(exports.contains_key("Config"), "should export Config type");
+    assert!(
+        matches!(exports["Config"], comment_parser::ParsedTy::AttrSet(_)),
+        "Config should be an attrset type"
+    );
+}
+
 /// Composition: Param(typeof f) where f is a function.
 #[test]
 fn param_of_typeof() {

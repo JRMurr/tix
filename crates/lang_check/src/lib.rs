@@ -30,10 +30,24 @@ use lang_ast::{AstDb, Expr, ExprId, Module, NameId, NameResolution, NixFile, Ove
 use lang_ty::{OutputTy, OwnedTy, PrimitiveTy, Ty, TyRef, TypeArena};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use thiserror::Error;
 use tracing::instrument;
 use type_table::TypeTable;
+
+/// Extract type alias declarations from a Module's doc comments.
+/// Returns a map of alias name → ParsedTy body. These are the types that
+/// other files can import via `import("./path.nix").TypeName`.
+pub fn extract_type_exports(module: &lang_ast::Module) -> HashMap<smol_str::SmolStr, ParsedTy> {
+    let mut exports = HashMap::new();
+    for alias_source in &module.inline_type_aliases {
+        if let Some((name, body)) = comment_parser::parse_inline_type_alias(alias_source) {
+            exports.insert(name, body);
+        }
+    }
+    exports
+}
 
 /// Load inline type aliases from doc comments, applying CoW on the registry.
 /// Most files have no inline aliases, so the Arc is shared without cloning.
@@ -637,6 +651,15 @@ pub struct CheckCtx<'db> {
     /// re-evaluation of shared sub-expressions — e.g. `inherit (from) f1..fN`
     /// where `from` is referenced by N Select expressions.
     inferred_exprs: FxHashSet<ExprId>,
+
+    /// Type exports from other files, keyed by (canonical path, type name).
+    /// Populated by the coordinator for files that declare types via
+    /// `/** type Foo = ...; */` doc comments. Used to resolve
+    /// `import("./path.nix").TypeName` in type annotations.
+    imported_type_exports: HashMap<PathBuf, HashMap<smol_str::SmolStr, ParsedTy>>,
+
+    /// Base directory for resolving relative import paths in type annotations.
+    file_base_dir: Option<PathBuf>,
 }
 
 /// Count the function arity (number of arrows along the spine) of a ParsedTy.
@@ -695,7 +718,24 @@ impl<'db> CheckCtx<'db> {
             bailed_out: false,
             rss_limit_mb: None,
             inferred_exprs: FxHashSet::default(),
+            imported_type_exports: HashMap::new(),
+            file_base_dir: None,
         }
+    }
+
+    /// Set imported type exports for cross-file type import resolution.
+    pub fn with_imported_type_exports(
+        mut self,
+        exports: HashMap<PathBuf, HashMap<smol_str::SmolStr, ParsedTy>>,
+    ) -> Self {
+        self.imported_type_exports = exports;
+        self
+    }
+
+    /// Set the base directory for resolving relative paths in type imports.
+    pub fn with_file_base_dir(mut self, dir: PathBuf) -> Self {
+        self.file_base_dir = Some(dir);
+        self
     }
 
     /// Set an RSS limit in MB. When RSS exceeds this threshold, inference
@@ -1346,8 +1386,23 @@ impl<'db> CheckCtx<'db> {
                 self.extract_field_ty(inner_ty, key)
             }
 
-            // Cross-file operators — resolved in later phases.
-            ParsedTy::TypeOfImport(_) | ParsedTy::ImportType(_, _) => self.new_var(),
+            // import("./path.nix").TypeName — resolve from imported type exports.
+            ParsedTy::ImportType(path, name) => {
+                if let Some(base) = &self.file_base_dir {
+                    let resolved = base.join(path);
+                    if let Some(exports) = self.imported_type_exports.get(&resolved) {
+                        if let Some(alias_body) = exports.get(name.as_str()).cloned() {
+                            return self.intern_fresh_ty(alias_body);
+                        }
+                    }
+                }
+                // Unresolved — degrade to fresh var.
+                // TODO: emit diagnostic
+                self.new_var()
+            }
+
+            // typeof import("./path.nix") — resolved in Phase 5.
+            ParsedTy::TypeOfImport(_) => self.new_var(),
         }
     }
 
