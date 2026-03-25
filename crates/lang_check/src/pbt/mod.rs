@@ -26,6 +26,7 @@
 
 mod frozen;
 mod stub_compose;
+mod type_ops;
 
 use std::collections::{BTreeMap, HashSet};
 
