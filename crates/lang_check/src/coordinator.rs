@@ -1272,6 +1272,90 @@ in
     }
 
     #[test]
+    fn cross_file_type_import_mismatch_produces_error() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // File A: exports a Config type
+        let a_path = write_nix(
+            dir.path(),
+            "config.nix",
+            "/**\n  type Config = { name: string, port: int };\n*/\n{ name, port }: { inherit name port; }",
+        );
+
+        // File B: annotates with Config but passes wrong type (int instead of attrset)
+        let b_src = format!(
+            "let\n  /**\n    type: cfg :: import(\"{}\").Config\n  */\n  cfg = 42;\nin cfg",
+            a_path.display()
+        );
+        let b_path = write_nix(dir.path(), "app.nix", &b_src);
+
+        let provider = TestSyntaxProvider::new();
+        let coord = InferenceCoordinator::new();
+
+        let result = coord.demand_file(&b_path, &provider);
+        assert!(result.is_some());
+
+        let result = result.unwrap();
+        let type_errors: Vec<_> = result
+            .check_result
+            .diagnostics
+            .iter()
+            .filter(|d| {
+                matches!(
+                    d.kind,
+                    crate::diagnostic::TixDiagnosticKind::TypeMismatch { .. }
+                )
+            })
+            .collect();
+        assert!(
+            !type_errors.is_empty(),
+            "annotating cfg as Config but assigning int should produce a type error"
+        );
+    }
+
+    #[test]
+    fn cross_file_typeof_mismatch_produces_error() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // File A: exports typeof scope where scope is an attrset
+        let a_path = write_nix(
+            dir.path(),
+            "scope.nix",
+            "/**\n  type Scope = typeof scope;\n*/\nlet scope = { x = 1; }; in scope",
+        );
+
+        // File B: annotates with Scope but uses the value as a string (type mismatch)
+        let b_src = format!(
+            "let\n  /**\n    type: s :: import(\"{}\").Scope\n  */\n  s = \"not an attrset\";\nin s",
+            a_path.display()
+        );
+        let b_path = write_nix(dir.path(), "consumer.nix", &b_src);
+
+        let provider = TestSyntaxProvider::new();
+        let coord = InferenceCoordinator::new();
+
+        let result = coord.demand_file(&b_path, &provider);
+        assert!(result.is_some());
+
+        let result = result.unwrap();
+        let type_errors: Vec<_> = result
+            .check_result
+            .diagnostics
+            .iter()
+            .filter(|d| {
+                matches!(
+                    d.kind,
+                    crate::diagnostic::TixDiagnosticKind::TypeMismatch { .. }
+                )
+            })
+            .collect();
+        assert!(
+            !type_errors.is_empty(),
+            "annotating s as Scope (attrset) but assigning string should produce a type error"
+        );
+    }
+
+    #[test]
     fn demand_type_exports_no_exports() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_nix(dir.path(), "a.nix", "42");
