@@ -52,18 +52,22 @@ proptest! {
     }
 }
 
+/// Generate a (param_ty, ret_ty) pair that are always distinct,
+/// avoiding prop_assume! rejections that hit the global reject limit.
+fn arb_distinct_type_pair() -> impl Strategy<Value = (&'static str, &'static str)> {
+    static TYPES: [&str; 3] = ["int", "string", "bool"];
+    // Pick an index for param, then an offset 1..3 to guarantee a different ret
+    (0..3usize, 1..3usize).prop_map(|(i, off)| (TYPES[i], TYPES[(i + off) % 3]))
+}
+
 // Param/Return on inline type aliases with known function types.
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(20))]
 
     #[test]
     fn param_extracts_first_arg(
-        param_ty in prop_oneof![Just("int"), Just("string"), Just("bool")],
-        ret_ty in prop_oneof![Just("int"), Just("string"), Just("bool")],
+        (param_ty, ret_ty) in arb_distinct_type_pair(),
     ) {
-        // Skip when param and return are the same (can't distinguish)
-        prop_assume!(param_ty != ret_ty);
-
         // Inline alias F = param_ty -> ret_ty, then Param(F) should be param_ty
         let src = format!(
             r#"/** type F = {param_ty} -> {ret_ty}; */
@@ -81,11 +85,8 @@ proptest! {
 
     #[test]
     fn return_extracts_result(
-        param_ty in prop_oneof![Just("int"), Just("string"), Just("bool")],
-        ret_ty in prop_oneof![Just("int"), Just("string"), Just("bool")],
+        (param_ty, ret_ty) in arb_distinct_type_pair(),
     ) {
-        prop_assume!(param_ty != ret_ty);
-
         let src = format!(
             r#"/** type F = {param_ty} -> {ret_ty}; */
             let /** type: x :: Return(F) */ x = {body}; in x"#,
