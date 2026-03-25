@@ -96,8 +96,20 @@ pub fn collect_type_expr(mut pairs: Pairs<Rule>) -> Result<Option<ParsedTy>, Col
         // If only one member, unwrap to avoid a spurious Union wrapper.
         Rule::union_type => collect_union(curr.into_inner())?,
 
-        // Intersection type: `atom_type ("&" atom_type)*`
+        // Intersection type: `postfix_type ("&" postfix_type)*`
         Rule::isect_type => collect_intersection(curr.into_inner())?,
+
+        // Postfix field access: `atom_type ("." field_access_key)*`
+        Rule::postfix_type => collect_postfix(curr.into_inner())?,
+
+        // typeof varname | typeof import("path")
+        Rule::typeof_expr => collect_typeof(curr.into_inner())?,
+
+        // import("path").TypeName
+        Rule::import_type => collect_import_type(curr.into_inner())?,
+
+        // Param(T) | Return(T)
+        Rule::applied_type => collect_applied_type(curr.into_inner())?,
 
         Rule::attrset_type => collect_attrset(curr.into_inner())?,
         Rule::list_type => {
@@ -148,6 +160,10 @@ pub fn collect_type_expr(mut pairs: Pairs<Rule>) -> Result<Option<ParsedTy>, Col
 fn collect_one(pair: pest::iterators::Pair<Rule>) -> Result<ParsedTy, CollectError> {
     match pair.as_rule() {
         Rule::isect_type => collect_intersection(pair.into_inner()),
+        Rule::postfix_type => collect_postfix(pair.into_inner()),
+        Rule::typeof_expr => collect_typeof(pair.into_inner()),
+        Rule::import_type => collect_import_type(pair.into_inner()),
+        Rule::applied_type => collect_applied_type(pair.into_inner()),
         Rule::atom_type
         | Rule::paren_type
         | Rule::type_ref
@@ -180,6 +196,102 @@ fn collect_one(pair: pest::iterators::Pair<Rule>) -> Result<ParsedTy, CollectErr
             pair.as_rule()
         ))),
     }
+}
+
+/// Collect a postfix field access chain: `atom_type ("." field_access_key)*`.
+/// Wraps the base type in FieldAccess for each `.key` suffix.
+fn collect_postfix(pairs: Pairs<Rule>) -> Result<ParsedTy, CollectError> {
+    let mut iter = pairs;
+    let base_pair = iter
+        .next()
+        .ok_or_else(|| CollectError::new("postfix_type missing base type"))?;
+    let mut result = collect_one(base_pair)?;
+    for key_pair in iter {
+        if key_pair.as_rule() == Rule::field_access_key {
+            result =
+                ParsedTy::FieldAccess(ParsedTyRef::from(result), SmolStr::from(key_pair.as_str()));
+        }
+    }
+    Ok(result)
+}
+
+/// Collect a typeof expression: `typeof_kw (import_path | identifier)`.
+fn collect_typeof(pairs: Pairs<Rule>) -> Result<ParsedTy, CollectError> {
+    let mut iter = pairs;
+    // Skip typeof_kw
+    let _kw = iter
+        .next()
+        .ok_or_else(|| CollectError::new("typeof_expr missing keyword"))?;
+    let target = iter
+        .next()
+        .ok_or_else(|| CollectError::new("typeof_expr missing target"))?;
+    match target.as_rule() {
+        Rule::import_path => {
+            let path = extract_import_path(target)?;
+            Ok(ParsedTy::TypeOfImport(path))
+        }
+        Rule::identifier => Ok(ParsedTy::TypeOf(SmolStr::from(target.as_str()))),
+        _ => Err(CollectError::new(format!(
+            "unexpected rule {:?} in typeof_expr",
+            target.as_rule()
+        ))),
+    }
+}
+
+/// Collect a cross-file type import: `import_kw "(" string_literal ")" "." user_type`.
+fn collect_import_type(pairs: Pairs<Rule>) -> Result<ParsedTy, CollectError> {
+    let mut iter = pairs;
+    // Skip import_kw
+    let _kw = iter
+        .next()
+        .ok_or_else(|| CollectError::new("import_type missing keyword"))?;
+    let path_pair = iter
+        .next()
+        .ok_or_else(|| CollectError::new("import_type missing path"))?;
+    let path = unquote_string_literal(path_pair.as_str());
+    let type_name = iter
+        .next()
+        .ok_or_else(|| CollectError::new("import_type missing type name"))?;
+    Ok(ParsedTy::ImportType(
+        path,
+        SmolStr::from(type_name.as_str()),
+    ))
+}
+
+/// Collect an applied type: `type_func "(" type_expr ")"`.
+fn collect_applied_type(pairs: Pairs<Rule>) -> Result<ParsedTy, CollectError> {
+    let mut iter = pairs;
+    let func = iter
+        .next()
+        .ok_or_else(|| CollectError::new("applied_type missing function"))?;
+    let func_name = func.as_str();
+    let inner = collect_type_expr(iter)?
+        .ok_or_else(|| CollectError::new("applied_type missing inner type"))?;
+    match func_name {
+        "Param" => Ok(ParsedTy::Param(ParsedTyRef::from(inner))),
+        "Return" => Ok(ParsedTy::Return(ParsedTyRef::from(inner))),
+        _ => Err(CollectError::new(format!(
+            "unknown type function: {func_name}"
+        ))),
+    }
+}
+
+/// Extract the path string from an import_path rule: `import_kw "(" string_literal ")"`.
+fn extract_import_path(pair: pest::iterators::Pair<Rule>) -> Result<String, CollectError> {
+    let mut iter = pair.into_inner();
+    // Skip import_kw
+    let _kw = iter
+        .next()
+        .ok_or_else(|| CollectError::new("import_path missing keyword"))?;
+    let path_pair = iter
+        .next()
+        .ok_or_else(|| CollectError::new("import_path missing path"))?;
+    Ok(unquote_string_literal(path_pair.as_str()))
+}
+
+/// Strip surrounding double quotes from a string literal.
+fn unquote_string_literal(s: &str) -> String {
+    s.trim_matches('"').to_string()
 }
 
 /// Collect a union type from its children: `isect_type ("|" isect_type)*`.

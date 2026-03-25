@@ -1230,6 +1230,17 @@ impl<'db> CheckCtx<'db> {
             // rather than a true ⊤ — which is the desired behavior for
             // annotations like `val f :: any -> int`.
             ParsedTy::Top | ParsedTy::Bottom => self.new_var(),
+
+            // Type-level operators — resolved in later phases.
+            // For now, degrade to fresh variables so the checker doesn't panic.
+            // Phase 2 will implement TypeOf resolution, Phase 3 will implement
+            // Param/Return/FieldAccess, Phase 4/5 will implement cross-file ops.
+            ParsedTy::TypeOf(_)
+            | ParsedTy::TypeOfImport(_)
+            | ParsedTy::ImportType(_, _)
+            | ParsedTy::Param(_)
+            | ParsedTy::Return(_)
+            | ParsedTy::FieldAccess(_, _) => self.new_var(),
         }
     }
 

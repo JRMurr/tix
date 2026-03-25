@@ -779,6 +779,15 @@ fn collect_references_inner(ty: &ParsedTy, refs: &mut Vec<SmolStr>) {
                 collect_references_inner(&m.0, refs);
             }
         }
+        // Type-level operators: opaque references have no type alias refs,
+        // but Param/Return/FieldAccess may contain them in their inner types.
+        ParsedTy::TypeOf(_) | ParsedTy::TypeOfImport(_) | ParsedTy::ImportType(_, _) => {}
+        ParsedTy::Param(inner) | ParsedTy::Return(inner) => {
+            collect_references_inner(&inner.0, refs);
+        }
+        ParsedTy::FieldAccess(inner, _) => {
+            collect_references_inner(&inner.0, refs);
+        }
     }
 }
 
@@ -871,6 +880,14 @@ pub fn parsed_ty_to_output_ty(
         ),
         ParsedTy::Top => OutputTy::Top,
         ParsedTy::Bottom => OutputTy::Bottom,
+        // Type-level operators are not resolvable at the ParsedTy→OutputTy level
+        // (they require inference context). Degrade to a fresh type variable.
+        ParsedTy::TypeOf(_)
+        | ParsedTy::TypeOfImport(_)
+        | ParsedTy::ImportType(_, _)
+        | ParsedTy::Param(_)
+        | ParsedTy::Return(_)
+        | ParsedTy::FieldAccess(_, _) => OutputTy::TyVar(0),
     }
 }
 

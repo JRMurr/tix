@@ -38,8 +38,35 @@ module_decl     = { doc_block? ~ "module" ~ identifier ~ "{" ~ tix_declaration* 
 type_expr     = { arrow_segment ~ ("->" ~ arrow_segment)* }
 arrow_segment = { union_type }
 union_type    = { isect_type ~ ("|" ~ isect_type)* }
-isect_type    = { atom_type ~ ("&" ~ atom_type)* }
-atom_type     = { paren_type | list_type | attrset_type | type_ref }
+isect_type    = { postfix_type ~ ("&" ~ postfix_type)* }
+
+// Postfix field access: `Config.name`, `(typeof foo).key`
+postfix_type = { atom_type ~ ("." ~ field_access_key)* }
+field_access_key = @{ ASCII_ALPHA ~ (ASCII_ALPHANUMERIC | "_" | "-")* }
+
+// Order matters: import_type/typeof_expr/applied_type must precede type_ref
+// since their keywords would otherwise match generic_ident or user_type.
+atom_type     = { paren_type | list_type | attrset_type | import_type | typeof_expr | applied_type | type_ref }
+
+// -------------------------------------------------------------------------
+// Type-level operators
+// -------------------------------------------------------------------------
+
+// typeof — reference the inferred type of a local variable or imported file
+typeof_expr = { typeof_kw ~ (import_path | identifier) }
+typeof_kw   = @{ "typeof" ~ !(ASCII_ALPHANUMERIC | "_") }
+
+// import("./path.nix") — used in typeof and import type contexts
+import_path    = { import_kw ~ "(" ~ string_literal ~ ")" }
+import_kw      = @{ "import" ~ !(ASCII_ALPHANUMERIC | "_") }
+string_literal = @{ "\"" ~ (!"\"" ~ ANY)* ~ "\"" }
+
+// import("./path.nix").TypeName — cross-file type import
+import_type = { import_kw ~ "(" ~ string_literal ~ ")" ~ "." ~ user_type }
+
+// Param(T), Return(T) — extract parameter/return type from a function type
+applied_type = { type_func ~ "(" ~ type_expr ~ ")" }
+type_func    = @{ ("Param" | "Return") ~ !(ASCII_ALPHANUMERIC | "_") }
 
 paren_type = { "(" ~ type_expr ~ ")" }
 list_type  = { "[" ~ type_expr ~ "]" }

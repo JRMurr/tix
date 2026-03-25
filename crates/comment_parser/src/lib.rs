@@ -272,6 +272,28 @@ pub enum ParsedTy {
     Top,
     /// The bottom type (⊥) — subtype of all types. Written `never` in `.tix` files.
     Bottom,
+
+    // -------------------------------------------------------------------------
+    // Type-level operators (resolved during inference, not during parsing)
+    // -------------------------------------------------------------------------
+    /// `typeof varname` — resolved to the inferred type of a local binding.
+    #[debug("TypeOf({_0})")]
+    TypeOf(SmolStr),
+    /// `typeof import("./path.nix")` — resolved to the inferred root type of another file.
+    #[debug("TypeOfImport({_0})")]
+    TypeOfImport(String),
+    /// `import("./path.nix").TypeName` — resolved to a declared type alias from another file.
+    #[debug("ImportType({_0}, {_1})")]
+    ImportType(String, SmolStr),
+    /// `Param(T)` — extract the parameter type from a function type.
+    #[debug("Param({_0:?})")]
+    Param(ParsedTyRef),
+    /// `Return(T)` — extract the return type from a function type.
+    #[debug("Return({_0:?})")]
+    Return(ParsedTyRef),
+    /// `T.key` — extract the type of a field from an attrset type.
+    #[debug("FieldAccess({_0:?}, {_1})")]
+    FieldAccess(ParsedTyRef, SmolStr),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -317,6 +339,16 @@ impl ParsedTy {
                 for m in members {
                     m.0.collect_free_vars(set);
                 }
+            }
+            // Type-level operators: TypeOf/TypeOfImport/ImportType resolve to
+            // inferred types at check time, not parsed type variables.
+            // Param/Return/FieldAccess recurse into their inner types.
+            ParsedTy::TypeOf(_) | ParsedTy::TypeOfImport(_) | ParsedTy::ImportType(_, _) => {}
+            ParsedTy::Param(inner) | ParsedTy::Return(inner) => {
+                inner.0.collect_free_vars(set);
+            }
+            ParsedTy::FieldAccess(inner, _) => {
+                inner.0.collect_free_vars(set);
             }
         }
     }
@@ -371,6 +403,20 @@ impl ParsedTy {
                     .map(|m| ParsedTyRef::from(m.0.rename_generics(suffix)))
                     .collect(),
             ),
+            // Type-level operators: pass through opaque references, recurse into inner types
+            ParsedTy::TypeOf(_) | ParsedTy::TypeOfImport(_) | ParsedTy::ImportType(_, _) => {
+                self.clone()
+            }
+            ParsedTy::Param(inner) => {
+                ParsedTy::Param(ParsedTyRef::from(inner.0.rename_generics(suffix)))
+            }
+            ParsedTy::Return(inner) => {
+                ParsedTy::Return(ParsedTyRef::from(inner.0.rename_generics(suffix)))
+            }
+            ParsedTy::FieldAccess(inner, key) => ParsedTy::FieldAccess(
+                ParsedTyRef::from(inner.0.rename_generics(suffix)),
+                key.clone(),
+            ),
         }
     }
 
@@ -389,6 +435,9 @@ impl ParsedTy {
                     || attr.dyn_ty.as_ref().is_some_and(|d| d.0.contains_union())
             }
             ParsedTy::Intersection(members) => members.iter().any(|m| m.0.contains_union()),
+            ParsedTy::TypeOf(_) | ParsedTy::TypeOfImport(_) | ParsedTy::ImportType(_, _) => false,
+            ParsedTy::Param(inner) | ParsedTy::Return(inner) => inner.0.contains_union(),
+            ParsedTy::FieldAccess(inner, _) => inner.0.contains_union(),
         }
     }
 
@@ -434,6 +483,13 @@ impl ParsedTy {
             ParsedTy::Intersection(members) => members
                 .iter()
                 .any(|m| m.0.contains_union_resolving_inner(lookup, depth)),
+            ParsedTy::TypeOf(_) | ParsedTy::TypeOfImport(_) | ParsedTy::ImportType(_, _) => false,
+            ParsedTy::Param(inner) | ParsedTy::Return(inner) => {
+                inner.0.contains_union_resolving_inner(lookup, depth)
+            }
+            ParsedTy::FieldAccess(inner, _) => {
+                inner.0.contains_union_resolving_inner(lookup, depth)
+            }
         }
     }
 
@@ -763,5 +819,61 @@ mod conformance_tests {
         for var in &keyword_prefix_vars {
             assert_conformance(var);
         }
+    }
+
+    // ---- Type-level operators ----
+
+    #[test]
+    fn typeof_local_var() {
+        assert_conformance("typeof foo");
+        assert_conformance("typeof myVar");
+    }
+
+    #[test]
+    fn typeof_import() {
+        assert_conformance(r#"typeof import("./foo.nix")"#);
+        assert_conformance(r#"typeof import("../lib/bar.nix")"#);
+    }
+
+    #[test]
+    fn import_type() {
+        assert_conformance(r#"import("./foo.nix").Config"#);
+        assert_conformance(r#"import("../lib.nix").Scope"#);
+    }
+
+    #[test]
+    fn param_return() {
+        assert_conformance("Param(int -> string)");
+        assert_conformance("Return(int -> string)");
+        assert_conformance("Param(Foo)");
+        assert_conformance("Return(a -> b -> c)");
+    }
+
+    #[test]
+    fn field_access() {
+        assert_conformance("Config.name");
+        assert_conformance("Config.meta.name");
+        assert_conformance("Foo.bar.baz");
+    }
+
+    #[test]
+    fn composed_operators() {
+        assert_conformance("Param(typeof foo)");
+        assert_conformance(r#"Return(typeof import("./a.nix"))"#);
+        assert_conformance(r#"import("./a.nix").Scope.lib"#);
+        assert_conformance("Param(Return(Foo))");
+    }
+
+    #[test]
+    fn typeof_keyword_prefix_is_generic() {
+        // "typeofsomething" should parse as a generic_ident, not typeof
+        assert_conformance("typeofsomething");
+    }
+
+    #[test]
+    fn param_return_keyword_prefix_is_user_type() {
+        // "Parameter" should parse as a user_type reference, not Param
+        assert_conformance("Parameter");
+        assert_conformance("Returns");
     }
 }
