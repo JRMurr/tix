@@ -8,10 +8,9 @@ let
     type: cfg :: import("./config.nix").Config
   */
   cfg = {
-    # name = "myapp";
-    # debug = true;
-    # port = 3000;
-
+    name = "myapp";
+    debug = true;
+    port = 3000;
   };
 in
 import ./config.nix cfg
