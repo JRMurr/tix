@@ -25,6 +25,7 @@
 //   and Uri is rarely used.
 
 mod frozen;
+mod partial;
 mod stub_compose;
 mod type_ops;
 
