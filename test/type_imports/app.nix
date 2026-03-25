@@ -4,9 +4,14 @@
 # checker the expected shape without needing to infer config.nix.
 
 let
-    /**
-      type: cfg :: import("./config.nix").Config
-    */
-    cfg = { name = "myapp"; debug = true; port = 3000; };
+  /**
+    type: cfg :: import("./config.nix").Config
+  */
+  cfg = {
+    # name = "myapp";
+    # debug = true;
+    # port = 3000;
+
+  };
 in
-    import ./config.nix cfg
+import ./config.nix cfg

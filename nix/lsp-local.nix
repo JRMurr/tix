@@ -4,7 +4,7 @@
   */
   pkgs,
   # "debug" or "release" — selects the cargo build profile under target/.
-  profile ? "debug",
+  profile ? "release",
   name ? "tix-lsp-${profile}",
 }:
 

@@ -24,6 +24,7 @@
 //    all visible names (let bindings, lambda params, `with` env fields, builtins).
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use lang_ast::nameres::{self, ResolveResult};
 use lang_ast::{AstPtr, Expr, ExprId, NameKind};
@@ -100,6 +101,13 @@ pub fn completion(
         // Try callsite attrset completion (cursor inside `{ }` argument).
         // Includes name-text fallback for stale analysis.
         if let Some(items) = try_callsite_completion(analysis, inf, &token, docs) {
+            if !items.is_empty() {
+                return Some(CompletionResponse::Array(items));
+            }
+        }
+
+        // Try binding type completion (cursor inside `{ }` of an annotated let binding).
+        if let Some(items) = try_binding_type_completion(analysis, inf, &token, docs) {
             if !items.is_empty() {
                 return Some(CompletionResponse::Array(items));
             }
@@ -674,6 +682,180 @@ fn collect_existing_fields(
             .collect(),
         _ => Vec::new(),
     }
+}
+
+// ==============================================================================
+// Binding type completion: cursor inside `{ }` of an annotated let binding
+// ==============================================================================
+
+/// When the cursor is inside an attrset `{ }` that is the value of a let
+/// binding with a type annotation, suggest the annotation's fields.
+///
+/// Example: `let /** type: cfg :: { name: string, port: int } */ cfg = { | }; in cfg`
+/// → suggests `name` and `port`.
+fn try_binding_type_completion(
+    analysis: &FileSnapshot,
+    inference: &lang_check::InferenceResult,
+    token: &rowan::SyntaxToken<rnix::NixLanguage>,
+    _docs: &DocIndex,
+) -> Option<Vec<CompletionItem>> {
+    let node = token.parent()?;
+
+    // Two rnix parse shapes depending on what's inside the `{ }`:
+    //
+    // 1. `cfg = { name = "x"; }` — AttrSet with key-value bindings:
+    //    AttrpathValue(cfg, AttrSet({...}))
+    //
+    // 2. `cfg = { a }` — bare identifier, rnix thinks it's a lambda pattern:
+    //    AttrpathValue(cfg, Lambda(Pattern({a}), ...))
+    let (apv, existing) =
+        if let Some(attrset_node) = node.ancestors().find_map(rnix::ast::AttrSet::cast) {
+            let apv = attrset_node
+                .syntax()
+                .parent()
+                .and_then(rnix::ast::AttrpathValue::cast)?;
+            let from_map = collect_existing_fields(analysis, &attrset_node);
+            let existing = if from_map.is_empty() {
+                collect_existing_fields_from_tree(&attrset_node)
+            } else {
+                from_map
+            };
+            (apv, existing)
+        } else if let Some(pat_node) = node.ancestors().find_map(rnix::ast::Pattern::cast) {
+            // rnix parsed `{ a }` as Pattern → Lambda. Walk up:
+            // Pattern → Lambda → AttrpathValue
+            let lambda_node = pat_node
+                .syntax()
+                .parent()
+                .and_then(rnix::ast::Lambda::cast)?;
+            let apv = lambda_node
+                .syntax()
+                .parent()
+                .and_then(rnix::ast::AttrpathValue::cast)?;
+            let existing: Vec<SmolStr> = pat_node
+                .pat_entries()
+                .filter_map(|e| Some(e.ident()?.to_string().into()))
+                .collect();
+            (apv, existing)
+        } else {
+            return None;
+        };
+
+    // Confirm we're inside a LetIn.
+    apv.syntax().parent().and_then(rnix::ast::LetIn::cast)?;
+
+    // Extract the binding name from the AttrpathValue.
+    let attrpath = apv.attrpath()?;
+    let mut attrs = attrpath.attrs();
+    let first = attrs.next()?;
+    if attrs.next().is_some() {
+        return None;
+    }
+    let binding_name = match first {
+        rnix::ast::Attr::Ident(ident) => ident.ident_token()?.text().to_string(),
+        _ => return None,
+    };
+
+    // Try to get expected fields from the doc comment annotation directly.
+    // This is the authoritative source of "what fields should be here".
+    let (expected_fields, anno_arena) = resolve_annotation_fields(analysis, &binding_name).unzip();
+
+    // Fall back to the inferred type if no annotation found.
+    let inference_arena = &*inference.arena;
+    let (expected_fields, display_arena): (BTreeMap<SmolStr, TyRef>, &lang_ty::TypeArena) =
+        if let (Some(fields), Some(ref arena)) = (&expected_fields, &anno_arena) {
+            if !fields.is_empty() {
+                (fields.clone(), arena)
+            } else {
+                // Annotation parsed but had no fields — try inferred type
+                let binding_ty = analysis
+                    .syntax
+                    .module
+                    .names()
+                    .find(|(_, name)| name.text == binding_name.as_str())
+                    .and_then(|(name_id, _)| inference.name_ty_map.get(name_id))
+                    .map(|&ty_ref| inference_arena[ty_ref].clone())?;
+                let fields = collect_attrset_fields(inference_arena, &binding_ty);
+                (fields, inference_arena)
+            }
+        } else {
+            // No annotation — try inferred type
+            let binding_ty = analysis
+                .syntax
+                .module
+                .names()
+                .find(|(_, name)| name.text == binding_name.as_str())
+                .and_then(|(name_id, _)| inference.name_ty_map.get(name_id))
+                .map(|&ty_ref| inference_arena[ty_ref].clone())?;
+            let fields = collect_attrset_fields(inference_arena, &binding_ty);
+            (fields, inference_arena)
+        };
+
+    if expected_fields.is_empty() {
+        return None;
+    }
+
+    let remaining: BTreeMap<SmolStr, TyRef> = expected_fields
+        .into_iter()
+        .filter(|(k, _)| !existing.contains(k))
+        .collect();
+
+    if remaining.is_empty() {
+        return None;
+    }
+
+    Some(fields_to_completion_items(display_arena, &remaining, None))
+}
+
+/// Resolve annotation fields directly from doc comments when the inferred type
+/// doesn't have fields (e.g., annotation applied after early-canonical snapshot).
+/// Returns the fields and a temporary arena containing their types.
+fn resolve_annotation_fields(
+    analysis: &FileSnapshot,
+    binding_name: &str,
+) -> Option<(BTreeMap<SmolStr, TyRef>, Arc<lang_ty::TypeArena>)> {
+    // Find the NameId for this binding.
+    let (name_id, _) = analysis
+        .syntax
+        .module
+        .names()
+        .find(|(_, name)| name.text == binding_name)?;
+
+    // Get doc comments for this name.
+    let docs = analysis.syntax.module.type_dec_map.docs_for_name(name_id)?;
+
+    // Parse the doc comments and find the annotation matching the binding name.
+    let mut annotation_ty = None;
+    for doc in docs.iter() {
+        if let Ok(decls) = comment_parser::parse_and_collect(doc) {
+            for decl in decls {
+                if decl.identifier == binding_name {
+                    annotation_ty = Some(decl.type_expr);
+                    break;
+                }
+            }
+        }
+        if annotation_ty.is_some() {
+            break;
+        }
+    }
+
+    let parsed_ty = annotation_ty?;
+
+    // Convert ParsedTy to OutputTy in a temporary arena.
+    let registry = lang_check::aliases::TypeAliasRegistry::default();
+    let mut arena = lang_ty::TypeArena::new();
+    let output_ty =
+        lang_check::aliases::parsed_ty_to_output_ty(&parsed_ty, &registry, &mut arena, 0);
+    let root = arena.intern(output_ty);
+    let arena = Arc::new(arena);
+
+    let fields = collect_attrset_fields(&arena, arena.get(root));
+    if fields.is_empty() {
+        return None;
+    }
+
+    Some((fields, arena))
 }
 
 // ==============================================================================
@@ -1571,6 +1753,60 @@ mod tests {
         assert!(
             names.contains(&"enable"),
             "should complete enable, got: {names:?}"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Binding type completion (annotation-based)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn binding_type_completion_basic() {
+        let src = indoc! {r#"
+            let
+                /** type: cfg :: { name: string, debug: bool, port: int } */
+                cfg = { };
+            #           ^1
+            in cfg
+        "#};
+        let results = complete_at_markers(src);
+        let names = labels(&results[&1]);
+        assert!(
+            names.contains(&"name"),
+            "should complete name from annotation, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"debug"),
+            "should complete debug from annotation, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"port"),
+            "should complete port from annotation, got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn binding_type_completion_filters_existing() {
+        let src = indoc! {r#"
+            let
+                /** type: cfg :: { name: string, debug: bool, port: int } */
+                cfg = { name = "x";  };
+            #                       ^1
+            in cfg
+        "#};
+        let results = complete_at_markers(src);
+        let names = labels(&results[&1]);
+        assert!(
+            !names.contains(&"name"),
+            "should NOT complete already-present name, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"debug"),
+            "should complete debug, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"port"),
+            "should complete port, got: {names:?}"
         );
     }
 
