@@ -8258,3 +8258,146 @@ fn typeof_local_attrset() {
     let ty = get_inferred_root(nix);
     assert_eq!(format!("{ty}"), "int");
 }
+
+// ==============================================================================
+// Type operators: Param, Return, .key
+// ==============================================================================
+
+/// Param(F) must actually constrain — F is int -> string so Param(F) is int.
+/// Annotating a string binding with Param(F) should error.
+#[test]
+fn param_constrains_type() {
+    let registry = registry_from_tix("type F = int -> string;");
+    let nix = indoc! {"
+        let
+            /**
+                type: x :: Param(F)
+            */
+            x = \"hello\";
+        in x
+    "};
+    let (_, result) = check_str_with_aliases(nix, &registry);
+    assert!(
+        result.is_err(),
+        "Param(F) is int, but x = \"hello\" is string — should error"
+    );
+}
+
+/// Return(F) must actually constrain — F is int -> string so Return(F) is string.
+/// Annotating an int binding with Return(F) should error.
+#[test]
+fn return_constrains_type() {
+    let registry = registry_from_tix("type F = int -> string;");
+    let nix = indoc! {"
+        let
+            /**
+                type: x :: Return(F)
+            */
+            x = 42;
+        in x
+    "};
+    let (_, result) = check_str_with_aliases(nix, &registry);
+    assert!(
+        result.is_err(),
+        "Return(F) is string, but x = 42 is int — should error"
+    );
+}
+
+/// Config.name must constrain — Config.name is string. Annotating an int should error.
+#[test]
+fn field_access_constrains_type() {
+    let registry = registry_from_tix("type Config = { name: string, age: int };");
+    let nix = indoc! {"
+        let
+            /**
+                type: x :: Config.name
+            */
+            x = 42;
+        in x
+    "};
+    let (_, result) = check_str_with_aliases(nix, &registry);
+    assert!(
+        result.is_err(),
+        "Config.name is string, but x = 42 is int — should error"
+    );
+}
+
+/// Param(F) extracts the parameter type from a function type alias.
+#[test]
+fn param_of_alias() {
+    let registry = registry_from_tix("type F = int -> string;");
+    let nix = indoc! {"
+        let
+            /**
+                type: x :: Param(F)
+            */
+            x = 42;
+        in x
+    "};
+    let ty = get_inferred_root_with_aliases(nix, &registry);
+    assert_eq!(format!("{ty}"), "int");
+}
+
+/// Return(F) extracts the return type from a function type alias.
+#[test]
+fn return_of_alias() {
+    let registry = registry_from_tix("type F = int -> string;");
+    let nix = indoc! {"
+        let
+            /**
+                type: x :: Return(F)
+            */
+            x = \"hello\";
+        in x
+    "};
+    let ty = get_inferred_root_with_aliases(nix, &registry);
+    assert_eq!(format!("{ty}"), "string");
+}
+
+/// Chained: Param(Return(F)) on a curried function.
+#[test]
+fn param_of_return_curried() {
+    let registry = registry_from_tix("type F = int -> string -> bool;");
+    let nix = indoc! {"
+        let
+            /**
+                type: x :: Param(Return(F))
+            */
+            x = \"hello\";
+        in x
+    "};
+    let ty = get_inferred_root_with_aliases(nix, &registry);
+    assert_eq!(format!("{ty}"), "string");
+}
+
+/// Field access: Config.name extracts the type of the 'name' field.
+#[test]
+fn field_access_on_alias() {
+    let registry = registry_from_tix("type Config = { name: string, age: int };");
+    let nix = indoc! {"
+        let
+            /**
+                type: x :: Config.name
+            */
+            x = \"hello\";
+        in x
+    "};
+    let ty = get_inferred_root_with_aliases(nix, &registry);
+    assert_eq!(format!("{ty}"), "string");
+}
+
+/// Composition: Param(typeof f) where f is a function.
+#[test]
+fn param_of_typeof() {
+    let nix = indoc! {"
+        let
+            f = a: a + 1;
+            /**
+                type: x :: Param(typeof f)
+            */
+            x = 42;
+        in x
+    "};
+    let ty = get_inferred_root(nix);
+    assert_eq!(format!("{ty}"), "int");
+}

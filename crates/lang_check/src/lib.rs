@@ -1099,10 +1099,79 @@ impl<'db> CheckCtx<'db> {
         self.propagate_annotation_bounds_inner(annot_body, body_expr);
     }
 
+    /// Resolve type-level operators (Param, Return, FieldAccess) by expanding
+    /// aliases and destructuring at the ParsedTy level. Depth-guarded to 20.
+    fn resolve_type_operators(&self, ty: &ParsedTy) -> ParsedTy {
+        self.resolve_type_operators_inner(ty, 0)
+    }
+
+    fn resolve_type_operators_inner(&self, ty: &ParsedTy, depth: usize) -> ParsedTy {
+        if depth > 20 {
+            return ty.clone();
+        }
+        match ty {
+            ParsedTy::Param(inner) => {
+                let resolved = self.resolve_type_operators_inner(&inner.0, depth + 1);
+                let expanded = self.expand_parsed_aliases(&resolved, depth + 1);
+                match expanded {
+                    ParsedTy::Lambda { param, .. } => (*param.0).clone(),
+                    _ => ty.clone(), // can't extract — keep as-is, will degrade to fresh var
+                }
+            }
+            ParsedTy::Return(inner) => {
+                let resolved = self.resolve_type_operators_inner(&inner.0, depth + 1);
+                let expanded = self.expand_parsed_aliases(&resolved, depth + 1);
+                match expanded {
+                    ParsedTy::Lambda { body, .. } => (*body.0).clone(),
+                    _ => ty.clone(),
+                }
+            }
+            ParsedTy::FieldAccess(inner, key) => {
+                let resolved = self.resolve_type_operators_inner(&inner.0, depth + 1);
+                let expanded = self.expand_parsed_aliases(&resolved, depth + 1);
+                match expanded {
+                    ParsedTy::AttrSet(ref attr) => {
+                        if let Some(field_ty) = attr.fields.get(key.as_str()) {
+                            (*field_ty.0).clone()
+                        } else {
+                            ty.clone() // field not found — keep, will degrade
+                        }
+                    }
+                    _ => ty.clone(),
+                }
+            }
+            // For all other variants, return as-is.
+            _ => ty.clone(),
+        }
+    }
+
+    /// Expand type alias references in a ParsedTy. Replaces Reference("Foo")
+    /// with the alias body from the registry. Depth-guarded to prevent cycles.
+    fn expand_parsed_aliases(&self, ty: &ParsedTy, depth: usize) -> ParsedTy {
+        if depth > 20 {
+            return ty.clone();
+        }
+        match ty {
+            ParsedTy::TyVar(TypeVarValue::Reference(name)) => {
+                if let Some(alias_body) = self.type_aliases.get(name.as_str()).cloned() {
+                    self.expand_parsed_aliases(&alias_body, depth + 1)
+                } else {
+                    ty.clone()
+                }
+            }
+            _ => ty.clone(),
+        }
+    }
+
     /// Intern a ParsedTy with fresh type variables for each free generic var
     /// and alias resolution for Reference vars. Each call produces an independent
     /// "instance" — analogous to polymorphic instantiation.
     fn intern_fresh_ty(&mut self, ty: ParsedTy) -> TyId {
+        // Pre-resolve type operators (Param, Return, FieldAccess) at the
+        // ParsedTy level before interning. This expands aliases and
+        // destructures types so the result is a plain ParsedTy.
+        let ty = self.resolve_type_operators(&ty);
+
         let free_vars = ty.free_vars();
 
         let subs: HashMap<TypeVarValue, TyId> = free_vars
@@ -1261,13 +1330,64 @@ impl<'db> CheckCtx<'db> {
                 }
             }
 
-            // Type-level operators — resolved in later phases.
-            // For now, degrade to fresh variables so the checker doesn't panic.
-            ParsedTy::TypeOfImport(_)
-            | ParsedTy::ImportType(_, _)
-            | ParsedTy::Param(_)
-            | ParsedTy::Return(_)
-            | ParsedTy::FieldAccess(_, _) => self.new_var(),
+            // Param/Return/FieldAccess that survived resolve_type_operators
+            // (e.g. Param(typeof f) where typeof needs TyId-level resolution).
+            // Intern the inner type, then inspect the concrete result.
+            ParsedTy::Param(inner) => {
+                let inner_ty = self.intern_parsed_ty(&inner.0, substitutions);
+                self.extract_param_ty(inner_ty)
+            }
+            ParsedTy::Return(inner) => {
+                let inner_ty = self.intern_parsed_ty(&inner.0, substitutions);
+                self.extract_return_ty(inner_ty)
+            }
+            ParsedTy::FieldAccess(inner, key) => {
+                let inner_ty = self.intern_parsed_ty(&inner.0, substitutions);
+                self.extract_field_ty(inner_ty, key)
+            }
+
+            // Cross-file operators — resolved in later phases.
+            ParsedTy::TypeOfImport(_) | ParsedTy::ImportType(_, _) => self.new_var(),
+        }
+    }
+
+    /// Extract the parameter type from a TyId that should be a Lambda.
+    /// Follows Named wrappers and single-lower-bound variables.
+    fn extract_param_ty(&mut self, ty: TyId) -> TyId {
+        match self.types.storage.get(ty).clone() {
+            crate::storage::TypeEntry::Concrete(Ty::Lambda { param, .. }) => param,
+            crate::storage::TypeEntry::Concrete(Ty::Named(_, inner)) => {
+                self.extract_param_ty(inner)
+            }
+            _ => self.new_var(), // Not a function — degrade
+        }
+    }
+
+    /// Extract the return type from a TyId that should be a Lambda.
+    fn extract_return_ty(&mut self, ty: TyId) -> TyId {
+        match self.types.storage.get(ty).clone() {
+            crate::storage::TypeEntry::Concrete(Ty::Lambda { body, .. }) => body,
+            crate::storage::TypeEntry::Concrete(Ty::Named(_, inner)) => {
+                self.extract_return_ty(inner)
+            }
+            _ => self.new_var(),
+        }
+    }
+
+    /// Extract a field's type from a TyId that should be an AttrSet.
+    fn extract_field_ty(&mut self, ty: TyId, key: &str) -> TyId {
+        match self.types.storage.get(ty).clone() {
+            crate::storage::TypeEntry::Concrete(Ty::AttrSet(ref attr)) => {
+                if let Some(&field_ty) = attr.fields.get(key) {
+                    field_ty
+                } else {
+                    self.new_var() // Field not found — degrade
+                }
+            }
+            crate::storage::TypeEntry::Concrete(Ty::Named(_, inner)) => {
+                self.extract_field_ty(inner, key)
+            }
+            _ => self.new_var(),
         }
     }
 
