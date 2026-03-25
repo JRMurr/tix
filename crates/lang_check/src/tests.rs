@@ -8181,3 +8181,80 @@ fn scc_error_recovery_null_param_field_access() {
         "test should have a type despite f's body error"
     );
 }
+
+// ==============================================================================
+// typeof on local variables
+// ==============================================================================
+
+/// typeof must actually resolve to the target binding's type — not just a
+/// fresh variable. Here y is annotated with `typeof x` where x is int.
+/// The body of y is a string, so constrain_equal between int (from typeof)
+/// and string (from body) should produce a type error.
+#[test]
+fn typeof_local_constrains_type() {
+    let nix = indoc! {"
+        let
+            x = 42;
+            /**
+                type: y :: typeof x
+            */
+            y = \"hello\";
+        in y
+    "};
+    let (_, result) = check_str(nix);
+    assert!(
+        result.is_err(),
+        "typeof x is int, but y = \"hello\" is string — should error"
+    );
+}
+
+/// typeof on a primitive binding should resolve to that primitive's type.
+#[test]
+fn typeof_local_int() {
+    let nix = indoc! {"
+        let
+            x = 42;
+            /**
+                type: y :: typeof x
+            */
+            y = x;
+        in y
+    "};
+    let ty = get_inferred_root(nix);
+    assert_eq!(format!("{ty}"), "int");
+}
+
+/// typeof on a function binding should resolve to the function's type.
+#[test]
+fn typeof_local_function() {
+    let nix = indoc! {"
+        let
+            f = a: a + 1;
+            /**
+                type: g :: typeof f
+            */
+            g = f;
+        in g
+    "};
+    let ty = get_inferred_root(nix);
+    assert!(
+        format!("{ty}").contains("->"),
+        "expected function type, got: {ty}"
+    );
+}
+
+/// typeof on an attrset binding should resolve to its structure.
+#[test]
+fn typeof_local_attrset() {
+    let nix = indoc! {"
+        let
+            r = { a = 1; b = \"hi\"; };
+            /**
+                type: s :: typeof r
+            */
+            s = r;
+        in s.a
+    "};
+    let ty = get_inferred_root(nix);
+    assert_eq!(format!("{ty}"), "int");
+}

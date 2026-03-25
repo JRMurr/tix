@@ -1231,12 +1231,39 @@ impl<'db> CheckCtx<'db> {
             // annotations like `val f :: any -> int`.
             ParsedTy::Top | ParsedTy::Bottom => self.new_var(),
 
+            // typeof varname — resolve to the inferred type of a local binding.
+            // The binding must be in an already-generalized SCC (in poly_type_env).
+            ParsedTy::TypeOf(name) => {
+                // Find the NameId for this binding name.
+                let name_id = self
+                    .module
+                    .names()
+                    .find(|(_, n)| n.text.as_str() == name.as_str())
+                    .map(|(id, _)| id);
+                match name_id {
+                    Some(name_id) => {
+                        if let Some(&poly_ty) = self.poly_type_env.get(name_id) {
+                            // Extrude a fresh instance, same as a normal reference.
+                            self.extrude(poly_ty, Polarity::Positive, Some(name_id))
+                        } else {
+                            // Not yet generalized (same or later SCC). Degrade to
+                            // fresh var — the annotation will have no constraining
+                            // effect, which is the safe fallback.
+                            // TODO: emit a diagnostic for this case
+                            self.new_var()
+                        }
+                    }
+                    None => {
+                        // Unknown name. Degrade to fresh var.
+                        // TODO: emit a diagnostic for this case
+                        self.new_var()
+                    }
+                }
+            }
+
             // Type-level operators — resolved in later phases.
             // For now, degrade to fresh variables so the checker doesn't panic.
-            // Phase 2 will implement TypeOf resolution, Phase 3 will implement
-            // Param/Return/FieldAccess, Phase 4/5 will implement cross-file ops.
-            ParsedTy::TypeOf(_)
-            | ParsedTy::TypeOfImport(_)
+            ParsedTy::TypeOfImport(_)
             | ParsedTy::ImportType(_, _)
             | ParsedTy::Param(_)
             | ParsedTy::Return(_)
