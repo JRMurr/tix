@@ -204,12 +204,21 @@ let
 in
 pkgs.runCommand "tix-stubs"
   {
-    nativeBuildInputs = [ tix-path ];
+    nativeBuildInputs = [ pkgs.patchelf ];
   }
   ''
+    # The tix binary is a content-addressed store path with no recorded
+    # Nix references, so its glibc isn't in the sandbox closure. Copy it
+    # locally and patch the interpreter to match this stdenv's glibc.
+    install -m 755 ${tix-path}/bin/tix ./tix
+    patchelf \
+      --set-interpreter "$(cat ${pkgs.stdenv.cc}/nix-support/dynamic-linker)" \
+      --set-rpath "${lib.makeLibraryPath [ pkgs.stdenv.cc.libc pkgs.stdenv.cc.cc.lib ]}" \
+      ./tix
+
     mkdir -p $out
-    tix gen-stubs nixos --from-json ${nixosJsonFile} --descriptions -o $out/nixos.tix
-    ${lib.optionalString (hmJsonFile != null) "tix gen-stubs home-manager --from-json ${hmJsonFile} --descriptions -o $out/home-manager.tix"}
-    tix gen-stubs pkgs --from-json ${pkgsJsonFile} -o $out/pkgs.tix
+    ./tix gen-stubs nixos --from-json ${nixosJsonFile} --descriptions -o $out/nixos.tix
+    ${lib.optionalString (hmJsonFile != null) "./tix gen-stubs home-manager --from-json ${hmJsonFile} --descriptions -o $out/home-manager.tix"}
+    ./tix gen-stubs pkgs --from-json ${pkgsJsonFile} -o $out/pkgs.tix
     cp ${lib-tix-path} $out/lib.tix
   ''
