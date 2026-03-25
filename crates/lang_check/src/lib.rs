@@ -29,7 +29,7 @@ use la_arena::ArenaMap;
 use lang_ast::{AstDb, Expr, ExprId, Module, NameId, NameResolution, NixFile, OverloadBinOp};
 use lang_ty::{OutputTy, OwnedTy, PrimitiveTy, Ty, TyRef, TypeArena};
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use thiserror::Error;
@@ -47,6 +47,264 @@ pub fn extract_type_exports(module: &lang_ast::Module) -> HashMap<smol_str::Smol
         }
     }
     exports
+}
+
+/// For exported type aliases that contain `typeof varname`, return the
+/// set of binding names whose types need to be inferred.
+pub fn find_typeof_targets(
+    exports: &HashMap<smol_str::SmolStr, ParsedTy>,
+) -> HashSet<smol_str::SmolStr> {
+    let mut targets = HashSet::new();
+    for body in exports.values() {
+        collect_typeof_names(body, &mut targets);
+    }
+    targets
+}
+
+fn collect_typeof_names(ty: &ParsedTy, out: &mut HashSet<smol_str::SmolStr>) {
+    match ty {
+        ParsedTy::TypeOf(name) => {
+            out.insert(name.clone());
+        }
+        ParsedTy::Param(inner) | ParsedTy::Return(inner) | ParsedTy::FieldAccess(inner, _) => {
+            collect_typeof_names(&inner.0, out);
+        }
+        ParsedTy::Lambda { param, body } => {
+            collect_typeof_names(&param.0, out);
+            collect_typeof_names(&body.0, out);
+        }
+        ParsedTy::List(inner) => {
+            collect_typeof_names(&inner.0, out);
+        }
+        ParsedTy::AttrSet(attr) => {
+            for val in attr.fields.values() {
+                collect_typeof_names(&val.0, out);
+            }
+            if let Some(dyn_ty) = &attr.dyn_ty {
+                collect_typeof_names(&dyn_ty.0, out);
+            }
+        }
+        ParsedTy::Union(members) | ParsedTy::Intersection(members) => {
+            for m in members {
+                collect_typeof_names(&m.0, out);
+            }
+        }
+        // Leaf variants: Primitive, TyVar, Top, Bottom, ImportType, TypeOfImport
+        _ => {}
+    }
+}
+
+/// Given a binding name and grouped defs, find the SCC group index
+/// that contains the binding. Returns None if not found.
+pub fn find_scc_group_for_name(
+    module: &lang_ast::Module,
+    groups: &lang_ast::GroupedDefs,
+    name: &str,
+) -> Option<usize> {
+    for (i, group) in groups.iter().enumerate() {
+        for def in group {
+            if module[def.name()].text.as_str() == name {
+                return Some(i);
+            }
+        }
+    }
+    None
+}
+
+/// Convert an `OwnedTy` (OutputTy in a TypeArena) to a `ParsedTy`.
+///
+/// This conversion is lossy: `Named` wrappers are discarded, `Neg` types
+/// become `Top`, and type variable indices map to letter names (0→"a", etc.).
+/// Sufficient for concrete types like attrset shapes.
+pub fn owned_ty_to_parsed_ty(owned: &OwnedTy) -> ParsedTy {
+    output_ty_to_parsed_ty(&owned.arena, owned.root)
+}
+
+fn output_ty_to_parsed_ty(arena: &lang_ty::TypeArena, ty_ref: TyRef) -> ParsedTy {
+    use comment_parser::ParsedTyRef;
+
+    match arena.get(ty_ref) {
+        OutputTy::Primitive(p) => ParsedTy::Primitive(*p),
+        OutputTy::TyVar(n) => {
+            // Map variable index to a letter name: 0→"a", 1→"b", ...
+            let letter = (b'a' + (*n as u8 % 26)) as char;
+            ParsedTy::TyVar(TypeVarValue::Generic(smol_str::SmolStr::from(
+                letter.to_string(),
+            )))
+        }
+        OutputTy::List(inner) => {
+            ParsedTy::List(ParsedTyRef::from(output_ty_to_parsed_ty(arena, *inner)))
+        }
+        OutputTy::Lambda { param, body } => ParsedTy::Lambda {
+            param: ParsedTyRef::from(output_ty_to_parsed_ty(arena, *param)),
+            body: ParsedTyRef::from(output_ty_to_parsed_ty(arena, *body)),
+        },
+        OutputTy::AttrSet(attr) => {
+            let fields = attr
+                .fields
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        ParsedTyRef::from(output_ty_to_parsed_ty(arena, *v)),
+                    )
+                })
+                .collect();
+            let dyn_ty = attr
+                .dyn_ty
+                .map(|d| ParsedTyRef::from(output_ty_to_parsed_ty(arena, d)));
+            ParsedTy::AttrSet(lang_ty::AttrSetTy {
+                fields,
+                dyn_ty,
+                open: attr.open,
+                optional_fields: attr.optional_fields.clone(),
+            })
+        }
+        OutputTy::Union(members) => ParsedTy::Union(
+            members
+                .iter()
+                .map(|m| ParsedTyRef::from(output_ty_to_parsed_ty(arena, *m)))
+                .collect(),
+        ),
+        OutputTy::Intersection(members) => ParsedTy::Intersection(
+            members
+                .iter()
+                .map(|m| ParsedTyRef::from(output_ty_to_parsed_ty(arena, *m)))
+                .collect(),
+        ),
+        OutputTy::Named(_, inner) => output_ty_to_parsed_ty(arena, *inner),
+        OutputTy::Neg(_) => ParsedTy::Top, // approximation
+        OutputTy::Top => ParsedTy::Top,
+        OutputTy::Bottom => ParsedTy::Bottom,
+        OutputTy::Extern(ext) => owned_ty_to_parsed_ty(ext),
+    }
+}
+
+/// Substitute `TypeOf(name)` nodes in exported `ParsedTy` trees with the
+/// actual inferred types from `binding_types`. Unresolved `TypeOf` nodes
+/// (name not in binding_types) are left as-is.
+pub fn resolve_export_typeof(
+    raw_exports: &HashMap<smol_str::SmolStr, ParsedTy>,
+    binding_types: &HashMap<smol_str::SmolStr, OwnedTy>,
+) -> HashMap<smol_str::SmolStr, ParsedTy> {
+    raw_exports
+        .iter()
+        .map(|(name, body)| {
+            (
+                name.clone(),
+                resolve_typeof_in_parsed_ty(body, binding_types),
+            )
+        })
+        .collect()
+}
+
+fn resolve_typeof_in_parsed_ty(
+    ty: &ParsedTy,
+    binding_types: &HashMap<smol_str::SmolStr, OwnedTy>,
+) -> ParsedTy {
+    use comment_parser::ParsedTyRef;
+
+    match ty {
+        ParsedTy::TypeOf(name) => {
+            if let Some(owned) = binding_types.get(name.as_str()) {
+                owned_ty_to_parsed_ty(owned)
+            } else {
+                ty.clone()
+            }
+        }
+        ParsedTy::Param(inner) => ParsedTy::Param(ParsedTyRef::from(resolve_typeof_in_parsed_ty(
+            &inner.0,
+            binding_types,
+        ))),
+        ParsedTy::Return(inner) => ParsedTy::Return(ParsedTyRef::from(
+            resolve_typeof_in_parsed_ty(&inner.0, binding_types),
+        )),
+        ParsedTy::FieldAccess(inner, field) => ParsedTy::FieldAccess(
+            ParsedTyRef::from(resolve_typeof_in_parsed_ty(&inner.0, binding_types)),
+            field.clone(),
+        ),
+        ParsedTy::Lambda { param, body } => ParsedTy::Lambda {
+            param: ParsedTyRef::from(resolve_typeof_in_parsed_ty(&param.0, binding_types)),
+            body: ParsedTyRef::from(resolve_typeof_in_parsed_ty(&body.0, binding_types)),
+        },
+        ParsedTy::List(inner) => ParsedTy::List(ParsedTyRef::from(resolve_typeof_in_parsed_ty(
+            &inner.0,
+            binding_types,
+        ))),
+        ParsedTy::AttrSet(attr) => {
+            let fields = attr
+                .fields
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        ParsedTyRef::from(resolve_typeof_in_parsed_ty(&v.0, binding_types)),
+                    )
+                })
+                .collect();
+            let dyn_ty = attr
+                .dyn_ty
+                .as_ref()
+                .map(|d| ParsedTyRef::from(resolve_typeof_in_parsed_ty(&d.0, binding_types)));
+            ParsedTy::AttrSet(lang_ty::AttrSetTy {
+                fields,
+                dyn_ty,
+                open: attr.open,
+                optional_fields: attr.optional_fields.clone(),
+            })
+        }
+        ParsedTy::Union(members) => ParsedTy::Union(
+            members
+                .iter()
+                .map(|m| ParsedTyRef::from(resolve_typeof_in_parsed_ty(&m.0, binding_types)))
+                .collect(),
+        ),
+        ParsedTy::Intersection(members) => ParsedTy::Intersection(
+            members
+                .iter()
+                .map(|m| ParsedTyRef::from(resolve_typeof_in_parsed_ty(&m.0, binding_types)))
+                .collect(),
+        ),
+        // Leaf variants that don't contain TypeOf: pass through unchanged
+        _ => ty.clone(),
+    }
+}
+
+/// Run partial inference on SCC groups 0..=`stop_after_group` and return the
+/// inferred types for `target_names` as portable `OwnedTy` values.
+///
+/// Used by the coordinator to get binding types for `typeof` references in
+/// type exports without running full file inference.
+pub fn run_partial_inference(
+    inputs: &InferenceInputs,
+    stop_after_group: usize,
+    target_names: &HashSet<smol_str::SmolStr>,
+) -> HashMap<smol_str::SmolStr, OwnedTy> {
+    let aliases = load_inline_aliases(Arc::clone(&inputs.registry), &inputs.module);
+
+    let check = CheckCtx::new(
+        &inputs.module,
+        &inputs.name_res,
+        &inputs.module_indices.binding_expr,
+        aliases,
+        inputs.import_types.clone(),
+        Arc::clone(&inputs.context_args),
+    );
+
+    let (result, _diagnostics) =
+        check.infer_prog_up_to_group(inputs.grouped_defs.clone(), stop_after_group);
+
+    let mut binding_types = HashMap::new();
+    for (name_id, &ty_ref) in result.name_ty_map.iter() {
+        let name_text = inputs.module[name_id].text.clone();
+        if target_names.contains(name_text.as_str()) {
+            binding_types.insert(
+                name_text,
+                OwnedTy::new(result.arena.clone(), ty_ref).compact(),
+            );
+        }
+    }
+    binding_types
 }
 
 /// Load inline type aliases from doc comments, applying CoW on the registry.

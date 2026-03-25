@@ -8647,3 +8647,348 @@ fn param_of_typeof() {
     let ty = get_inferred_root(nix);
     assert_eq!(format!("{ty}"), "int");
 }
+
+// ==============================================================================
+// Phase 4b: Partial inference helpers
+// ==============================================================================
+
+#[test]
+fn find_typeof_targets_simple() {
+    let nix = indoc! {"
+        /**
+            type Scope = typeof scope;
+        */
+        let
+            scope = 1;
+        in scope
+    "};
+    let (db, file) = TestDatabase::single_file(nix).unwrap();
+    let module = lang_ast::module(&db, file);
+    let exports = crate::extract_type_exports(&module);
+    let targets = crate::find_typeof_targets(&exports);
+    assert_eq!(targets.len(), 1);
+    assert!(targets.contains("scope"));
+}
+
+#[test]
+fn find_typeof_targets_nested_attrset() {
+    let nix = indoc! {"
+        /**
+            type Nested = { x: typeof a, y: typeof b };
+        */
+        let
+            a = 1;
+            b = 2;
+        in a
+    "};
+    let (db, file) = TestDatabase::single_file(nix).unwrap();
+    let module = lang_ast::module(&db, file);
+    let exports = crate::extract_type_exports(&module);
+    let targets = crate::find_typeof_targets(&exports);
+    assert_eq!(targets.len(), 2);
+    assert!(targets.contains("a"));
+    assert!(targets.contains("b"));
+}
+
+#[test]
+fn find_typeof_targets_no_typeof() {
+    let nix = indoc! {"
+        /**
+            type Config = { x: int };
+        */
+        let x = 1; in x
+    "};
+    let (db, file) = TestDatabase::single_file(nix).unwrap();
+    let module = lang_ast::module(&db, file);
+    let exports = crate::extract_type_exports(&module);
+    let targets = crate::find_typeof_targets(&exports);
+    assert!(targets.is_empty());
+}
+
+#[test]
+fn find_scc_group_for_name_basic() {
+    let nix = "let a = 1; b = a; in b";
+    let (db, file) = TestDatabase::single_file(nix).unwrap();
+    let module = lang_ast::module(&db, file);
+    let groups = lang_ast::group_def(&db, file);
+    assert!(crate::find_scc_group_for_name(&module, &groups, "a").is_some());
+    assert!(crate::find_scc_group_for_name(&module, &groups, "nonexistent").is_none());
+}
+
+#[test]
+fn find_scc_group_for_name_ordering() {
+    // Independent bindings should be in separate groups, with 'a' before 'b'
+    // since 'b' depends on 'a'.
+    let nix = "let a = 1; b = a + 1; in b";
+    let (db, file) = TestDatabase::single_file(nix).unwrap();
+    let module = lang_ast::module(&db, file);
+    let groups = lang_ast::group_def(&db, file);
+    let group_a = crate::find_scc_group_for_name(&module, &groups, "a").unwrap();
+    let group_b = crate::find_scc_group_for_name(&module, &groups, "b").unwrap();
+    assert!(
+        group_a < group_b,
+        "a should be in an earlier SCC group than b"
+    );
+}
+
+#[test]
+fn owned_ty_to_parsed_ty_primitive() {
+    let mut arena = TypeArena::new();
+    let root = arena.intern(OutputTy::Primitive(PrimitiveTy::Int));
+    let owned = OwnedTy::new(Arc::new(arena), root);
+    let parsed = crate::owned_ty_to_parsed_ty(&owned);
+    assert_eq!(
+        parsed,
+        comment_parser::ParsedTy::Primitive(PrimitiveTy::Int)
+    );
+}
+
+#[test]
+fn owned_ty_to_parsed_ty_attrset() {
+    use std::collections::BTreeMap;
+    let mut arena = TypeArena::new();
+    let int_ty = arena.intern(OutputTy::Primitive(PrimitiveTy::Int));
+    let str_ty = arena.intern(OutputTy::Primitive(PrimitiveTy::String));
+    let mut fields = BTreeMap::new();
+    fields.insert(smol_str::SmolStr::from("x"), int_ty);
+    fields.insert(smol_str::SmolStr::from("y"), str_ty);
+    let attrset = lang_ty::AttrSetTy {
+        fields,
+        dyn_ty: None,
+        open: false,
+        optional_fields: Default::default(),
+    };
+    let root = arena.intern(OutputTy::AttrSet(attrset));
+    let owned = OwnedTy::new(Arc::new(arena), root);
+    let parsed = crate::owned_ty_to_parsed_ty(&owned);
+    match &parsed {
+        comment_parser::ParsedTy::AttrSet(a) => {
+            assert_eq!(a.fields.len(), 2);
+            assert!(a.fields.contains_key("x"));
+            assert!(a.fields.contains_key("y"));
+        }
+        other => panic!("expected AttrSet, got {:?}", other),
+    }
+}
+
+#[test]
+fn owned_ty_to_parsed_ty_lambda() {
+    let mut arena = TypeArena::new();
+    let int_ty = arena.intern(OutputTy::Primitive(PrimitiveTy::Int));
+    let str_ty = arena.intern(OutputTy::Primitive(PrimitiveTy::String));
+    let root = arena.intern(OutputTy::Lambda {
+        param: int_ty,
+        body: str_ty,
+    });
+    let owned = OwnedTy::new(Arc::new(arena), root);
+    let parsed = crate::owned_ty_to_parsed_ty(&owned);
+    match &parsed {
+        comment_parser::ParsedTy::Lambda { param, body } => {
+            assert_eq!(
+                param.0.as_ref(),
+                &comment_parser::ParsedTy::Primitive(PrimitiveTy::Int)
+            );
+            assert_eq!(
+                body.0.as_ref(),
+                &comment_parser::ParsedTy::Primitive(PrimitiveTy::String)
+            );
+        }
+        other => panic!("expected Lambda, got {:?}", other),
+    }
+}
+
+#[test]
+fn owned_ty_to_parsed_ty_tyvar() {
+    let mut arena = TypeArena::new();
+    let root = arena.intern(OutputTy::TyVar(0));
+    let owned = OwnedTy::new(Arc::new(arena), root);
+    let parsed = crate::owned_ty_to_parsed_ty(&owned);
+    match &parsed {
+        comment_parser::ParsedTy::TyVar(comment_parser::TypeVarValue::Generic(name)) => {
+            assert_eq!(name.as_str(), "a");
+        }
+        other => panic!("expected TyVar(Generic(\"a\")), got {:?}", other),
+    }
+}
+
+#[test]
+fn resolve_export_typeof_simple() {
+    use comment_parser::ParsedTy;
+    use smol_str::SmolStr;
+
+    let mut raw_exports = HashMap::new();
+    raw_exports.insert(
+        SmolStr::from("Scope"),
+        ParsedTy::TypeOf(SmolStr::from("scope")),
+    );
+
+    let mut arena = TypeArena::new();
+    let root = arena.intern(OutputTy::Primitive(PrimitiveTy::Int));
+    let owned = OwnedTy::new(Arc::new(arena), root);
+
+    let mut binding_types = HashMap::new();
+    binding_types.insert(SmolStr::from("scope"), owned);
+
+    let resolved = crate::resolve_export_typeof(&raw_exports, &binding_types);
+    assert_eq!(resolved["Scope"], ParsedTy::Primitive(PrimitiveTy::Int));
+}
+
+#[test]
+fn resolve_export_typeof_nested() {
+    use comment_parser::{ParsedTy, ParsedTyRef};
+    use smol_str::SmolStr;
+
+    // type Pair = { x: typeof a, y: typeof b }
+    let mut fields = std::collections::BTreeMap::new();
+    fields.insert(
+        SmolStr::from("x"),
+        ParsedTyRef::from(ParsedTy::TypeOf(SmolStr::from("a"))),
+    );
+    fields.insert(
+        SmolStr::from("y"),
+        ParsedTyRef::from(ParsedTy::TypeOf(SmolStr::from("b"))),
+    );
+    let mut raw_exports = HashMap::new();
+    raw_exports.insert(
+        SmolStr::from("Pair"),
+        ParsedTy::AttrSet(lang_ty::AttrSetTy {
+            fields,
+            dyn_ty: None,
+            open: false,
+            optional_fields: Default::default(),
+        }),
+    );
+
+    let mut arena_a = TypeArena::new();
+    let root_a = arena_a.intern(OutputTy::Primitive(PrimitiveTy::Int));
+    let mut arena_b = TypeArena::new();
+    let root_b = arena_b.intern(OutputTy::Primitive(PrimitiveTy::String));
+
+    let mut binding_types = HashMap::new();
+    binding_types.insert(SmolStr::from("a"), OwnedTy::new(Arc::new(arena_a), root_a));
+    binding_types.insert(SmolStr::from("b"), OwnedTy::new(Arc::new(arena_b), root_b));
+
+    let resolved = crate::resolve_export_typeof(&raw_exports, &binding_types);
+
+    // After resolution, no TypeOf nodes should remain
+    let remaining_targets = crate::find_typeof_targets(&resolved);
+    assert!(
+        remaining_targets.is_empty(),
+        "all TypeOf should be resolved"
+    );
+
+    // Check the field types
+    match &resolved["Pair"] {
+        ParsedTy::AttrSet(a) => {
+            assert_eq!(
+                a.fields["x"].0.as_ref(),
+                &ParsedTy::Primitive(PrimitiveTy::Int)
+            );
+            assert_eq!(
+                a.fields["y"].0.as_ref(),
+                &ParsedTy::Primitive(PrimitiveTy::String)
+            );
+        }
+        other => panic!("expected AttrSet, got {:?}", other),
+    }
+}
+
+/// Helper: run partial inference up to a given group and return a name's type.
+fn get_name_type_up_to_group(src: &str, name: &str, stop_after_group: usize) -> Option<RootTy> {
+    let (db, file) = TestDatabase::single_file(src).unwrap();
+    let module = module(&db, file);
+    let groups = lang_ast::group_def(&db, file);
+    let name_res = lang_ast::name_resolution(&db, file);
+    let indices = lang_ast::module_indices(&db, file);
+    let aliases = crate::load_inline_aliases(Arc::new(TypeAliasRegistry::default()), &module);
+    let check = crate::CheckCtx::new(
+        &module,
+        &name_res,
+        &indices.binding_expr,
+        aliases,
+        HashMap::new(),
+        Arc::default(),
+    );
+    let (result, _diags) = check.infer_prog_up_to_group(groups, stop_after_group);
+
+    for (name_id, name_data) in module.names() {
+        if name_data.text == name {
+            if let Some(&ty) = result.name_ty_map.get(name_id) {
+                return Some(RootTy::new(ty, result.arena.clone()));
+            }
+        }
+    }
+    None
+}
+
+#[test]
+fn infer_prog_up_to_group_first_group_only() {
+    // 'a' is independent (group 0), 'b' depends on 'a' (group 1)
+    let nix = "let a = 1; b = a + 1; in b";
+    let ty = get_name_type_up_to_group(nix, "a", 0);
+    assert!(ty.is_some(), "a should have a type after group 0");
+    assert_eq!(format!("{}", ty.unwrap()), "int");
+}
+
+#[test]
+fn infer_prog_up_to_group_two_groups() {
+    let nix = "let a = 1; b = a + 1; in b";
+    let ty_a = get_name_type_up_to_group(nix, "a", 1);
+    let ty_b = get_name_type_up_to_group(nix, "b", 1);
+    assert_eq!(format!("{}", ty_a.unwrap()), "int");
+    assert_eq!(format!("{}", ty_b.unwrap()), "int");
+}
+
+#[test]
+fn infer_prog_up_to_group_matches_full() {
+    // Partial inference of all groups should produce the same types as full inference.
+    let nix = "let a = 1; b = a + 1; c = b + 1; in c";
+    let (db, file) = TestDatabase::single_file(nix).unwrap();
+    let groups = lang_ast::group_def(&db, file);
+    let n_groups = groups.len();
+
+    let full_a = get_name_type_partial(nix, "a").unwrap();
+    let partial_a = get_name_type_up_to_group(nix, "a", n_groups - 1).unwrap();
+    assert_eq!(format!("{full_a}"), format!("{partial_a}"));
+}
+
+#[test]
+fn run_partial_inference_basic() {
+    use smol_str::SmolStr;
+    use std::collections::HashSet;
+
+    let nix = "let scope = { mkDeriv = x: x; }; in scope";
+    let (db, file) = TestDatabase::single_file(nix).unwrap();
+    let module = lang_ast::module(&db, file);
+    let name_res = lang_ast::name_resolution(&db, file);
+    let indices = lang_ast::module_indices(&db, file);
+    let groups = lang_ast::group_def(&db, file);
+
+    let inputs = crate::InferenceInputs {
+        module,
+        module_indices: indices,
+        name_res,
+        grouped_defs: groups,
+        registry: Arc::new(TypeAliasRegistry::default()),
+        import_types: HashMap::new(),
+        import_diagnostics: vec![],
+        context_args: Arc::default(),
+        rss_limit_mb: None,
+        file_path: None,
+    };
+
+    let mut target_names = HashSet::new();
+    target_names.insert(SmolStr::from("scope"));
+
+    let binding_types = crate::run_partial_inference(&inputs, 0, &target_names);
+    assert!(
+        binding_types.contains_key("scope"),
+        "should have scope type"
+    );
+    let scope_ty = &binding_types["scope"];
+    let display = format!("{}", scope_ty.arena.display(scope_ty.root));
+    assert!(
+        display.contains("mkDeriv"),
+        "scope type should contain mkDeriv field: {display}"
+    );
+}

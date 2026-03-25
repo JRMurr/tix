@@ -222,6 +222,48 @@ impl CheckCtx<'_> {
         (result, diagnostics, bailed_out)
     }
 
+    /// Infer SCC groups 0..=`stop_after_group` only. Skips `infer_root` and
+    /// expr-level canonicalization. Used by the coordinator to get binding
+    /// types for `typeof` references in type exports without running full
+    /// file inference.
+    pub fn infer_prog_up_to_group(
+        mut self,
+        groups: GroupedDefs,
+        stop_after_group: usize,
+    ) -> (InferenceResult, Vec<TixDiagnostic>) {
+        let len = self.module.names().len() + self.module.exprs().len();
+        for _ in 0..len {
+            self.new_var();
+        }
+
+        let mut errors = Vec::new();
+
+        if let Some(err) = self.pre_apply_entry_lambda_annotations() {
+            errors.push(err);
+        }
+
+        for (i, group) in groups.into_iter().enumerate() {
+            if i > stop_after_group {
+                break;
+            }
+            errors.extend(self.infer_scc_group(group));
+        }
+
+        errors.extend(std::mem::take(&mut self.deferred_errors));
+        let warnings = std::mem::take(&mut self.warnings);
+        let mut diagnostics =
+            diagnostic::errors_to_diagnostics(&errors, &self.types.storage, self.module);
+        diagnostics.extend(diagnostic::warnings_to_diagnostics(&warnings));
+
+        // Force bailed_out so finalize_inference skips expr canonicalization
+        // and file_sig_ty computation — we only need name-level types.
+        self.bailed_out = true;
+
+        let mut collector = Collector::new(self);
+        let result = collector.finalize_inference();
+        (result, diagnostics)
+    }
+
     fn infer_root(&mut self) -> Result<(), LocatedError> {
         let expr_result = log_if_slow!(50, self.infer_expr(self.module.entry_expr), |elapsed| {
             log::info!(
