@@ -84,6 +84,9 @@ pub struct InferenceCoordinator {
     /// Concurrent cache of file inference state.
     cache: DashMap<PathBuf, FileSlot>,
 
+    /// Concurrent cache of resolved type exports per file.
+    type_export_cache: DashMap<PathBuf, TypeExportSlot>,
+
     /// Reverse dependency index: imported file → set of importers.
     /// Used for invalidation cascading.
     reverse_deps: Mutex<HashMap<PathBuf, HashSet<PathBuf>>>,
@@ -91,6 +94,14 @@ pub struct InferenceCoordinator {
     /// Forward dependency index: importer → list of imported files.
     /// Used for O(old_import_count) cleanup when deps change.
     forward_deps: Mutex<HashMap<PathBuf, Vec<PathBuf>>>,
+}
+
+/// State of a file's type exports in the coordinator cache.
+enum TypeExportSlot {
+    /// Type export resolution in-progress — other threads wait on condvar.
+    Computing { notify: Arc<(Mutex<bool>, Condvar)> },
+    /// Type exports resolved.
+    Ready(HashMap<smol_str::SmolStr, comment_parser::ParsedTy>),
 }
 
 // Thread-local set of files currently being inferred on this thread.
@@ -104,6 +115,7 @@ impl InferenceCoordinator {
     pub fn new() -> Self {
         Self {
             cache: DashMap::new(),
+            type_export_cache: DashMap::new(),
             reverse_deps: Mutex::new(HashMap::new()),
             forward_deps: Mutex::new(HashMap::new()),
         }
@@ -251,6 +263,132 @@ impl InferenceCoordinator {
             .collect()
     }
 
+    // =========================================================================
+    // Type export resolution
+    // =========================================================================
+
+    /// Demand resolved type exports for a file. Returns the fully resolved
+    /// exports where `TypeOf(name)` has been substituted with the actual
+    /// inferred type via partial inference. Results are cached.
+    pub fn demand_type_exports(
+        &self,
+        path: &Path,
+        syntax_provider: &dyn SyntaxProvider,
+    ) -> Option<HashMap<smol_str::SmolStr, comment_parser::ParsedTy>> {
+        // 1. Check cache
+        if let Some(entry) = self.type_export_cache.get(path) {
+            match &*entry {
+                TypeExportSlot::Ready(exports) => return Some(exports.clone()),
+                TypeExportSlot::Computing { notify } => {
+                    let notify = notify.clone();
+                    drop(entry);
+                    let (lock, cvar) = &*notify;
+                    let mut done = lock.lock();
+                    while !*done {
+                        cvar.wait(&mut done);
+                    }
+                    drop(done);
+                    return self.type_export_cache.get(path).and_then(|e| match &*e {
+                        TypeExportSlot::Ready(exports) => Some(exports.clone()),
+                        _ => None,
+                    });
+                }
+            }
+        }
+
+        // 2. Parse file, extract raw type exports
+        let bundle = syntax_provider.syntax_for_file(path)?;
+        let raw_exports = crate::extract_type_exports(&bundle.module);
+
+        if raw_exports.is_empty() {
+            self.type_export_cache
+                .insert(path.to_path_buf(), TypeExportSlot::Ready(HashMap::new()));
+            return Some(HashMap::new());
+        }
+
+        // 3. Check if any exports contain typeof
+        let typeof_targets = crate::find_typeof_targets(&raw_exports);
+
+        if typeof_targets.is_empty() {
+            // Pure parse-level types — no inference needed
+            self.type_export_cache.insert(
+                path.to_path_buf(),
+                TypeExportSlot::Ready(raw_exports.clone()),
+            );
+            return Some(raw_exports);
+        }
+
+        // 4. Partial inference needed — claim the Computing slot
+        let notify = Arc::new((Mutex::new(false), Condvar::new()));
+        self.type_export_cache.insert(
+            path.to_path_buf(),
+            TypeExportSlot::Computing {
+                notify: notify.clone(),
+            },
+        );
+
+        // Find max SCC group index needed
+        let max_group = typeof_targets
+            .iter()
+            .filter_map(|name| {
+                crate::find_scc_group_for_name(&bundle.module, &bundle.grouped_defs, name)
+            })
+            .max()
+            .unwrap_or(0);
+
+        // Resolve value-level imports for the partial inference
+        let base_dir = path.parent().unwrap_or(Path::new("/"));
+        let import_resolution = resolve_import_types(
+            &bundle.module,
+            &bundle.name_res,
+            base_dir,
+            |dep_path| {
+                if let Some(sig) = self.get_signature(dep_path) {
+                    return Some(sig);
+                }
+                let dep_result = self.demand_file(dep_path, syntax_provider)?;
+                dep_result.signature.map(|s| s.root_ty)
+            },
+            Some(&bundle.registry),
+        );
+
+        let inputs = InferenceInputs {
+            module: bundle.module,
+            module_indices: bundle.module_indices,
+            name_res: bundle.name_res,
+            grouped_defs: bundle.grouped_defs,
+            registry: bundle.registry,
+            import_types: import_resolution.types,
+            import_diagnostics: vec![],
+            context_args: bundle.context_args,
+            rss_limit_mb: None,
+            file_path: Some(path.to_path_buf()),
+            imported_type_exports: HashMap::new(),
+            typeof_import_types: HashMap::new(),
+            file_base_dir: None,
+        };
+
+        let binding_types = crate::run_partial_inference(&inputs, max_group, &typeof_targets);
+
+        // 5. Resolve typeof references in exports
+        let resolved_exports = crate::resolve_export_typeof(&raw_exports, &binding_types);
+
+        // Signal completion
+        let (lock, cvar) = &*notify;
+        *lock.lock() = true;
+        cvar.notify_all();
+        self.type_export_cache.insert(
+            path.to_path_buf(),
+            TypeExportSlot::Ready(resolved_exports.clone()),
+        );
+
+        Some(resolved_exports)
+    }
+
+    // =========================================================================
+    // Active mode: file inference
+    // =========================================================================
+
     /// The core computation: extract syntax, scan imports, demand dependencies,
     /// build InferenceInputs, run inference, extract signature.
     fn compute_file(
@@ -289,6 +427,31 @@ impl InferenceCoordinator {
         // Record dependencies for invalidation.
         self.record_deps(path, &import_paths);
 
+        // Scan doc comments for cross-file type references and resolve them.
+        let type_import_paths = crate::imports::scan_type_import_paths(&bundle.module);
+        let mut imported_type_exports = HashMap::new();
+        let mut typeof_import_types = HashMap::new();
+        for path_str in &type_import_paths {
+            let resolved = base_dir.join(path_str);
+            let canonical = resolved.canonicalize().unwrap_or(resolved);
+
+            // Try type exports (import("path").TypeName)
+            if let Some(exports) = self.demand_type_exports(&canonical, syntax_provider) {
+                if !exports.is_empty() {
+                    imported_type_exports.insert(canonical.clone(), exports);
+                }
+            }
+
+            // Try typeof import (typeof import("path"))
+            if let Some(sig) = self.get_signature(&canonical) {
+                typeof_import_types.insert(canonical, sig);
+            } else if let Some(dep_result) = self.demand_file(&canonical, syntax_provider) {
+                if let Some(sig) = dep_result.signature {
+                    typeof_import_types.insert(canonical, sig.root_ty);
+                }
+            }
+        }
+
         // Build InferenceInputs and run inference.
         let inputs = InferenceInputs {
             module: bundle.module,
@@ -301,9 +464,9 @@ impl InferenceCoordinator {
             context_args: bundle.context_args,
             rss_limit_mb: None,
             file_path: Some(path.to_path_buf()),
-            imported_type_exports: HashMap::new(),
-            typeof_import_types: HashMap::new(),
-            file_base_dir: None,
+            imported_type_exports,
+            typeof_import_types,
+            file_base_dir: Some(base_dir.to_path_buf()),
         };
 
         let check_result = run_inference(&inputs);
@@ -420,6 +583,7 @@ impl InferenceCoordinator {
             return;
         }
         self.cache.remove(path);
+        self.type_export_cache.remove(path);
         if let Some(dependents) = reverse_deps.get(path) {
             for dep in dependents {
                 evicted.push(dep.clone());
@@ -455,6 +619,7 @@ impl InferenceCoordinator {
     /// Clear all cached state (used on registry reload).
     pub fn clear(&self) {
         self.cache.clear();
+        self.type_export_cache.clear();
         self.reverse_deps.lock().clear();
         self.forward_deps.lock().clear();
     }
@@ -1054,5 +1219,114 @@ in
             errors.len(),
             errors,
         );
+    }
+
+    #[test]
+    fn cross_file_typeof_export_motivating_case() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // File A: exports a type alias using typeof, and imports B
+        let b_path = write_nix(dir.path(), "package.nix", "args: args.mkDerivation { }");
+
+        let a_src = format!(
+            "/**\n  type Scope = typeof scope;\n*/\n\
+             let scope = {{ mkDerivation = x: x; }};\n    \
+             pkg = import {} scope;\nin pkg",
+            b_path.display()
+        );
+        let _a_path = write_nix(dir.path(), "default.nix", &a_src);
+
+        // File B: annotates its parameter with the imported type
+        let a_canonical = dir.path().join("default.nix").canonicalize().unwrap();
+        let b_src = format!(
+            "/**\n  type: args :: import(\"{}\").Scope\n*/\nargs: args.mkDerivation {{}}",
+            a_canonical.display()
+        );
+        // Overwrite package.nix with the annotated version
+        std::fs::write(&b_path, b_src).unwrap();
+
+        let provider = TestSyntaxProvider::new();
+        let coord = InferenceCoordinator::new();
+
+        // Demand package.nix — should resolve Scope via partial inference of default.nix
+        let result = coord.demand_file(&b_path, &provider);
+        assert!(result.is_some(), "package.nix should infer successfully");
+
+        let result = result.unwrap();
+        // Should not have type mismatch errors from the annotation
+        let type_errors: Vec<_> = result
+            .check_result
+            .diagnostics
+            .iter()
+            .filter(|d| {
+                matches!(
+                    d.kind,
+                    crate::diagnostic::TixDiagnosticKind::TypeMismatch { .. }
+                )
+            })
+            .collect();
+        assert!(
+            type_errors.is_empty(),
+            "should have no type errors from cross-file typeof import, but got: {type_errors:?}"
+        );
+    }
+
+    #[test]
+    fn demand_type_exports_no_exports() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_nix(dir.path(), "a.nix", "42");
+        let provider = TestSyntaxProvider::new();
+        let coord = InferenceCoordinator::new();
+
+        let exports = coord.demand_type_exports(&path, &provider);
+        assert!(exports.is_some());
+        assert!(exports.unwrap().is_empty());
+    }
+
+    #[test]
+    fn demand_type_exports_pure_parse() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_nix(
+            dir.path(),
+            "a.nix",
+            "/**\n  type Config = { x: int };\n*/\nlet x = 42; in x",
+        );
+        let provider = TestSyntaxProvider::new();
+        let coord = InferenceCoordinator::new();
+
+        let exports = coord.demand_type_exports(&path, &provider).unwrap();
+        assert!(exports.contains_key("Config"), "should have Config export");
+        assert!(
+            matches!(exports["Config"], comment_parser::ParsedTy::AttrSet(_)),
+            "Config should be AttrSet"
+        );
+    }
+
+    #[test]
+    fn demand_type_exports_with_typeof() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_nix(
+            dir.path(),
+            "a.nix",
+            "/**\n  type Scope = typeof scope;\n*/\nlet scope = { x = 1; }; in scope",
+        );
+        let provider = TestSyntaxProvider::new();
+        let coord = InferenceCoordinator::new();
+
+        let exports = coord.demand_type_exports(&path, &provider).unwrap();
+        assert!(exports.contains_key("Scope"), "should have Scope export");
+        // TypeOf should be resolved — no TypeOf nodes remaining
+        let targets = crate::find_typeof_targets(&exports);
+        assert!(
+            targets.is_empty(),
+            "typeof should be resolved, but found: {targets:?}"
+        );
+        // The resolved type should be an attrset
+        match &exports["Scope"] {
+            comment_parser::ParsedTy::AttrSet(a) => {
+                assert!(a.fields.contains_key("x"), "should have field x");
+            }
+            other => panic!("expected AttrSet, got: {other:?}"),
+        }
     }
 }
