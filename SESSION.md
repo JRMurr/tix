@@ -188,6 +188,14 @@ Intentional O(n^2) trade-offs, acceptable for typical Nix code sizes:
 - **No CONTRIBUTING.md** for potential contributors.
 - **No recursive type aliases** in `.tix` files.
 
+### Excluded-but-imported files as nocheck
+
+The `[project] excludes` currently skips files entirely from discovery. The plan also
+calls for excluded files that are reached via imports (from included files) to still be
+parsed/inferred with diagnostics suppressed (nocheck behavior). This "excluded-but-imported"
+handling is not yet implemented — it would require detecting excluded import targets
+during Phase 1b of `tix check` and flagging them as nocheck in the pipeline.
+
 ### DX Audit: What Works Well
 
 Strengths to preserve during future work:
