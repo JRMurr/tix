@@ -267,6 +267,17 @@ fn derive_glob_patterns(
     // -------------------------------------------------------------------------
     merge_sibling_globs(&mut patterns, &mut excludes, &other_kind_paths);
 
+    // -------------------------------------------------------------------------
+    // Filename-specific merge pass: when many individual files share the same
+    // filename across different subdirectories (e.g. packages/*/package.nix),
+    // merge into a filename-specific glob like packages/**/package.nix.
+    //
+    // This handles the common case where each subdirectory has both a
+    // `package.nix` (CallPackage) and `default.nix` (Library) — the wildcard
+    // `/**/*.nix` glob can't distinguish them, but `/**/package.nix` can.
+    // -------------------------------------------------------------------------
+    merge_by_filename(&mut patterns, &mut excludes, &other_kind_paths);
+
     GlobResult {
         paths: patterns,
         excludes,
@@ -441,6 +452,94 @@ fn is_covered_by_excludes(path: &Path, excludes: &[String]) -> bool {
             path_str == exc
         }
     })
+}
+
+/// Merge individual files that share the same filename across sibling
+/// directories into a filename-specific glob like `ancestor/**/name.nix`.
+///
+/// For example, `packages/foo/package.nix` + `packages/bar/package.nix` +
+/// `packages/baz/package.nix` becomes `packages/**/package.nix` (with excludes
+/// for any other-kind files that share the same name).
+fn merge_by_filename(
+    patterns: &mut Vec<String>,
+    excludes: &mut Vec<String>,
+    other_kind_paths: &[&Path],
+) {
+    loop {
+        if !try_filename_merge_pass(patterns, excludes, other_kind_paths) {
+            break;
+        }
+    }
+}
+
+/// One pass of filename-based merging. Returns true if any merge happened.
+fn try_filename_merge_pass(
+    patterns: &mut Vec<String>,
+    excludes: &mut Vec<String>,
+    other_kind_paths: &[&Path],
+) -> bool {
+    // Collect individual file patterns (not globs) that are nested 2+ levels.
+    // Group by (grandparent_directory, filename).
+    let mut by_key: HashMap<(PathBuf, String), Vec<usize>> = HashMap::new();
+    for (i, pattern) in patterns.iter().enumerate() {
+        if pattern.contains("**") {
+            continue;
+        }
+        let p = Path::new(pattern);
+        let filename = match p.file_name().and_then(|f| f.to_str()) {
+            Some(f) => f.to_string(),
+            None => continue,
+        };
+        let parent = match p.parent() {
+            Some(d) if !d.as_os_str().is_empty() && d != Path::new(".") => d,
+            _ => continue,
+        };
+        let grandparent = match parent.parent() {
+            Some(gp) if !gp.as_os_str().is_empty() && gp != Path::new(".") => gp.to_path_buf(),
+            _ => continue,
+        };
+        by_key.entry((grandparent, filename)).or_default().push(i);
+    }
+
+    for ((ancestor, filename), indices) in &by_key {
+        if indices.len() < 2 {
+            continue;
+        }
+
+        let glob_pattern = format!("{}/**/{}", ancestor.display(), filename);
+
+        // Count false positives: other-kind files with the same filename under ancestor.
+        let ancestor_prefix = format!("{}/", ancestor.display());
+        let false_positives: Vec<String> = other_kind_paths
+            .iter()
+            .filter(|p| {
+                p.file_name().and_then(|f| f.to_str()) == Some(filename)
+                    && p.to_str().is_some_and(|s| s.starts_with(&ancestor_prefix))
+                    && !is_covered_by_excludes(p, excludes)
+            })
+            .map(|p| p.display().to_string())
+            .collect();
+
+        // Conciseness check: 1 glob + false_positive_excludes < current pattern count.
+        let merged_count = 1 + false_positives.len();
+        let current_count = indices.len();
+        if merged_count < current_count {
+            let mut sorted_indices = indices.clone();
+            sorted_indices.sort_unstable();
+            for &i in sorted_indices.iter().rev() {
+                patterns.remove(i);
+            }
+            patterns.push(glob_pattern);
+            excludes.extend(false_positives);
+            patterns.sort();
+            patterns.dedup();
+            excludes.sort();
+            excludes.dedup();
+            return true; // One merge per pass for index safety.
+        }
+    }
+
+    false
 }
 
 /// Remove patterns subsumed by a broader recursive glob in the same set.
@@ -1172,6 +1271,150 @@ mod tests {
             result.paths,
             vec!["a/**/*.nix"],
             "multi-level merging should collapse to top-level glob"
+        );
+        assert!(result.excludes.is_empty());
+    }
+
+    /// Many individual files sharing the same filename across sibling dirs
+    /// should merge into a filename-specific glob like `packages/**/package.nix`.
+    #[test]
+    fn merge_by_filename_across_sibling_dirs() {
+        // Simulates the llm-agents-nix layout:
+        //   packages/foo/package.nix   (CallPackage)
+        //   packages/foo/default.nix   (Library)
+        //   packages/bar/package.nix   (CallPackage)
+        //   packages/bar/default.nix   (Library)
+        //   packages/baz/package.nix   (CallPackage)
+        //   packages/baz/default.nix   (Library)
+        let callpackage_files: Vec<(PathBuf, Classification)> = ["foo", "bar", "baz"]
+            .iter()
+            .map(|name| {
+                (
+                    PathBuf::from(format!("packages/{name}/package.nix")),
+                    classification(NixFileKind::CallPackage),
+                )
+            })
+            .collect();
+
+        let library_files: Vec<(PathBuf, Classification)> = ["foo", "bar", "baz"]
+            .iter()
+            .map(|name| {
+                (
+                    PathBuf::from(format!("packages/{name}/default.nix")),
+                    classification(NixFileKind::Library),
+                )
+            })
+            .collect();
+
+        let all_files: Vec<_> = callpackage_files
+            .iter()
+            .chain(library_files.iter())
+            .cloned()
+            .collect();
+
+        let result = derive_glob_patterns(&callpackage_files, &all_files);
+        assert_eq!(
+            result.paths,
+            vec!["packages/**/package.nix"],
+            "should merge into filename-specific glob, got: {:?}",
+            result.paths
+        );
+        assert!(result.excludes.is_empty());
+    }
+
+    /// Filename merge with a false positive (same filename, different kind)
+    /// should use the glob + exclude.
+    #[test]
+    fn merge_by_filename_with_false_positive_excludes() {
+        let callpackage_files: Vec<(PathBuf, Classification)> = ["foo", "bar", "baz", "qux"]
+            .iter()
+            .map(|name| {
+                (
+                    PathBuf::from(format!("packages/{name}/package.nix")),
+                    classification(NixFileKind::CallPackage),
+                )
+            })
+            .collect();
+
+        let library_files: Vec<(PathBuf, Classification)> = ["foo", "bar", "baz", "qux"]
+            .iter()
+            .map(|name| {
+                (
+                    PathBuf::from(format!("packages/{name}/default.nix")),
+                    classification(NixFileKind::Library),
+                )
+            })
+            .chain(std::iter::once((
+                // This package.nix is Library, not CallPackage — a false positive.
+                PathBuf::from("packages/special/package.nix"),
+                classification(NixFileKind::Library),
+            )))
+            .collect();
+
+        let all_files: Vec<_> = callpackage_files
+            .iter()
+            .chain(library_files.iter())
+            .cloned()
+            .collect();
+
+        let result = derive_glob_patterns(&callpackage_files, &all_files);
+        assert_eq!(
+            result.paths,
+            vec!["packages/**/package.nix"],
+            "should use filename-specific glob, got: {:?}",
+            result.paths
+        );
+        assert_eq!(
+            result.excludes,
+            vec!["packages/special/package.nix"],
+            "should exclude the false-positive file"
+        );
+    }
+
+    /// Filename merge shouldn't happen when there are too few files to make it worthwhile.
+    #[test]
+    fn merge_by_filename_skipped_when_not_concise() {
+        // Only 2 callpackage files, but 2 false positives — not worth it.
+        let callpackage_files = vec![
+            (
+                PathBuf::from("packages/foo/package.nix"),
+                classification(NixFileKind::CallPackage),
+            ),
+            (
+                PathBuf::from("packages/bar/package.nix"),
+                classification(NixFileKind::CallPackage),
+            ),
+        ];
+        let library_files = vec![
+            (
+                PathBuf::from("packages/foo/default.nix"),
+                classification(NixFileKind::Library),
+            ),
+            (
+                PathBuf::from("packages/bar/default.nix"),
+                classification(NixFileKind::Library),
+            ),
+            (
+                PathBuf::from("packages/special1/package.nix"),
+                classification(NixFileKind::Library),
+            ),
+            (
+                PathBuf::from("packages/special2/package.nix"),
+                classification(NixFileKind::Library),
+            ),
+        ];
+        let all_files: Vec<_> = callpackage_files
+            .iter()
+            .chain(library_files.iter())
+            .cloned()
+            .collect();
+
+        let result = derive_glob_patterns(&callpackage_files, &all_files);
+        // 1 glob + 2 excludes = 3, vs 2 individual files. Not concise.
+        assert_eq!(
+            result.paths,
+            vec!["packages/bar/package.nix", "packages/foo/package.nix",],
+            "should keep individual files when merge is not concise"
         );
         assert!(result.excludes.is_empty());
     }
