@@ -82,16 +82,46 @@ The `[project]` section configures project-level behavior for both the LSP and `
 
 ```toml
 [project]
-analyze = ["lib/*.nix", "pkgs/**/*.nix"]
-exclude = ["result", ".direnv", "vendor/**"]
+includes = ["lib/*.nix", "pkgs/**/*.nix"]
+excludes = ["result", ".direnv", "vendor/**"]
 ```
 
-- **analyze** — glob patterns for files to analyze in the background when the LSP starts. Their inferred types become ephemeral stubs available to all open files.
-- **exclude** — glob patterns for files/directories to skip during `tix check`. Hardcoded ignores (`.git`, `node_modules`, `result`, `.direnv`, `target`) are always applied.
+- **includes** — glob patterns for files to include in analysis. When the LSP starts, these files are analyzed in the background and their inferred types become ephemeral stubs available to all open files.
+- **excludes** — glob patterns for files/directories to skip during `tix check`. Excluded files are fully skipped from discovery. Hardcoded ignores (`.git`, `node_modules`, `result`, `.direnv`, `target`) are always applied.
 
 `tix init` generates a `[project]` section with sensible defaults.
 
-Files matching `analyze` are processed in the background after LSP initialization. As each file's type is inferred, any open files that import it are automatically re-analyzed with the updated type information.
+Files matching `includes` are processed in the background after LSP initialization. As each file's type is inferred, any open files that import it are automatically re-analyzed with the updated type information.
+
+### Suppression directives
+
+Tix supports TypeScript-style comment directives for suppressing diagnostics:
+
+#### `# tix-nocheck`
+
+Suppresses all diagnostics for the entire file. Place anywhere in the file:
+
+```nix
+# tix-nocheck
+{ config, lib, pkgs, ... }:
+{
+  # This file will not report any type errors
+  services.foo.enable = 42;
+}
+```
+
+#### `# tix-ignore`
+
+Suppresses diagnostics on the next line only:
+
+```nix
+let
+  # tix-ignore
+  x = (1 + 2).foo;  # no error reported for this line
+  y = (3 + 4).bar;  # this line still reports errors
+in
+  x
+```
 
 ### Diagnostics
 
