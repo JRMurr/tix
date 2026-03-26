@@ -33,13 +33,15 @@ pub type TixConfig = tix_lsp::project_config::ProjectConfig;
 // ==============================================================================
 
 /// Hardcoded directory names to always skip during recursive walks.
-const SKIP_DIRS: &[&str] = &[".git", "node_modules", "result", ".direnv", "target"];
+/// These are skipped even when no `.gitignore` is present.
+const SKIP_DIRS: &[&str] = &["node_modules", "result", ".direnv", "target"];
 
 /// Discover `.nix` files to check under `root`.
 ///
 /// If `[project] includes` globs are configured, only files matching those
 /// patterns are returned (via `resolve_include_globs`). Otherwise falls back
-/// to walking all `.nix` files with exclude patterns and hardcoded ignores.
+/// to walking all `.nix` files with exclude patterns, `.gitignore` rules, and
+/// hardcoded ignores.
 pub fn discover_all_nix_files(root: &Path, config: &TixConfig) -> Vec<PathBuf> {
     // If [project] analyze is specified, use those globs instead of walking
     // everything. This reduces checked files dramatically for projects that
@@ -50,11 +52,7 @@ pub fn discover_all_nix_files(root: &Path, config: &TixConfig) -> Vec<PathBuf> {
     }
 
     let exclude_set = build_exclude_set(config);
-    let mut paths = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    walk_nix_files(root, root, &exclude_set, &mut seen, &mut paths);
-    paths.sort();
-    paths
+    walk_nix_files(root, &exclude_set)
 }
 
 /// Build a GlobSet from the `[project] exclude` patterns.
@@ -81,50 +79,54 @@ fn build_exclude_set(config: &TixConfig) -> Option<globset::GlobSet> {
     builder.build().ok()
 }
 
-/// Recursively walk `dir`, collecting `.nix` files.
-fn walk_nix_files(
-    dir: &Path,
-    root: &Path,
-    exclude_set: &Option<globset::GlobSet>,
-    seen: &mut std::collections::HashSet<PathBuf>,
-    out: &mut Vec<PathBuf>,
-) {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
+/// Walk `root` collecting `.nix` files, respecting `.gitignore` rules.
+///
+/// Uses the `ignore` crate which handles `.gitignore`, `.git/info/exclude`,
+/// and global gitignore automatically. Also applies hardcoded `SKIP_DIRS`
+/// and any `[project] excludes` patterns from the config.
+fn walk_nix_files(root: &Path, exclude_set: &Option<globset::GlobSet>) -> Vec<PathBuf> {
+    use ignore::WalkBuilder;
 
-    for entry in entries.flatten() {
+    let mut builder = WalkBuilder::new(root);
+    // Respect .gitignore (enabled by default, but be explicit).
+    builder.git_ignore(true);
+    builder.git_global(true);
+    builder.git_exclude(true);
+    // Don't need hidden files (dotfiles), but do need to enter dirs to find
+    // .gitignore files — the ignore crate handles this correctly with
+    // hidden(true) filtering only non-git-related hidden entries.
+    builder.hidden(true);
+    // Sort for deterministic output.
+    builder.sort_by_file_name(|a, b| a.cmp(b));
+
+    // Add hardcoded skip dirs as custom ignore rules.
+    let mut overrides = ignore::overrides::OverrideBuilder::new(root);
+    for dir in SKIP_DIRS {
+        // The `!` prefix means "exclude" in override syntax.
+        let _ = overrides.add(&format!("!{dir}/"));
+    }
+    if let Ok(built) = overrides.build() {
+        builder.overrides(built);
+    }
+
+    let mut paths = Vec::new();
+    for entry in builder.build().flatten() {
         let path = entry.path();
-
-        if path.is_dir() {
-            // Skip hardcoded directories.
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if SKIP_DIRS.contains(&name) {
-                    continue;
-                }
-            }
-            // Skip excluded directories.
+        if !path.is_file() {
+            continue;
+        }
+        if path.extension().is_some_and(|e| e == "nix") {
+            // Apply [project] excludes on top.
             if let Some(ref gs) = exclude_set {
-                let relative = path.strip_prefix(root).unwrap_or(&path);
+                let relative = path.strip_prefix(root).unwrap_or(path);
                 if gs.is_match(relative) {
                     continue;
                 }
             }
-            walk_nix_files(&path, root, exclude_set, seen, out);
-        } else if path.is_file() && path.extension().is_some_and(|e| e == "nix") {
-            // Check file-level exclude patterns.
-            if let Some(ref gs) = exclude_set {
-                let relative = path.strip_prefix(root).unwrap_or(&path);
-                if gs.is_match(relative) {
-                    continue;
-                }
-            }
-            if seen.insert(path.clone()) {
-                out.push(path);
-            }
+            paths.push(path.to_path_buf());
         }
     }
+    paths
 }
 
 /// Check if a file path matches any context in the config.
@@ -345,6 +347,42 @@ mod tests {
             Path::new("."),
         );
         assert_eq!(result, Some("home"));
+    }
+
+    /// `discover_all_nix_files` should skip directories listed in `.gitignore`.
+    /// This prevents scanning into large cached/vendored directories (e.g.
+    /// `.repo-check-cache/`) that happen to contain `.nix` files.
+    #[test]
+    fn discover_skips_gitignored_dirs() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let root = dir.path();
+
+        // Initialize a git repo so .gitignore is recognized.
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(root)
+            .output()
+            .expect("git init");
+
+        // Create a .gitignore that ignores a cache directory.
+        std::fs::write(root.join(".gitignore"), "cache-dir/\n").unwrap();
+
+        std::fs::create_dir_all(root.join("cache-dir/nested")).unwrap();
+        std::fs::write(root.join("cache-dir/nested/deep.nix"), "42").unwrap();
+        std::fs::write(root.join("top.nix"), "42").unwrap();
+
+        let config = TixConfig::default();
+        let files = discover_all_nix_files(root, &config);
+        let names: Vec<_> = files
+            .iter()
+            .map(|p| p.file_name().unwrap().to_str().unwrap())
+            .collect();
+
+        assert!(names.contains(&"top.nix"), "should find top.nix");
+        assert!(
+            !names.contains(&"deep.nix"),
+            "should NOT find gitignored cache-dir/nested/deep.nix, got: {names:?}"
+        );
     }
 
     // Regression: `common/*.nix` was matching `common/homemanager/default.nix`

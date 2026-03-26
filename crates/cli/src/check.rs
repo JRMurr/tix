@@ -661,6 +661,7 @@ fn find_and_load_config(
             let cfg = config::load_config(&explicit_path)?;
             let dir = explicit_path
                 .parent()
+                .filter(|p| !p.as_os_str().is_empty())
                 .unwrap_or(std::path::Path::new("."))
                 .to_path_buf();
             let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
