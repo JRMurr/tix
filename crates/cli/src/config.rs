@@ -37,14 +37,14 @@ const SKIP_DIRS: &[&str] = &[".git", "node_modules", "result", ".direnv", "targe
 
 /// Discover `.nix` files to check under `root`.
 ///
-/// If `[project] analyze` globs are configured, only files matching those
-/// patterns are returned (via `resolve_analyze_globs`). Otherwise falls back
+/// If `[project] includes` globs are configured, only files matching those
+/// patterns are returned (via `resolve_include_globs`). Otherwise falls back
 /// to walking all `.nix` files with exclude patterns and hardcoded ignores.
 pub fn discover_all_nix_files(root: &Path, config: &TixConfig) -> Vec<PathBuf> {
     // If [project] analyze is specified, use those globs instead of walking
     // everything. This reduces checked files dramatically for projects that
     // only want a subset analyzed (e.g. 40 → 7 files).
-    let analyze_files = tix_lsp::project_config::resolve_analyze_globs(config, root);
+    let analyze_files = tix_lsp::project_config::resolve_include_globs(config, root);
     if !analyze_files.is_empty() {
         return analyze_files;
     }
@@ -62,7 +62,7 @@ fn build_exclude_set(config: &TixConfig) -> Option<globset::GlobSet> {
     let patterns: Vec<&str> = config
         .project
         .as_ref()
-        .map(|p| p.exclude.iter().map(|s| s.as_str()).collect())
+        .map(|p| p.excludes.iter().map(|s| s.as_str()).collect())
         .unwrap_or_default();
 
     if patterns.is_empty() {
@@ -216,8 +216,8 @@ mod tests {
         let toml_str = r#"
             stubs = ["./stubs"]
             [project]
-            analyze = ["lib/*.nix"]
-            exclude = ["vendor/**", "result"]
+            includes = ["lib/*.nix"]
+            excludes = ["vendor/**", "result"]
 
             [context.nixos]
             paths = ["modules/**/*.nix"]
@@ -225,8 +225,8 @@ mod tests {
         "#;
         let config: TixConfig = toml::from_str(toml_str).expect("parse error");
         let project = config.project.as_ref().unwrap();
-        assert_eq!(project.analyze, vec!["lib/*.nix"]);
-        assert_eq!(project.exclude, vec!["vendor/**", "result"]);
+        assert_eq!(project.includes, vec!["lib/*.nix"]);
+        assert_eq!(project.excludes, vec!["vendor/**", "result"]);
     }
 
     #[test]
@@ -244,7 +244,7 @@ mod tests {
         let config: TixConfig = toml::from_str(
             r#"
             [project]
-            exclude = ["vendor/**"]
+            excludes = ["vendor/**"]
             "#,
         )
         .unwrap();
@@ -276,14 +276,14 @@ mod tests {
         assert!(files[0].ends_with("top.nix"));
     }
 
-    /// Regression: `discover_all_nix_files` should use `[project] analyze` globs
+    /// Regression: `discover_all_nix_files` should use `[project] includes` globs
     /// when configured, returning only matching files instead of walking everything.
     #[test]
-    fn discover_respects_analyze_globs() {
+    fn discover_respects_includes_globs() {
         let dir = tempfile::tempdir().expect("create temp dir");
         let root = dir.path();
 
-        // Create directory structure with files inside and outside the analyze pattern.
+        // Create directory structure with files inside and outside the includes pattern.
         std::fs::create_dir_all(root.join("nix")).unwrap();
         std::fs::create_dir_all(root.join("test/import")).unwrap();
         std::fs::write(root.join("nix/foo.nix"), "42").unwrap();
@@ -294,7 +294,7 @@ mod tests {
         let config: TixConfig = toml::from_str(
             r#"
             [project]
-            analyze = ["nix/*.nix", "test/import/lib.nix"]
+            includes = ["nix/*.nix", "test/import/lib.nix"]
             "#,
         )
         .unwrap();
@@ -313,7 +313,7 @@ mod tests {
         );
         assert!(
             !names.iter().any(|n| n.contains("untracked")),
-            "should NOT include untracked.nix outside analyze globs, got: {names:?}"
+            "should NOT include untracked.nix outside includes globs, got: {names:?}"
         );
     }
 

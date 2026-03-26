@@ -305,16 +305,16 @@ in
         echo "# Auto-generated for nixpkgs checking."
         echo "[project]"
         if [[ ''${#DIRS[@]} -gt 0 ]]; then
-          analyze="["
+          includes="["
           first=1
           for dir in "''${DIRS[@]}"; do
-            if [[ $first -eq 1 ]]; then first=0; else analyze+=", "; fi
-            analyze+="\"''${dir}/**/*.nix\""
+            if [[ $first -eq 1 ]]; then first=0; else includes+=", "; fi
+            includes+="\"''${dir}/**/*.nix\""
           done
-          analyze+="]"
-          echo "analyze = $analyze"
+          includes+="]"
+          echo "includes = $includes"
         fi
-        echo "exclude = ${excludeToml}"
+        echo "excludes = ${excludeToml}"
       } > "$WORK_DIR/tix.toml"
 
       echo "---" >&2

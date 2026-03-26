@@ -887,7 +887,7 @@ impl LanguageServer for TixLanguageServer {
                             }
 
                             // Resolve analyze globs before moving config into state.
-                            let analyze_files = crate::project_config::resolve_analyze_globs(
+                            let analyze_files = crate::project_config::resolve_include_globs(
                                 &project_cfg,
                                 &config_dir,
                             );

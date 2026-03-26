@@ -483,7 +483,7 @@ fn create_nixpkgs_like_workspace(pkg_rel_path: &str, pkg_source: &str) -> PathBu
          paths = [\"pkgs/**/*.nix\"]\n\
          stubs = [\"@callpackage\"]\n\n\
          [project]\n\
-         analyze = [\"lib/*.nix\"]\n",
+         includes = [\"lib/*.nix\"]\n",
     )
     .unwrap();
     std::fs::write(&pkg_full, pkg_source).unwrap();

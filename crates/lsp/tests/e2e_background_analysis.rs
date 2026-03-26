@@ -4,10 +4,10 @@ use common::{LspTestHarness, TIMEOUT};
 use indoc::indoc;
 use tower_lsp::lsp_types::*;
 
-/// Background analysis processes files from [project] analyze globs
+/// Background analysis processes files from [project] includes globs
 /// without the user explicitly opening them.
 ///
-/// This test creates a workspace with a tix.toml that specifies analyze
+/// This test creates a workspace with a tix.toml that specifies includes
 /// globs, verifies diagnostics are published for background files, and
 /// then checks that opening a file that imports a background-analyzed
 /// file gets the correct cross-file type.
@@ -18,10 +18,10 @@ async fn background_analysis_processes_queued_files() {
             "tix.toml",
             indoc! {r#"
                 [project]
-                analyze = ["lib/*.nix"]
+                includes = ["lib/*.nix"]
             "#},
         ),
-        // This file is matched by the analyze glob — it should be
+        // This file is matched by the includes glob — it should be
         // background-analyzed without being explicitly opened.
         ("lib/helpers.nix", "{ greet = \"hello\"; count = 42; }"),
     ])
@@ -48,7 +48,7 @@ async fn background_analysis_populates_import_cache() {
             "tix.toml",
             indoc! {r#"
                 [project]
-                analyze = ["lib/*.nix"]
+                includes = ["lib/*.nix"]
             "#},
         ),
         ("lib/helpers.nix", "{ greet = \"hello\"; count = 42; }"),

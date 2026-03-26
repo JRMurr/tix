@@ -121,18 +121,23 @@ pub struct DiagnosticsProjectConfig {
 /// The `[project]` section of `tix.toml`.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ProjectSection {
-    /// Glob patterns for files to analyze in the background when the LSP
-    /// starts. Their inferred types become ephemeral stubs available to all
-    /// open files. Patterns are relative to the tix.toml directory.
+    /// Glob patterns for files to include in analysis. When the LSP starts,
+    /// these files are analyzed in the background and their inferred types
+    /// become ephemeral stubs available to all open files.
+    /// Patterns are relative to the tix.toml directory.
     ///
-    /// Example: `analyze = ["lib/*.nix", "pkgs/**/*.nix"]`
+    /// Example: `includes = ["lib/*.nix", "pkgs/**/*.nix"]`
     #[serde(default)]
-    pub analyze: Vec<String>,
+    pub includes: Vec<String>,
 
-    /// Glob patterns for files/directories to exclude from `tix check`.
-    /// Example: `exclude = ["result", "vendor/**"]`
+    /// Glob patterns for files/directories to exclude from checking.
+    /// Excluded files are fully skipped from discovery. If an included file
+    /// imports an excluded file, the excluded file is still parsed and inferred
+    /// (so types flow through) but its diagnostics are suppressed.
+    ///
+    /// Example: `excludes = ["result", "vendor/**"]`
     #[serde(default)]
-    pub exclude: Vec<String>,
+    pub excludes: Vec<String>,
 }
 
 /// A single context definition within `tix.toml`.
@@ -244,20 +249,20 @@ pub fn resolve_context_for_file(
     Ok(Arc::default())
 }
 
-/// Expand the `[project] analyze` glob patterns into concrete file paths.
+/// Expand the `[project] includes` glob patterns into concrete file paths.
 ///
 /// Patterns are relative to `config_dir` (the directory containing tix.toml).
 /// Returns deduplicated paths. Uses a recursive directory walk + globset
 /// matching (no extra `glob` crate dependency).
-pub fn resolve_analyze_globs(config: &ProjectConfig, config_dir: &Path) -> Vec<PathBuf> {
+pub fn resolve_include_globs(config: &ProjectConfig, config_dir: &Path) -> Vec<PathBuf> {
     let section = match config.project {
-        Some(ref p) if !p.analyze.is_empty() => p,
+        Some(ref p) if !p.includes.is_empty() => p,
         _ => return Vec::new(),
     };
 
     // Build a combined GlobSet from all patterns.
     let mut builder = globset::GlobSetBuilder::new();
-    for pattern in &section.analyze {
+    for pattern in &section.includes {
         match globset::GlobBuilder::new(pattern)
             .literal_separator(true)
             .build()
@@ -266,7 +271,7 @@ pub fn resolve_analyze_globs(config: &ProjectConfig, config_dir: &Path) -> Vec<P
                 builder.add(glob);
             }
             Err(e) => {
-                log::warn!("Invalid analyze glob pattern '{pattern}': {e}");
+                log::warn!("Invalid includes glob pattern '{pattern}': {e}");
             }
         }
     }
@@ -281,9 +286,9 @@ pub fn resolve_analyze_globs(config: &ProjectConfig, config_dir: &Path) -> Vec<P
     // Build an exclude GlobSet from `[project] exclude` patterns so that
     // excluded files (e.g. `**/Cargo.nix`) are never returned even when
     // matched by `analyze` globs.
-    let exclude_set = if !section.exclude.is_empty() {
+    let exclude_set = if !section.excludes.is_empty() {
         let mut exc_builder = globset::GlobSetBuilder::new();
-        for pattern in &section.exclude {
+        for pattern in &section.excludes {
             if let Ok(glob) = globset::GlobBuilder::new(pattern)
                 .literal_separator(true)
                 .build()
@@ -367,10 +372,10 @@ fn walk_dir_matching(
 mod tests {
     use super::*;
 
-    fn config_with_analyze(patterns: Vec<&str>) -> ProjectConfig {
+    fn config_with_includes(patterns: Vec<&str>) -> ProjectConfig {
         ProjectConfig {
             project: Some(ProjectSection {
-                analyze: patterns.into_iter().map(String::from).collect(),
+                includes: patterns.into_iter().map(String::from).collect(),
                 ..Default::default()
             }),
             ..Default::default()
@@ -378,10 +383,10 @@ mod tests {
     }
 
     #[test]
-    fn empty_analyze_returns_empty() {
+    fn empty_includes_returns_empty() {
         let config = ProjectConfig::default();
         let dir = tempfile::tempdir().unwrap();
-        let result = resolve_analyze_globs(&config, dir.path());
+        let result = resolve_include_globs(&config, dir.path());
         assert!(result.is_empty());
     }
 
@@ -395,8 +400,8 @@ mod tests {
         // Non-.nix file should not match.
         std::fs::write(lib_dir.join("README.md"), "hello").unwrap();
 
-        let config = config_with_analyze(vec!["lib/*.nix"]);
-        let result = resolve_analyze_globs(&config, dir.path());
+        let config = config_with_includes(vec!["lib/*.nix"]);
+        let result = resolve_include_globs(&config, dir.path());
         assert_eq!(result.len(), 2, "should match both .nix files");
     }
 
@@ -410,14 +415,14 @@ mod tests {
         std::fs::write(sub_dir.join("deep.nix"), "42").unwrap();
 
         // lib/*.nix should NOT match lib/sub/deep.nix.
-        let config = config_with_analyze(vec!["lib/*.nix"]);
-        let result = resolve_analyze_globs(&config, dir.path());
+        let config = config_with_includes(vec!["lib/*.nix"]);
+        let result = resolve_include_globs(&config, dir.path());
         assert_eq!(result.len(), 1, "should only match top-level lib/ files");
         assert!(result[0].ends_with("top.nix"));
     }
 
     #[test]
-    fn analyze_respects_project_exclude() {
+    fn includes_respects_project_excludes() {
         let dir = tempfile::tempdir().unwrap();
         let lib_dir = dir.path().join("lib");
         std::fs::create_dir(&lib_dir).unwrap();
@@ -428,12 +433,12 @@ mod tests {
 
         let config = ProjectConfig {
             project: Some(ProjectSection {
-                analyze: vec!["**/*.nix".to_string()],
-                exclude: vec!["**/Cargo.nix".to_string()],
+                includes: vec!["**/*.nix".to_string()],
+                excludes: vec!["**/Cargo.nix".to_string()],
             }),
             ..Default::default()
         };
-        let result = resolve_analyze_globs(&config, dir.path());
+        let result = resolve_include_globs(&config, dir.path());
         // Cargo.nix files should be excluded even though **/*.nix matches them.
         assert_eq!(result.len(), 2, "should exclude both Cargo.nix files");
         assert!(
@@ -452,8 +457,8 @@ mod tests {
         std::fs::write(lib_dir.join("top.nix"), "42").unwrap();
         std::fs::write(sub_dir.join("deep.nix"), "42").unwrap();
 
-        let config = config_with_analyze(vec!["lib/**/*.nix"]);
-        let result = resolve_analyze_globs(&config, dir.path());
+        let config = config_with_includes(vec!["lib/**/*.nix"]);
+        let result = resolve_include_globs(&config, dir.path());
         assert_eq!(result.len(), 2, "** should match files at any depth");
     }
 
@@ -464,8 +469,8 @@ mod tests {
 
         // An invalid glob pattern should be skipped (logged as warning),
         // not crash.
-        let config = config_with_analyze(vec!["[invalid"]);
-        let result = resolve_analyze_globs(&config, dir.path());
+        let config = config_with_includes(vec!["[invalid"]);
+        let result = resolve_include_globs(&config, dir.path());
         assert!(
             result.is_empty(),
             "invalid pattern should not match anything"
@@ -573,9 +578,9 @@ mod tests {
         let link = dir.path().join("link");
         std::os::unix::fs::symlink(&real_dir, &link).unwrap();
 
-        let config = config_with_analyze(vec!["*.nix"]);
+        let config = config_with_includes(vec!["*.nix"]);
         // Resolve starting from the symlink path.
-        let result = resolve_analyze_globs(&config, &link);
+        let result = resolve_include_globs(&config, &link);
         assert_eq!(result.len(), 1);
         // The returned path should be canonical (through real_dir, not link).
         let canonical_real = real_dir.canonicalize().unwrap();

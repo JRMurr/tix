@@ -17,5 +17,5 @@ paths = ["nix/*.nix"]
 stubs = ["@callpackage"]
 
 [project]
-analyze = ["test/**/*.nix", "nix/*.nix", "flake.nix", "default.nix"]
-exclude = ["result", ".direnv", ".claude"]
+includes = ["test/**/*.nix", "nix/*.nix", "flake.nix", "default.nix"]
+excludes = ["result", ".direnv", ".claude"]

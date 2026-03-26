@@ -382,7 +382,7 @@ fn generate_toml(
                 );
                 if !result.excludes.is_empty() {
                     section.push_str(&format!(
-                        "exclude = [{}]\n",
+                        "excludes = [{}]\n",
                         format_string_array(&result.excludes),
                     ));
                 }
@@ -416,7 +416,7 @@ fn generate_toml(
     }
 
     // Project section with exclude defaults.
-    sections.push("[project]\nexclude = [\"result\", \".direnv\"]\n".to_string());
+    sections.push("[project]\nexcludes = [\"result\", \".direnv\"]\n".to_string());
 
     sections.join("\n")
 }

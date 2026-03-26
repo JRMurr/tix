@@ -261,7 +261,7 @@ async fn callpackage_context_nixpkgs_toml_format() {
                     stubs = [\"@callpackage\"]
 
                     [project]
-                    analyze = [\"lib/*.nix\"]
+                    includes = [\"lib/*.nix\"]
                 "},
             ),
             (
