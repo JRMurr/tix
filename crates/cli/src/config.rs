@@ -358,11 +358,18 @@ mod tests {
         let root = dir.path();
 
         // Initialize a git repo so .gitignore is recognized.
-        std::process::Command::new("git")
+        // Skip if git is not available (e.g. in Nix build sandbox).
+        let git_init = std::process::Command::new("git")
             .args(["init"])
             .current_dir(root)
-            .output()
-            .expect("git init");
+            .output();
+        match git_init {
+            Ok(o) if o.status.success() => {}
+            _ => {
+                eprintln!("skipping: git not available");
+                return;
+            }
+        }
 
         // Create a .gitignore that ignores a cache directory.
         std::fs::write(root.join(".gitignore"), "cache-dir/\n").unwrap();
