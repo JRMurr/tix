@@ -9040,3 +9040,93 @@ fn scan_type_import_paths_none() {
     let paths = crate::imports::scan_type_import_paths(&module);
     assert!(paths.is_empty());
 }
+
+// ==============================================================================
+// Suppression Directives
+// ==============================================================================
+
+#[test]
+fn nocheck_flag_set_on_module() {
+    let nix = "# tix-nocheck\nlet x = 1; in x";
+    let (db, file) = TestDatabase::single_file(nix).unwrap();
+    let module = lang_ast::module(&db, file);
+    assert!(module.nocheck, "module should have nocheck = true");
+}
+
+#[test]
+fn nocheck_flag_not_set_without_directive() {
+    let nix = "let x = 1; in x";
+    let (db, file) = TestDatabase::single_file(nix).unwrap();
+    let module = lang_ast::module(&db, file);
+    assert!(!module.nocheck, "module should have nocheck = false");
+}
+
+#[test]
+fn ignore_lines_populated() {
+    let nix = "# tix-ignore\nlet x = 1; in x";
+    let (db, file) = TestDatabase::single_file(nix).unwrap();
+    let module = lang_ast::module(&db, file);
+    assert!(
+        module.ignore_lines.contains(&1),
+        "line 1 should be in ignore_lines, got: {:?}",
+        module.ignore_lines
+    );
+}
+
+#[test]
+fn filter_ignored_diagnostics_suppresses_target_line() {
+    use rowan::ast::AstNode;
+
+    // `.foo` on an int produces a type mismatch. The `# tix-ignore` on the
+    // line before should suppress it.
+    let nix = indoc! {"
+        let
+          # tix-ignore
+          x = (1 + 2).foo;
+          y = (3 + 4).bar;
+        in
+          x
+    "};
+
+    let (db, file) = TestDatabase::single_file(nix).unwrap();
+    let module = lang_ast::module(&db, file);
+    let (_, source_map) = lang_ast::module_and_source_maps(&db, file);
+
+    let result = crate::CheckBuilder::from_db(
+        &db,
+        file,
+        Arc::new(TypeAliasRegistry::default()),
+        HashMap::new(),
+        Arc::default(),
+    )
+    .run();
+
+    // Should have at least 2 diagnostics before filtering (one for .foo, one for .bar).
+    assert!(
+        result.diagnostics.len() >= 2,
+        "expected at least 2 diagnostics, got {}",
+        result.diagnostics.len()
+    );
+
+    let root = rnix::Root::parse(nix).tree();
+    let filtered = crate::diagnostic::filter_ignored_diagnostics(
+        result.diagnostics,
+        &module.ignore_lines,
+        &source_map,
+        root.syntax(),
+        nix,
+    );
+
+    // Only the `.bar` diagnostic should remain (`.foo` is on the ignored line).
+    assert_eq!(
+        filtered.len(),
+        1,
+        "expected 1 diagnostic after filtering, got {}: {:?}",
+        filtered.len(),
+        filtered.iter().map(|d| &d.kind).collect::<Vec<_>>()
+    );
+    assert!(
+        matches!(&filtered[0].kind, TixDiagnosticKind::TypeMismatch { .. }),
+        "remaining diagnostic should be TypeMismatch"
+    );
+}

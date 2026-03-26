@@ -1053,6 +1053,21 @@ fn run_check(
 
     let source_text = std::fs::read_to_string(&file_path)?;
 
+    // Apply suppression directives: `# tix-nocheck` clears all diagnostics,
+    // `# tix-ignore` filters diagnostics on the next line.
+    if module.nocheck {
+        result.diagnostics.clear();
+    } else if !module.ignore_lines.is_empty() {
+        let root = rnix::Root::parse(&source_text).tree();
+        result.diagnostics = lang_check::diagnostic::filter_ignored_diagnostics(
+            result.diagnostics,
+            &module.ignore_lines,
+            &source_map,
+            root.syntax(),
+            &source_text,
+        );
+    }
+
     // Collect binding types and root type (shared by both output modes).
     let display_config = if full_types {
         lang_ty::DisplayConfig::full()

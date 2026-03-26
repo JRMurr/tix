@@ -14,15 +14,17 @@ pub mod arbitrary;
 #[cfg(any(test, feature = "proptest_support"))]
 pub mod tests;
 
-use std::{collections::HashMap, fmt, ops, path::Path, sync::LazyLock};
+use std::{collections::HashMap, collections::HashSet, fmt, ops, path::Path, sync::LazyLock};
 
-use comment::gather_doc_comments;
+pub use comment::line_of_offset;
+use comment::{gather_doc_comments, gather_ignore_lines, has_nocheck_directive};
 pub use db::{AstDb, NixFile, RootDatabase};
 use derive_more::From;
 use la_arena::{Arena, ArenaMap, Idx as Id};
 use lower::lower;
 pub use nameres::{group_def, name_resolution, scopes, GroupedDefs, ModuleScopes, NameResolution};
 use rnix::NixLanguage;
+use rowan::ast::AstNode;
 use smol_str::SmolStr;
 use tracing::instrument;
 
@@ -46,9 +48,17 @@ pub fn module_and_source_maps(db: &dyn crate::AstDb, file: NixFile) -> (Module, 
     let parsed = db.parse_file(file);
     let root = parsed.tree();
 
+    let nocheck = has_nocheck_directive(&root);
+    let source_text = root.syntax().text().to_string();
+    let ignore_lines = gather_ignore_lines(&root, &source_text);
+
     let docs = gather_doc_comments(&root);
 
-    lower(root, docs)
+    let (mut module, source_map) = lower(root, docs);
+    module.nocheck = nocheck;
+    module.ignore_lines = ignore_lines;
+
+    (module, source_map)
 }
 
 #[salsa::tracked]
@@ -149,6 +159,10 @@ pub struct Module {
     pub inline_type_aliases: Vec<String>,
     /// Diagnostics emitted during AST lowering (e.g. duplicate keys).
     pub lower_diagnostics: Vec<LowerDiagnostic>,
+    /// `true` when the file contains a `# tix-nocheck` comment — all diagnostics suppressed.
+    pub nocheck: bool,
+    /// 0-indexed line numbers where diagnostics should be suppressed (`# tix-ignore`).
+    pub ignore_lines: HashSet<u32>,
 }
 
 impl Module {

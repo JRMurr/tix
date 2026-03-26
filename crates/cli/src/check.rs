@@ -22,6 +22,7 @@ use lang_ast::{module_and_source_maps, name_resolution, ModuleSourceMap, RootDat
 use lang_check::coordinator::{InferenceCoordinator, SyntaxProvider};
 use lang_check::SyntaxBundle;
 use rayon::prelude::*;
+use rowan::ast::AstNode;
 
 use crate::config::{self, TixConfig};
 use crate::json_output;
@@ -81,6 +82,10 @@ struct RenderableResult {
     source_text: String,
     source_map: ModuleSourceMap,
     diagnostics: Vec<lang_check::diagnostic::TixDiagnostic>,
+    /// `true` if the file has `# tix-nocheck` — all diagnostics suppressed.
+    nocheck: bool,
+    /// 0-indexed lines where diagnostics are suppressed (`# tix-ignore`).
+    ignore_lines: std::collections::HashSet<u32>,
 }
 
 /// Entry point for `tix check`.
@@ -394,6 +399,8 @@ pub fn run_check_project(
                     source_text: fm.source_text,
                     source_map: fm.source_map,
                     diagnostics: vec![],
+                    nocheck: false,
+                    ignore_lines: Default::default(),
                 });
             }
         };
@@ -445,6 +452,9 @@ pub fn run_check_project(
             "finished file"
         );
 
+        let nocheck = inputs.module.nocheck;
+        let ignore_lines = inputs.module.ignore_lines.clone();
+
         // Extract only diagnostics. The heavy InferenceResult is dropped
         // here, keeping memory bounded.
         Some(RenderableResult {
@@ -452,6 +462,8 @@ pub fn run_check_project(
             source_text: fm.source_text,
             source_map: fm.source_map,
             diagnostics: check_result.diagnostics,
+            nocheck,
+            ignore_lines,
         })
     };
 
@@ -534,6 +546,26 @@ pub fn run_check_project(
 
     let mut total_errors = 0usize;
     let mut total_warnings = 0usize;
+
+    // Apply suppression directives before rendering.
+    let results: Vec<RenderableResult> = results
+        .into_iter()
+        .map(|mut r| {
+            if r.nocheck {
+                r.diagnostics.clear();
+            } else if !r.ignore_lines.is_empty() {
+                let root = rnix::Root::parse(&r.source_text).tree();
+                r.diagnostics = lang_check::diagnostic::filter_ignored_diagnostics(
+                    r.diagnostics,
+                    &r.ignore_lines,
+                    &r.source_map,
+                    root.syntax(),
+                    &r.source_text,
+                );
+            }
+            r
+        })
+        .collect();
 
     match format {
         OutputFormat::Human => {

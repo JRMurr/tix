@@ -33,6 +33,7 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
+rowan = { workspace = true }
 tempfile = "3"
 lang_ast = { path = "../lang_ast", features = ["proptest_support"] }
 lang_ty = { path = "../lang_ty", features = ["proptest_support"] }

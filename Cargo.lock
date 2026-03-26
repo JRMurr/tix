@@ -973,6 +973,7 @@ dependencies = [
  "proptest",
  "rayon",
  "rnix",
+ "rowan",
  "rustc-hash 2.1.0",
  "salsa",
  "smallvec",

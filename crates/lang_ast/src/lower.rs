@@ -70,6 +70,8 @@ pub fn lower(root: rnix::Root, doc_comments: DocCommentCtx) -> (Module, ModuleSo
         type_dec_map: ctx.type_dec_map,
         inline_type_aliases,
         lower_diagnostics: ctx.diagnostics,
+        nocheck: false,
+        ignore_lines: Default::default(),
     };
     (module, ctx.source_map)
 }

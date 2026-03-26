@@ -465,24 +465,45 @@ fn spawn_analysis_loop(
                     // Buffer diagnostics for quiescence publication.
                     if dc.enable {
                         if let Some(snap) = _snapshots.get(&result.path) {
-                            let root = snap.syntax.parsed.tree();
-                            let file_uri = Url::from_file_path(&result.path)
-                                .unwrap_or_else(|_| Url::parse("file:///unknown").unwrap());
-                            let mut diags = crate::diagnostics::to_lsp_diagnostics(
-                                &result.diagnostics,
-                                &snap.syntax.source_map,
-                                &snap.syntax.line_index,
-                                &root,
-                                &file_uri,
-                            );
-                            diags.extend(crate::diagnostics::unknown_type_diagnostics(
-                                &result.inference_data.check_result,
-                                &snap.syntax.module,
-                                &snap.syntax.source_map,
-                                &snap.syntax.line_index,
-                                &root,
-                                dc.unknown_type,
-                            ));
+                            let module = &snap.syntax.module;
+                            let diags = if module.nocheck {
+                                vec![]
+                            } else {
+                                let root = snap.syntax.parsed.tree();
+                                let file_uri = Url::from_file_path(&result.path)
+                                    .unwrap_or_else(|_| Url::parse("file:///unknown").unwrap());
+
+                                // Apply # tix-ignore filtering before LSP conversion.
+                                let filtered_diags = if module.ignore_lines.is_empty() {
+                                    result.diagnostics.clone()
+                                } else {
+                                    let source_text = root.syntax().text().to_string();
+                                    lang_check::diagnostic::filter_ignored_diagnostics(
+                                        result.diagnostics.clone(),
+                                        &module.ignore_lines,
+                                        &snap.syntax.source_map,
+                                        root.syntax(),
+                                        &source_text,
+                                    )
+                                };
+
+                                let mut diags = crate::diagnostics::to_lsp_diagnostics(
+                                    &filtered_diags,
+                                    &snap.syntax.source_map,
+                                    &snap.syntax.line_index,
+                                    &root,
+                                    &file_uri,
+                                );
+                                diags.extend(crate::diagnostics::unknown_type_diagnostics(
+                                    &result.inference_data.check_result,
+                                    module,
+                                    &snap.syntax.source_map,
+                                    &snap.syntax.line_index,
+                                    &root,
+                                    dc.unknown_type,
+                                ));
+                                diags
+                            };
                             pending_diags.insert(result.path.clone(), diags);
                         }
                     }
@@ -654,26 +675,45 @@ fn spawn_analysis_loop(
                 let dc = diag_config.lock().clone();
                 let diags = if dc.enable && !was_cancelled {
                     if let Some(snap) = _snapshots.get(path) {
-                        let root = snap.syntax.parsed.tree();
-                        let file_uri = Url::from_file_path(path)
-                            .unwrap_or_else(|_| Url::parse("file:///unknown").unwrap());
-                        let mut diags = crate::diagnostics::to_lsp_diagnostics(
-                            &check_result.diagnostics,
-                            &snap.syntax.source_map,
-                            &snap.syntax.line_index,
-                            &root,
-                            &file_uri,
-                        );
-                        // Append unknown-type diagnostics for `?`-typed bindings.
-                        diags.extend(crate::diagnostics::unknown_type_diagnostics(
-                            &check_result,
-                            &snap.syntax.module,
-                            &snap.syntax.source_map,
-                            &snap.syntax.line_index,
-                            &root,
-                            dc.unknown_type,
-                        ));
-                        diags
+                        let module = &snap.syntax.module;
+                        if module.nocheck {
+                            vec![]
+                        } else {
+                            let root = snap.syntax.parsed.tree();
+                            let file_uri = Url::from_file_path(path)
+                                .unwrap_or_else(|_| Url::parse("file:///unknown").unwrap());
+
+                            let filtered_diags = if module.ignore_lines.is_empty() {
+                                check_result.diagnostics.clone()
+                            } else {
+                                let source_text = root.syntax().text().to_string();
+                                lang_check::diagnostic::filter_ignored_diagnostics(
+                                    check_result.diagnostics.clone(),
+                                    &module.ignore_lines,
+                                    &snap.syntax.source_map,
+                                    root.syntax(),
+                                    &source_text,
+                                )
+                            };
+
+                            let mut diags = crate::diagnostics::to_lsp_diagnostics(
+                                &filtered_diags,
+                                &snap.syntax.source_map,
+                                &snap.syntax.line_index,
+                                &root,
+                                &file_uri,
+                            );
+                            // Append unknown-type diagnostics for `?`-typed bindings.
+                            diags.extend(crate::diagnostics::unknown_type_diagnostics(
+                                &check_result,
+                                module,
+                                &snap.syntax.source_map,
+                                &snap.syntax.line_index,
+                                &root,
+                                dc.unknown_type,
+                            ));
+                            diags
+                        }
                     } else {
                         vec![]
                     }
@@ -1057,23 +1097,41 @@ impl LanguageServer for TixLanguageServer {
                 .filter_map(|(path, analysis)| {
                     let uri = Url::from_file_path(path).ok()?;
                     let diags = if dc.enable {
-                        let root = analysis.parsed.tree();
-                        let mut diags = crate::diagnostics::to_lsp_diagnostics(
-                            &analysis.check_result.diagnostics,
-                            &analysis.source_map,
-                            &analysis.line_index,
-                            &root,
-                            &uri,
-                        );
-                        diags.extend(crate::diagnostics::unknown_type_diagnostics(
-                            &analysis.check_result,
-                            &analysis.module,
-                            &analysis.source_map,
-                            &analysis.line_index,
-                            &root,
-                            dc.unknown_type,
-                        ));
-                        diags
+                        if analysis.module.nocheck {
+                            vec![]
+                        } else {
+                            let root = analysis.parsed.tree();
+
+                            let filtered_diags = if analysis.module.ignore_lines.is_empty() {
+                                analysis.check_result.diagnostics.clone()
+                            } else {
+                                let source_text = root.syntax().text().to_string();
+                                lang_check::diagnostic::filter_ignored_diagnostics(
+                                    analysis.check_result.diagnostics.clone(),
+                                    &analysis.module.ignore_lines,
+                                    &analysis.source_map,
+                                    root.syntax(),
+                                    &source_text,
+                                )
+                            };
+
+                            let mut diags = crate::diagnostics::to_lsp_diagnostics(
+                                &filtered_diags,
+                                &analysis.source_map,
+                                &analysis.line_index,
+                                &root,
+                                &uri,
+                            );
+                            diags.extend(crate::diagnostics::unknown_type_diagnostics(
+                                &analysis.check_result,
+                                &analysis.module,
+                                &analysis.source_map,
+                                &analysis.line_index,
+                                &root,
+                                dc.unknown_type,
+                            ));
+                            diags
+                        }
                     } else {
                         vec![]
                     };

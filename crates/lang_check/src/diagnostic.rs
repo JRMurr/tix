@@ -683,6 +683,54 @@ pub fn warnings_to_diagnostics(warnings: &[Located<Warning>]) -> Vec<TixDiagnost
     warnings.iter().map(warning_to_diagnostic).collect()
 }
 
+// ==============================================================================
+// Suppression Filtering
+// ==============================================================================
+
+/// Filter out diagnostics on lines suppressed by `# tix-ignore`.
+///
+/// For each diagnostic, resolves its source location to a 0-indexed line number
+/// and removes it if that line is in `ignore_lines`.
+///
+/// `syntax_root` should be `root.syntax()` (the root `SyntaxNode`).
+pub fn filter_ignored_diagnostics(
+    diagnostics: Vec<TixDiagnostic>,
+    ignore_lines: &std::collections::HashSet<u32>,
+    source_map: &lang_ast::ModuleSourceMap,
+    syntax_root: &rnix::SyntaxNode,
+    source_text: &str,
+) -> Vec<TixDiagnostic> {
+    if ignore_lines.is_empty() {
+        return diagnostics;
+    }
+
+    diagnostics
+        .into_iter()
+        .filter(|diag| {
+            let byte_offset = match &diag.kind {
+                // DuplicateKey carries its own AstPtr — use the second (duplicate) span.
+                TixDiagnosticKind::DuplicateKey { second, .. } => {
+                    let node = second.to_node(syntax_root);
+                    Some(usize::from(node.text_range().start()))
+                }
+                _ => source_map.node_for_expr(diag.at_expr).map(|ptr| {
+                    let node = ptr.to_node(syntax_root);
+                    usize::from(node.text_range().start())
+                }),
+            };
+
+            match byte_offset {
+                Some(offset) => {
+                    let line = lang_ast::line_of_offset(source_text, offset);
+                    !ignore_lines.contains(&line)
+                }
+                // No source location — keep the diagnostic.
+                None => true,
+            }
+        })
+        .collect()
+}
+
 /// Convert lowering-phase diagnostics into `TixDiagnostic`s.
 ///
 /// Lowering diagnostics carry their own `AstPtr` spans (they don't have an
