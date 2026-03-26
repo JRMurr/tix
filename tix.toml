@@ -6,14 +6,14 @@
 stubs = ["stubs/"]
 
 [context.nixos]
-paths = ["test/nixos_module.nix", "test/nixos_fixture/**/*.nix"]
+includes = ["test/nixos_module.nix", "test/nixos_fixture/**/*.nix"]
 stubs = ["@nixos"]
 
 # nix/ helper files are callPackage-style: they take { pkgs, ... } and get
 # dependency-injected by the flake. @callpackage types pkgs (and friends)
 # from the built-in Pkgs module alias.
 [context.callpackage]
-paths = ["nix/*.nix"]
+includes = ["nix/*.nix"]
 stubs = ["@callpackage"]
 
 [project]

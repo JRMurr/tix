@@ -182,7 +182,7 @@ Load the generated file via `--stubs` or the `stubs` config key:
 stubs = ["./generated-pkgs.tix"]
 
 [context.callpackage]
-paths = ["pkgs/**/*.nix"]
+includes = ["pkgs/**/*.nix"]
 stubs = ["@callpackage"]
 ```
 

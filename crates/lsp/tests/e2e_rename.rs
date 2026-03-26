@@ -95,7 +95,7 @@ async fn rename_in_callpackage_context() {
             "tix.toml",
             indoc! {"
                 [context.callpackage]
-                paths = [\"pkgs/**/*.nix\"]
+                includes = [\"pkgs/**/*.nix\"]
                 stubs = [\"ctx.tix\"]
             "},
         ),
@@ -411,7 +411,7 @@ async fn rename_pattern_param_in_callpackage_context() {
             "tix.toml",
             indoc! {"
                 [context.callpackage]
-                paths = [\"pkgs/**/*.nix\"]
+                includes = [\"pkgs/**/*.nix\"]
                 stubs = [\"ctx.tix\"]
             "},
         ),

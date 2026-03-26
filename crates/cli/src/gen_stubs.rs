@@ -487,7 +487,7 @@ pub fn generate_tix_file_with_docs(
          # Use in tix.toml as a context stub to get typed config:\n\
          #\n\
          #   [context.{ctx}]\n\
-         #   paths = [\"{example_glob}\"]\n\
+         #   includes = [\"{example_glob}\"]\n\
          #   stubs = [\"./path/to/this-file.tix\"]\n\
          \n\
          type {type_name} = {attrset_ty};\n\

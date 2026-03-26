@@ -232,7 +232,7 @@ fn module_merge_builtins_and_local_stubs() {
         &config_path,
         indoc! {r#"
             [context.nixos]
-            paths = ["merge_test.nix"]
+            includes = ["merge_test.nix"]
             stubs = ["@nixos"]
         "#},
     )

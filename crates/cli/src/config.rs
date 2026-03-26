@@ -11,11 +11,11 @@
 // stubs = ["./stubs"]
 //
 // [context.nixos]
-// paths = ["modules/**/*.nix", "nixos/**/*.nix"]
+// includes = ["modules/**/*.nix", "nixos/**/*.nix"]
 // stubs = ["@nixos"]
 //
 // [context.home]
-// paths = ["home/**/*.nix"]
+// includes = ["home/**/*.nix"]
 // stubs = ["@home-manager", "./stubs/home-extra.tix"]
 // ```
 
@@ -137,7 +137,7 @@ pub fn find_matching_context<'a>(
     let relative = file_path.strip_prefix(config_dir).unwrap_or(file_path);
 
     for (name, ctx) in &config.context {
-        let matched = ctx.paths.iter().any(|pattern| {
+        let matched = ctx.includes.iter().any(|pattern| {
             globset::GlobBuilder::new(pattern)
                 .literal_separator(true)
                 .build()
@@ -147,7 +147,7 @@ pub fn find_matching_context<'a>(
         });
 
         let excluded = matched
-            && ctx.exclude.iter().any(|pattern| {
+            && ctx.excludes.iter().any(|pattern| {
                 globset::GlobBuilder::new(pattern)
                     .literal_separator(true)
                     .build()
@@ -185,22 +185,22 @@ mod tests {
             stubs = ["./stubs"]
 
             [context.nixos]
-            paths = ["modules/**/*.nix"]
+            includes = ["modules/**/*.nix"]
             stubs = ["@nixos"]
 
             [context.home]
-            paths = ["home/**/*.nix"]
+            includes = ["home/**/*.nix"]
             stubs = ["@home-manager", "./stubs/home.tix"]
         "#;
         let config: TixConfig = toml::from_str(toml_str).expect("parse error");
         assert_eq!(config.context.len(), 2);
 
         let nixos = &config.context["nixos"];
-        assert_eq!(nixos.paths, vec!["modules/**/*.nix"]);
+        assert_eq!(nixos.includes, vec!["modules/**/*.nix"]);
         assert_eq!(nixos.stubs, vec!["@nixos"]);
 
         let home = &config.context["home"];
-        assert_eq!(home.paths, vec!["home/**/*.nix"]);
+        assert_eq!(home.includes, vec!["home/**/*.nix"]);
         assert_eq!(home.stubs, vec!["@home-manager", "./stubs/home.tix"]);
     }
 
@@ -220,7 +220,7 @@ mod tests {
             excludes = ["vendor/**", "result"]
 
             [context.nixos]
-            paths = ["modules/**/*.nix"]
+            includes = ["modules/**/*.nix"]
             stubs = ["@nixos"]
         "#;
         let config: TixConfig = toml::from_str(toml_str).expect("parse error");
@@ -322,12 +322,12 @@ mod tests {
         let config: TixConfig = toml::from_str(
             r#"
             [context.nixos]
-            paths = ["common/**/*.nix"]
-            exclude = ["common/homemanager/**/*.nix"]
+            includes = ["common/**/*.nix"]
+            excludes = ["common/homemanager/**/*.nix"]
             stubs = ["@nixos"]
 
             [context.home]
-            paths = ["common/homemanager/**/*.nix"]
+            includes = ["common/homemanager/**/*.nix"]
             stubs = ["@home-manager"]
             "#,
         )
@@ -356,11 +356,11 @@ mod tests {
         let config: TixConfig = toml::from_str(
             r#"
             [context.nixos]
-            paths = ["common/*.nix"]
+            includes = ["common/*.nix"]
             stubs = ["@nixos"]
 
             [context.home]
-            paths = ["common/homemanager/**/*.nix"]
+            includes = ["common/homemanager/**/*.nix"]
             stubs = ["@home-manager"]
             "#,
         )

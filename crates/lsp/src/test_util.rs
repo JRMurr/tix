@@ -220,8 +220,8 @@ mod internal {
             context.insert(
                 "test".to_string(),
                 ContextConfig {
-                    paths: vec!["*.nix".to_string()],
-                    exclude: vec![],
+                    includes: vec!["*.nix".to_string()],
+                    excludes: vec![],
                     stubs: vec!["test_context.tix".to_string()],
                 },
             );

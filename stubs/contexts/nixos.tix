@@ -6,7 +6,7 @@
 # Use in tix.toml as a context stub to get typed config:
 #
 #   [context.nixos]
-#   paths = ["modules/**/*.nix"]
+#   includes = ["modules/**/*.nix"]
 #   stubs = ["./path/to/this-file.tix"]
 
 type NixosConfig = {

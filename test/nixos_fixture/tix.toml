@@ -5,9 +5,9 @@
 #       --stubs test/nixos_fixture/stubs/nixos.tix
 
 [context.nixos]
-paths = ["hosts/**/*.nix", "common/*.nix"]
+includes = ["hosts/**/*.nix", "common/*.nix"]
 stubs = ["@nixos"]
 
 [context.home]
-paths = ["common/homemanager/**/*.nix", "home/**/*.nix"]
+includes = ["common/homemanager/**/*.nix", "home/**/*.nix"]
 stubs = ["@home-manager"]

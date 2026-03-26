@@ -69,5 +69,5 @@ subdir = "lib"
 skip_init = true
 tix_toml = """
 [project]
-exclude = ["**/tests/**", "**/test/**"]
+excludes = ["**/tests/**", "**/test/**"]
 """

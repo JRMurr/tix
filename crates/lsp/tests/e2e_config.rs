@@ -62,7 +62,7 @@ async fn tix_toml_context() {
             "tix.toml",
             indoc! {"
                 [context.nixos]
-                paths = [\"modules/*.nix\"]
+                includes = [\"modules/*.nix\"]
                 stubs = [\"nixos_context.tix\"]
             "},
         ),
@@ -125,7 +125,7 @@ async fn context_hover_on_pattern_field() {
             "tix.toml",
             indoc! {"
                 [context.test]
-                paths = [\"src/*.nix\"]
+                includes = [\"src/*.nix\"]
                 stubs = [\"ctx.tix\"]
             "},
         ),
@@ -186,7 +186,7 @@ async fn callpackage_context_lib_hover() {
                 "tix.toml",
                 indoc! {"
                     [context.callpackage]
-                    paths = [\"pkgs/**/*.nix\"]
+                    includes = [\"pkgs/**/*.nix\"]
                     stubs = [\"@callpackage\"]
                 "},
             ),
@@ -253,11 +253,11 @@ async fn callpackage_context_nixpkgs_toml_format() {
                     stubs = []
 
                     [context.nixos]
-                    paths = [\"nixos/**/*.nix\"]
+                    includes = [\"nixos/**/*.nix\"]
                     stubs = [\"@nixos\"]
 
                     [context.callpackage]
-                    paths = [\"pkgs/**/*.nix\"]
+                    includes = [\"pkgs/**/*.nix\"]
                     stubs = [\"@callpackage\"]
 
                     [project]

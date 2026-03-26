@@ -2804,8 +2804,8 @@ mod tests {
             context_map.insert(
                 name.to_string(),
                 ContextConfig {
-                    paths: globs.iter().map(|s| s.to_string()).collect(),
-                    exclude: vec![],
+                    includes: globs.iter().map(|s| s.to_string()).collect(),
+                    excludes: vec![],
                     stubs: vec![format!("stubs/{stub_filename}")],
                 },
             );
@@ -2853,8 +2853,8 @@ mod tests {
             context_map.insert(
                 name.to_string(),
                 ContextConfig {
-                    paths: globs.iter().map(|s| s.to_string()).collect(),
-                    exclude: vec![],
+                    includes: globs.iter().map(|s| s.to_string()).collect(),
+                    excludes: vec![],
                     stubs: vec![format!("@{name}")],
                 },
             );
@@ -3293,8 +3293,8 @@ mod tests {
         context_map.insert(
             "nixos".to_string(),
             ContextConfig {
-                paths: vec!["**/*.nix".to_string()],
-                exclude: vec![],
+                includes: vec!["**/*.nix".to_string()],
+                excludes: vec![],
                 stubs: vec!["@nixos".to_string()],
             },
         );

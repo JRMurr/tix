@@ -144,11 +144,11 @@ pub struct ProjectSection {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ContextConfig {
     /// Glob patterns for files this context applies to.
-    pub paths: Vec<String>,
+    pub includes: Vec<String>,
 
-    /// Glob patterns for files to exclude even if `paths` matches.
+    /// Glob patterns for files to exclude even if `includes` matches.
     #[serde(default)]
-    pub exclude: Vec<String>,
+    pub excludes: Vec<String>,
 
     /// Stub entries: `@nixos` for built-in, `./path.tix` for user files.
     #[serde(default)]
@@ -208,7 +208,7 @@ pub fn resolve_context_for_file(
     let relative = file_path.strip_prefix(config_dir).unwrap_or(file_path);
 
     for ctx in config.context.values() {
-        let matched = ctx.paths.iter().any(|pattern| {
+        let matched = ctx.includes.iter().any(|pattern| {
             globset::GlobBuilder::new(pattern)
                 .literal_separator(true)
                 .build()
@@ -218,7 +218,7 @@ pub fn resolve_context_for_file(
         });
 
         let excluded = matched
-            && ctx.exclude.iter().any(|pattern| {
+            && ctx.excludes.iter().any(|pattern| {
                 globset::GlobBuilder::new(pattern)
                     .literal_separator(true)
                     .build()
@@ -481,24 +481,24 @@ mod tests {
     fn context_exclude_defaults_to_empty() {
         let toml_str = r#"
             [context.nixos]
-            paths = ["modules/**/*.nix"]
+            includes = ["modules/**/*.nix"]
             stubs = ["@nixos"]
         "#;
         let config: ProjectConfig = toml::from_str(toml_str).expect("parse error");
-        assert!(config.context["nixos"].exclude.is_empty());
+        assert!(config.context["nixos"].excludes.is_empty());
     }
 
     #[test]
     fn context_exclude_parses_when_present() {
         let toml_str = r#"
             [context.nixos]
-            paths = ["common/**/*.nix", "hosts/**/*.nix"]
-            exclude = ["common/homemanager/**/*.nix", "common/default.nix"]
+            includes = ["common/**/*.nix", "hosts/**/*.nix"]
+            excludes = ["common/homemanager/**/*.nix", "common/default.nix"]
             stubs = ["@nixos"]
         "#;
         let config: ProjectConfig = toml::from_str(toml_str).expect("parse error");
         assert_eq!(
-            config.context["nixos"].exclude,
+            config.context["nixos"].excludes,
             vec!["common/homemanager/**/*.nix", "common/default.nix"]
         );
     }
@@ -507,12 +507,12 @@ mod tests {
     fn resolve_context_respects_exclude() {
         let toml_str = r#"
             [context.nixos]
-            paths = ["common/**/*.nix"]
-            exclude = ["common/homemanager/**/*.nix"]
+            includes = ["common/**/*.nix"]
+            excludes = ["common/homemanager/**/*.nix"]
             stubs = ["@nixos"]
 
             [context.home]
-            paths = ["common/homemanager/**/*.nix"]
+            includes = ["common/homemanager/**/*.nix"]
             stubs = ["@home-manager"]
         "#;
         let config: ProjectConfig = toml::from_str(toml_str).expect("parse error");

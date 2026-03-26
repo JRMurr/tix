@@ -377,7 +377,7 @@ fn generate_toml(
             if !result.paths.is_empty() {
                 used_patterns.extend(result.paths.iter().cloned());
                 let mut section = format!(
-                    "[context.{name}]\npaths = [{}]\n",
+                    "[context.{name}]\nincludes = [{}]\n",
                     format_string_array(&result.paths),
                 );
                 if !result.excludes.is_empty() {

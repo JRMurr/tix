@@ -231,7 +231,7 @@ async fn demand_driven_import_with_callpackage_context() {
                 "tix.toml",
                 indoc! {"
                     [context.callpackage]
-                    paths = [\"pkgs/**/*.nix\"]
+                    includes = [\"pkgs/**/*.nix\"]
                     stubs = [\"@callpackage\"]
                 "},
             ),

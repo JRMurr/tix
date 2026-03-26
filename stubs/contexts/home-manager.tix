@@ -6,7 +6,7 @@
 # Use in tix.toml as a context stub to get typed config:
 #
 #   [context.home]
-#   paths = ["home/**/*.nix"]
+#   includes = ["home/**/*.nix"]
 #   stubs = ["./path/to/this-file.tix"]
 
 type HomeManagerConfig = {

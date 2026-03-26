@@ -372,7 +372,7 @@ async fn nixpkgs_beast_lib_hover() {
                     stubs = []
 
                     [context.callpackage]
-                    paths = [\"pkgs/**/*.nix\"]
+                    includes = [\"pkgs/**/*.nix\"]
                     stubs = [\"@callpackage\"]
                 "},
             ),
@@ -477,10 +477,10 @@ fn create_nixpkgs_like_workspace(pkg_rel_path: &str, pkg_source: &str) -> PathBu
         root.join("tix.toml"),
         "stubs = []\n\n\
          [context.nixos]\n\
-         paths = [\"nixos/**/*.nix\"]\n\
+         includes = [\"nixos/**/*.nix\"]\n\
          stubs = [\"@nixos\"]\n\n\
          [context.callpackage]\n\
-         paths = [\"pkgs/**/*.nix\"]\n\
+         includes = [\"pkgs/**/*.nix\"]\n\
          stubs = [\"@callpackage\"]\n\n\
          [project]\n\
          includes = [\"lib/*.nix\"]\n",
@@ -564,7 +564,7 @@ async fn nixpkgs_callpackage_lib_hover() {
                 &format!(
                     "stubs = []\n\n\
                      [context.callpackage]\n\
-                     paths = [\"pkgs/**/*.nix\"]\n\
+                     includes = [\"pkgs/**/*.nix\"]\n\
                      stubs = [\"@callpackage\"]\n"
                 ),
             ),
