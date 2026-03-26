@@ -59,6 +59,10 @@ url = "https://github.com/nix-community/nixvim"
 name = "dream2nix"
 url = "https://github.com/nix-community/dream2nix"
 
+[[repo]]
+name = "llm-agents-nix"
+url = "https://github.com/numtide/llm-agents.nix"
+
 # -- nixpkgs lib (subdir only) --
 
 [[repo]]
