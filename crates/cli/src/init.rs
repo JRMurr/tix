@@ -246,15 +246,210 @@ fn derive_glob_patterns(
     excludes.sort();
     excludes.dedup();
 
-    // Collect the directory prefixes that have recursive globs.
+    // Remove patterns subsumed by a broader recursive glob (e.g.
+    // `dir/sub/**/*.nix` under `dir/**/*.nix`).
+    remove_subsumed(&mut patterns);
+
+    // -------------------------------------------------------------------------
+    // Hierarchical merge pass: collapse sibling dir/**/*.nix globs into a
+    // broader parent/**/*.nix glob when doing so is more concise.
+    //
+    // For example, if we have:
+    //   modules/networking/**/*.nix
+    //   modules/services/**/*.nix
+    //   modules/hardware/e.nix        (individual file)
+    //
+    // And no other-kind files exist under modules/, we can replace all three
+    // with just modules/**/*.nix.
+    //
+    // When some subdirectories under the parent contain other-kind files, we
+    // can still merge if glob + excludes is more concise than the originals.
+    // -------------------------------------------------------------------------
+    merge_sibling_globs(&mut patterns, &mut excludes, &other_kind_paths);
+
+    GlobResult {
+        paths: patterns,
+        excludes,
+    }
+}
+
+/// Try to merge sibling `dir/**/*.nix` globs (and individual files) into a
+/// broader `parent/**/*.nix` glob. Iterates until no more merges are possible,
+/// handling multi-level directory trees.
+fn merge_sibling_globs(
+    patterns: &mut Vec<String>,
+    excludes: &mut Vec<String>,
+    other_kind_paths: &[&Path],
+) {
+    loop {
+        // First, promote lone child globs to their parent level when safe.
+        // This enables multi-level merging: a/c/z/**/*.nix → a/c/**/*.nix,
+        // which can then merge with a/b/**/*.nix → a/**/*.nix.
+        let promoted = try_promote_pass(patterns, other_kind_paths);
+
+        let merged = try_merge_pass(patterns, excludes, other_kind_paths);
+        if !merged && !promoted {
+            break;
+        }
+        // After merging, clean up: remove patterns subsumed by a new parent glob.
+        remove_subsumed(patterns);
+    }
+}
+
+/// Promote lone child globs to their parent directory when safe.
+///
+/// If `dir/sub/**/*.nix` is the only pattern under `dir/` and no other-kind
+/// files exist under `dir/` outside of `sub/`, promote to `dir/**/*.nix`.
+fn try_promote_pass(patterns: &mut [String], other_kind_paths: &[&Path]) -> bool {
+    // Only consider recursive globs for promotion.
+    let mut by_parent: HashMap<PathBuf, Vec<usize>> = HashMap::new();
+    for (i, pattern) in patterns.iter().enumerate() {
+        if let Some(dir) = pattern.strip_suffix("/**/*.nix") {
+            if let Some(parent) = Path::new(dir).parent() {
+                if !parent.as_os_str().is_empty() && parent != Path::new(".") {
+                    by_parent.entry(parent.to_path_buf()).or_default().push(i);
+                }
+            }
+        }
+    }
+
+    let mut any_promoted = false;
+
+    for (parent, indices) in &by_parent {
+        // Only promote when there's exactly one child glob under this parent.
+        if indices.len() != 1 {
+            continue;
+        }
+
+        let parent_glob = format!("{}/**/*.nix", parent.display());
+        if patterns.contains(&parent_glob) {
+            continue;
+        }
+
+        // Check that no other-kind files exist under parent.
+        let parent_prefix = format!("{}/", parent.display());
+        let has_conflicts = other_kind_paths
+            .iter()
+            .any(|p| p.to_str().is_some_and(|s| s.starts_with(&parent_prefix)));
+
+        if !has_conflicts {
+            patterns[indices[0]] = parent_glob;
+            any_promoted = true;
+            // One promotion per pass to keep indices valid.
+            break;
+        }
+    }
+
+    any_promoted
+}
+
+/// One pass of sibling merging. Returns true if any merge happened.
+fn try_merge_pass(
+    patterns: &mut Vec<String>,
+    excludes: &mut Vec<String>,
+    other_kind_paths: &[&Path],
+) -> bool {
+    // Group current patterns by what their "parent directory" would be if merged.
+    // For "dir/**/*.nix" → parent is dir's parent.
+    // For "dir/file.nix" → parent is dir.
+    let mut by_parent: HashMap<PathBuf, Vec<usize>> = HashMap::new();
+    for (i, pattern) in patterns.iter().enumerate() {
+        if let Some(parent) = merge_parent(pattern) {
+            if !parent.as_os_str().is_empty() && parent != Path::new(".") {
+                by_parent.entry(parent).or_default().push(i);
+            }
+        }
+    }
+
+    let mut any_merged = false;
+
+    for (parent, indices) in &by_parent {
+        // Need 2+ patterns under the same parent to consider merging.
+        if indices.len() < 2 {
+            continue;
+        }
+
+        let parent_glob = format!("{}/**/*.nix", parent.display());
+
+        // If this parent glob already exists, skip.
+        if patterns.contains(&parent_glob) {
+            continue;
+        }
+
+        // Check what other-kind files exist under this parent.
+        let parent_prefix = format!("{}/", parent.display());
+        let others_under_parent: Vec<&Path> = other_kind_paths
+            .iter()
+            .filter(|p| p.to_str().is_some_and(|s| s.starts_with(&parent_prefix)))
+            .copied()
+            .collect();
+
+        // Compute what new excludes would be needed: other-kind files under
+        // parent that aren't already covered by existing excludes.
+        let new_excludes: Vec<String> = others_under_parent
+            .iter()
+            .filter(|p| !is_covered_by_excludes(p, excludes))
+            .map(|p| p.display().to_string())
+            .collect();
+
+        // Conciseness check: 1 parent glob + new excludes vs current pattern count.
+        let current_count = indices.len();
+        let merged_count = 1 + new_excludes.len();
+
+        if merged_count < current_count {
+            // Merge: replace all child patterns with the parent glob.
+            // Remove indices in reverse order to keep indices valid.
+            let mut sorted_indices = indices.clone();
+            sorted_indices.sort_unstable();
+            for &i in sorted_indices.iter().rev() {
+                patterns.remove(i);
+            }
+            patterns.push(parent_glob);
+            excludes.extend(new_excludes);
+            patterns.sort();
+            patterns.dedup();
+            excludes.sort();
+            excludes.dedup();
+            any_merged = true;
+            // Only one merge per pass to avoid index invalidation.
+            break;
+        }
+    }
+
+    any_merged
+}
+
+/// Get the parent directory for merging purposes.
+/// - `dir/**/*.nix` → dir's parent
+/// - `dir/file.nix` → dir (the file's parent directory)
+fn merge_parent(pattern: &str) -> Option<PathBuf> {
+    if let Some(dir) = pattern.strip_suffix("/**/*.nix") {
+        Path::new(dir).parent().map(|p| p.to_path_buf())
+    } else {
+        Path::new(pattern).parent().map(|p| p.to_path_buf())
+    }
+}
+
+/// Check if a file path is already covered by an existing exclude pattern.
+fn is_covered_by_excludes(path: &Path, excludes: &[String]) -> bool {
+    let path_str = path.to_str().unwrap_or("");
+    excludes.iter().any(|exc| {
+        if let Some(dir) = exc.strip_suffix("/**/*.nix") {
+            let prefix = format!("{dir}/");
+            path_str.starts_with(&prefix) || path_str == dir
+        } else {
+            path_str == exc
+        }
+    })
+}
+
+/// Remove patterns subsumed by a broader recursive glob in the same set.
+fn remove_subsumed(patterns: &mut Vec<String>) {
     let glob_dirs: Vec<String> = patterns
         .iter()
         .filter_map(|p| p.strip_suffix("/**/*.nix").map(|d| d.to_string()))
         .collect();
 
-    // Remove any pattern whose path falls under an existing recursive glob.
-    // This handles both individual files (e.g. `dir/sub/foo.nix` under `dir/**/*.nix`)
-    // and child globs (e.g. `dir/sub/**/*.nix` under `dir/**/*.nix`).
     patterns.retain(|pattern| {
         let pattern_dir = if let Some(dir) = pattern.strip_suffix("/**/*.nix") {
             dir
@@ -268,11 +463,6 @@ fn derive_glob_patterns(
             pattern_dir != glob_dir.as_str() && pattern_dir.starts_with(&format!("{glob_dir}/"))
         })
     });
-
-    GlobResult {
-        paths: patterns,
-        excludes,
-    }
 }
 
 /// Compress a set of other-kind files into exclude patterns.
@@ -545,6 +735,10 @@ mod tests {
         //   common/homemanager/claude/default.nix   (subsumed by the glob above)
         //   common/homemanager/fish/default.nix     (subsumed)
         //   common/homemanager/git/default.nix      (subsumed)
+        //
+        // The initial pass creates common/homemanager/**/*.nix (subsumes child dirs).
+        // Then hierarchical promotion lifts it to common/**/*.nix since there are
+        // no other-kind files under common/.
         let files = vec![
             (
                 PathBuf::from("common/homemanager/a.nix"),
@@ -568,7 +762,7 @@ mod tests {
             ),
         ];
         let result = derive_glob_patterns(&files, &files);
-        assert_eq!(result.paths, vec!["common/homemanager/**/*.nix"]);
+        assert_eq!(result.paths, vec!["common/**/*.nix"]);
         assert!(result.excludes.is_empty());
     }
 
@@ -812,6 +1006,174 @@ mod tests {
             "should compress subdir into glob exclude, got excludes: {:?}",
             result.excludes
         );
+    }
+
+    // =========================================================================
+    // Hierarchical merging tests
+    // =========================================================================
+
+    /// Sibling directory globs merge into a parent glob when all are pure.
+    #[test]
+    fn merge_sibling_globs_pure_directories() {
+        // Three sibling directories, all nixos.
+        let files = vec![
+            (
+                PathBuf::from("modules/networking/a.nix"),
+                dummy_classification(),
+            ),
+            (
+                PathBuf::from("modules/networking/b.nix"),
+                dummy_classification(),
+            ),
+            (
+                PathBuf::from("modules/services/c.nix"),
+                dummy_classification(),
+            ),
+            (
+                PathBuf::from("modules/services/d.nix"),
+                dummy_classification(),
+            ),
+            (
+                PathBuf::from("modules/hardware/e.nix"),
+                dummy_classification(),
+            ),
+            (
+                PathBuf::from("modules/hardware/f.nix"),
+                dummy_classification(),
+            ),
+        ];
+        let result = derive_glob_patterns(&files, &files);
+        assert_eq!(
+            result.paths,
+            vec!["modules/**/*.nix"],
+            "sibling pure-kind globs should merge into parent glob"
+        );
+        assert!(result.excludes.is_empty());
+    }
+
+    /// Sibling globs merge with excludes when some subdirectories are other-kind.
+    #[test]
+    fn merge_sibling_globs_with_excludes() {
+        let nixos_files = vec![
+            (
+                PathBuf::from("modules/networking/a.nix"),
+                dummy_classification(),
+            ),
+            (
+                PathBuf::from("modules/networking/b.nix"),
+                dummy_classification(),
+            ),
+            (
+                PathBuf::from("modules/services/c.nix"),
+                dummy_classification(),
+            ),
+            (
+                PathBuf::from("modules/services/d.nix"),
+                dummy_classification(),
+            ),
+            (
+                PathBuf::from("modules/hardware/e.nix"),
+                dummy_classification(),
+            ),
+            (
+                PathBuf::from("modules/hardware/f.nix"),
+                dummy_classification(),
+            ),
+        ];
+        // One other-kind file under modules/hm/.
+        let library_files = vec![(
+            PathBuf::from("modules/hm/lib.nix"),
+            classification(NixFileKind::Library),
+        )];
+        let all_files: Vec<_> = nixos_files
+            .iter()
+            .chain(library_files.iter())
+            .cloned()
+            .collect();
+
+        let result = derive_glob_patterns(&nixos_files, &all_files);
+        assert_eq!(
+            result.paths,
+            vec!["modules/**/*.nix"],
+            "should merge into parent glob with excludes"
+        );
+        assert!(
+            result.excludes.contains(&"modules/hm/lib.nix".to_string()),
+            "should exclude the other-kind file, got: {:?}",
+            result.excludes
+        );
+    }
+
+    /// Don't merge when excludes would make the result longer.
+    #[test]
+    fn merge_sibling_globs_skipped_when_not_concise() {
+        let nixos_files = vec![
+            (
+                PathBuf::from("modules/networking/a.nix"),
+                dummy_classification(),
+            ),
+            (
+                PathBuf::from("modules/networking/b.nix"),
+                dummy_classification(),
+            ),
+            (
+                PathBuf::from("modules/services/c.nix"),
+                dummy_classification(),
+            ),
+            (
+                PathBuf::from("modules/services/d.nix"),
+                dummy_classification(),
+            ),
+        ];
+        // Many other-kind files — too many excludes to be worth merging.
+        let library_files: Vec<_> = (0..10)
+            .map(|i| {
+                (
+                    PathBuf::from(format!("modules/lib/f{i}.nix")),
+                    classification(NixFileKind::Library),
+                )
+            })
+            .collect();
+        let all_files: Vec<_> = nixos_files
+            .iter()
+            .chain(library_files.iter())
+            .cloned()
+            .collect();
+
+        let result = derive_glob_patterns(&nixos_files, &all_files);
+        // 2 child globs vs 1 parent + 10 excludes → keep children.
+        assert!(
+            !result.paths.contains(&"modules/**/*.nix".to_string()),
+            "should not merge when excludes make it longer, got: {:?}",
+            result.paths
+        );
+        assert_eq!(
+            result.paths,
+            vec!["modules/networking/**/*.nix", "modules/services/**/*.nix",]
+        );
+    }
+
+    /// Multi-level merging: child merges first, then parent merges.
+    #[test]
+    fn merge_multi_level() {
+        // a/b/x/*.nix, a/b/y/*.nix → a/b/**/*.nix
+        // a/c/z/*.nix (2 files)    → a/c/**/*.nix (via subdir subsumption)
+        // Then a/b/**/*.nix + a/c/**/*.nix → a/**/*.nix
+        let files = vec![
+            (PathBuf::from("a/b/x/1.nix"), dummy_classification()),
+            (PathBuf::from("a/b/x/2.nix"), dummy_classification()),
+            (PathBuf::from("a/b/y/3.nix"), dummy_classification()),
+            (PathBuf::from("a/b/y/4.nix"), dummy_classification()),
+            (PathBuf::from("a/c/z/5.nix"), dummy_classification()),
+            (PathBuf::from("a/c/z/6.nix"), dummy_classification()),
+        ];
+        let result = derive_glob_patterns(&files, &files);
+        assert_eq!(
+            result.paths,
+            vec!["a/**/*.nix"],
+            "multi-level merging should collapse to top-level glob"
+        );
+        assert!(result.excludes.is_empty());
     }
 
     fn dummy_classification() -> Classification {
