@@ -7,7 +7,7 @@
 // subcommands.
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde::Deserialize;
@@ -26,16 +26,10 @@ fn format_source_annotation(
     source_roots: &[(String, PathBuf)],
     indent: &str,
 ) -> Option<String> {
+    let file_path = Path::new(&pos.file);
     for (id, root) in source_roots {
-        let root_str = root.to_string_lossy();
-        // Ensure the root ends with / for clean stripping.
-        let prefix = if root_str.ends_with('/') {
-            root_str.to_string()
-        } else {
-            format!("{root_str}/")
-        };
-        if pos.file.starts_with(&prefix) {
-            let relative = &pos.file[prefix.len()..];
+        if let Ok(relative) = file_path.strip_prefix(root) {
+            let relative = relative.display();
             return Some(format!(
                 "{indent}@source {id}:{relative}:{}:{}",
                 pos.line, pos.column

@@ -79,21 +79,25 @@ fn take_source_annotation(inner: &mut Pairs<Rule>) -> Option<SourceLocation> {
 }
 
 /// Parse a source location string like `nixpkgs:lib/trivial.nix:61:8`.
-/// Splits from the right on `:` to handle paths that may contain colons.
+/// Splits from the right on `:` to extract line/column, then splits the
+/// remaining prefix on the first `:` to separate source_id from relative_path.
 fn parse_source_loc(s: &str) -> Option<SourceLocation> {
-    // Split from right: last segment is column, second-to-last is line,
-    // everything before is the source-id-prefixed path.
+    // Split from right: last segment is column, second-to-last is line.
     let last_colon = s.rfind(':')?;
     let column: u32 = s[last_colon + 1..].parse().ok()?;
     let rest = &s[..last_colon];
     let second_colon = rest.rfind(':')?;
     let line: u32 = rest[second_colon + 1..].parse().ok()?;
-    let path = &rest[..second_colon];
-    if path.is_empty() {
+    let id_and_path = &rest[..second_colon];
+
+    // Split source_id from relative_path on the first `:`.
+    let (source_id, relative_path) = id_and_path.split_once(':')?;
+    if source_id.is_empty() || relative_path.is_empty() {
         return None;
     }
     Some(SourceLocation {
-        path: SmolStr::from(path),
+        source_id: SmolStr::from(source_id),
+        relative_path: SmolStr::from(relative_path),
         line,
         column,
     })
@@ -599,16 +603,19 @@ mod tests {
     #[test]
     fn parse_source_loc_basic() {
         let loc = parse_source_loc("nixpkgs:lib/trivial.nix:61:8").unwrap();
-        assert_eq!(loc.path.as_str(), "nixpkgs:lib/trivial.nix");
+        assert_eq!(loc.source_id.as_str(), "nixpkgs");
+        assert_eq!(loc.relative_path.as_str(), "lib/trivial.nix");
         assert_eq!(loc.line, 61);
         assert_eq!(loc.column, 8);
     }
 
     #[test]
     fn parse_source_loc_with_colons_in_path() {
-        // Unlikely but handles paths with colons gracefully by splitting from right.
+        // Handles paths with colons by splitting source_id on first `:`,
+        // then line/column from the right.
         let loc = parse_source_loc("nixpkgs:some:path:42:5").unwrap();
-        assert_eq!(loc.path.as_str(), "nixpkgs:some:path");
+        assert_eq!(loc.source_id.as_str(), "nixpkgs");
+        assert_eq!(loc.relative_path.as_str(), "some:path");
         assert_eq!(loc.line, 42);
         assert_eq!(loc.column, 5);
     }
@@ -1187,7 +1194,8 @@ mod tests {
             crate::TixDeclaration::ValDecl { name, source, .. } => {
                 assert_eq!(name.as_str(), "id");
                 let src_loc = source.as_ref().expect("should have source location");
-                assert_eq!(src_loc.path.as_str(), "nixpkgs:lib/trivial.nix");
+                assert_eq!(src_loc.source_id.as_str(), "nixpkgs");
+                assert_eq!(src_loc.relative_path.as_str(), "lib/trivial.nix");
                 assert_eq!(src_loc.line, 61);
                 assert_eq!(src_loc.column, 8);
             }
@@ -1210,7 +1218,7 @@ mod tests {
                 assert_eq!(name.as_str(), "id");
                 assert_eq!(doc.as_deref(), Some("The identity function."));
                 let src_loc = source.as_ref().expect("should have source location");
-                assert_eq!(src_loc.path.as_str(), "nixpkgs:lib/trivial.nix");
+                assert_eq!(src_loc.source_id.as_str(), "nixpkgs");
                 assert_eq!(src_loc.line, 61);
             }
             other => panic!("expected ValDecl, got: {other:?}"),
@@ -1235,7 +1243,8 @@ mod tests {
             } => {
                 assert_eq!(name.as_str(), "lib");
                 let src_loc = source.as_ref().expect("should have source location");
-                assert_eq!(src_loc.path.as_str(), "nixpkgs:lib/default.nix");
+                assert_eq!(src_loc.source_id.as_str(), "nixpkgs");
+                assert_eq!(src_loc.relative_path.as_str(), "lib/default.nix");
                 assert_eq!(declarations.len(), 1);
             }
             other => panic!("expected Module, got: {other:?}"),
@@ -1253,7 +1262,8 @@ mod tests {
             crate::TixDeclaration::TypeAlias { name, source, .. } => {
                 assert_eq!(name.as_str(), "Derivation");
                 let src_loc = source.as_ref().expect("should have source location");
-                assert_eq!(src_loc.path.as_str(), "nixpkgs:lib/types.nix");
+                assert_eq!(src_loc.source_id.as_str(), "nixpkgs");
+                assert_eq!(src_loc.relative_path.as_str(), "lib/types.nix");
                 assert_eq!(src_loc.line, 10);
                 assert_eq!(src_loc.column, 3);
             }
@@ -1283,10 +1293,8 @@ mod tests {
         match &file.declarations[0] {
             crate::TixDeclaration::ValDecl { source, .. } => {
                 let src_loc = source.as_ref().expect("should have source location");
-                assert_eq!(
-                    src_loc.path.as_str(),
-                    "home-manager:modules/programs/git.nix"
-                );
+                assert_eq!(src_loc.source_id.as_str(), "home-manager");
+                assert_eq!(src_loc.relative_path.as_str(), "modules/programs/git.nix");
                 assert_eq!(src_loc.line, 15);
                 assert_eq!(src_loc.column, 3);
             }

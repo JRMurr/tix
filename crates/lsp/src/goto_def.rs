@@ -169,21 +169,18 @@ pub(crate) fn decl_location_to_lsp(
 
 /// Resolve a `SourceLocation` (from `@source` annotation) to an LSP `Location`
 /// by looking up the source root and constructing an absolute path.
-fn resolve_source_location(
+pub(crate) fn resolve_source_location(
     src: &comment_parser::SourceLocation,
     source_roots: &HashMap<SmolStr, PathBuf>,
 ) -> Option<Location> {
-    // Split path on first `:` to get (source_id, relative_path).
-    let colon_idx = src.path.find(':')?;
-    let source_id = &src.path[..colon_idx];
-    let relative_path = &src.path[colon_idx + 1..];
-
-    let root = source_roots.get(source_id)?;
-    let abs_path = root.join(relative_path);
+    let root = source_roots.get(src.source_id.as_str())?;
+    let abs_path = root.join(src.relative_path.as_str());
+    // Source roots point into the Nix store (immutable), so the existence
+    // check is reliable. Falling back to the stub is better UX than jumping
+    // to a nonexistent file.
     if !abs_path.exists() {
         return None;
     }
-
     let uri = Url::from_file_path(&abs_path).ok()?;
     // Nix positions are 1-based; LSP positions are 0-based.
     let pos = Position::new(src.line.saturating_sub(1), src.column.saturating_sub(1));

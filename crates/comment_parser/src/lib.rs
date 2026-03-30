@@ -176,13 +176,13 @@ pub struct FieldDoc {
 }
 
 /// Original source location of a declaration, extracted from `@source` annotations.
-/// Stores a source-id-prefixed relative path (e.g. `nixpkgs:lib/trivial.nix`) plus
-/// line/column. Resolved to an absolute path at jump time using configured source roots.
+/// Resolved to an absolute path at jump time using configured source roots.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceLocation {
-    /// Source-id prefixed relative path, e.g. `"nixpkgs:lib/trivial.nix"`.
-    /// Split on the first `:` to get `(source_id, relative_path)`.
-    pub path: SmolStr,
+    /// Source identifier, e.g. `"nixpkgs"` or `"home-manager"`.
+    pub source_id: SmolStr,
+    /// Relative path within the source root, e.g. `"lib/trivial.nix"`.
+    pub relative_path: SmolStr,
     pub line: u32,
     pub column: u32,
 }
