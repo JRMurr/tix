@@ -17,6 +17,12 @@ const MAX_RENDERED_DIAGNOSTICS: usize = 200;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
+/// Parse a `--source-root` value of the form `id=path`.
+fn parse_source_root(s: &str) -> Result<(String, PathBuf), String> {
+    let (id, path) = s.split_once('=').ok_or("expected id=path")?;
+    Ok((id.to_string(), PathBuf::from(path)))
+}
+
 /// Output format for diagnostics and type information.
 #[derive(Clone, Debug, Default, ValueEnum)]
 pub enum OutputFormat {
@@ -209,6 +215,11 @@ struct CommonGenStubsArgs {
     /// Include option descriptions as ## doc comments in the output
     #[arg(long)]
     descriptions: bool,
+
+    /// Source root for @source annotations. Format: id=path (e.g. nixpkgs=/nix/store/...-source).
+    /// Can be repeated for multiple roots.
+    #[arg(long = "source-root", value_parser = parse_source_root)]
+    source_roots: Vec<(String, PathBuf)>,
 }
 
 impl From<CommonGenStubsArgs> for gen_stubs::CommonOptions {
@@ -220,7 +231,7 @@ impl From<CommonGenStubsArgs> for gen_stubs::CommonOptions {
             output: args.output,
             max_depth: args.max_depth,
             descriptions: args.descriptions,
-            source_roots: Vec::new(),
+            source_roots: args.source_roots,
         }
     }
 }
@@ -269,6 +280,11 @@ enum GenStubsSource {
         /// python3Packages, etc. (0 = flat, default: 1)
         #[arg(long, default_value = "1")]
         max_depth: u32,
+
+        /// Source root for @source annotations. Format: id=path (e.g. nixpkgs=/nix/store/...-source).
+        /// Can be repeated for multiple roots.
+        #[arg(long = "source-root", value_parser = parse_source_root)]
+        source_roots: Vec<(String, PathBuf)>,
     },
 }
 
@@ -395,12 +411,13 @@ fn run_gen_stubs(source: GenStubsSource) -> Result<(), Box<dyn Error>> {
             from_json,
             output,
             max_depth,
+            source_roots,
         } => gen_stubs::run_pkgs(gen_stubs::PkgsOptions {
             nixpkgs,
             from_json,
             output,
             max_depth,
-            source_roots: Vec::new(),
+            source_roots,
         }),
     }
 }
