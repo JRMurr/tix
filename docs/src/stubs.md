@@ -190,6 +190,39 @@ stubs = ["@callpackage"]
 
 Once generated, point your `tix.toml` at them. See [Configuration](./configuration.md).
 
+## Source annotations
+
+Stub declarations can carry `@source` annotations that link back to the
+original source file. When present, **go-to-definition** in the LSP jumps
+directly to the nixpkgs (or home-manager) source instead of landing in
+the generated `.tix` file.
+
+### Syntax
+
+```
+@source <source-id>:<relative-path>:<line>:<column>
+```
+
+For example:
+
+```tix
+@source nixpkgs:lib/trivial.nix:61:8
+val id :: a -> a;
+```
+
+`@source` can appear before `val`, `type`, and `module` declarations, as
+well as on individual attrset fields (used in NixOS/Home Manager option stubs).
+
+### How it works
+
+When stubs are generated with `--source-root nixpkgs=/nix/store/...-source`,
+absolute Nix store paths from `builtins.unsafeGetAttrPos` are stripped against
+the root to produce relative paths. At LSP startup the source root is resolved
+(typically from the flake lock) so that go-to-definition can open the real file.
+
+When using `[stubs.generate]` in `tix.toml`, source roots are passed
+automatically — no manual `--source-root` flags needed.
+
 ## Using stubs in your code
 
 Assign stub types to imports via doc comments:
