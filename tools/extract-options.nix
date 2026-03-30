@@ -169,8 +169,16 @@ let
               # returns null for programmatically assembled option attrsets.
               # Fall back to unsafeGetAttrPos if declarationPositions is absent.
               declPos = (builtins.tryEval (
-                let ps = v.declarationPositions or [];
-                in if ps == [] then null else builtins.head ps
+                let
+                  ps = v.declarationPositions or [];
+                  # Some declarationPositions have null line/column (e.g.
+                  # submodule type option defs). Filter to usable entries.
+                  valid = builtins.filter
+                    (p: p ? file && p.file != null && p ? line && p.line != null)
+                    ps;
+                  # Normalize: ensure column is never null (default to 0).
+                  normalize = p: p // { column = p.column or 0; };
+                in if valid == [] then null else normalize (builtins.head valid)
               )).value or null;
               pos = if declPos != null then declPos else attrPos;
             in [{
