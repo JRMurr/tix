@@ -229,6 +229,17 @@ let
   hmJsonFile =
     if hmOptionsJson != null then pkgs.writeText "hm-options.json" hmOptionsJson else null;
 
+  # Source root strings for @source annotations. We must use toString to
+  # capture the exact store path that Nix used during evaluation (which
+  # matches the paths in declarationPositions / unsafeGetAttrPos). Using
+  # bare ${nixpkgs-path} in the derivation builder would create a
+  # content-addressed copy with a different hash, causing a mismatch.
+  nixpkgsSourceRoot = "nixpkgs=${toString nixpkgs-path}";
+  hmSourceRoot =
+    if home-manager-path != null
+    then "home-manager=${toString home-manager-path}"
+    else null;
+
 in
 pkgs.runCommand "tix-stubs"
   {
@@ -246,14 +257,14 @@ pkgs.runCommand "tix-stubs"
 
     mkdir -p $out
     ./tix gen-stubs nixos --from-json ${nixosJsonFile} --descriptions \
-      --source-root nixpkgs=${nixpkgs-path} -o $out/nixos.tix
+      --source-root ${nixpkgsSourceRoot} -o $out/nixos.tix
     ${lib.optionalString (hmJsonFile != null) ''
       ./tix gen-stubs home-manager --from-json ${hmJsonFile} --descriptions \
-        --source-root nixpkgs=${nixpkgs-path} \
-        ${lib.optionalString (home-manager-path != null) "--source-root home-manager=${home-manager-path}"} \
+        --source-root ${nixpkgsSourceRoot} \
+        ${lib.optionalString (hmSourceRoot != null) "--source-root ${hmSourceRoot}"} \
         -o $out/home-manager.tix
     ''}
     ./tix gen-stubs pkgs --from-json ${pkgsJsonFile} \
-      --source-root nixpkgs=${nixpkgs-path} -o $out/pkgs.tix
+      --source-root ${nixpkgsSourceRoot} -o $out/pkgs.tix
     cp ${lib-tix-path} $out/lib.tix
   ''

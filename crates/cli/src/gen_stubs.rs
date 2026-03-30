@@ -397,8 +397,8 @@ fn options_to_attrset_ty_inner(
                 };
                 let mut line_parts: Vec<String> = Vec::new();
 
-                // Emit @source annotation if position is available.
-                maybe_emit_source(leaf.pos.as_ref(), source_roots, &pad, &mut line_parts);
+                // Grammar: named_field = { doc_block? ~ source_annotation? ~ field_name ~ ... }
+                // Doc comments must come before @source.
 
                 // Emit doc comment if we have a description.
                 if emit_docs {
@@ -413,6 +413,9 @@ fn options_to_attrset_ty_inner(
                         }
                     }
                 }
+
+                // Emit @source annotation if position is available.
+                maybe_emit_source(leaf.pos.as_ref(), source_roots, &pad, &mut line_parts);
 
                 line_parts.push(format!("{}{}: {}", pad, field_name, ty_str));
                 fields.push(line_parts.join("\n"));
@@ -1738,10 +1741,11 @@ mod tests {
             result.contains("@source nixpkgs:nixos/modules/foo.nix:42:5"),
             "expected @source annotation, got:\n{result}"
         );
-        // @source should appear before the doc comment
+        // Grammar: doc_block? ~ source_annotation? ~ field_name
+        // Doc comments come before @source.
         let source_pos = result.find("@source").unwrap();
         let doc_pos = result.find("##").unwrap();
-        assert!(source_pos < doc_pos, "@source should precede doc comment");
+        assert!(doc_pos < source_pos, "doc comment should precede @source");
     }
 
     #[test]

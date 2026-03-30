@@ -142,6 +142,65 @@
 
                   touch $out
                 '';
+
+            # Verify the runtime stub generation pipeline:
+            #   extract-options.nix produces pos fields (declarationPositions)
+            #   → tix gen-stubs emits @source annotations
+            #   → generated .tix files parse successfully
+            stub-generation =
+              let
+                stubs = tix-stubs;
+              in
+              pkgs.runCommand "tix-check-stub-generation"
+                {
+                  nativeBuildInputs = [ tix-with-stubs pkgs.jq ];
+                }
+                ''
+                  echo "=== Checking generated stubs exist ==="
+                  for f in nixos.tix home-manager.tix pkgs.tix lib.tix; do
+                    test -f ${stubs}/$f || { echo "FAIL: $f missing"; exit 1; }
+                    echo "  $f exists ($(wc -l < ${stubs}/$f) lines)"
+                  done
+
+                  echo "=== Checking @source annotations ==="
+                  for f in nixos.tix home-manager.tix pkgs.tix lib.tix; do
+                    count=$(grep -c '@source' ${stubs}/$f || true)
+                    echo "  $f: $count @source annotations"
+                  done
+
+                  # NixOS options should have many @source annotations from
+                  # declarationPositions. Fail if fewer than 1000 — that would
+                  # indicate the extraction regressed.
+                  nixos_count=$(grep -c '@source' ${stubs}/nixos.tix || true)
+                  if [ "$nixos_count" -lt 1000 ]; then
+                    echo "FAIL: nixos.tix has only $nixos_count @source annotations (expected >= 1000)"
+                    exit 1
+                  fi
+
+                  # pkgs should have @source from unsafeGetAttrPos + meta.position fallback
+                  pkgs_count=$(grep -c '@source' ${stubs}/pkgs.tix || true)
+                  if [ "$pkgs_count" -lt 1000 ]; then
+                    echo "FAIL: pkgs.tix has only $pkgs_count @source annotations (expected >= 1000)"
+                    exit 1
+                  fi
+
+                  # lib.tix @source comes from noogle data
+                  lib_count=$(grep -c '@source' ${stubs}/lib.tix || true)
+                  if [ "$lib_count" -lt 100 ]; then
+                    echo "FAIL: lib.tix has only $lib_count @source annotations (expected >= 100)"
+                    exit 1
+                  fi
+
+                  echo "=== Checking generated stubs parse ==="
+                  for f in nixos.tix pkgs.tix lib.tix; do
+                    tix --no-default-stubs --stubs ${stubs}/$f /dev/null \
+                      || { echo "FAIL: $f failed to parse"; exit 1; }
+                    echo "  $f parses OK"
+                  done
+
+                  echo "=== All stub generation checks passed ==="
+                  touch $out
+                '';
           };
 
         }

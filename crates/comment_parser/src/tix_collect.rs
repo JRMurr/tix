@@ -520,6 +520,12 @@ fn collect_attrset(pairs: Pairs<Rule>, ctx: &mut CollectCtx) -> Result<ParsedTy,
                 // Check for a doc_block on the field.
                 let field_doc = take_doc_block(&mut inner);
 
+                // Consume optional @source annotation on the field.
+                // We capture it but don't store it here — the source
+                // location for fields is only used when loading stubs
+                // at the declaration level, not inside type expressions.
+                let _field_source = take_source_annotation(&mut inner);
+
                 let name_pair = inner
                     .next()
                     .ok_or_else(|| CollectError::new("named_field missing field name"))?;
