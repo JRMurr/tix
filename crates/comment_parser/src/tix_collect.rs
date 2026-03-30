@@ -587,7 +587,32 @@ fn collect_attrset(pairs: Pairs<Rule>, ctx: &mut CollectCtx) -> Result<ParsedTy,
 
 #[cfg(test)]
 mod tests {
+    use super::parse_source_loc;
     use crate::{known_ty, parse_tix_file};
+
+    #[test]
+    fn parse_source_loc_basic() {
+        let loc = parse_source_loc("nixpkgs:lib/trivial.nix:61:8").unwrap();
+        assert_eq!(loc.path.as_str(), "nixpkgs:lib/trivial.nix");
+        assert_eq!(loc.line, 61);
+        assert_eq!(loc.column, 8);
+    }
+
+    #[test]
+    fn parse_source_loc_with_colons_in_path() {
+        // Unlikely but handles paths with colons gracefully by splitting from right.
+        let loc = parse_source_loc("nixpkgs:some:path:42:5").unwrap();
+        assert_eq!(loc.path.as_str(), "nixpkgs:some:path");
+        assert_eq!(loc.line, 42);
+        assert_eq!(loc.column, 5);
+    }
+
+    #[test]
+    fn parse_source_loc_invalid() {
+        assert!(parse_source_loc("").is_none());
+        assert!(parse_source_loc("just-a-path").is_none());
+        assert!(parse_source_loc("path:notanumber:5").is_none());
+    }
 
     #[test]
     fn type_alias() {
@@ -1137,6 +1162,129 @@ mod tests {
                 assert_eq!(&src[span.0..span.1], "type B = string;");
             }
             other => panic!("expected TypeAlias, got: {other:?}"),
+        }
+    }
+
+    // =========================================================================
+    // @source annotation tests
+    // =========================================================================
+
+    #[test]
+    fn source_annotation_on_val() {
+        let src = r#"
+            @source nixpkgs:lib/trivial.nix:61:8
+            val id :: a -> a;
+        "#;
+        let file = parse_tix_file(src).expect("parse error");
+        assert_eq!(file.declarations.len(), 1);
+        match &file.declarations[0] {
+            crate::TixDeclaration::ValDecl { name, source, .. } => {
+                assert_eq!(name.as_str(), "id");
+                let src_loc = source.as_ref().expect("should have source location");
+                assert_eq!(src_loc.path.as_str(), "nixpkgs:lib/trivial.nix");
+                assert_eq!(src_loc.line, 61);
+                assert_eq!(src_loc.column, 8);
+            }
+            other => panic!("expected ValDecl, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn source_annotation_with_doc_block() {
+        let src = r#"
+            ## The identity function.
+            @source nixpkgs:lib/trivial.nix:61:8
+            val id :: a -> a;
+        "#;
+        let file = parse_tix_file(src).expect("parse error");
+        match &file.declarations[0] {
+            crate::TixDeclaration::ValDecl {
+                name, doc, source, ..
+            } => {
+                assert_eq!(name.as_str(), "id");
+                assert_eq!(doc.as_deref(), Some("The identity function."));
+                let src_loc = source.as_ref().expect("should have source location");
+                assert_eq!(src_loc.path.as_str(), "nixpkgs:lib/trivial.nix");
+                assert_eq!(src_loc.line, 61);
+            }
+            other => panic!("expected ValDecl, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn source_annotation_on_module() {
+        let src = r#"
+            @source nixpkgs:lib/default.nix:59:7
+            module lib {
+                val id :: a -> a;
+            }
+        "#;
+        let file = parse_tix_file(src).expect("parse error");
+        match &file.declarations[0] {
+            crate::TixDeclaration::Module {
+                name,
+                source,
+                declarations,
+                ..
+            } => {
+                assert_eq!(name.as_str(), "lib");
+                let src_loc = source.as_ref().expect("should have source location");
+                assert_eq!(src_loc.path.as_str(), "nixpkgs:lib/default.nix");
+                assert_eq!(declarations.len(), 1);
+            }
+            other => panic!("expected Module, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn source_annotation_on_type_alias() {
+        let src = r#"
+            @source nixpkgs:lib/types.nix:10:3
+            type Derivation = { name: string };
+        "#;
+        let file = parse_tix_file(src).expect("parse error");
+        match &file.declarations[0] {
+            crate::TixDeclaration::TypeAlias { name, source, .. } => {
+                assert_eq!(name.as_str(), "Derivation");
+                let src_loc = source.as_ref().expect("should have source location");
+                assert_eq!(src_loc.path.as_str(), "nixpkgs:lib/types.nix");
+                assert_eq!(src_loc.line, 10);
+                assert_eq!(src_loc.column, 3);
+            }
+            other => panic!("expected TypeAlias, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_source_annotation_backward_compat() {
+        let src = "val id :: a -> a;";
+        let file = parse_tix_file(src).expect("parse error");
+        match &file.declarations[0] {
+            crate::TixDeclaration::ValDecl { source, .. } => {
+                assert!(source.is_none(), "should have no source location");
+            }
+            other => panic!("expected ValDecl, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn source_annotation_home_manager_path() {
+        let src = r#"
+            @source home-manager:modules/programs/git.nix:15:3
+            val enable :: bool;
+        "#;
+        let file = parse_tix_file(src).expect("parse error");
+        match &file.declarations[0] {
+            crate::TixDeclaration::ValDecl { source, .. } => {
+                let src_loc = source.as_ref().expect("should have source location");
+                assert_eq!(
+                    src_loc.path.as_str(),
+                    "home-manager:modules/programs/git.nix"
+                );
+                assert_eq!(src_loc.line, 15);
+                assert_eq!(src_loc.column, 3);
+            }
+            other => panic!("expected ValDecl, got: {other:?}"),
         }
     }
 }

@@ -730,4 +730,89 @@ mod tests {
             "unresolved ref with no stub should return None"
         );
     }
+
+    // ------------------------------------------------------------------
+    // @source annotation → jumps to original nixpkgs source
+    // ------------------------------------------------------------------
+    #[test]
+    fn unresolved_ref_jumps_to_source_location() {
+        let stub = indoc! {"
+            @source nixpkgs:lib/trivial.nix:61:8
+            val myFunc :: a -> a;
+        "};
+
+        let src = indoc! {"
+            myFunc 42
+            # ^1
+        "};
+        let markers = parse_markers(src);
+
+        // Create a fake nixpkgs directory with a trivial.nix file.
+        let nixpkgs_tmp = tempfile::tempdir().unwrap();
+        let nixpkgs_dir = nixpkgs_tmp.path().to_path_buf();
+        let lib_dir = nixpkgs_dir.join("lib");
+        std::fs::create_dir_all(&lib_dir).unwrap();
+        std::fs::write(lib_dir.join("trivial.nix"), "{ myFunc = x: x; }").unwrap();
+
+        let (mut registry, _stub_path) = registry_with_stub(stub);
+        registry.set_source_root("nixpkgs", nixpkgs_dir.clone());
+
+        let project = TempProject::new(&[("main.nix", src)]);
+        let main_path = project.path("main.nix");
+
+        let mut state = AnalysisState::new(registry);
+        let (uri, contents) = analyze(&mut state, &main_path);
+        let analysis = state.get_file(&main_path).unwrap().to_snapshot();
+        let root = rnix::Root::parse(&contents).tree();
+
+        let pos = analysis.syntax.line_index.position(markers[&1]);
+        let loc = goto_definition(&state, &analysis, pos, &uri, &root)
+            .expect("should resolve to nixpkgs source");
+
+        // Should jump to the nixpkgs file, not the stub file.
+        let expected_path = lib_dir.join("trivial.nix");
+        let expected_uri = Url::from_file_path(&expected_path).unwrap();
+        assert_eq!(loc.uri, expected_uri, "should jump to nixpkgs source");
+        // Nix positions are 1-based, LSP is 0-based.
+        assert_eq!(loc.range.start, Position::new(60, 7));
+    }
+
+    #[test]
+    fn source_location_falls_back_to_stub_when_file_missing() {
+        let stub = indoc! {"
+            @source nixpkgs:lib/nonexistent.nix:10:3
+            val myFunc :: a -> a;
+        "};
+
+        let src = indoc! {"
+            myFunc 42
+            # ^1
+        "};
+        let markers = parse_markers(src);
+
+        let (mut registry, stub_path) = registry_with_stub(stub);
+        // Set a source root but the file doesn't exist.
+        registry.set_source_root("nixpkgs", PathBuf::from("/nonexistent/path"));
+
+        let project = TempProject::new(&[("main.nix", src)]);
+        let main_path = project.path("main.nix");
+
+        let mut state = AnalysisState::new(registry);
+        let (uri, contents) = analyze(&mut state, &main_path);
+        let analysis = state.get_file(&main_path).unwrap().to_snapshot();
+        let root = rnix::Root::parse(&contents).tree();
+
+        let pos = analysis.syntax.line_index.position(markers[&1]);
+        let loc = goto_definition(&state, &analysis, pos, &uri, &root)
+            .expect("should fall back to stub location");
+
+        // Should fall back to the stub file.
+        let stub_uri = Url::from_file_path(&stub_path).unwrap();
+        assert_eq!(
+            loc.uri, stub_uri,
+            "should fall back to stub when source missing"
+        );
+
+        let _ = std::fs::remove_file(&stub_path);
+    }
 }

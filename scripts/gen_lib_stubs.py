@@ -94,6 +94,10 @@ MANUAL_OVERRIDES: dict[tuple[str | None, str], str] = {
     (None, "naturalSort"): "[string] -> [string]",
     (None, "subtractLists"): "[a] -> [a] -> [a]",
     (None, "intersectLists"): "[a] -> [a] -> [a]",
+    # ---- lib.trivial ----
+    # pipe's noogle signature uses pseudo-syntax that our grammar can't parse.
+    ("trivial", "pipe"): "a -> [(a -> b)] -> b",
+    (None, "pipe"): "a -> [(a -> b)] -> b",
     # ---- lib.options (NixOS module system) ----
     ("options", "mkOption"): "{ ... } -> { ... }",
     ("options", "mkEnableOption"): "string -> { ... }",
@@ -617,6 +621,48 @@ class FuncEntry:
     tix_sig: str | None = None  # translated .tix signature
     needs_review: bool = False
     review_reason: str = ""
+    source_loc: str | None = None  # e.g. "nixpkgs:lib/trivial.nix:61:8"
+
+
+def detect_store_prefix(data: list[dict]) -> str | None:
+    """Auto-detect the common /nix/store/...-source/ prefix across all entries.
+
+    Noogle data references a single nixpkgs store path for all positions.
+    We strip this prefix to get relative paths like `lib/trivial.nix`.
+    """
+    for entry in data:
+        for field in ("lambda_position", "attr_position"):
+            pos = entry.get("meta", {}).get(field)
+            if pos and pos.get("file"):
+                m = re.match(r"(/nix/store/[^/]+-source/)", pos["file"])
+                if m:
+                    return m.group(1)
+    return None
+
+
+def extract_source_loc(entry: dict, store_prefix: str | None) -> str | None:
+    """Extract a @source location string from a noogle entry.
+
+    Prefers lambda_position (points to function body) over attr_position
+    (points to the attribute binding, often a re-export in lib/default.nix).
+    Returns e.g. "nixpkgs:lib/trivial.nix:61:8" or None.
+    """
+    if store_prefix is None:
+        return None
+
+    meta = entry.get("meta", {})
+    pos = meta.get("lambda_position") or meta.get("attr_position")
+    if not pos or not pos.get("file"):
+        return None
+
+    file_path = pos["file"]
+    if not file_path.startswith(store_prefix):
+        return None
+
+    relative = file_path[len(store_prefix):]
+    line = pos.get("line", 0)
+    column = pos.get("column", 0)
+    return f"nixpkgs:{relative}:{line}:{column}"
 
 
 def process_entries(data: list[dict]) -> tuple[dict[str, list[FuncEntry]], list[FuncEntry]]:
@@ -627,6 +673,7 @@ def process_entries(data: list[dict]) -> tuple[dict[str, list[FuncEntry]], list[
         and top_level is [entries] for lib.X re-exports.
     """
     lib_entries = [e for e in data if e["meta"]["path"][0] == "lib"]
+    store_prefix = detect_store_prefix(data)
 
     # Separate into module entries (lib.module.func) and top-level (lib.func).
     module_entries: dict[str, list[FuncEntry]] = defaultdict(list)
@@ -655,6 +702,7 @@ def process_entries(data: list[dict]) -> tuple[dict[str, list[FuncEntry]], list[
             path=path,
             signature=sig,
             description=desc,
+            source_loc=extract_source_loc(entry, store_prefix),
         )
 
         # Manual overrides take priority over noogle translations (some
@@ -687,6 +735,7 @@ def process_entries(data: list[dict]) -> tuple[dict[str, list[FuncEntry]], list[
             path=path,
             signature=sig,
             description=desc,
+            source_loc=extract_source_loc(entry, store_prefix),
         )
 
         override = MANUAL_OVERRIDES.get((None, func_name))
@@ -730,6 +779,8 @@ def format_val_decl(func: FuncEntry, indent: str) -> str:
     lines = []
     if func.description:
         lines.append(format_doc_comment(func.description, indent))
+    if func.source_loc:
+        lines.append(f"{indent}@source {func.source_loc}")
 
     lines.append(f"{indent}val {func.name} :: {func.tix_sig};")
     return "\n".join(lines)
