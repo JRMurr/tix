@@ -145,8 +145,9 @@ let
         else
           let
             v = val.value;
-            # Source position of the attribute (for @source annotations).
-            pos = (builtins.tryEval (builtins.unsafeGetAttrPos name opts)).value or null;
+            # Source position of the attribute binding (for @source annotations).
+            # For non-option namespace attrs, unsafeGetAttrPos is the only source.
+            attrPos = (builtins.tryEval (builtins.unsafeGetAttrPos name opts)).value or null;
           in
           if isOption v then
             let
@@ -163,6 +164,15 @@ let
                 else if builtins.isAttrs rawDesc.value && (rawDesc.value.text or null) != null
                   then rawDesc.value.text
                 else null;
+              # For options, the module system provides declarationPositions
+              # (file + line + column) which works even though unsafeGetAttrPos
+              # returns null for programmatically assembled option attrsets.
+              # Fall back to unsafeGetAttrPos if declarationPositions is absent.
+              declPos = (builtins.tryEval (
+                let ps = v.declarationPositions or [];
+                in if ps == [] then null else builtins.head ps
+              )).value or null;
+              pos = if declPos != null then declPos else attrPos;
             in [{
               inherit name;
               value = {
@@ -183,7 +193,7 @@ let
               value = {
                 _isOption = false;
                 children = walkOptions (depth - 1) v;
-              } // (if pos != null then { inherit pos; } else {});
+              } // (if attrPos != null then { pos = attrPos; } else {});
             }]
           else []
       ) safeNames);
