@@ -838,11 +838,17 @@ impl LanguageServer for TixLanguageServer {
                                             &gen_config,
                                             &gen_config_dir,
                                         ) {
-                                            Ok(dir) => {
-                                                log::info!("Generated stubs: {}", dir.display());
+                                            Ok(result) => {
+                                                log::info!(
+                                                    "Generated stubs: {}",
+                                                    result.stubs_dir.display()
+                                                );
                                                 let mut state = gen_state.lock();
-                                                Arc::make_mut(&mut state.registry)
-                                                    .set_builtin_stubs_dir(dir);
+                                                let reg = Arc::make_mut(&mut state.registry);
+                                                reg.set_builtin_stubs_dir(result.stubs_dir);
+                                                for (id, root) in &result.source_roots {
+                                                    reg.set_source_root(id.as_str(), root.clone());
+                                                }
 
                                                 // Re-analyze all open files so they
                                                 // pick up the new stubs.

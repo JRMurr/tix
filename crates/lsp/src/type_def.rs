@@ -97,10 +97,24 @@ fn resolve_decl_locations(
     let Some(name) = alias_name else {
         return Vec::new();
     };
+    let source_roots = registry.source_roots();
     registry
         .decl_locations(name)
         .iter()
         .filter_map(|loc| {
+            // Prefer the original source location when available and resolvable.
+            if let Some(ref src) = loc.source {
+                if let Some(resolved) =
+                    crate::goto_def::decl_location_to_lsp(Some(loc), source_roots)
+                {
+                    return Some(resolved);
+                }
+                // source annotation present but unresolvable — try trimming @source
+                // and falling back to stub. We still need the stub location below.
+                let _ = src;
+            }
+
+            // Fall back to the .tix stub file location.
             let source = std::fs::read_to_string(&loc.file_path).ok()?;
             let span_end = trim_to_header(&source, loc.span);
             let line_index = crate::convert::LineIndex::new(&source);

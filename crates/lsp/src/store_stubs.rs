@@ -18,11 +18,24 @@ use std::process::Command;
 
 use crate::project_config::{NixSource, StubsGenerateConfig};
 
+/// Result of successful stub generation: the stubs directory plus the resolved
+/// source roots for `@source` annotation resolution.
+pub struct GeneratedStubs {
+    /// Store path containing the generated `.tix` files.
+    pub stubs_dir: PathBuf,
+    /// Source roots for resolving `@source` annotations.
+    /// e.g. `[("nixpkgs", "/nix/store/...-source"), ("home-manager", "/nix/store/...-hm")]`
+    pub source_roots: Vec<(String, PathBuf)>,
+}
+
 /// Generate stubs from `[stubs.generate]` config, using the Nix store as cache.
 ///
-/// Returns the store path containing the generated .tix files, or an error
-/// if generation fails. The caller should fall back to compiled-in stubs.
-pub fn generate_stubs(config: &StubsGenerateConfig, config_dir: &Path) -> Result<PathBuf, Error> {
+/// Returns the stubs directory and source roots, or an error if generation fails.
+/// The caller should fall back to compiled-in stubs.
+pub fn generate_stubs(
+    config: &StubsGenerateConfig,
+    config_dir: &Path,
+) -> Result<GeneratedStubs, Error> {
     // Resolve the nixpkgs source to a store path.
     let nixpkgs_path = config
         .nixpkgs
@@ -46,11 +59,20 @@ pub fn generate_stubs(config: &StubsGenerateConfig, config_dir: &Path) -> Result
         log::debug!("Resolved home-manager: {}", hm.display());
     }
 
+    // Build source roots for @source annotation resolution.
+    let mut source_roots = vec![("nixpkgs".to_string(), nixpkgs_path.clone())];
+    if let Some(ref hm) = hm_path {
+        source_roots.push(("home-manager".to_string(), hm.clone()));
+    }
+
     // Check the lightweight file cache before invoking nix.
     let cache_key = compute_cache_key(&nixpkgs_path, &tix_path, hm_path.as_deref());
     if let Some(cached) = check_cache(&cache_key) {
         log::debug!("Using cached stubs: {}", cached.display());
-        return Ok(cached);
+        return Ok(GeneratedStubs {
+            stubs_dir: cached,
+            source_roots,
+        });
     }
 
     // Find the generate-stubs-runtime.nix shipped with the tix binary.
@@ -66,7 +88,10 @@ pub fn generate_stubs(config: &StubsGenerateConfig, config_dir: &Path) -> Result
     }
 
     log::info!("Generated stubs: {}", store_path.display());
-    Ok(store_path)
+    Ok(GeneratedStubs {
+        stubs_dir: store_path,
+        source_roots,
+    })
 }
 
 // ==============================================================================

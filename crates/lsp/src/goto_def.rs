@@ -12,10 +12,14 @@
 // - Unresolved names that match a `val` in .tix stubs → jumps to the stub
 // - `lib.field` where `field` matches a stub val → jumps to the stub
 
+use std::collections::HashMap;
+use std::path::PathBuf;
+
 use lang_ast::nameres::ResolveResult;
 use lang_ast::{AstDb, AstPtr, Expr, Literal};
 use lang_check::aliases::DeclLocation;
 use rowan::ast::AstNode;
+use smol_str::SmolStr;
 use tower_lsp::lsp_types::{Location, Position, Range, Url};
 
 use crate::state::{AnalysisState, FileSnapshot};
@@ -69,9 +73,10 @@ pub fn goto_definition(
                 {
                     return Some(location);
                 }
-                if let Some(location) =
-                    decl_location_to_lsp(state.registry.decl_locations(field_name).first())
-                {
+                if let Some(location) = decl_location_to_lsp(
+                    state.registry.decl_locations(field_name).first(),
+                    state.registry.source_roots(),
+                ) {
                     return Some(location);
                 }
             }
@@ -112,9 +117,10 @@ pub fn goto_definition(
                         // definition we can jump to within this file.
                         ResolveResult::Builtin(_) | ResolveResult::WithExprs(..) => {}
                     }
-                } else if let Some(location) =
-                    decl_location_to_lsp(state.registry.decl_locations(ref_name.as_str()).first())
-                {
+                } else if let Some(location) = decl_location_to_lsp(
+                    state.registry.decl_locations(ref_name.as_str()).first(),
+                    state.registry.source_roots(),
+                ) {
                     return Some(location);
                 }
             }
@@ -131,11 +137,25 @@ pub fn goto_definition(
 // ==============================================================================
 
 /// Convert a `DeclLocation` from the registry into an LSP `Location`.
-/// Reads the `.tix` file from disk to build a `LineIndex` for byte-to-position
-/// conversion. Returns `None` if the file can't be read or the path can't
-/// become a URI.
-fn decl_location_to_lsp(loc: Option<&DeclLocation>) -> Option<Location> {
+///
+/// When the declaration has an `@source` annotation and the corresponding source
+/// root is configured, returns a location in the original source (e.g. nixpkgs)
+/// instead of the `.tix` stub file. Falls back to the stub location if the source
+/// can't be resolved.
+pub(crate) fn decl_location_to_lsp(
+    loc: Option<&DeclLocation>,
+    source_roots: &HashMap<SmolStr, PathBuf>,
+) -> Option<Location> {
     let loc = loc?;
+
+    // Prefer the original source location when available and resolvable.
+    if let Some(ref src) = loc.source {
+        if let Some(resolved) = resolve_source_location(src, source_roots) {
+            return Some(resolved);
+        }
+    }
+
+    // Fall back to the .tix stub file location.
     let source = std::fs::read_to_string(&loc.file_path).ok()?;
     let line_index = crate::convert::LineIndex::new(&source);
     let start = line_index.position(loc.span.0 as u32);
@@ -145,6 +165,29 @@ fn decl_location_to_lsp(loc: Option<&DeclLocation>) -> Option<Location> {
         uri,
         tower_lsp::lsp_types::Range::new(start, end),
     ))
+}
+
+/// Resolve a `SourceLocation` (from `@source` annotation) to an LSP `Location`
+/// by looking up the source root and constructing an absolute path.
+fn resolve_source_location(
+    src: &comment_parser::SourceLocation,
+    source_roots: &HashMap<SmolStr, PathBuf>,
+) -> Option<Location> {
+    // Split path on first `:` to get (source_id, relative_path).
+    let colon_idx = src.path.find(':')?;
+    let source_id = &src.path[..colon_idx];
+    let relative_path = &src.path[colon_idx + 1..];
+
+    let root = source_roots.get(source_id)?;
+    let abs_path = root.join(relative_path);
+    if !abs_path.exists() {
+        return None;
+    }
+
+    let uri = Url::from_file_path(&abs_path).ok()?;
+    // Nix positions are 1-based; LSP positions are 0-based.
+    let pos = Position::new(src.line.saturating_sub(1), src.column.saturating_sub(1));
+    Some(Location::new(uri, Range::new(pos, pos)))
 }
 
 // ==============================================================================

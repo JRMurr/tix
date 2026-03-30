@@ -175,6 +175,18 @@ pub struct FieldDoc {
     pub doc: SmolStr,
 }
 
+/// Original source location of a declaration, extracted from `@source` annotations.
+/// Stores a source-id-prefixed relative path (e.g. `nixpkgs:lib/trivial.nix`) plus
+/// line/column. Resolved to an absolute path at jump time using configured source roots.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceLocation {
+    /// Source-id prefixed relative path, e.g. `"nixpkgs:lib/trivial.nix"`.
+    /// Split on the first `:` to get `(source_id, relative_path)`.
+    pub path: SmolStr,
+    pub line: u32,
+    pub column: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TixDeclaration {
     TypeAlias {
@@ -183,6 +195,8 @@ pub enum TixDeclaration {
         doc: Option<SmolStr>,
         /// Byte span `(start, end)` of the type alias declaration in the source file.
         span: (usize, usize),
+        /// Original source location from `@source` annotation.
+        source: Option<SourceLocation>,
     },
     ValDecl {
         name: SmolStr,
@@ -191,6 +205,8 @@ pub enum TixDeclaration {
         /// Byte span `(start, end)` of the val declaration in the source file.
         /// Used for source-annotated diagnostics in verify-stubs.
         span: (usize, usize),
+        /// Original source location from `@source` annotation.
+        source: Option<SourceLocation>,
     },
     Module {
         name: SmolStr,
@@ -198,6 +214,8 @@ pub enum TixDeclaration {
         doc: Option<SmolStr>,
         /// Byte span `(start, end)` of the module declaration in the source file.
         span: (usize, usize),
+        /// Original source location from `@source` annotation.
+        source: Option<SourceLocation>,
     },
 }
 

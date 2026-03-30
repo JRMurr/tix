@@ -1326,9 +1326,12 @@ fn maybe_generate_stubs(
 
     if let Some(gen_config) = stubs_config.generate() {
         match tix_lsp::store_stubs::generate_stubs(gen_config, config_dir) {
-            Ok(dir) => {
-                eprintln!("Using generated stubs: {}", dir.display());
-                registry.set_builtin_stubs_dir(dir);
+            Ok(result) => {
+                eprintln!("Using generated stubs: {}", result.stubs_dir.display());
+                registry.set_builtin_stubs_dir(result.stubs_dir);
+                for (id, root) in &result.source_roots {
+                    registry.set_source_root(id.as_str(), root.clone());
+                }
             }
             Err(e) => {
                 eprintln!("Warning: stub generation failed, using defaults: {e}");

@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use comment_parser::{ParsedTy, ParsedTyRef, TixDeclFile, TixDeclaration};
+use comment_parser::{ParsedTy, ParsedTyRef, SourceLocation, TixDeclFile, TixDeclaration};
 use lang_ty::{AttrSetTy, TypeArena};
 use smol_str::SmolStr;
 
@@ -96,11 +96,16 @@ impl DocIndex {
 
 /// Points to a declaration (type alias, module, or val) in a `.tix` stub file
 /// on disk. Used by `textDocument/typeDefinition` and `textDocument/definition`
-/// to navigate to stub declarations.
+/// to navigate to stub declarations. When `source` is present, the LSP can
+/// jump to the original source (e.g. in nixpkgs) instead of the `.tix` file.
 #[derive(Debug, Clone)]
 pub struct DeclLocation {
     pub file_path: PathBuf,
     pub span: (usize, usize),
+    /// Original source location from `@source` annotation in the `.tix` file.
+    /// When present with a matching source root, the LSP jumps here instead
+    /// of to the `.tix` file.
+    pub source: Option<SourceLocation>,
 }
 
 // =============================================================================
@@ -139,6 +144,11 @@ pub struct TypeAliasRegistry {
     /// appears in several stub files. Populated by `load_tix_file_with_path`
     /// — compiled-in stubs (via `load_tix_file`) intentionally have no locations.
     decl_locations: HashMap<SmolStr, Vec<DeclLocation>>,
+
+    /// Maps source identifiers to root paths for resolving `@source` annotations.
+    /// e.g. `"nixpkgs"` → `/nix/store/...-source`, `"home-manager"` → `/nix/store/...-hm`.
+    /// Set during stub generation/loading when the source roots are known.
+    source_roots: HashMap<SmolStr, PathBuf>,
 }
 
 /// Shared, read-only map of context argument names to their declared types.
@@ -216,19 +226,23 @@ impl TypeAliasRegistry {
     fn record_decl_locations(&mut self, declarations: &[TixDeclaration], path: &Path) {
         for decl in declarations {
             match decl {
-                TixDeclaration::TypeAlias { name, span, .. } => {
+                TixDeclaration::TypeAlias {
+                    name, span, source, ..
+                } => {
                     self.decl_locations
                         .entry(name.clone())
                         .or_default()
                         .push(DeclLocation {
                             file_path: path.to_path_buf(),
                             span: *span,
+                            source: source.clone(),
                         });
                 }
                 TixDeclaration::Module {
                     name,
                     declarations: nested,
                     span,
+                    source,
                     ..
                 } => {
                     // Modules generate a capitalized alias (e.g. "lib" -> "Lib").
@@ -239,17 +253,21 @@ impl TypeAliasRegistry {
                         .push(DeclLocation {
                             file_path: path.to_path_buf(),
                             span: *span,
+                            source: source.clone(),
                         });
                     // Recurse into nested modules.
                     self.record_decl_locations(nested, path);
                 }
-                TixDeclaration::ValDecl { name, span, .. } => {
+                TixDeclaration::ValDecl {
+                    name, span, source, ..
+                } => {
                     self.decl_locations
                         .entry(name.clone())
                         .or_default()
                         .push(DeclLocation {
                             file_path: path.to_path_buf(),
                             span: *span,
+                            source: source.clone(),
                         });
                 }
             }
@@ -265,6 +283,17 @@ impl TypeAliasRegistry {
             .get(name)
             .map(|v| v.as_slice())
             .unwrap_or_default()
+    }
+
+    /// Register a source root for resolving `@source` annotations.
+    /// e.g. `set_source_root("nixpkgs", "/nix/store/...-source")`.
+    pub fn set_source_root(&mut self, id: impl Into<SmolStr>, root: PathBuf) {
+        self.source_roots.insert(id.into(), root);
+    }
+
+    /// Source roots for resolving `@source` annotations in `DeclLocation`s.
+    pub fn source_roots(&self) -> &HashMap<SmolStr, PathBuf> {
+        &self.source_roots
     }
 
     /// Recursively load declarations. `val_target` controls where val

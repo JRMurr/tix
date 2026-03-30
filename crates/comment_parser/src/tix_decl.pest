@@ -22,14 +22,28 @@ COMMENT    = _{ !("##") ~ "#" ~ (!"\n" ~ ANY)* }
 doc_comment = @{ "##" ~ (!"\n" ~ ANY)* }
 doc_block   = { doc_comment+ }
 
+// =============================================================================
+// Source location annotations
+// =============================================================================
+//
+// `@source <loc>` annotations record the original source location of a
+// declaration (e.g. in nixpkgs or home-manager). Format:
+//   @source <source-id>:<relative-path>:<line>:<column>
+// Example:
+//   @source nixpkgs:lib/trivial.nix:61:8
+//   val id :: a -> a;
+
+source_annotation = { "@source" ~ source_loc }
+source_loc        = @{ (!NEWLINE ~ ANY)+ }
+
 // Entry point
 tix_file = { SOI ~ tix_declaration* ~ EOI }
 
 tix_declaration = _{ type_alias_decl | val_decl | module_decl }
 
-type_alias_decl = { doc_block? ~ "type" ~ user_type ~ "=" ~ type_expr ~ ";" }
-val_decl        = { doc_block? ~ "val" ~ identifier ~ "::" ~ type_expr ~ ";" }
-module_decl     = { doc_block? ~ "module" ~ identifier ~ "{" ~ tix_declaration* ~ "}" }
+type_alias_decl = { doc_block? ~ source_annotation? ~ "type" ~ user_type ~ "=" ~ type_expr ~ ";" }
+val_decl        = { doc_block? ~ source_annotation? ~ "val" ~ identifier ~ "::" ~ type_expr ~ ";" }
+module_decl     = { doc_block? ~ source_annotation? ~ "module" ~ identifier ~ "{" ~ tix_declaration* ~ "}" }
 
 // -------------------------------------------------------------------------
 // Type expressions (duplicated from comment.pest to keep grammars decoupled)
@@ -78,7 +92,7 @@ attrset_inner = _{
   | dyn_field ~ ("," ~ open_marker)? ~ ","?
   | named_field ~ ("," ~ named_field)* ~ ("," ~ (dyn_field ~ ("," ~ open_marker)? | open_marker))? ~ ","?
 }
-named_field = { doc_block? ~ field_name ~ optional_marker? ~ ":" ~ type_expr }
+named_field = { doc_block? ~ source_annotation? ~ field_name ~ optional_marker? ~ ":" ~ type_expr }
 optional_marker = { "?" }
 field_name = _{ quoted_field | identifier }
 // Quoted identifiers for field names containing dots or other special characters

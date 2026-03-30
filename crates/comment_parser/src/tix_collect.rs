@@ -19,7 +19,8 @@ use std::collections::BTreeMap;
 
 use crate::tix_parser::Rule;
 use crate::{
-    CollectError, FieldDoc, ParsedTy, ParsedTyRef, TixDeclFile, TixDeclaration, TypeVarValue,
+    CollectError, FieldDoc, ParsedTy, ParsedTyRef, SourceLocation, TixDeclFile, TixDeclaration,
+    TypeVarValue,
 };
 
 // =============================================================================
@@ -60,6 +61,44 @@ fn take_doc_block(inner: &mut Pairs<Rule>) -> Option<SmolStr> {
     }
 }
 
+// =============================================================================
+// Source annotation extraction
+// =============================================================================
+
+/// Try to extract a `source_annotation` from the next child of `inner`.
+/// Returns `Option<SourceLocation>` and consumes the pair if matched.
+fn take_source_annotation(inner: &mut Pairs<Rule>) -> Option<SourceLocation> {
+    let first = inner.peek()?;
+    if first.as_rule() == Rule::source_annotation {
+        inner.next(); // consume the source_annotation pair
+        let source_loc = first.into_inner().next()?; // the source_loc child
+        parse_source_loc(source_loc.as_str().trim())
+    } else {
+        None
+    }
+}
+
+/// Parse a source location string like `nixpkgs:lib/trivial.nix:61:8`.
+/// Splits from the right on `:` to handle paths that may contain colons.
+fn parse_source_loc(s: &str) -> Option<SourceLocation> {
+    // Split from right: last segment is column, second-to-last is line,
+    // everything before is the source-id-prefixed path.
+    let last_colon = s.rfind(':')?;
+    let column: u32 = s[last_colon + 1..].parse().ok()?;
+    let rest = &s[..last_colon];
+    let second_colon = rest.rfind(':')?;
+    let line: u32 = rest[second_colon + 1..].parse().ok()?;
+    let path = &rest[..second_colon];
+    if path.is_empty() {
+        return None;
+    }
+    Some(SourceLocation {
+        path: SmolStr::from(path),
+        line,
+        column,
+    })
+}
+
 /// Helper to build a CollectError with span information from a pest Pair.
 fn err_at_pair(message: impl Into<String>, pair: &Pair<Rule>) -> CollectError {
     let span = pair.as_span();
@@ -98,6 +137,7 @@ fn collect_tix_file_inner(
                 let span = (pair_span.start(), pair_span.end());
                 let mut inner = pair.into_inner();
                 let doc = take_doc_block(&mut inner);
+                let source = take_source_annotation(&mut inner);
                 let name: SmolStr = inner
                     .next()
                     .ok_or_else(|| CollectError::new("type_alias_decl missing identifier"))?
@@ -117,6 +157,7 @@ fn collect_tix_file_inner(
                     body,
                     doc,
                     span,
+                    source,
                 });
             }
             Rule::val_decl => {
@@ -124,6 +165,7 @@ fn collect_tix_file_inner(
                 let span = (pair_span.start(), pair_span.end());
                 let mut inner = pair.into_inner();
                 let doc = take_doc_block(&mut inner);
+                let source = take_source_annotation(&mut inner);
                 let name: SmolStr = inner
                     .next()
                     .ok_or_else(|| CollectError::new("val_decl missing identifier"))?
@@ -137,6 +179,7 @@ fn collect_tix_file_inner(
                     ty,
                     doc,
                     span,
+                    source,
                 });
             }
             Rule::module_decl => {
@@ -144,6 +187,7 @@ fn collect_tix_file_inner(
                 let span = (pair_span.start(), pair_span.end());
                 let mut inner = pair.into_inner();
                 let doc = take_doc_block(&mut inner);
+                let source = take_source_annotation(&mut inner);
                 let name: SmolStr = inner
                     .next()
                     .ok_or_else(|| CollectError::new("module_decl missing identifier"))?
@@ -157,6 +201,7 @@ fn collect_tix_file_inner(
                     declarations: nested,
                     doc,
                     span,
+                    source,
                 });
             }
             Rule::EOI => {}
