@@ -89,658 +89,979 @@ module pkgs {
 module lib {
 
   module trivial {
+    ## boolean “and”
+    @source nixpkgs:lib/trivial.nix:231:9
+    val and :: bool -> bool -> bool;
+    ## bitwise “not”
+    @source nixpkgs:lib/trivial.nix:265:3
+    val bitNot :: int | float -> int | float;
     ## Convert a boolean to a string.
+    @source nixpkgs:lib/trivial.nix:286:18
     val boolToString :: bool -> string;
     ## Converts a boolean to a string.
+    @source nixpkgs:lib/trivial.nix:306:17
     val boolToYesNo :: bool -> string;
     ## Check if the elements in a list are valid values from a enum, returning
     ## the identity function, or throwing an error message otherwise.
-    val checkListOfEnum :: string -> [a] -> [a] -> a -> a;
+    @source nixpkgs:lib/trivial.nix:1040:5
+    val checkListOfEnum :: string -> [a] -> [a] -> ((b -> b) | Never);
+    ## C-style comparisons
+    @source nixpkgs:lib/trivial.nix:676:5
+    val compare :: a -> a -> int;
     ## Concatenate two lists
+    @source nixpkgs:lib/trivial.nix:189:12
     val concat :: [a] -> [a] -> [a];
     ## The constant function
+    @source nixpkgs:lib/trivial.nix:96:11
     val const :: a -> b -> a;
+    ## Returns maybeValue if not null, otherwise return default.
+    @source nixpkgs:lib/trivial.nix:412:15
+    val defaultTo :: a -> (b | null) -> (b | a);
     ## Flip the order of the arguments of a binary function.
+    @source nixpkgs:lib/trivial.nix:375:5
     val flip :: (a -> b -> c) -> (b -> a -> c);
     ## Convert a hexadecimal string to it's integer representation.
+    @source nixpkgs:lib/trivial.nix:1227:5
     val fromHexString :: string -> int;
-    ## Extract the expected function arguments from a function. This works
-    ## both with nix-native { a, b ? foo, ... }: style functions and functions
-    ## with args set with setFunctionArgs. It has the same retur...
-    val functionArgs :: (a -> b) -> { _: bool, ... };
     ## The identity function For when you need a function that does “nothing”.
+    @source nixpkgs:lib/trivial.nix:61:8
     val id :: a -> a;
     ## Reads a JSON file.
-    val importJSON :: path -> a;
+    @source nixpkgs:lib/trivial.nix:792:16
+    val importJSON :: path -> Any;
     ## Reads a TOML file.
-    val importTOML :: path -> a;
+    @source nixpkgs:lib/trivial.nix:839:16
+    val importTOML :: path -> Any;
+    ## Check whether something is a function or something annotated with
+    ## function args.
+    @source nixpkgs:lib/trivial.nix:1126:16
+    val isFunction :: Any -> bool;
+    ## Apply function if the supplied argument is non-null.
+    @source nixpkgs:lib/trivial.nix:446:17
+    val mapNullable :: (a -> b) -> (a | null) -> (b | null);
+    ## Returns maximum of two numbers.
+    @source nixpkgs:lib/trivial.nix:614:9
+    val max :: int | float -> int | float -> int | float;
     ## Merge two attribute sets shallowly, right side trumps left
+    @source nixpkgs:lib/trivial.nix:338:16
     val mergeAttrs :: { ... } -> { ... } -> { ... };
+    ## Returns minimum of two numbers.
+    @source nixpkgs:lib/trivial.nix:593:9
+    val min :: int | float -> int | float -> int | float;
     ## mirrorFunctionArgs f g creates a new function g' with the same behavior
     ## as g (g' x == g x) but its function arguments mirroring f
     ## (lib.functionArgs g' == lib.functionArgs f).
+    @source nixpkgs:lib/trivial.nix:1173:5
     val mirrorFunctionArgs :: (a -> b) -> (a -> c) -> (a -> c);
+    ## Integer modulus
+    @source nixpkgs:lib/trivial.nix:648:9
+    val mod :: int -> int -> int;
+    ## boolean “or”
+    @source nixpkgs:lib/trivial.nix:210:10
+    val or :: bool -> bool -> bool;
+    ## Pipes a value through a list of functions, left to right.
+    @source nixpkgs:lib/trivial.nix:150:3
+    val pipe :: a -> [(a -> b)] -> b;
     ## Attempts to return the the current revision of nixpkgs and returns the
     ## supplied default value otherwise.
+    @source nixpkgs:lib/trivial.nix:533:5
     val revisionWithDefault :: string -> string;
-    ## Add metadata about expected function arguments to a function. The
-    ## metadata should match the format given by builtins.functionArgs, i.e. a
-    ## set from expected argument to a bool representing whether t...
-    val setFunctionArgs :: (a -> b) -> { _: bool, ... } -> (a -> b);
     ## Split type into two subtypes by predicate p, take all elements of the
     ## first subtype to be less than all the elements of the second subtype,
     ## compare elements of a single subtype with yes and no resp...
+    @source nixpkgs:lib/trivial.nix:737:5
     val splitByAndCompare :: (a -> bool) -> (a -> a -> int) -> (a -> a -> int) -> (a -> a -> int);
     ## Like throwIfNot, but negated (throw if the first argument is true).
-    val throwIf :: bool -> string -> a -> a;
+    @source nixpkgs:lib/trivial.nix:1001:13
+    val throwIf :: bool -> string -> a -> (a | Never);
     ## Like the assert b; e expression, but with a custom error message and
     ## without the semicolon.
-    val throwIfNot :: bool -> string -> a -> a;
+    @source nixpkgs:lib/trivial.nix:980:16
+    val throwIfNot :: bool -> string -> a -> (a | Never);
+    ## toBaseDigits base i converts the positive integer i to a list of its
+    ## digits in the given base.
+    @source nixpkgs:lib/trivial.nix:1314:5
+    val toBaseDigits :: int -> int -> [int];
+    ## Convert the given positive integer to a string of its hexadecimal
+    ## representation.
+    @source nixpkgs:lib/trivial.nix:1278:5
+    val toHexString :: int -> string;
     ## warn message value
+    @source nixpkgs:lib/trivial.nix:865:3
     val warn :: string -> a -> a;
     ## warnIf condition message value
+    @source nixpkgs:lib/trivial.nix:912:12
     val warnIf :: bool -> string -> a -> a;
     ## warnIfNot condition message value
+    @source nixpkgs:lib/trivial.nix:939:15
     val warnIfNot :: bool -> string -> a -> a;
+    ## boolean “exclusive or”
+    @source nixpkgs:lib/trivial.nix:254:9
+    val xor :: bool -> bool -> bool;
   }
 
   module fixedPoints {
     ## Returns the fixpoint that f converges to when called iteratively,
     ## starting with the input x.
+    @source nixpkgs:lib/fixed-points.nix:153:5
     val converge :: (a -> a) -> a -> a;
     ## fix f computes the fixed point of the given function f. In other words,
     ## the return value is x in x = f x.
+    @source nixpkgs:lib/fixed-points.nix:93:5
     val fix :: (a -> a) -> a;
+    ## A variant of fix that records the original recursive attribute set in
+    ## the result, in an attribute named __unfix__.
+    @source nixpkgs:lib/fixed-points.nix:119:5
+    val fix' :: (a -> a) -> a;
   }
 
   module attrsets {
     ## Returns an attribute from nested attribute sets.
+    @source nixpkgs:lib/attrsets.nix:88:5
     val attrByPath :: [string] -> Any -> { ... } -> Any;
     ## Return the names of the attributes in the set set in an alphabetically
     ## sorted list. For instance, builtins.attrNames { y = 1; x = "foo"; }
     ## evaluates to [ "x" "y" ].
+    @source nixpkgs:lib/attrsets.nix:31:5
     val attrNames :: { ... } -> [string];
     ## Returns the specified attributes from a set.
-    val attrVals :: [string] -> { ... } -> [Any];
+    @source nixpkgs:lib/attrsets.nix:530:14
+    val attrVals :: [string] -> { _: a, ... } -> [a];
     ## Returns the values of all attributes in the given set, sorted by
     ## attribute name.
-    val attrValues :: { ... } -> [Any];
+    @source nixpkgs:lib/attrsets.nix:553:3
+    val attrValues :: { _: a, ... } -> [a];
     ## Return the cartesian product of attribute set value combinations.
-    val cartesianProduct :: { ... } -> [{ ... }];
+    @source nixpkgs:lib/attrsets.nix:911:5
+    val cartesianProduct :: { _: [a], ... } -> [{ _: a, ... }];
     ## Collect each attribute named attr from a list of attribute sets. Sets
     ## that don't contain the named attribute are ignored.
-    val catAttrs :: string -> [{ ... }] -> [Any];
+    @source nixpkgs:lib/attrsets.nix:619:3
+    val catAttrs :: string -> [{ _: a, ... }] -> [a];
     ## Pick the outputs of packages to place in buildInputs
+    @source nixpkgs:lib/attrsets.nix:2163:3
     val chooseDevOutputs :: [Derivation] -> [Derivation];
     ## Recursively collect sets that verify a given predicate named pred from
     ## the set attrs. The recursion is stopped when the predicate is verified.
-    val collect :: ({ ... } -> bool) -> { ... } -> [x];
+    @source nixpkgs:lib/attrsets.nix:871:5
+    val collect :: ({ ... } -> bool) -> { ... } -> [Any];
     ## Map each attribute in the given set and merge them into a new attribute
     ## set.
-    val concatMapAttrs :: (string -> a -> { ... }) -> { ... } -> { ... };
+    @source nixpkgs:lib/attrsets.nix:373:20
+    val concatMapAttrs :: (string -> Any -> { ... }) -> { ... } -> { ... };
     ## Undo the effect of recurseIntoAttrs.
+    @source nixpkgs:lib/attrsets.nix:2216:26
     val dontRecurseIntoAttrs :: { ... } -> { ... };
     ## Filter an attribute set by removing all attributes for which the given
     ## predicate return false.
-    val filterAttrs :: (string -> Any -> bool) -> { ... } -> { ... };
+    @source nixpkgs:lib/attrsets.nix:662:17
+    val filterAttrs :: (string -> a -> bool) -> { _: a, ... } -> { _: a, ... };
     ## Filter an attribute set recursively by removing all attributes for
     ## which the given predicate return false.
+    @source nixpkgs:lib/attrsets.nix:696:5
     val filterAttrsRecursive :: (string -> Any -> bool) -> { ... } -> { ... };
     ## Apply fold functions to values grouped by key.
-    val foldAttrs :: (Any -> Any -> Any) -> Any -> [{ ... }] -> Any;
+    @source nixpkgs:lib/attrsets.nix:829:5
+    val foldAttrs :: (a -> b -> b) -> b -> [{ _: a, ... }] -> { _: b, ... };
     ## Like lib.lists.foldl' but for attribute sets. Iterates over every name-
     ## value pair in the given attribute set. The result of the callback
     ## function is often called acc for accumulator. It is passed b...
+    @source nixpkgs:lib/attrsets.nix:791:5
     val foldlAttrs :: ( a -> string -> b -> a ) -> a -> { _: b, ... } -> a;
     ## Generate an attribute set by mapping a function over a list of
     ## attribute names.
-    val genAttrs :: [ string ] -> (string -> Any) -> { ... };
+    @source nixpkgs:lib/attrsets.nix:1343:14
+    val genAttrs :: [string] -> (string -> a) -> { _: a, ... };
     ## getAttr returns the attribute named s from set. Evaluation aborts if
     ## the attribute doesn’t exist. This is a dynamic version of the .
     ## operator, since s is an expression rather than an identifier.
+    @source nixpkgs:lib/attrsets.nix:35:5
     val getAttr :: string -> { _: a, ... } -> a;
     ## Like attrByPath, but without a default value. If it doesn't find the
     ## path it will throw an error.
+    @source nixpkgs:lib/attrsets.nix:335:5
     val getAttrFromPath :: [string] -> { ... } -> Any;
     ## Given a set of attribute names, return the set of the corresponding
     ## attributes from the given set.
-    val getAttrs :: [string] -> { ... } -> { ... };
+    @source nixpkgs:lib/attrsets.nix:586:14
+    val getAttrs :: [string] -> { _: a, ... } -> { _: a, ... };
     ## Get a package's bin output. If the output does not exist, fallback to
     ## .out and then to the default.
+    @source nixpkgs:lib/attrsets.nix:1923:13
     val getBin :: Derivation -> Derivation;
     ## Get a package's dev output. If the output does not exist, fallback to
     ## .out and then to the default.
+    @source nixpkgs:lib/attrsets.nix:1923:13
     val getDev :: Derivation -> Derivation;
     ## Get the first of the outputs provided by the package, or the default.
     ## This function is aligned with _overrideFirst() from the multiple-
     ## outputs.sh setup hook. Like getOutput, the function is idempot...
+    @source nixpkgs:lib/attrsets.nix:1959:5
     val getFirstOutput :: [string] -> Derivation -> Derivation;
     ## Get a package's include output. If the output does not exist, fallback
     ## to .dev, then to .out, and then to the default.
+    @source nixpkgs:lib/attrsets.nix:1959:17
     val getInclude :: Derivation -> Derivation;
     ## Get a package's lib output. If the output does not exist, fallback to
     ## .out and then to the default.
+    @source nixpkgs:lib/attrsets.nix:1923:13
     val getLib :: Derivation -> Derivation;
     ## Get a package's man output. If the output does not exist, fallback to
     ## .out and then to the default.
+    @source nixpkgs:lib/attrsets.nix:1923:13
     val getMan :: Derivation -> Derivation;
     ## Get a package's static output. If the output does not exist, fallback
     ## to .lib, then to .out, and then to the default.
+    @source nixpkgs:lib/attrsets.nix:1959:17
     val getStatic :: Derivation -> Derivation;
     ## hasAttr returns true if set has an attribute named s, and false
     ## otherwise. This is a dynamic version of the ? operator, since s is an
     ## expression rather than an identifier.
+    @source nixpkgs:lib/attrsets.nix:33:5
     val hasAttr :: string -> { ... } -> bool;
     ## Returns if an attribute from nested attribute set exists.
+    @source nixpkgs:lib/attrsets.nix:156:5
     val hasAttrByPath :: [string] -> { ... } -> bool;
     ## Return true if e evaluates to a set, and false otherwise.
+    @source nixpkgs:lib/attrsets.nix:34:5
     val isAttrs :: a -> bool;
     ## Check whether the argument is a derivation. Any set with { type =
     ## "derivation"; } counts as a derivation.
+    @source nixpkgs:lib/attrsets.nix:1412:18
     val isDerivation :: Any -> bool;
     ## Construct a set from a list specifying the names and values of each
     ## attribute. Each element of the list should be a set consisting of a
     ## string-valued attribute name specifying the name of the attri...
+    @source nixpkgs:lib/attrsets.nix:32:5
     val listToAttrs :: [{ name: string, value: a }] -> { _: a, ... };
     ## Returns the longest prefix of an attribute path that refers to an
     ## existing attribute in a nesting of attribute sets.
-    val longestValidPathPrefix :: [string] -> a -> [string];
+    @source nixpkgs:lib/attrsets.nix:225:5
+    val longestValidPathPrefix :: [string] -> { ... } -> [string];
     ## Apply a function to each element in an attribute set, creating a new
     ## attribute set.
-    val mapAttrs :: (string -> Any -> Any) -> { ... } -> { ... };
+    @source nixpkgs:lib/attrsets.nix:1015:3
+    val mapAttrs :: (string -> a -> b) -> { _: a, ... } -> { _: b, ... };
     ## Like mapAttrs, except that it recursively applies itself to the leaf
     ## attributes of a potentially-nested attribute set: the second argument
     ## of the function will never be an attrset. Also, the first ...
+    @source nixpkgs:lib/attrsets.nix:1156:23
     val mapAttrsRecursive :: ([string] -> a -> b) -> { ... } -> { ... };
     ## Like mapAttrsRecursive, but it takes an additional predicate that tells
     ## it whether to recurse into an attribute set. If the predicate returns
     ## false, mapAttrsRecursiveCond does not recurse, but inst...
+    @source nixpkgs:lib/attrsets.nix:1182:5
     val mapAttrsRecursiveCond :: ({ ... } -> bool) -> ([string] -> a -> b) -> { ... } -> { ... };
     ## Call a function for each attribute in the given set and return the
     ## result in a list.
-    val mapAttrsToList :: (string -> a -> b) -> { ... } -> [b];
+    @source nixpkgs:lib/attrsets.nix:1084:20
+    val mapAttrsToList :: (string -> a -> b) -> { _: a, ... } -> [b];
     ## Apply a function to each leaf (non‐attribute‐set attribute) of a tree
     ## of nested attribute sets, returning the results of the function as a
     ## list, ordered lexicographically by their attribute paths.
+    @source nixpkgs:lib/attrsets.nix:1304:11
     val mapAttrsToListRecursive :: ([string] -> a -> b) -> { ... } -> [b];
     ## Determine the nodes of a tree of nested attribute sets by applying a
     ## predicate, then apply a function to the leaves, returning the results
     ## as a list, ordered lexicographically by their attribute pa...
+    @source nixpkgs:lib/attrsets.nix:1304:5
     val mapAttrsToListRecursiveCond :: ([string] -> { ... } -> bool) -> ([string] -> a -> b) -> { ... } -> [b];
     ## Return the result of function f applied to the cartesian product of
     ## attribute set value combinations. Equivalent to using cartesianProduct
     ## followed by map.
-    val mapCartesianProduct :: ({ ... } -> a) -> { ... } -> [a];
+    @source nixpkgs:lib/attrsets.nix:950:25
+    val mapCartesianProduct :: ({ _: a, ... } -> b) -> { _: a, ... } -> [b];
     ## Recurse into every attribute set of the first argument and check that:
     ## - Each attribute path also exists in the second argument. - If the
     ## attribute's value is not a nested attribute set, it must ha...
+    @source nixpkgs:lib/attrsets.nix:1801:5
     val matchAttrs :: { ... } -> { ... } -> bool;
     ## Merge a list of attribute sets together using the // operator. In case
     ## of duplicate attributes, values from later list elements take
     ## precedence over earlier ones. The result is the same as foldl me...
-    val mergeAttrsList :: [ { ... } ] -> { ... };
+    @source nixpkgs:lib/attrsets.nix:1608:5
+    val mergeAttrsList :: [{ ... }] -> { ... };
     ## If cond is true, return the attribute set as, otherwise an empty
     ## attribute set.
+    @source nixpkgs:lib/attrsets.nix:1477:19
     val optionalAttrs :: bool -> { ... } -> { ... };
     ## Override only the attributes that are already present in the old set
     ## useful for deep-overriding.
+    @source nixpkgs:lib/attrsets.nix:1853:22
     val overrideExisting :: { ... } -> { ... } -> { ... };
     ## Make various Nix tools consider the contents of the resulting attribute
     ## set when looking for what to build, find, etc.
+    @source nixpkgs:lib/attrsets.nix:2199:22
     val recurseIntoAttrs :: { ... } -> { ... };
     ## A recursive variant of the update operator //. The recursion stops when
     ## one of the attribute values is not an attribute set, in which case the
     ## right hand side value takes precedence over the left h...
+    @source nixpkgs:lib/attrsets.nix:1762:5
     val recursiveUpdate :: { ... } -> { ... } -> { ... };
     ## Update lhs so that rhs wins for any given attribute path that occurs in
     ## both.
-    val recursiveUpdateUntil :: ( [ string ] -> { ... } -> { ... } -> bool ) -> { ... } -> { ... } -> { ... };
+    @source nixpkgs:lib/attrsets.nix:1702:5
+    val recursiveUpdateUntil :: ([string] -> { ... } -> { ... } -> bool) -> { ... } -> { ... } -> { ... };
     ## Create a new attribute set with value set at the nested attribute
     ## location specified in attrPath.
+    @source nixpkgs:lib/attrsets.nix:285:5
     val setAttrByPath :: [string] -> Any -> { ... };
     ## Turns a list of strings into a human-readable description of those
     ## strings represented as an attribute path. The result of this function
     ## is not intended to be machine-readable. Create a new attribu...
+    @source nixpkgs:lib/attrsets.nix:1887:5
     val showAttrPath :: [string] -> string;
     ## Converts a store path to a fake derivation.
+    @source nixpkgs:lib/attrsets.nix:1430:5
     val toDerivation :: path -> Derivation;
     ## unionOfDisjoint x y is equal to x // y, but accessing attributes
     ## present in both x and y will throw an error. This operator is
     ## commutative, unlike //.
+    @source nixpkgs:lib/attrsets.nix:2239:5
     val unionOfDisjoint :: { ... } -> { ... } -> { ... };
     ## Merge sets of attributes and combine each attribute value in to a list.
-    val zipAttrs :: [ { ... } ] -> { ... };
+    @source nixpkgs:lib/attrsets.nix:1574:3
+    val zipAttrs :: [{ _: a, ... }] -> { _: [a], ... };
     ## Merge sets of attributes and use the function f to merge attribute
     ## values. Like lib.attrsets.zipAttrsWithNames with all key names are
     ## passed for names.
-    val zipAttrsWith :: (string -> [ Any ] -> Any) -> [ { ... } ] -> { ... };
+    @source nixpkgs:lib/attrsets.nix:1549:3
+    val zipAttrsWith :: (string -> [a] -> b) -> [{ _: a, ... }] -> { _: b, ... };
     ## Merge sets of attributes and use the function f to merge attributes
     ## values.
-    val zipAttrsWithNames :: [ string ] -> (string -> [ Any ] -> Any) -> [ { ... } ] -> { ... };
+    @source nixpkgs:lib/attrsets.nix:1515:5
+    val zipAttrsWithNames :: [string] -> (string -> [a] -> b) -> [{ _: a, ... }] -> { _: b, ... };
   }
 
   module lists {
     ## Returns true if function pred returns true for all elements of list.
+    @source nixpkgs:lib/lists.nix:720:3
     val all :: (a -> bool) -> [a] -> bool;
     ## Check if list contains only unique elements. O(n^2) complexity.
+    @source nixpkgs:lib/lists.nix:1968:15
     val allUnique :: [a] -> bool;
     ## Returns true if function pred returns true for at least one element of
     ## list.
+    @source nixpkgs:lib/lists.nix:685:3
     val any :: (a -> bool) -> [a] -> bool;
     ## The common prefix of two lists.
+    @source nixpkgs:lib/lists.nix:1771:5
     val commonPrefix :: [a] -> [a] -> [a];
     ## Compare two lists element-by-element with a comparison function cmp.
+    @source nixpkgs:lib/lists.nix:1421:5
     val compareLists :: (a -> a -> int) -> [a] -> [a] -> int;
+    ## Concatenate all attributes of an attribute set. This assumes that every
+    ## attribute of the set is a list.
+    @source nixpkgs:lib/lists.nix:2087:22
+    val concatAttrValues :: { _: [a], ... } -> [a];
     ## Concatenate a list of lists into a single list.
+    @source nixpkgs:lib/lists.nix:24:5
     val concatLists :: [[a]] -> [a];
     ## Map and concatenate the result.
+    @source nixpkgs:lib/lists.nix:414:3
     val concatMap :: (a -> [b]) -> [a] -> [b];
     ## Count how many elements of list match the supplied predicate function.
+    @source nixpkgs:lib/lists.nix:749:11
     val count :: (a -> bool) -> [a] -> int;
     ## Returns the image of the cross product of some lists by a function.
+    @source nixpkgs:lib/lists.nix:1869:16
     val crossLists :: (a -> b -> c) -> [a] -> [b] -> [c];
     ## Remove the first (at most) N elements of a list.
+    @source nixpkgs:lib/lists.nix:1575:10
     val drop :: int -> [a] -> [a];
     ## Remove the last (at most) N elements of a list.
+    @source nixpkgs:lib/lists.nix:1609:13
     val dropEnd :: int -> [a] -> [a];
     ## Return true if a value equal to x occurs in the list xs, and false
     ## otherwise.
+    @source nixpkgs:lib/lists.nix:26:5
     val elem :: a -> [a] -> bool;
     ## Return a list consisting of the elements of list for which the function
     ## f returns true.
+    @source nixpkgs:lib/lists.nix:25:5
     val filter :: (a -> bool) -> [a] -> [a];
     ## Find the first element in the list matching the specified predicate or
     ## return default if no such element exists.
+    @source nixpkgs:lib/lists.nix:646:5
     val findFirst :: (a -> bool) -> b -> [a] -> (a | b);
     ## Find the first index in the list matching the specified predicate or
     ## return default if no such element exists.
+    @source nixpkgs:lib/lists.nix:576:5
     val findFirstIndex :: (a -> bool) -> b -> [a] -> (int | b);
     ## Find the sole element in the list matching the specified predicate.
+    @source nixpkgs:lib/lists.nix:526:5
     val findSingle :: (a -> bool) -> a -> a -> [a] -> a;
     ## Flatten the argument into a single list; that is, nested lists are
     ## spliced into the top-level lists.
+    @source nixpkgs:lib/lists.nix:445:13
     val flatten :: [[a]] -> [a];
     ## “left fold”, like foldr, but from the left:
+    @source nixpkgs:lib/lists.nix:196:5
     val foldl :: (b -> a -> b) -> b -> [a] -> b;
+    ## Reduce a list by applying a binary operator from left to right,
+    ## starting with an initial accumulator.
+    @source nixpkgs:lib/lists.nix:279:5
+    val foldl' :: (a -> b -> a) -> a -> [b] -> a;
     ## “right fold” a binary function op between successive elements of list
     ## with nul as the starting value, i.e., foldr op nul [x_1 x_2 ... x_n] ==
     ## op x_1 (op x_2 ... (op x_n nul)).
+    @source nixpkgs:lib/lists.nix:138:5
     val foldr :: (a -> b -> b) -> b -> [a] -> b;
     ## Apply the function to each element in the list. Same as map, but
     ## arguments flipped.
+    @source nixpkgs:lib/lists.nix:94:13
     val forEach :: [a] -> (a -> b) -> [b];
     ## Groups elements of list together by the string returned from the
     ## function f called on each element. It returns an attribute set where
     ## each attribute value contains the elements of list that are map...
+    @source nixpkgs:lib/lists.nix:1011:3
     val groupBy :: (a -> string) -> [a] -> { _: [a], ... };
+    ## Splits the elements of a list into many lists, using the return value
+    ## of a predicate. Predicate should return a string which becomes keys of
+    ## attrset groupBy returns. groupBy' allows to customise th...
+    @source nixpkgs:lib/lists.nix:1008:5
+    val groupBy' :: (a -> b -> a) -> a -> (b -> string) -> [b] -> { _: a, ... };
     ## Whether the first list is a prefix of the second list.
+    @source nixpkgs:lib/lists.nix:1643:15
     val hasPrefix :: [a] -> [a] -> bool;
     ## Return the first element of a list; abort evaluation if the argument
     ## isn’t a list or is an empty list. You can test whether a list is empty
     ## by comparing it with [].
+    @source nixpkgs:lib/lists.nix:19:5
     val head :: [a] -> a;
     ## Filter a list for elements that satisfy a predicate function. The
     ## predicate function is called with both the index and value for each
     ## element. It must return true/false to include/exclude a given e...
+    @source nixpkgs:lib/lists.nix:389:5
     val ifilter0 :: (int -> a -> bool) -> [a] -> [a];
     ## Map with index starting from 0
+    @source nixpkgs:lib/lists.nix:315:11
     val imap0 :: (int -> a -> b) -> [a] -> [b];
     ## Map with index starting from 1
+    @source nixpkgs:lib/lists.nix:347:11
     val imap1 :: (int -> a -> b) -> [a] -> [b];
     ## Returns all elements but the last.
+    @source nixpkgs:lib/lists.nix:1845:5
     val init :: [a] -> [a];
     ## Intersects list list1 and another list (list2).
+    @source nixpkgs:lib/lists.nix:2002:20
     val intersectLists :: [a] -> [a] -> [a];
     ## Returns the last element of a list.
+    @source nixpkgs:lib/lists.nix:1812:5
     val last :: [a] -> a;
     ## Return the length of the list e.
+    @source nixpkgs:lib/lists.nix:21:5
     val length :: [a] -> int;
     ## Apply the function f to each element in the list list. For example,
+    @source nixpkgs:lib/lists.nix:28:5
     val map :: (a -> b) -> [a] -> [b];
     ## Test if two lists have no common element. It should be slightly more
     ## efficient than intersectLists a b == [].
+    @source nixpkgs:lib/lists.nix:2058:23
     val mutuallyExclusive :: [a] -> [a] -> bool;
     ## Sort list using "Natural sorting". Numeric portions of strings are
     ## sorted in numeric order.
+    @source nixpkgs:lib/lists.nix:1464:5
     val naturalSort :: [string] -> [string];
     ## Return a singleton list or an empty list, depending on a boolean value.
     ## Useful when building lists with optional elements (e.g. ++ optional
     ## (system == "i686-linux") firefox).
+    @source nixpkgs:lib/lists.nix:785:14
     val optional :: bool -> a -> [a];
     ## Returns a list or an empty list, depending on a boolean value.
+    @source nixpkgs:lib/lists.nix:819:15
     val optionals :: bool -> [a] -> [a];
     ## Returns a list of integers from first up to and including last.
+    @source nixpkgs:lib/lists.nix:885:11
     val range :: int -> int -> [int];
     ## Remove elements equal to e from a list. Useful for buildInputs.
+    @source nixpkgs:lib/lists.nix:477:12
     val remove :: a -> [a] -> [a];
     ## Remove the first list as a prefix from the second list. Error if the
     ## first list isn't a prefix of the second list.
+    @source nixpkgs:lib/lists.nix:1679:5
     val removePrefix :: [a] -> [a] -> [a];
+    ## Replaces a list's nth element with a new element
+    @source nixpkgs:lib/lists.nix:2121:5
+    val replaceElemAt :: [a] -> int -> a -> [a];
     ## Returns a list with n copies of an element.
+    @source nixpkgs:lib/lists.nix:919:15
     val replicate :: int -> a -> [a];
     ## Reverse the order of the elements of a list.
+    @source nixpkgs:lib/lists.nix:1123:5
     val reverseList :: [a] -> [a];
     ## Create a list consisting of a single element. singleton x is sometimes
     ## more convenient with respect to indentation than [x] when x spans
     ## multiple lines.
+    @source nixpkgs:lib/lists.nix:59:15
     val singleton :: a -> [a];
     ## Sort a list based on a comparator function which compares two elements
     ## and returns true if the first argument is strictly below the second
     ## argument. The returned list is sorted in an increasing ord...
+    @source nixpkgs:lib/lists.nix:1305:3
     val sort :: (a -> a -> bool) -> [a] -> [a];
     ## Returns a list consisting of at most count elements of list, starting
     ## at index start.
+    @source nixpkgs:lib/lists.nix:1723:5
     val sublist :: int -> int -> [a] -> [a];
     ## Subtracts list e from another list (list2).
+    @source nixpkgs:lib/lists.nix:2036:19
     val subtractLists :: [a] -> [a] -> [a];
     ## Return the list without its first item; abort evaluation if the
     ## argument isn’t a list or is an empty list.
+    @source nixpkgs:lib/lists.nix:20:5
     val tail :: [a] -> [a];
     ## Returns the first (at most) N elements of a list.
+    @source nixpkgs:lib/lists.nix:1507:10
     val take :: int -> [a] -> [a];
     ## Returns the last (at most) N elements of a list.
+    @source nixpkgs:lib/lists.nix:1541:13
     val takeEnd :: int -> [a] -> [a];
+    ## If argument is a list, return it; else, wrap it in a singleton list. If
+    ## you're using this, you should almost certainly reconsider if there
+    ## isn't a more "well-typed" approach.
+    @source nixpkgs:lib/lists.nix:851:12
+    val toList :: (a | [a]) -> [a];
     ## Remove duplicate elements from the list. O(n^2) complexity.
+    @source nixpkgs:lib/lists.nix:1901:3
     val unique :: [a] -> [a];
     ## Removes duplicate strings from the list. O(n log n) complexity.
-    val uniqueStrings :: [ string ] -> [ string ];
+    @source nixpkgs:lib/lists.nix:1938:19
+    val uniqueStrings :: [string] -> [string];
     ## Merges two lists of the same size together. If the sizes aren't the
     ## same the merging stops at the shortest. How both lists are merged is
     ## defined by the first argument.
+    @source nixpkgs:lib/lists.nix:1060:5
     val zipListsWith :: (a -> b -> c) -> [a] -> [b] -> [c];
   }
 
   module strings {
     ## Appends string context from string like object src to target.
+    @source nixpkgs:lib/strings.nix:1691:20
     val addContextFrom :: string -> string -> string;
     ## Convert char to ascii value, must be in printable range
+    @source nixpkgs:lib/strings.nix:1004:15
     val charToInt :: string -> int;
     ## Create a "-D<condition>={TRUE,FALSE}" string that can be passed to
     ## typical CMake invocations.
+    @source nixpkgs:lib/strings.nix:2189:5
     val cmakeBool :: string -> bool -> string;
     ## Create a "-D<feature>:STRING=<value>" string that can be passed to
     ## typical CMake invocations. This is the most typical usage, so it
     ## deserves a special case.
+    @source nixpkgs:lib/strings.nix:2225:5
     val cmakeFeature :: string -> string -> string;
     ## Create a "-D<feature>:<type>=<value>" string that can be passed to
     ## typical CMake invocations.
+    @source nixpkgs:lib/strings.nix:2153:5
     val cmakeOptionType :: string -> string -> string -> string;
     ## Returns the length of the prefix that appears in both strings a and b.
+    @source nixpkgs:lib/strings.nix:2998:5
     val commonPrefixLength :: string -> string -> int;
     ## Returns the length of the suffix common to both strings a and b.
+    @source nixpkgs:lib/strings.nix:3030:5
     val commonSuffixLength :: string -> string -> int;
     ## Like concatMapStrings except that the function f also gets the position
     ## as a parameter.
+    @source nixpkgs:lib/strings.nix:156:23
     val concatImapStrings :: (int -> a -> string) -> [a] -> string;
     ## Same as concatMapStringsSep, but the mapping function additionally
     ## receives the position of its argument.
+    @source nixpkgs:lib/strings.nix:298:5
     val concatImapStringsSep :: string -> (int -> a -> string) -> [a] -> string;
     ## Concatenate a list of strings, adding a newline at the end of each one.
     ## Defined as concatMapStrings (s: s + "\n").
+    @source nixpkgs:lib/strings.nix:125:25
     val concatLines :: [string] -> string;
     ## Like concatMapStringsSep but takes an attribute set instead of a list.
-    val concatMapAttrsStringSep :: string -> (string -> Any -> string) -> { ... } -> string;
+    @source nixpkgs:lib/strings.nix:335:5
+    val concatMapAttrsStringSep :: string -> (string -> a -> string) -> { _: a, ... } -> string;
     ## Map a function over a list and concatenate the resulting strings.
+    @source nixpkgs:lib/strings.nix:125:22
     val concatMapStrings :: (a -> string) -> [a] -> string;
     ## Maps a function over a list of strings and then concatenates the result
     ## with the specified separator interspersed between elements.
+    @source nixpkgs:lib/strings.nix:262:5
     val concatMapStringsSep :: string -> (a -> string) -> [a] -> string;
     ## Concatenate a list of strings.
+    @source nixpkgs:lib/strings.nix:95:3
     val concatStrings :: [string] -> string;
     ## Concatenate a list of strings with a separator between each element
+    @source nixpkgs:lib/strings.nix:226:3
     val concatStringsSep :: string -> [string] -> string;
     ## Create an "--{enable,disable}-<feature>" string that can be passed to
     ## standard GNU Autoconf scripts.
+    @source nixpkgs:lib/strings.nix:2371:5
     val enableFeature :: bool -> string -> string;
     ## Create an "--{enable-<feature>=<value>,disable-<feature>}" string that
     ## can be passed to standard GNU Autoconf scripts.
+    @source nixpkgs:lib/strings.nix:2411:5
     val enableFeatureAs :: bool -> string -> string -> string;
     ## Escape occurrence of the elements of list in string by prefixing it
     ## with a backslash.
+    @source nixpkgs:lib/strings.nix:1035:12
     val escape :: [string] -> string -> string;
     ## Escape occurrence of the element of list in string by converting to its
     ## ASCII value and prefixing it with \\x. Only works for printable ascii
     ## characters.
+    @source nixpkgs:lib/strings.nix:1068:5
     val escapeC :: [string] -> string -> string;
     ## Quotes a string s if it can't be used as an identifier directly.
+    @source nixpkgs:lib/strings.nix:1451:5
     val escapeNixIdentifier :: string -> string;
     ## Turn a string s into a Nix expression representing that string
+    @source nixpkgs:lib/strings.nix:1379:21
     val escapeNixString :: string -> string;
     ## Turn a string s into an exact regular expression
+    @source nixpkgs:lib/strings.nix:1406:3
     val escapeRegex :: string -> string;
     ## Quote string to be used safely within the Bourne shell if it has any
     ## special characters.
+    @source nixpkgs:lib/strings.nix:1202:5
     val escapeShellArg :: string -> string;
     ## Quote all arguments that have special characters to be safely passed to
     ## the Bourne shell.
+    @source nixpkgs:lib/strings.nix:262:13
     val escapeShellArgs :: [string] -> string;
     ## Escape the string so it can be safely placed inside a URL query.
+    @source nixpkgs:lib/strings.nix:1099:3
     val escapeURL :: string -> string;
     ## Escapes a string s such that it is safe to include verbatim in an XML
     ## document.
+    @source nixpkgs:lib/strings.nix:1484:3
     val escapeXML :: string -> string;
     ## Read the contents of a file removing the trailing \n
+    @source nixpkgs:lib/strings.nix:2867:18
     val fileContents :: path -> string;
     ## Format a number adding leading zeroes up to fixed width.
+    @source nixpkgs:lib/strings.nix:2561:22
     val fixedWidthNumber :: int -> int -> string;
     ## Create a fixed width string with additional prefix to match required
     ## width.
+    @source nixpkgs:lib/strings.nix:2524:5
     val fixedWidthString :: int -> string -> string -> string;
     ## Convert a float to a string, but emit a warning when precision is lost
     ## during the conversion
+    @source nixpkgs:lib/strings.nix:2593:5
     val floatToString :: float -> string;
     ## This function takes an argument x that's either a derivation or a
     ## derivation's "name" attribute and extracts the name part from that
     ## argument.
+    @source nixpkgs:lib/strings.nix:2025:5
     val getName :: string | Derivation -> string;
     ## This function takes an argument x that's either a derivation or a
     ## derivation's "name" attribute and extracts the version part from that
     ## argument.
+    @source nixpkgs:lib/strings.nix:2060:5
     val getVersion :: string | Derivation -> string;
     ## Determine whether a string contains the given infix
+    @source nixpkgs:lib/strings.nix:893:5
     val hasInfix :: string -> string -> bool;
     ## Determine whether a string has given prefix.
+    @source nixpkgs:lib/strings.nix:800:5
     val hasPrefix :: string -> string -> bool;
     ## Determine whether a string has given suffix.
+    @source nixpkgs:lib/strings.nix:843:5
     val hasSuffix :: string -> string -> bool;
     ## Place an element between each element of a list
+    @source nixpkgs:lib/strings.nix:187:5
     val intersperse :: a -> [a] -> [a];
     ## Check whether a list or other value x can be passed to toString.
-    val isConvertibleWithToString :: a -> bool;
+    @source nixpkgs:lib/strings.nix:2626:5
+    val isConvertibleWithToString :: Any -> bool;
     ## Check whether a value x is a store path.
-    val isStorePath :: a -> bool;
+    @source nixpkgs:lib/strings.nix:2680:5
+    val isStorePath :: Any -> bool;
     ## Check whether a value can be coerced to a string. The value must be a
     ## string, path, or attribute set.
-    val isStringLike :: a -> bool;
+    @source nixpkgs:lib/strings.nix:2646:18
+    val isStringLike :: Any -> bool;
     ## Test whether the given name is a valid POSIX shell variable name.
+    @source nixpkgs:lib/strings.nix:1266:22
     val isValidPosixName :: string -> bool;
     ## Concatenates a list of strings with a separator between each element.
-    val join :: string -> [ string ] -> string;
+    @source nixpkgs:lib/strings.nix:73:3
+    val join :: string -> [string] -> string;
     ## Computes the Levenshtein distance between two strings a and b.
+    @source nixpkgs:lib/strings.nix:2961:5
     val levenshtein :: string -> string -> int;
     ## Returns whether the levenshtein distance between two strings a and b is
     ## at most some value k.
+    @source nixpkgs:lib/strings.nix:3132:5
     val levenshteinAtMost :: int -> string -> string -> bool;
     ## Construct a binary search path (such as $PATH) containing the binaries
     ## for a set of packages.
+    @source nixpkgs:lib/strings.nix:606:21
     val makeBinPath :: [Derivation] -> string;
     ## Construct an include search path (such as C_INCLUDE_PATH) containing
     ## the header files for a set of packages or paths.
+    @source nixpkgs:lib/strings.nix:606:21
     val makeIncludePath :: [Derivation] -> string;
     ## Construct a library search path (such as RPATH) containing the
     ## libraries for a set of packages
+    @source nixpkgs:lib/strings.nix:606:21
     val makeLibraryPath :: [Derivation] -> string;
     ## Construct a Unix-style, colon-separated search path consisting of the
     ## given subDir appended to each of the given paths.
+    @source nixpkgs:lib/strings.nix:568:5
     val makeSearchPath :: string -> [string] -> string;
     ## Construct a Unix-style search path by appending the given subDir to the
     ## specified output of each of the packages.
+    @source nixpkgs:lib/strings.nix:606:5
     val makeSearchPathOutput :: string -> string -> [Derivation] -> string;
     ## Create a "-D<condition>={true,false}" string that can be passed to
     ## typical Meson invocations.
+    @source nixpkgs:lib/strings.nix:2297:5
     val mesonBool :: string -> bool -> string;
     ## Create a "-D<feature>={enabled,disabled}" string that can be passed to
     ## typical Meson invocations.
+    @source nixpkgs:lib/strings.nix:2334:5
     val mesonEnable :: string -> bool -> string;
     ## Create a "-D<feature>=<value>" string that can be passed to typical
     ## Meson invocations.
+    @source nixpkgs:lib/strings.nix:2260:5
     val mesonOption :: string -> string -> string;
     ## Extract name and version from a URL as shown in the examples.
+    @source nixpkgs:lib/strings.nix:2095:5
     val nameFromURL :: string -> string;
     ## Normalize path, removing extraneous /s
+    @source nixpkgs:lib/strings.nix:725:5
     val normalizePath :: string -> string;
     ## Depending on the boolean cond, return either the given string or the
     ## empty string. Useful to concatenate against a bigger string.
+    @source nixpkgs:lib/strings.nix:767:20
     val optionalString :: bool -> string -> string;
     ## Returns a string without the specified prefix, if the prefix matches.
+    @source nixpkgs:lib/strings.nix:1855:5
     val removePrefix :: string -> string -> string;
     ## Returns a string without the specified suffix, if the suffix matches.
+    @source nixpkgs:lib/strings.nix:1906:5
     val removeSuffix :: string -> string -> string;
     ## Given string s, replace every occurrence of the string from with the
     ## string to.
+    @source nixpkgs:lib/strings.nix:399:19
     val replaceString :: string -> string -> string -> string;
     ## Given string s, replace every occurrence of the strings in from with
     ## the corresponding string in to.
+    @source nixpkgs:lib/strings.nix:33:5
     val replaceStrings :: [string] -> [string] -> string -> string;
     ## Repeat a string n times, and concatenate the parts into a new string.
+    @source nixpkgs:lib/strings.nix:432:15
     val replicate :: int -> string -> string;
     ## Creates a valid derivation name from a potentially invalid one.
+    @source nixpkgs:lib/strings.nix:2902:5
     val sanitizeDerivationName :: string -> string;
     ## Cut a string with a separator and produces a list of strings which were
     ## separated by this separator.
+    @source nixpkgs:lib/strings.nix:1725:5
     val splitString :: string -> string -> [string];
     ## Splits a string into substrings based on a predicate that examines
     ## adjacent characters.
+    @source nixpkgs:lib/strings.nix:1795:5
     val splitStringBy :: (string -> string -> bool) -> bool -> string -> [string];
     ## Manipulate a string character by character and replace them by strings
     ## before concatenating the results.
+    @source nixpkgs:lib/strings.nix:972:5
     val stringAsChars :: (string -> string) -> string -> string;
     ## Convert a string s to a list of characters (i.e. singleton strings).
     ## This allows you to, e.g., map a function over each character. However,
     ## note that this will likely be horribly inefficient; Nix i...
+    @source nixpkgs:lib/strings.nix:939:24
     val stringToCharacters :: string -> [string];
     ## Converts a string to camelCase. Handles snake_case, PascalCase, kebab-
     ## case strings as well as strings delimited by spaces.
+    @source nixpkgs:lib/strings.nix:1617:5
     val toCamelCase :: string -> string;
     ## Parse a string as an int. Does not support parsing of integers with
     ## preceding zero due to ambiguity between zero-padded and octal numbers.
     ## See toIntBase10.
+    @source nixpkgs:lib/strings.nix:2741:5
     val toInt :: string -> int;
     ## Parse a string as a base 10 int. This supports parsing of zero-padded
     ## integers.
+    @source nixpkgs:lib/strings.nix:2811:5
     val toIntBase10 :: string -> int;
     ## Converts an ASCII string s to lower-case.
+    @source nixpkgs:lib/strings.nix:1518:3
     val toLower :: string -> string;
     ## Converts the first character of a string s to upper-case.
+    @source nixpkgs:lib/strings.nix:1573:5
     val toSentenceCase :: string -> string;
+    ## Translate a Nix value into a shell variable declaration, with proper
+    ## escaping.
+    @source nixpkgs:lib/strings.nix:1307:5
+    val toShellVar :: string -> (string | [string] | { _: string, ... }) -> string;
     ## Converts an ASCII string s to upper-case.
+    @source nixpkgs:lib/strings.nix:1545:3
     val toUpper :: string -> string;
     ## Remove leading and trailing whitespace from a string s.
+    @source nixpkgs:lib/strings.nix:528:5
     val trim :: string -> string;
     ## Returns true if string v1 denotes a version equal to or newer than v2.
+    @source nixpkgs:lib/strings.nix:1990:20
     val versionAtLeast :: string -> string -> bool;
     ## Returns true if string v1 denotes a version older than v2.
+    @source nixpkgs:lib/strings.nix:1956:18
     val versionOlder :: string -> string -> bool;
     ## Create an "--{with,without}-<feature>" string that can be passed to
     ## standard GNU Autoconf scripts.
+    @source nixpkgs:lib/strings.nix:2446:5
     val withFeature :: bool -> string -> string;
     ## Create an "--{with-<feature>=<value>,without-<feature>}" string that
     ## can be passed to standard GNU Autoconf scripts.
+    @source nixpkgs:lib/strings.nix:2485:5
     val withFeatureAs :: bool -> string -> string -> string;
   }
 
   module debug {
+    ## Trace the input and output of a function f named name, both down to
+    ## depth.
+    @source nixpkgs:lib/debug.nix:426:5
+    val traceFnSeqN :: int -> string -> (a -> b) -> a -> b;
     ## Conditionally trace the supplied message, based on a predicate.
+    @source nixpkgs:lib/debug.nix:79:5
     val traceIf :: bool -> string -> a -> a;
     ## builtins.trace, but the value is builtins.deepSeqed first.
+    @source nixpkgs:lib/debug.nix:179:14
     val traceSeq :: a -> b -> b;
     ## Like traceSeq, but only evaluate down to depth n. This is very useful
     ## because lots of traceSeq usages lead to an infinite recursion.
+    @source nixpkgs:lib/debug.nix:219:5
     val traceSeqN :: int -> a -> b -> b;
     ## Trace the supplied value and return it.
+    @source nixpkgs:lib/debug.nix:114:19
     val traceVal :: a -> a;
     ## Trace the supplied value after applying a function to it, and return
     ## the original value.
+    @source nixpkgs:lib/debug.nix:114:16
     val traceValFn :: (a -> b) -> a -> a;
+    ## A combination of traceVal and traceSeq.
+    @source nixpkgs:lib/debug.nix:278:22
+    val traceValSeq :: a -> a;
+    ## A combination of traceVal and traceSeq that applies a provided function
+    ## to the value to be traced after deepSeqing it.
+    @source nixpkgs:lib/debug.nix:278:19
+    val traceValSeqFn :: (a -> b) -> a -> a;
+    ## A combination of traceVal and traceSeqN.
+    @source nixpkgs:lib/debug.nix:346:8
+    val traceValSeqN :: int -> a -> a;
+    ## A combination of traceVal and traceSeqN that applies a provided
+    ## function to the value to be traced.
+    @source nixpkgs:lib/debug.nix:346:5
+    val traceValSeqNFn :: (a -> b) -> int -> a -> a;
   }
 
   module options {
     ## Extracts values of all file keys of the given list
+    @source nixpkgs:lib/options.nix:564:3
     val getFiles :: [{ file: a }] -> [a];
     ## Extracts values of all value keys of the given list.
+    @source nixpkgs:lib/options.nix:542:3
     val getValues :: [{ value: a }] -> [a];
     ## Returns true when the given argument a is an option
-    val isOption :: a -> bool;
+    @source nixpkgs:lib/types.nix:140:18
+    val isOption :: Any -> bool;
     ## For use in the defaultText and example option attributes. Causes the
     ## given string to be rendered verbatim in the documentation as Nix code.
     ## This is necessary for complex values, e.g. functions, or ...
+    @source nixpkgs:lib/options.nix:701:5
     val literalExpression :: string -> { ... };
     ## For use in the defaultText and example option attributes. Causes the
     ## given MD text to be inserted verbatim in the documentation, for when a
     ## literalExpression would be too hard to read.
+    @source nixpkgs:lib/options.nix:765:5
     val literalMD :: string -> { ... };
     ## "Merge" option definitions by checking that they all have the same
     ## value.
+    @source nixpkgs:lib/options.nix:500:5
     val mergeEqualOption :: [string] -> [{ file: string, value: a }] -> a;
     ## Require a single definition.
+    @source nixpkgs:lib/options.nix:479:5
     val mergeOneOption :: [string] -> [{ file: string, value: a }] -> a;
     ## Creates an option declaration with a default value of false, and can be
     ## defined to true.
+    @source nixpkgs:lib/options.nix:187:5
     val mkEnableOption :: string -> { ... };
     ## Creates an Option declaration for use with the module system.
+    @source nixpkgs:lib/options.nix:140:5
     val mkOption :: { ... } -> { ... };
     ## Creates an Option attribute set for an option that specifies the
     ## package a module should use for some purpose.
+    @source nixpkgs:lib/options.nix:309:5
     val mkPackageOption :: { ... } -> (string | [string]) -> { ... } -> { ... };
     ## This option accepts arbitrary definitions, but it does not produce an
     ## option value.
+    @source nixpkgs:lib/options.nix:361:5
     val mkSinkUndeclaredOptions :: { ... } -> { ... };
+    @source nixpkgs:lib/options.nix:821:5
     val showDefs :: [{ file: string, value: a }] -> string;
+    @source nixpkgs:lib/options.nix:818:15
     val showFiles :: [string] -> string;
     ## Convert an option, described as a list of the option parts to a human-
     ## readable version.
+    @source nixpkgs:lib/options.nix:804:5
     val showOption :: [string] -> string;
   }
 
   module modules {
     ## See https://nixos.org/manual/nixpkgs/unstable/#module-system-lib-
     ## evalModules or file://./../doc/module-system/module-system.chapter.md
+    @source nixpkgs:lib/modules.nix:93:5
     val evalModules :: { ... } -> { ... };
     ## importApply file arg :: Path -> a -> Module, where import file :: a ->
     ## Module
+    @source nixpkgs:lib/modules.nix:2045:5
     val importApply :: path -> a -> { ... };
+    @source nixpkgs:lib/modules.nix:1543:23
     val mkAfter :: a -> a;
     ## Like ‘mkRenamedOptionModule’, but doesn't show a warning.
+    @source nixpkgs:lib/modules.nix:1846:5
     val mkAliasOptionModule :: [string] -> [string] -> { ... };
+    @source nixpkgs:lib/modules.nix:1543:23
     val mkBefore :: a -> a;
     ## Single "from" version of mkMergedOptionModule. Returns a module that
     ## causes a warning to be shown if the "from" option is defined; the
     ## defined value can be used in the "mergeFn" to set the "to" val...
+    @source nixpkgs:lib/modules.nix:1829:5
     val mkChangedOptionModule :: [string] -> [string] -> (a -> b) -> { ... };
+    @source nixpkgs:lib/modules.nix:1529:26
     val mkDefault :: a -> a;
     ## mkDerivedConfig : Option a -> (a -> Definition b) -> Definition b
+    @source nixpkgs:lib/modules.nix:1886:21
     val mkDerivedConfig :: { ... } -> (a -> b) -> b;
     ## The identity function For when you need a function that does “nothing”.
+    @source nixpkgs:lib/trivial.nix:61:8
     val mkFixStrictness :: a -> a;
+    @source nixpkgs:lib/modules.nix:1529:26
     val mkForce :: a -> a;
     ## Properties.
+    @source nixpkgs:lib/modules.nix:1510:10
     val mkIf :: bool -> a -> a;
+    @source nixpkgs:lib/modules.nix:1529:26
     val mkImageMediaOverride :: a -> a;
+    @source nixpkgs:lib/modules.nix:1519:13
     val mkMerge :: [a] -> a;
     ## Returns a module that causes a warning to be shown if any of the "from"
     ## option is defined; the defined values can be used in the "mergeFn" to
     ## set the "to" value. This function can be used to merge ...
+    @source nixpkgs:lib/modules.nix:1756:5
     val mkMergedOptionModule :: [[string]] -> [string] -> ([a] -> b) -> { ... };
+    @source nixpkgs:lib/modules.nix:1529:26
     val mkOptionDefault :: a -> a;
+    @source nixpkgs:lib/modules.nix:1543:13
     val mkOrder :: int -> a -> a;
+    @source nixpkgs:lib/modules.nix:1529:16
     val mkOverride :: int -> a -> a;
     ## Returns a module that causes a warning to be shown if the specified
     ## option is defined. For example,
+    @source nixpkgs:lib/modules.nix:1632:5
     val mkRemovedOptionModule :: [string] -> string -> { ... };
     ## Returns a module that causes a warning to be shown if the specified
     ## "from" option is defined; the defined value is however forwarded to the
     ## "to" option. This can be used to rename options while pro...
+    @source nixpkgs:lib/modules.nix:1681:5
     val mkRenamedOptionModule :: [string] -> [string] -> { ... };
+    @source nixpkgs:lib/modules.nix:1529:26
     val mkVMOverride :: a -> a;
   }
 
@@ -748,32 +1069,41 @@ module lib {
     ## Call the package function in the file fn with the required arguments
     ## automatically. The function is called with the arguments args, but any
     ## missing arguments are obtained from autoArgs. This functi...
+    @source nixpkgs:lib/customisation.nix:275:5
     val callPackageWith :: { ... } -> (({ ... } -> a) | path) -> { ... } -> a;
     ## Like callPackage, but for a function that returns an attribute set of
     ## derivations. The override function is added to the individual
     ## attributes.
+    @source nixpkgs:lib/customisation.nix:367:5
     val callPackagesWith :: { ... } -> (({ ... } -> { ... }) | path) -> { ... } -> { ... };
     ## Add attributes to each output of a derivation without changing the
     ## derivation itself and check a given condition when evaluating.
+    @source nixpkgs:lib/customisation.nix:410:5
     val extendDerivation :: bool -> Any -> Derivation -> Derivation;
     ## Strip a derivation of all non-essential attributes, returning only
     ## those needed by hydra-eval-jobs. Also strictly evaluate the result to
     ## ensure that there are no thunks kept alive to prevent garbag...
+    @source nixpkgs:lib/customisation.nix:472:5
     val hydraJob :: (Derivation | null) -> (Derivation | null);
     ## makeOverridable takes a function from attribute set to attribute set
     ## and injects override attribute which can be used to override arguments
     ## of the function.
+    @source nixpkgs:lib/customisation.nix:154:5
     val makeOverridable :: ({ ... } -> a) -> { ... } -> a;
-    ## Takes a function and applies it pointwise to each field of a cross
-    ## index.
-    val mapCrossIndex :: (a -> b) -> { ... } -> { ... };
+    ## Make an attribute set (a "scope") from functions that take arguments
+    ## from that same attribute set. See [](#ex-makeScope) for how to use it.
+    @source nixpkgs:lib/customisation.nix:632:5
+    val makeScope :: ({ ... } -> (({ ... } -> a) | path) -> { ... } -> a) -> ({ ... } -> { ... }) -> Scope;
     ## overrideDerivation drv f takes a derivation (i.e., the result of a call
     ## to the builtin function derivation) and returns a new derivation in
     ## which the attributes of the original are overridden accor...
+    @source nixpkgs:lib/customisation.nix:100:5
     val overrideDerivation :: Derivation -> ( Derivation -> { ... } ) -> Derivation;
     ## Removes a prefix from the attribute names of a cross index.
+    @source nixpkgs:lib/customisation.nix:933:26
     val renameCrossIndexFrom :: string -> { ... } -> { ... };
     ## Adds a prefix to the attribute names of a cross index.
+    @source nixpkgs:lib/customisation.nix:973:24
     val renameCrossIndexTo :: string -> { ... } -> { ... };
   }
 
@@ -781,12 +1111,15 @@ module lib {
     ## Specialized assertMsg for checking if every one of vals is one of the
     ## elements of the list xs. Useful for checking lists of supported
     ## attributes.
+    @source nixpkgs:lib/asserts.nix:140:5
     val assertEachOneOf :: string -> [a] -> [a] -> bool;
     ## Throw if pred is false, else return pred. Intended to be used to
     ## augment asserts with helpful error messages.
+    @source nixpkgs:lib/asserts.nix:50:15
     val assertMsg :: bool -> string -> bool;
     ## Specialized assertMsg for checking if val is one of the elements of the
     ## list xs. Useful for checking enums.
+    @source nixpkgs:lib/asserts.nix:92:5
     val assertOneOf :: string -> a -> [a] -> bool;
   }
 
@@ -794,86 +1127,112 @@ module lib {
     ## The file set containing all files from the first file set that are not
     ## in the second file set. See also Difference (set
     ## theory)#Relative_complement).
+    @source nixpkgs:lib/fileset/default.nix:730:5
     val difference :: FileSet -> FileSet -> FileSet;
     ## Create a file set with the same files as a lib.sources-based value.
     ## This does not import any of the files into the store.
+    @source nixpkgs:lib/fileset/default.nix:883:5
     val fromSource :: a -> FileSet;
     ## Create a file set containing all Git-tracked files in a repository.
+    @source nixpkgs:lib/fileset/default.nix:941:16
     val gitTracked :: path -> FileSet;
     ## The file set containing all files that are in both of two given file
     ## sets. See also Intersection (set theory)).
+    @source nixpkgs:lib/fileset/default.nix:671:5
     val intersection :: FileSet -> FileSet -> FileSet;
     ## Tests whether a given value is a fileset, or can be used in place of a
     ## fileset.
+    @source nixpkgs:lib/fileset/default.nix:1053:15
     val isFileset :: Any -> bool;
     ## Create a file set from a path that may or may not exist: - If the path
     ## does exist, the path is coerced to a file set. - If the path does not
     ## exist, a file set containing no files is returned.
+    @source nixpkgs:lib/fileset/default.nix:189:5
     val maybeMissing :: path -> FileSet;
     ## The list of file paths contained in the given file set.
+    @source nixpkgs:lib/fileset/default.nix:514:12
     val toList :: FileSet -> [ path ];
     ## Incrementally evaluate and trace a file set in a pretty way. This
     ## function is only intended for debugging purposes. The exact tracing
     ## format is unspecified and may change.
+    @source nixpkgs:lib/fileset/default.nix:248:5
     val trace :: FileSet -> Any -> Any;
     ## Incrementally evaluate and trace a file set in a pretty way. This
     ## function is only intended for debugging purposes. The exact tracing
     ## format is unspecified and may change.
+    @source nixpkgs:lib/fileset/default.nix:306:5
     val traceVal :: FileSet -> FileSet;
     ## The file set containing all files that are in either of two given file
     ## sets. This is the same as unions, but takes just two file sets instead
     ## of a list. See also Union (set theory)).
+    @source nixpkgs:lib/fileset/default.nix:558:5
     val union :: FileSet -> FileSet -> FileSet;
     ## The file set containing all files that are in any of the given file
     ## sets. This is the same as union, but takes a list of file sets instead
     ## of just two. See also Union (set theory)).
+    @source nixpkgs:lib/fileset/default.nix:620:5
     val unions :: [ FileSet ] -> FileSet;
   }
 
   module filesystem {
     ## A map of all haskell packages defined in the given path, identified by
     ## having a cabal file with the same name as the directory itself.
+    @source nixpkgs:lib/filesystem.nix:157:5
     val haskellPathsInDir :: path -> { _: path, ... };
     ## Given a directory, return a flattened list of all files within it
     ## recursively.
-    val listFilesRecursive :: path -> [ path ];
+    @source nixpkgs:lib/filesystem.nix:242:5
+    val listFilesRecursive :: path -> [path];
     ## Whether a path exists and is a directory.
+    @source nixpkgs:lib/filesystem.nix:103:21
     val pathIsDirectory :: path -> bool;
     ## Whether a path exists and is a regular file, meaning not a symlink or
     ## any other special file type.
+    @source nixpkgs:lib/filesystem.nix:137:23
     val pathIsRegularFile :: path -> bool;
     ## The type of a path. The path needs to exist and be accessible. The
     ## result is either "directory" for a directory, "regular" for a regular
     ## file, "symlink" for a symlink, or "unknown" for anything else.
+    @source nixpkgs:lib/filesystem.nix:69:3
     val pathType :: path -> string;
     ## The type of a path. The path needs to exist and be accessible. The
     ## result is either "directory" for a directory, "regular" for a regular
     ## file, "symlink" for a symlink, or "unknown" for anything else.
+    @source nixpkgs:lib/filesystem.nix:34:5
     val readFileType :: path -> string;
     ## Append /default.nix if the passed path is a directory.
+    @source nixpkgs:lib/filesystem.nix:480:5
     val resolveDefaultNix :: (path | string) -> (path | string);
   }
 
   module path {
     ## Append a subpath string to a path.
+    @source nixpkgs:lib/path/default.nix:238:5
     val append :: path -> string -> path;
     ## Split a subpath into its path component strings. Throw an error if the
     ## subpath isn't valid. Note that the returned path components are also
     ## valid subpath strings, though they are intentionally not ...
-    val components :: string -> [ string ];
+    @source nixpkgs:lib/path/default.nix:704:5
+    val components :: string -> [string];
     ## Whether the first path is a component-wise prefix of the second path.
+    @source nixpkgs:lib/path/default.nix:287:5
     val hasPrefix :: path -> path -> bool;
     ## Whether a path has a store path as a prefix.
+    @source nixpkgs:lib/path/default.nix:493:5
     val hasStorePathPrefix :: path -> bool;
     ## Whether a value is a valid subpath string.
+    @source nixpkgs:lib/path/default.nix:567:5
     val isValid :: string -> bool;
     ## Join subpath strings together using /, returning a normalised subpath
     ## string.
-    val join :: [ string ] -> string;
+    @source nixpkgs:lib/path/default.nix:644:5
+    val join :: [string] -> string;
     ## Normalise a subpath. Throw an error if the subpath isn't valid.
+    @source nixpkgs:lib/path/default.nix:801:5
     val normalise :: string -> string;
     ## Remove the first path as a component-wise prefix from the second path.
     ## The result is a normalised subpath string.
+    @source nixpkgs:lib/path/default.nix:346:5
     val removePrefix :: path -> path -> string;
   }
 
@@ -881,141 +1240,244 @@ module lib {
     ## Get all files ending with the specified suffices from the given source
     ## directory or its descendants, omitting files that do not match any
     ## suffix. The result of the example below will include files ...
+    @source nixpkgs:lib/sources.nix:259:5
     val sourceFilesBySuffices :: a -> [string] -> a;
     ## Add logging to a source, for troubleshooting the filtering behavior.
+    @source nixpkgs:lib/sources.nix:166:5
     val trace :: a -> a;
   }
 
-  module meta {
-    ## Generate CPE parts from inputs. Copies vendor and version to the
-    ## output, and sets update to *.
-    val cpeFullVersionWithVendor :: string -> string -> { ... };
-    ## Generate CPE parts from inputs. Copies vendor to the result. When
-    ## version matches X.Y.Z where all parts are numerical, sets version and
-    ## update fields to X.Y and Z. Throws an error if the version do...
-    val cpePatchVersionInUpdateWithVendor :: string -> string -> { ... };
-    ## Get the path to the main program of a package based on meta.mainProgram
-    val getExe :: Derivation -> string;
-    ## Alternate version of lib.meta.cpePatchVersionInUpdateWithVendor. If
-    ## cpePatchVersionInUpdateWithVendor succeeds, returns an attribute set
-    ## with success set to true and value set to the result. Otherw...
-    val tryCPEPatchVersionInUpdateWithVendor :: string -> string -> { ... };
+  module versions {
+    ## Get the major version string from a string.
+    @source nixpkgs:lib/versions.nix:56:11
+    val major :: string -> string;
+    ## Get string of the first two parts (major and minor) of a version
+    ## string.
+    @source nixpkgs:lib/versions.nix:141:16
+    val majorMinor :: string -> string;
+    ## Get the minor version string from a string.
+    @source nixpkgs:lib/versions.nix:84:11
+    val minor :: string -> string;
+    ## Pad a version string with zeros to match the given number of
+    ## components.
+    @source nixpkgs:lib/versions.nix:178:5
+    val pad :: int -> string -> string;
+    ## Get the patch version string from a string.
+    @source nixpkgs:lib/versions.nix:112:11
+    val patch :: string -> string;
+    ## Break a version string into its component parts.
+    @source nixpkgs:lib/versions.nix:28:3
+    val splitVersion :: string -> [string];
   }
 
-  module generators {
-    ## Mark string as Lua expression to be inlined when processed by toLua.
-    val mkLuaInline :: string -> { ... };
-    ## Translate a simple Nix expression to Lua representation with occasional
-    ## Lua-inlines that can be constructed by mkLuaInline function.
-    val toLua :: { ... } -> Any -> string;
+  module meta {
+    ## Add to or override the meta attributes of the given derivation.
+    @source nixpkgs:lib/meta.nix:59:5
+    val addMetaAttrs :: { ... } -> Derivation -> Derivation;
+    ## Append a suffix to the name of a package (before the version part).
+    @source nixpkgs:lib/meta.nix:157:5
+    val appendToName :: string -> Derivation -> Derivation;
+    ## Disable Hydra builds of given derivation.
+    @source nixpkgs:lib/meta.nix:82:20
+    val dontDistribute :: Derivation -> Derivation;
+    ## Get the path to the main program of a package based on meta.mainProgram
+    @source nixpkgs:lib/meta.nix:527:5
+    val getExe :: Derivation -> StorePath;
+    ## Get the path of a program of a derivation.
+    @source nixpkgs:lib/meta.nix:573:5
+    val getExe' :: Derivation -> string -> StorePath;
+    ## Increase the nix-env priority of the package, i.e., this
+    ## version/variant of the package will be preferred.
+    @source nixpkgs:lib/meta.nix:59:15
+    val hiPrio :: Derivation -> Derivation;
+    ## Apply hiPrio to an attrset with derivations.
+    @source nixpkgs:lib/meta.nix:280:15
+    val hiPrioSet :: { _: Derivation, ... } -> { _: Derivation, ... };
+    ## Decrease the nix-env priority of the package, i.e., other
+    ## versions/variants of the package will be preferred.
+    @source nixpkgs:lib/meta.nix:59:15
+    val lowPrio :: Derivation -> Derivation;
+    ## Apply lowPrio to an attrset with derivations.
+    @source nixpkgs:lib/meta.nix:245:16
+    val lowPrioSet :: { _: Derivation, ... } -> { _: Derivation, ... };
+    ## Apply a function to each derivation and only to derivations in an
+    ## attrset.
+    @source nixpkgs:lib/meta.nix:186:5
+    val mapDerivationAttrset :: (Derivation -> a) -> { ... } -> { ... };
+    ## Change the symbolic name of a derivation.
+    @source nixpkgs:lib/meta.nix:107:13
+    val setName :: string -> Derivation -> Derivation;
+    ## Set the nix-env priority of the package. Note that higher values are
+    ## lower priority, and vice versa.
+    @source nixpkgs:lib/meta.nix:210:13
+    val setPrio :: int -> Derivation -> Derivation;
+    ## Like setName, but takes the previous name as an argument.
+    @source nixpkgs:lib/meta.nix:138:16
+    val updateName :: (string -> string) -> Derivation -> Derivation;
   }
 
   module gvariant {
     ## Check if a value is a GVariant value
+    @source nixpkgs:lib/gvariant.nix:69:16
     val isGVariant :: Any -> bool;
     ## Returns the GVariant array from the given type of the elements and a
     ## Nix list.
-    val mkArray :: [Any] -> a;
+    @source nixpkgs:lib/gvariant.nix:192:5
+    val mkArray :: [Any] -> GVariant;
     ## Returns the GVariant boolean from the given Nix bool value.
-    val mkBoolean :: bool -> a;
+    @source nixpkgs:lib/gvariant.nix:430:5
+    val mkBoolean :: bool -> GVariant;
     ## Returns the GVariant dictionary entry from the given key and value.
-    val mkDictionaryEntry :: string -> Any -> a;
+    @source nixpkgs:lib/gvariant.nix:311:5
+    val mkDictionaryEntry :: string -> Any -> GVariant;
     ## Returns the GVariant double from the given Nix float value.
-    val mkDouble :: float -> a;
+    @source nixpkgs:lib/gvariant.nix:587:5
+    val mkDouble :: float -> GVariant;
+    ## Returns the GVariant array from the given empty Nix list.
+    @source nixpkgs:lib/gvariant.nix:231:5
+    val mkEmptyArray :: GVariantType -> GVariant;
     ## Returns the GVariant int16 from the given Nix int value.
-    val mkInt16 :: int -> a;
+    @source nixpkgs:lib/gvariant.nix:24:20
+    val mkInt16 :: int -> GVariant;
     ## Returns the GVariant int32 from the given Nix int value.
-    val mkInt32 :: int -> a;
+    @source nixpkgs:lib/gvariant.nix:532:5
+    val mkInt32 :: int -> GVariant;
     ## Returns the GVariant int64 from the given Nix int value.
-    val mkInt64 :: int -> a;
+    @source nixpkgs:lib/gvariant.nix:24:20
+    val mkInt64 :: int -> GVariant;
     ## Returns the GVariant just from the given Nix value.
-    val mkJust :: Any -> a;
+    @source nixpkgs:lib/gvariant.nix:382:5
+    val mkJust :: Any -> GVariant;
+    ## Returns the GVariant maybe from the given element type.
+    @source nixpkgs:lib/gvariant.nix:342:5
+    val mkMaybe :: GVariantType -> Any -> GVariant;
+    ## Returns the GVariant nothing from the given element type.
+    @source nixpkgs:lib/gvariant.nix:364:15
+    val mkNothing :: GVariantType -> GVariant;
     ## Returns the GVariant object path from the given Nix string value.
-    val mkObjectpath :: string -> a;
+    @source nixpkgs:lib/gvariant.nix:477:5
+    val mkObjectpath :: string -> GVariant;
     ## Returns the GVariant string from the given Nix string value.
-    val mkString :: string -> a;
+    @source nixpkgs:lib/gvariant.nix:452:5
+    val mkString :: string -> GVariant;
     ## Returns the GVariant tuple from the given Nix list.
-    val mkTuple :: [Any] -> a;
+    @source nixpkgs:lib/gvariant.nix:404:5
+    val mkTuple :: [Any] -> GVariant;
     ## Returns the GVariant uchar from the given Nix int value.
-    val mkUchar :: int -> a;
+    @source nixpkgs:lib/gvariant.nix:24:20
+    val mkUchar :: int -> GVariant;
     ## Returns the GVariant uint16 from the given Nix int value.
-    val mkUint16 :: int -> a;
+    @source nixpkgs:lib/gvariant.nix:24:20
+    val mkUint16 :: int -> GVariant;
     ## Returns the GVariant uint32 from the given Nix int value.
-    val mkUint32 :: int -> a;
+    @source nixpkgs:lib/gvariant.nix:24:20
+    val mkUint32 :: int -> GVariant;
     ## Returns the GVariant uint64 from the given Nix int value.
-    val mkUint64 :: int -> a;
+    @source nixpkgs:lib/gvariant.nix:24:20
+    val mkUint64 :: int -> GVariant;
     ## Returns the GVariant value that most closely matches the given Nix
     ## value. If no GVariant value can be found unambiguously then error is
     ## thrown.
-    val mkValue :: Any -> a;
+    @source nixpkgs:lib/gvariant.nix:135:5
+    val mkValue :: Any -> GVariant;
     ## Returns the GVariant variant from the given Nix value. Variants are
     ## containers of different GVariant type.
-    val mkVariant :: Any -> a;
+    @source nixpkgs:lib/gvariant.nix:267:5
+    val mkVariant :: Any -> GVariant;
   }
 
   module derivations {
     ## Conditionally set a derivation attribute.
-    val optionalDrvAttr :: bool -> a -> a | null;
+    @source nixpkgs:lib/derivations.nix:219:21
+    val optionalDrvAttr :: bool -> a -> (a | null);
+    ## Wrap a derivation such that instantiating it produces a warning.
+    @source nixpkgs:lib/derivations.nix:255:5
+    val warnOnInstantiate :: string -> Derivation -> Derivation;
   }
 
   module network {
     ## Creates an IPv6Address object from an IPv6 address as a string. If the
     ## prefix length is omitted, it defaults to 64. The parser is limited to
     ## the first two versions of IPv6 addresses addressed in RF...
+    @source nixpkgs:lib/network/default.nix:44:7
     val fromString :: string -> IPv6Address;
     ## Converts a 48-bit MAC address into a EUI-64 IPv6 address suffix.
+    @source nixpkgs:lib/network/default.nix:79:7
     val mkEUI64Suffix :: string -> string;
   }
 
   module mergeAttrBy {
     ## Concatenate two lists
+    @source nixpkgs:lib/trivial.nix:189:12
     val buildInputs :: [a] -> [a] -> [a];
     ## Merge two attribute sets shallowly, right side trumps left
+    @source nixpkgs:lib/trivial.nix:338:16
     val cfg :: { ... } -> { ... } -> { ... };
     ## Concatenate two lists
+    @source nixpkgs:lib/trivial.nix:189:12
     val configureFlags :: [a] -> [a] -> [a];
     ## Merge two attribute sets shallowly, right side trumps left
+    @source nixpkgs:lib/trivial.nix:338:16
     val flags :: { ... } -> { ... } -> { ... };
     ## Merge two attribute sets shallowly, right side trumps left
+    @source nixpkgs:lib/trivial.nix:338:16
     val meta :: { ... } -> { ... } -> { ... };
     ## Concatenate two lists
+    @source nixpkgs:lib/trivial.nix:189:12
     val nativeBuildInputs :: [a] -> [a] -> [a];
     ## Merge two attribute sets shallowly, right side trumps left
+    @source nixpkgs:lib/trivial.nix:338:16
     val passthru :: { ... } -> { ... } -> { ... };
     ## Concatenate two lists
+    @source nixpkgs:lib/trivial.nix:189:12
     val patches :: [a] -> [a] -> [a];
     ## Concatenate two lists
+    @source nixpkgs:lib/trivial.nix:189:12
     val postAll :: [a] -> [a] -> [a];
     ## Concatenate two lists
+    @source nixpkgs:lib/trivial.nix:189:12
     val prePhases :: [a] -> [a] -> [a];
     ## Concatenate two lists
+    @source nixpkgs:lib/trivial.nix:189:12
     val propagatedBuildInputs :: [a] -> [a] -> [a];
   }
 
   module misc {
     ## Concatenate two lists
+    @source nixpkgs:lib/trivial.nix:189:12
     val buildInputs :: [a] -> [a] -> [a];
     ## Merge two attribute sets shallowly, right side trumps left
+    @source nixpkgs:lib/trivial.nix:338:16
     val cfg :: { ... } -> { ... } -> { ... };
     ## Concatenate two lists
+    @source nixpkgs:lib/trivial.nix:189:12
     val configureFlags :: [a] -> [a] -> [a];
     ## Merge two attribute sets shallowly, right side trumps left
+    @source nixpkgs:lib/trivial.nix:338:16
     val flags :: { ... } -> { ... } -> { ... };
     ## Map with index starting from 1
+    @source nixpkgs:lib/lists.nix:347:11
     val imap :: (int -> a -> b) -> [a] -> [b];
     ## Merge two attribute sets shallowly, right side trumps left
+    @source nixpkgs:lib/trivial.nix:338:16
     val meta :: { ... } -> { ... } -> { ... };
     ## Concatenate two lists
+    @source nixpkgs:lib/trivial.nix:189:12
     val nativeBuildInputs :: [a] -> [a] -> [a];
     ## Merge two attribute sets shallowly, right side trumps left
+    @source nixpkgs:lib/trivial.nix:338:16
     val passthru :: { ... } -> { ... } -> { ... };
     ## Concatenate two lists
+    @source nixpkgs:lib/trivial.nix:189:12
     val patches :: [a] -> [a] -> [a];
     ## Concatenate two lists
+    @source nixpkgs:lib/trivial.nix:189:12
     val postAll :: [a] -> [a] -> [a];
     ## Concatenate two lists
+    @source nixpkgs:lib/trivial.nix:189:12
     val prePhases :: [a] -> [a] -> [a];
     ## Concatenate two lists
+    @source nixpkgs:lib/trivial.nix:189:12
     val propagatedBuildInputs :: [a] -> [a] -> [a];
   }
 
@@ -1125,35 +1587,42 @@ module lib {
 
   # Re-exports — nixpkgs lib re-exports submodule functions at the top level
   val addContextFrom :: string -> string -> string;
+  val addMetaAttrs :: { ... } -> Derivation -> Derivation;
   val all :: (a -> bool) -> [a] -> bool;
   val allUnique :: [a] -> bool;
+  val and :: bool -> bool -> bool;
   val any :: (a -> bool) -> [a] -> bool;
+  val appendToName :: string -> Derivation -> Derivation;
   val assertMsg :: bool -> string -> bool;
   val assertOneOf :: string -> a -> [a] -> bool;
   val attrByPath :: [string] -> Any -> { ... } -> Any;
   val attrNames :: { ... } -> [string];
-  val attrVals :: [string] -> { ... } -> [Any];
-  val attrValues :: { ... } -> [Any];
+  val attrVals :: [string] -> { _: a, ... } -> [a];
+  val attrValues :: { _: a, ... } -> [a];
+  val bitNot :: int | float -> int | float;
   val boolToString :: bool -> string;
   val boolToYesNo :: bool -> string;
   val callPackageWith :: { ... } -> (({ ... } -> a) | path) -> { ... } -> a;
   val callPackagesWith :: { ... } -> (({ ... } -> { ... }) | path) -> { ... } -> { ... };
-  val cartesianProduct :: { ... } -> [{ ... }];
-  val catAttrs :: string -> [{ ... }] -> [Any];
-  val checkListOfEnum :: string -> [a] -> [a] -> a -> a;
+  val cartesianProduct :: { _: [a], ... } -> [{ _: a, ... }];
+  val catAttrs :: string -> [{ _: a, ... }] -> [a];
+  val checkListOfEnum :: string -> [a] -> [a] -> ((b -> b) | Never);
   val chooseDevOutputs :: [Derivation] -> [Derivation];
   val cmakeBool :: string -> bool -> string;
   val cmakeFeature :: string -> string -> string;
   val cmakeOptionType :: string -> string -> string -> string;
-  val collect :: ({ ... } -> bool) -> { ... } -> [x];
+  val collect :: ({ ... } -> bool) -> { ... } -> [Any];
+  val compare :: a -> a -> int;
+  val compareLists :: (a -> a -> int) -> [a] -> [a] -> int;
   val concat :: [a] -> [a] -> [a];
+  val concatAttrValues :: { _: [a], ... } -> [a];
   val concatImapStrings :: (int -> a -> string) -> [a] -> string;
   val concatImapStringsSep :: string -> (int -> a -> string) -> [a] -> string;
   val concatLines :: [string] -> string;
   val concatLists :: [[a]] -> [a];
   val concatMap :: (a -> [b]) -> [a] -> [b];
-  val concatMapAttrs :: (string -> a -> { ... }) -> { ... } -> { ... };
-  val concatMapAttrsStringSep :: string -> (string -> Any -> string) -> { ... } -> string;
+  val concatMapAttrs :: (string -> Any -> { ... }) -> { ... } -> { ... };
+  val concatMapAttrsStringSep :: string -> (string -> a -> string) -> { _: a, ... } -> string;
   val concatMapStrings :: (a -> string) -> [a] -> string;
   val concatMapStringsSep :: string -> (a -> string) -> [a] -> string;
   val concatStrings :: [string] -> string;
@@ -1161,6 +1630,8 @@ module lib {
   val const :: a -> b -> a;
   val converge :: (a -> a) -> a -> a;
   val count :: (a -> bool) -> [a] -> int;
+  val defaultTo :: a -> (b | null) -> (b | a);
+  val dontDistribute :: Derivation -> Derivation;
   val dontRecurseIntoAttrs :: { ... } -> { ... };
   val drop :: int -> [a] -> [a];
   val dropEnd :: int -> [a] -> [a];
@@ -1177,28 +1648,30 @@ module lib {
   val extendDerivation :: bool -> Any -> Derivation -> Derivation;
   val fileContents :: path -> string;
   val filter :: (a -> bool) -> [a] -> [a];
-  val filterAttrs :: (string -> Any -> bool) -> { ... } -> { ... };
+  val filterAttrs :: (string -> a -> bool) -> { _: a, ... } -> { _: a, ... };
   val filterAttrsRecursive :: (string -> Any -> bool) -> { ... } -> { ... };
   val findFirst :: (a -> bool) -> b -> [a] -> (a | b);
   val findSingle :: (a -> bool) -> a -> a -> [a] -> a;
   val fix :: (a -> a) -> a;
+  val fix' :: (a -> a) -> a;
   val fixedWidthNumber :: int -> int -> string;
   val fixedWidthString :: int -> string -> string -> string;
   val flatten :: [[a]] -> [a];
   val flip :: (a -> b -> c) -> (b -> a -> c);
-  val foldAttrs :: (Any -> Any -> Any) -> Any -> [{ ... }] -> Any;
+  val foldAttrs :: (a -> b -> b) -> b -> [{ _: a, ... }] -> { _: b, ... };
   val foldl :: (b -> a -> b) -> b -> [a] -> b;
+  val foldl' :: (a -> b -> a) -> a -> [b] -> a;
   val foldlAttrs :: ( a -> string -> b -> a ) -> a -> { _: b, ... } -> a;
   val forEach :: [a] -> (a -> b) -> [b];
   val fromHexString :: string -> int;
-  val functionArgs :: (a -> b) -> { _: bool, ... };
-  val genAttrs :: [ string ] -> (string -> Any) -> { ... };
+  val genAttrs :: [string] -> (string -> a) -> { _: a, ... };
   val getAttr :: string -> { _: a, ... } -> a;
   val getAttrFromPath :: [string] -> { ... } -> Any;
-  val getAttrs :: [string] -> { ... } -> { ... };
+  val getAttrs :: [string] -> { _: a, ... } -> { _: a, ... };
   val getBin :: Derivation -> Derivation;
   val getDev :: Derivation -> Derivation;
-  val getExe :: Derivation -> string;
+  val getExe :: Derivation -> StorePath;
+  val getExe' :: Derivation -> string -> StorePath;
   val getFirstOutput :: [string] -> Derivation -> Derivation;
   val getInclude :: Derivation -> Derivation;
   val getLib :: Derivation -> Derivation;
@@ -1207,28 +1680,32 @@ module lib {
   val getStatic :: Derivation -> Derivation;
   val getVersion :: string | Derivation -> string;
   val groupBy :: (a -> string) -> [a] -> { _: [a], ... };
+  val groupBy' :: (a -> b -> a) -> a -> (b -> string) -> [b] -> { _: a, ... };
   val hasAttr :: string -> { ... } -> bool;
   val hasAttrByPath :: [string] -> { ... } -> bool;
   val hasInfix :: string -> string -> bool;
   val hasPrefix :: string -> string -> bool;
   val hasSuffix :: string -> string -> bool;
   val head :: [a] -> a;
+  val hiPrio :: Derivation -> Derivation;
+  val hiPrioSet :: { _: Derivation, ... } -> { _: Derivation, ... };
   val hydraJob :: (Derivation | null) -> (Derivation | null);
   val id :: a -> a;
   val ifilter0 :: (int -> a -> bool) -> [a] -> [a];
   val imap :: (int -> a -> b) -> [a] -> [b];
   val imap0 :: (int -> a -> b) -> [a] -> [b];
   val imap1 :: (int -> a -> b) -> [a] -> [b];
-  val importJSON :: path -> a;
-  val importTOML :: path -> a;
+  val importJSON :: path -> Any;
+  val importTOML :: path -> Any;
   val init :: [a] -> [a];
   val intersectLists :: [a] -> [a] -> [a];
   val intersperse :: a -> [a] -> [a];
   val isAttrs :: a -> bool;
   val isDerivation :: Any -> bool;
-  val isOption :: a -> bool;
-  val isStorePath :: a -> bool;
-  val isStringLike :: a -> bool;
+  val isFunction :: Any -> bool;
+  val isOption :: Any -> bool;
+  val isStorePath :: Any -> bool;
+  val isStringLike :: Any -> bool;
   val isValidPosixName :: string -> bool;
   val join :: string -> [string] -> string;
   val last :: [a] -> a;
@@ -1236,27 +1713,33 @@ module lib {
   val listToAttrs :: [{ name: string, value: a }] -> { _: a, ... };
   val literalExpression :: string -> { ... };
   val literalMD :: string -> { ... };
+  val lowPrio :: Derivation -> Derivation;
+  val lowPrioSet :: { _: Derivation, ... } -> { _: Derivation, ... };
   val makeBinPath :: [Derivation] -> string;
   val makeIncludePath :: [Derivation] -> string;
   val makeLibraryPath :: [Derivation] -> string;
   val makeOverridable :: ({ ... } -> a) -> { ... } -> a;
+  val makeScope :: ({ ... } -> (({ ... } -> a) | path) -> { ... } -> a) -> ({ ... } -> { ... }) -> Scope;
   val makeSearchPath :: string -> [string] -> string;
   val makeSearchPathOutput :: string -> string -> [Derivation] -> string;
   val map :: (a -> b) -> [a] -> [b];
-  val mapAttrs :: (string -> Any -> Any) -> { ... } -> { ... };
+  val mapAttrs :: (string -> a -> b) -> { _: a, ... } -> { _: b, ... };
   val mapAttrsRecursive :: ([string] -> a -> b) -> { ... } -> { ... };
   val mapAttrsRecursiveCond :: ({ ... } -> bool) -> ([string] -> a -> b) -> { ... } -> { ... };
-  val mapAttrsToList :: (string -> a -> b) -> { ... } -> [b];
+  val mapAttrsToList :: (string -> a -> b) -> { _: a, ... } -> [b];
   val mapAttrsToListRecursive :: ([string] -> a -> b) -> { ... } -> [b];
   val mapAttrsToListRecursiveCond :: ([string] -> { ... } -> bool) -> ([string] -> a -> b) -> { ... } -> [b];
-  val mapCartesianProduct :: ({ ... } -> a) -> { ... } -> [a];
-  val mapCrossIndex :: (a -> b) -> { ... } -> { ... };
+  val mapCartesianProduct :: ({ _: a, ... } -> b) -> { _: a, ... } -> [b];
+  val mapDerivationAttrset :: (Derivation -> a) -> { ... } -> { ... };
+  val mapNullable :: (a -> b) -> (a | null) -> (b | null);
   val matchAttrs :: { ... } -> { ... } -> bool;
+  val max :: int | float -> int | float -> int | float;
   val mergeAttrs :: { ... } -> { ... } -> { ... };
-  val mergeAttrsList :: [ { ... } ] -> { ... };
+  val mergeAttrsList :: [{ ... }] -> { ... };
   val mesonBool :: string -> bool -> string;
   val mesonEnable :: string -> bool -> string;
   val mesonOption :: string -> string -> string;
+  val min :: int | float -> int | float -> int | float;
   val mirrorFunctionArgs :: (a -> b) -> (a -> c) -> (a -> c);
   val mkAfter :: a -> a;
   val mkAliasOptionModule :: [string] -> [string] -> { ... };
@@ -1267,7 +1750,6 @@ module lib {
   val mkFixStrictness :: a -> a;
   val mkForce :: a -> a;
   val mkIf :: bool -> a -> a;
-  val mkLuaInline :: string -> { ... };
   val mkMerge :: [a] -> a;
   val mkOption :: { ... } -> { ... };
   val mkOptionDefault :: a -> a;
@@ -1277,34 +1759,40 @@ module lib {
   val mkRemovedOptionModule :: [string] -> string -> { ... };
   val mkRenamedOptionModule :: [string] -> [string] -> { ... };
   val mkSinkUndeclaredOptions :: { ... } -> { ... };
+  val mod :: int -> int -> int;
+  val mutuallyExclusive :: [a] -> [a] -> bool;
   val nameFromURL :: string -> string;
   val naturalSort :: [string] -> [string];
   val optional :: bool -> a -> [a];
   val optionalAttrs :: bool -> { ... } -> { ... };
-  val optionalDrvAttr :: bool -> a -> a | null;
+  val optionalDrvAttr :: bool -> a -> (a | null);
   val optionalString :: bool -> string -> string;
   val optionals :: bool -> [a] -> [a];
+  val or :: bool -> bool -> bool;
   val overrideDerivation :: Derivation -> ( Derivation -> { ... } ) -> Derivation;
   val overrideExisting :: { ... } -> { ... } -> { ... };
   val pathIsDirectory :: path -> bool;
   val pathIsRegularFile :: path -> bool;
   val pathType :: path -> string;
+  val pipe :: a -> [(a -> b)] -> b;
   val range :: int -> int -> [int];
   val readFileType :: path -> string;
   val recurseIntoAttrs :: { ... } -> { ... };
   val recursiveUpdate :: { ... } -> { ... } -> { ... };
-  val recursiveUpdateUntil :: ( [ string ] -> { ... } -> { ... } -> bool ) -> { ... } -> { ... } -> { ... };
+  val recursiveUpdateUntil :: ([string] -> { ... } -> { ... } -> bool) -> { ... } -> { ... } -> { ... };
   val remove :: a -> [a] -> [a];
   val removePrefix :: string -> string -> string;
   val removeSuffix :: string -> string -> string;
   val renameCrossIndexFrom :: string -> { ... } -> { ... };
   val renameCrossIndexTo :: string -> { ... } -> { ... };
+  val replaceElemAt :: [a] -> int -> a -> [a];
   val replaceString :: string -> string -> string -> string;
   val replaceStrings :: [string] -> [string] -> string -> string;
   val replicate :: int -> a -> [a];
   val reverseList :: [a] -> [a];
   val setAttrByPath :: [string] -> Any -> { ... };
-  val setFunctionArgs :: (a -> b) -> { _: bool, ... } -> (a -> b);
+  val setName :: string -> Derivation -> Derivation;
+  val setPrio :: int -> Derivation -> Derivation;
   val showAttrPath :: [string] -> string;
   val showOption :: [string] -> string;
   val singleton :: a -> [a];
@@ -1313,6 +1801,7 @@ module lib {
   val splitByAndCompare :: (a -> bool) -> (a -> a -> int) -> (a -> a -> int) -> (a -> a -> int);
   val splitString :: string -> string -> [string];
   val splitStringBy :: (string -> string -> bool) -> bool -> string -> [string];
+  val splitVersion :: string -> [string];
   val stringAsChars :: (string -> string) -> string -> string;
   val stringToCharacters :: string -> [string];
   val sublist :: int -> int -> [a] -> [a];
@@ -1320,32 +1809,44 @@ module lib {
   val tail :: [a] -> [a];
   val take :: int -> [a] -> [a];
   val takeEnd :: int -> [a] -> [a];
-  val throwIf :: bool -> string -> a -> a;
-  val throwIfNot :: bool -> string -> a -> a;
+  val throwIf :: bool -> string -> a -> (a | Never);
+  val throwIfNot :: bool -> string -> a -> (a | Never);
+  val toBaseDigits :: int -> int -> [int];
   val toCamelCase :: string -> string;
   val toDerivation :: path -> Derivation;
+  val toHexString :: int -> string;
   val toInt :: string -> int;
   val toIntBase10 :: string -> int;
+  val toList :: (a | [a]) -> [a];
   val toLower :: string -> string;
   val toSentenceCase :: string -> string;
+  val toShellVar :: string -> (string | [string] | { _: string, ... }) -> string;
   val toUpper :: string -> string;
+  val traceFnSeqN :: int -> string -> (a -> b) -> a -> b;
   val traceIf :: bool -> string -> a -> a;
   val traceSeq :: a -> b -> b;
   val traceSeqN :: int -> a -> b -> b;
   val traceVal :: a -> a;
   val traceValFn :: (a -> b) -> a -> a;
+  val traceValSeq :: a -> a;
+  val traceValSeqFn :: (a -> b) -> a -> a;
+  val traceValSeqN :: int -> a -> a;
+  val traceValSeqNFn :: (a -> b) -> int -> a -> a;
   val trim :: string -> string;
   val unique :: [a] -> [a];
-  val uniqueStrings :: [ string ] -> [ string ];
+  val uniqueStrings :: [string] -> [string];
+  val updateName :: (string -> string) -> Derivation -> Derivation;
   val versionAtLeast :: string -> string -> bool;
   val versionOlder :: string -> string -> bool;
   val warn :: string -> a -> a;
   val warnIf :: bool -> string -> a -> a;
   val warnIfNot :: bool -> string -> a -> a;
+  val warnOnInstantiate :: string -> Derivation -> Derivation;
   val withFeature :: bool -> string -> string;
   val withFeatureAs :: bool -> string -> string -> string;
-  val zipAttrs :: [ { ... } ] -> { ... };
-  val zipAttrsWith :: (string -> [ Any ] -> Any) -> [ { ... } ] -> { ... };
-  val zipAttrsWithNames :: [ string ] -> (string -> [ Any ] -> Any) -> [ { ... } ] -> { ... };
+  val xor :: bool -> bool -> bool;
+  val zipAttrs :: [{ _: a, ... }] -> { _: [a], ... };
+  val zipAttrsWith :: (string -> [a] -> b) -> [{ _: a, ... }] -> { _: b, ... };
+  val zipAttrsWithNames :: [string] -> (string -> [a] -> b) -> [{ _: a, ... }] -> { _: b, ... };
   val zipListsWith :: (a -> b -> c) -> [a] -> [b] -> [c];
 }

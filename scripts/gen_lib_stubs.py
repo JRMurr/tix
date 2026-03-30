@@ -475,6 +475,9 @@ def fixup_tix_record(expr: str) -> str:
     # Handle `{ ... : type }` (noogle's dynamic field syntax) → `{ _: type, ... }`
     expr = re.sub(r"\{\s*\.\.\.\s*:\s*(\w+)\s*}", r"{ _: \1, ... }", expr)
 
+    # Handle `{ [string] : type }` (noogle's indexed record syntax) → `{ _: type, ... }`
+    expr = re.sub(r"\{\s*\[string\]\s*:\s*([^}]+?)\s*}", r"{ _: \1, ... }", expr)
+
     return expr
 
 
