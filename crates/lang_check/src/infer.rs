@@ -445,7 +445,7 @@ impl CheckCtx<'_> {
             }
         }
 
-        log::debug!(
+        log::trace!(
             "  early canonicalization: {:.1}ms for {} names",
             canon_start.elapsed().as_secs_f64() * 1000.0,
             inferred.len(),
@@ -505,7 +505,7 @@ impl CheckCtx<'_> {
         }
 
         let scc_elapsed = scc_start.elapsed();
-        log::debug!(
+        log::trace!(
             "SCC group: {} defs, {:.1}ms, cache {} → {}, slots {} → {}, carried overloads: {}",
             scc_size,
             scc_elapsed.as_secs_f64() * 1000.0,
@@ -575,7 +575,7 @@ impl CheckCtx<'_> {
                 }
             };
             let name_id = def.name();
-            log::debug!(
+            log::trace!(
                 "  def '{}': infer_expr {:.1}ms",
                 self.module[name_id].text,
                 def_start.elapsed().as_secs_f64() * 1000.0,
@@ -600,7 +600,7 @@ impl CheckCtx<'_> {
         }
 
         let infer_elapsed = infer_start.elapsed();
-        log::debug!(
+        log::trace!(
             "  all defs inferred in {:.1}ms, pending: {} active",
             infer_elapsed.as_secs_f64() * 1000.0,
             self.deferred.active.len(),
@@ -612,7 +612,7 @@ impl CheckCtx<'_> {
         if let Err(err) = self.resolve_pending() {
             errors.push(err);
         }
-        log::debug!(
+        log::trace!(
             "  resolve_pending: {:.1}ms",
             resolve_start.elapsed().as_secs_f64() * 1000.0,
         );
