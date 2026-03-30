@@ -175,6 +175,26 @@ enum Command {
         no_default_stubs: bool,
     },
 
+    /// Run the runtime stub generation pipeline from tix.toml config
+    ///
+    /// Resolves [stubs.generate] from tix.toml, evaluates Nix source
+    /// expressions, and generates .tix stubs via nix build. Useful for
+    /// debugging the same pipeline that `tix check` and the LSP run
+    /// automatically.
+    GenerateStubs {
+        /// Path to tix.toml config file (auto-discovered if not specified)
+        #[arg(long = "config", value_name = "PATH")]
+        config_path: Option<PathBuf>,
+
+        /// Log level (default: debug). Set to "trace" for maximum detail.
+        #[arg(long, value_name = "LEVEL", default_value = "debug")]
+        log_level: String,
+
+        /// Skip the file cache and force a fresh nix build
+        #[arg(long)]
+        no_cache: bool,
+    },
+
     /// Start the Language Server (LSP) on stdin/stdout
     Lsp {
         /// RSS memory limit in MiB (default: 80% of system RAM).
@@ -294,8 +314,12 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let args = Cli::parse();
 
-    // The LSP sets up its own logger with custom filters, so skip here.
-    if !matches!(args.command, Some(Command::Lsp { .. })) {
+    // The LSP and generate-stubs commands set up their own loggers with
+    // custom filters, so skip the default tracing init for them.
+    if !matches!(
+        args.command,
+        Some(Command::Lsp { .. }) | Some(Command::GenerateStubs { .. })
+    ) {
         timing::init_tracing(args.timing);
     }
 
@@ -361,6 +385,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
             Ok(())
         }
+        Some(Command::GenerateStubs {
+            config_path,
+            log_level,
+            no_cache,
+        }) => run_generate_stubs(config_path, log_level, no_cache),
         Some(Command::Lsp {
             mem_limit,
             log_level,
@@ -382,6 +411,81 @@ fn main() -> Result<(), Box<dyn Error>> {
                 args.format,
             )
         }
+    }
+}
+
+// =============================================================================
+// generate-stubs: run the runtime stub generation pipeline from tix.toml
+// =============================================================================
+
+fn run_generate_stubs(
+    config_path: Option<PathBuf>,
+    log_level: String,
+    no_cache: bool,
+) -> Result<(), Box<dyn Error>> {
+    // Set up logging at the requested level.
+    use tracing_subscriber::EnvFilter;
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new(format!(
+            "warn,tix_lsp::store_stubs={log_level},lang_check={log_level},cli={log_level}"
+        ))
+    });
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .init();
+
+    // Locate tix.toml.
+    let (toml_config, config_dir) = match &config_path {
+        Some(explicit_path) => {
+            let cfg = config::load_config(explicit_path)?;
+            let dir = explicit_path
+                .parent()
+                .unwrap_or(std::path::Path::new("."))
+                .to_path_buf();
+            (cfg, dir)
+        }
+        None => {
+            let cwd = std::env::current_dir()?;
+            match config::find_config(&cwd) {
+                Some(found_path) => {
+                    let dir = found_path
+                        .parent()
+                        .unwrap_or(std::path::Path::new("."))
+                        .to_path_buf();
+                    let cfg = config::load_config(&found_path)?;
+                    eprintln!("Using config: {}", found_path.display());
+                    (cfg, dir)
+                }
+                None => {
+                    return Err("No tix.toml found. Use --config to specify one.".into());
+                }
+            }
+        }
+    };
+
+    let gen_config = toml_config
+        .stubs
+        .generate()
+        .ok_or("No [stubs.generate] section in tix.toml")?;
+
+    eprintln!("nixpkgs source: {:?}", gen_config.nixpkgs);
+    if let Some(ref hm) = gen_config.home_manager {
+        eprintln!("home-manager source: {:?}", hm);
+    }
+
+    match tix_lsp::store_stubs::generate_stubs_with_options(gen_config, &config_dir, None, no_cache)
+    {
+        Ok(result) => {
+            eprintln!("Generated stubs: {}", result.stubs_dir.display());
+            for (id, root) in &result.source_roots {
+                eprintln!("  source root: {id} = {}", root.display());
+            }
+            // Print the stubs directory to stdout for scripting.
+            println!("{}", result.stubs_dir.display());
+            Ok(())
+        }
+        Err(e) => Err(format!("Stub generation failed: {e}").into()),
     }
 }
 

@@ -36,6 +36,19 @@ pub fn generate_stubs(
     config: &StubsGenerateConfig,
     config_dir: &Path,
 ) -> Result<GeneratedStubs, Error> {
+    generate_stubs_with_options(config, config_dir, None, false)
+}
+
+/// Like [`generate_stubs`], but with additional control:
+/// - `tix_path_override`: use this path instead of auto-detecting the tix store path
+///   (useful for dev builds where the binary isn't in `/nix/store/`).
+/// - `skip_cache`: bypass the file cache and force a fresh nix build.
+pub fn generate_stubs_with_options(
+    config: &StubsGenerateConfig,
+    config_dir: &Path,
+    tix_path_override: Option<&Path>,
+    skip_cache: bool,
+) -> Result<GeneratedStubs, Error> {
     // Resolve the nixpkgs source to a store path.
     let nixpkgs_path = config
         .nixpkgs
@@ -44,7 +57,10 @@ pub fn generate_stubs(
         .and_then(|src| resolve_nix_source(src, config_dir))?;
 
     // Resolve tix's own store path (needed as a build input for gen-stubs).
-    let tix_path = resolve_tix_store_path().ok_or(Error::NotInNixStore)?;
+    let tix_path = match tix_path_override {
+        Some(p) => p.to_path_buf(),
+        None => resolve_tix_store_path().ok_or(Error::NotInNixStore)?,
+    };
 
     // Optionally resolve home-manager source.
     let hm_path = config
@@ -67,12 +83,14 @@ pub fn generate_stubs(
 
     // Check the lightweight file cache before invoking nix.
     let cache_key = compute_cache_key(&nixpkgs_path, &tix_path, hm_path.as_deref());
-    if let Some(cached) = check_cache(&cache_key) {
-        log::debug!("Using cached stubs: {}", cached.display());
-        return Ok(GeneratedStubs {
-            stubs_dir: cached,
-            source_roots,
-        });
+    if !skip_cache {
+        if let Some(cached) = check_cache(&cache_key) {
+            log::debug!("Using cached stubs: {}", cached.display());
+            return Ok(GeneratedStubs {
+                stubs_dir: cached,
+                source_roots,
+            });
+        }
     }
 
     // Find the generate-stubs-runtime.nix shipped with the tix binary.
