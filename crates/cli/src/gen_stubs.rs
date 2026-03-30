@@ -349,22 +349,25 @@ pub fn options_to_attrset_ty(
     options: &std::collections::BTreeMap<String, OptionNode>,
     indent: usize,
 ) -> String {
-    options_to_attrset_ty_inner(options, indent, false)
+    options_to_attrset_ty_inner(options, indent, false, &[])
 }
 
-/// Like `options_to_attrset_ty` but with doc comment emission control.
+/// Like `options_to_attrset_ty` but with doc comment emission control and
+/// optional `@source` annotation emission.
 pub fn options_to_attrset_ty_with_docs(
     options: &std::collections::BTreeMap<String, OptionNode>,
     indent: usize,
     full_descriptions: bool,
+    source_roots: &[(String, PathBuf)],
 ) -> String {
-    options_to_attrset_ty_inner(options, indent, full_descriptions)
+    options_to_attrset_ty_inner(options, indent, full_descriptions, source_roots)
 }
 
 fn options_to_attrset_ty_inner(
     options: &std::collections::BTreeMap<String, OptionNode>,
     indent: usize,
     emit_docs: bool,
+    source_roots: &[(String, PathBuf)],
 ) -> String {
     if options.is_empty() {
         return "{ ... }".to_string();
@@ -392,7 +395,10 @@ fn options_to_attrset_ty_inner(
                 } else {
                     type_to_tix(&leaf.type_info)
                 };
-                let mut lines = String::new();
+                let mut line_parts: Vec<String> = Vec::new();
+
+                // Emit @source annotation if position is available.
+                maybe_emit_source(leaf.pos.as_ref(), source_roots, &pad, &mut line_parts);
 
                 // Emit doc comment if we have a description.
                 if emit_docs {
@@ -400,20 +406,24 @@ fn options_to_attrset_ty_inner(
                         let doc_text = format_description(desc);
                         for doc_line in doc_text.lines() {
                             if doc_line.is_empty() {
-                                lines.push_str(&format!("{}##\n", pad));
+                                line_parts.push(format!("{}##", pad));
                             } else {
-                                lines.push_str(&format!("{}## {}\n", pad, doc_line));
+                                line_parts.push(format!("{}## {}", pad, doc_line));
                             }
                         }
                     }
                 }
 
-                lines.push_str(&format!("{}{}: {}", pad, field_name, ty_str));
-                fields.push(lines);
+                line_parts.push(format!("{}{}: {}", pad, field_name, ty_str));
+                fields.push(line_parts.join("\n"));
             }
             OptionNode::Namespace(ns) => {
-                let nested = options_to_attrset_ty_inner(&ns.children, indent + 1, emit_docs);
-                fields.push(format!("{}{}: {}", pad, field_name, nested));
+                let nested =
+                    options_to_attrset_ty_inner(&ns.children, indent + 1, emit_docs, source_roots);
+                let mut line_parts: Vec<String> = Vec::new();
+                maybe_emit_source(ns.pos.as_ref(), source_roots, &pad, &mut line_parts);
+                line_parts.push(format!("{}{}: {}", pad, field_name, nested));
+                fields.push(line_parts.join("\n"));
             }
         }
     }
@@ -521,7 +531,7 @@ pub fn generate_tix_file(
     options: &std::collections::BTreeMap<String, OptionNode>,
     kind: &StubKind,
 ) -> String {
-    generate_tix_file_with_docs(options, kind, false)
+    generate_tix_file_with_docs(options, kind, false, &[])
 }
 
 /// Like `generate_tix_file` but with explicit doc comment control.
@@ -529,8 +539,9 @@ pub fn generate_tix_file_with_docs(
     options: &std::collections::BTreeMap<String, OptionNode>,
     kind: &StubKind,
     full_descriptions: bool,
+    source_roots: &[(String, PathBuf)],
 ) -> String {
-    let attrset_ty = options_to_attrset_ty_with_docs(options, 0, full_descriptions);
+    let attrset_ty = options_to_attrset_ty_with_docs(options, 0, full_descriptions, source_roots);
     let type_name = kind.type_name();
     let command = kind.command();
     let label = kind.label();
@@ -578,8 +589,6 @@ pub struct CommonOptions {
     /// Source roots for `@source` annotations. Each entry maps a source id
     /// (e.g. "nixpkgs") to an absolute path. Absolute paths in `NixPosition.file`
     /// are stripped against these roots to produce relative `@source` annotations.
-    /// TODO: wire through option stub emission (options_to_attrset_ty_inner)
-    #[allow(dead_code)]
     pub source_roots: Vec<(String, PathBuf)>,
 }
 
@@ -776,8 +785,12 @@ pub fn run_nixos(opts: NixosOptions) -> Result<(), Box<dyn std::error::Error>> {
         Some(ref path) => read_json_file(path)?,
         None => invoke_nix_eval(&opts)?,
     };
-    let tix_content =
-        generate_tix_file_with_docs(&tree, &StubKind::Nixos, opts.common.descriptions);
+    let tix_content = generate_tix_file_with_docs(
+        &tree,
+        &StubKind::Nixos,
+        opts.common.descriptions,
+        &opts.common.source_roots,
+    );
     write_generated_stubs(&tix_content, opts.common.output.as_ref(), "NixOS")
 }
 
@@ -787,8 +800,12 @@ pub fn run_home_manager(opts: HomeManagerOptions) -> Result<(), Box<dyn std::err
         Some(ref path) => read_json_file(path)?,
         None => invoke_hm_nix_eval(&opts)?,
     };
-    let tix_content =
-        generate_tix_file_with_docs(&tree, &StubKind::HomeManager, opts.common.descriptions);
+    let tix_content = generate_tix_file_with_docs(
+        &tree,
+        &StubKind::HomeManager,
+        opts.common.descriptions,
+        &opts.common.source_roots,
+    );
     write_generated_stubs(&tix_content, opts.common.output.as_ref(), "Home Manager")
 }
 
@@ -1693,6 +1710,79 @@ mod tests {
         assert!(result.contains("enable: bool"));
     }
 
+    #[test]
+    fn source_annotation_on_option_field() {
+        let mut opts = BTreeMap::new();
+        opts.insert(
+            "enable".to_string(),
+            OptionNode::Option(OptionLeaf {
+                _is_option: true,
+                type_info: NixosTypeInfo::Primitive {
+                    value: "bool".into(),
+                },
+                description: Some("Enable the service.".into()),
+                has_default: false,
+                pos: Some(NixPosition {
+                    file: "/nix/store/abc-nixpkgs/nixos/modules/foo.nix".into(),
+                    line: 42,
+                    column: 5,
+                }),
+            }),
+        );
+        let roots = vec![(
+            "nixpkgs".to_string(),
+            PathBuf::from("/nix/store/abc-nixpkgs"),
+        )];
+        let result = options_to_attrset_ty_with_docs(&opts, 0, true, &roots);
+        assert!(
+            result.contains("@source nixpkgs:nixos/modules/foo.nix:42:5"),
+            "expected @source annotation, got:\n{result}"
+        );
+        // @source should appear before the doc comment
+        let source_pos = result.find("@source").unwrap();
+        let doc_pos = result.find("##").unwrap();
+        assert!(source_pos < doc_pos, "@source should precede doc comment");
+    }
+
+    #[test]
+    fn source_annotation_on_namespace() {
+        let mut inner = BTreeMap::new();
+        inner.insert(
+            "enable".to_string(),
+            OptionNode::Option(OptionLeaf {
+                _is_option: true,
+                type_info: NixosTypeInfo::Primitive {
+                    value: "bool".into(),
+                },
+                description: None,
+                has_default: false,
+                pos: None,
+            }),
+        );
+        let mut outer = BTreeMap::new();
+        outer.insert(
+            "services".to_string(),
+            OptionNode::Namespace(NamespaceNode {
+                _is_option: false,
+                children: inner,
+                pos: Some(NixPosition {
+                    file: "/nix/store/abc-nixpkgs/nixos/modules/svc.nix".into(),
+                    line: 10,
+                    column: 3,
+                }),
+            }),
+        );
+        let roots = vec![(
+            "nixpkgs".to_string(),
+            PathBuf::from("/nix/store/abc-nixpkgs"),
+        )];
+        let result = options_to_attrset_ty_with_docs(&outer, 0, true, &roots);
+        assert!(
+            result.contains("@source nixpkgs:nixos/modules/svc.nix:10:3"),
+            "expected @source annotation on namespace, got:\n{result}"
+        );
+    }
+
     // -------------------------------------------------------------------------
     // Round-trip: generate → parse
     // -------------------------------------------------------------------------
@@ -2343,7 +2433,7 @@ mod tests {
             }),
         );
 
-        let tix_content = generate_tix_file_with_docs(&tree, &StubKind::Nixos, true);
+        let tix_content = generate_tix_file_with_docs(&tree, &StubKind::Nixos, true, &[]);
 
         // The doc comment should appear before the `enable` field.
         assert!(
@@ -2390,7 +2480,7 @@ mod tests {
             }),
         );
 
-        let tix_content = generate_tix_file_with_docs(&tree, &StubKind::Nixos, true);
+        let tix_content = generate_tix_file_with_docs(&tree, &StubKind::Nixos, true, &[]);
 
         // Parse the generated file.
         let file = comment_parser::parse_tix_file(&tix_content).unwrap_or_else(|e| {
