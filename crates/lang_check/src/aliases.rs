@@ -527,6 +527,10 @@ impl TypeAliasRegistry {
                         let result = self.load_context_stubs(&source);
                         match result {
                             Ok(args) => {
+                                // Context files like nixos.tix declare `val pkgs :: Pkgs;`
+                                // — the Pkgs alias may have a corresponding module stub
+                                // (pkgs.tix) that needs loading to populate all fields.
+                                self.preload_module_stubs_for_context_args(&args);
                                 let arc = Arc::new(args);
                                 self.cached_context_args.insert(cache_key, Arc::clone(&arc));
                                 Ok(arc)
@@ -544,6 +548,7 @@ impl TypeAliasRegistry {
             let result = self.load_context_stubs(source);
             return Some(match result {
                 Ok(args) => {
+                    self.preload_module_stubs_for_context_args(&args);
                     let arc = Arc::new(args);
                     self.cached_context_args.insert(cache_key, Arc::clone(&arc));
                     Ok(arc)
@@ -569,32 +574,7 @@ impl TypeAliasRegistry {
         // If builtin_stubs_dir has a matching module stub, load it first
         // to ensure the alias is fully populated before extracting fields.
         // e.g. @callpackage → Pkgs → module pkgs → pkgs.tix
-        //
-        // This is best-effort: if the file can't be read or parsed, we log a
-        // warning and fall through to whatever the alias already contains.
-        // Unlike the override check above (which is *the* context source and
-        // must propagate errors), this is a pre-loading side-effect.
-        if !self.loaded_module_stubs.contains(&alias_name) {
-            if let Some(ref dir) = self.builtin_stubs_dir {
-                let module_name = alias_name.to_ascii_lowercase();
-                let module_path = dir.join(format!("{module_name}.tix"));
-                match std::fs::read_to_string(&module_path) {
-                    Ok(source) => match comment_parser::parse_tix_file(&source) {
-                        Ok(file) => {
-                            self.load_tix_file_with_path(&file, &module_path);
-                            self.loaded_module_stubs.insert(alias_name.clone());
-                        }
-                        Err(e) => {
-                            log::warn!("Failed to parse {}: {e}", module_path.display())
-                        }
-                    },
-                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                        log::warn!("Failed to read {}: {e}", module_path.display())
-                    }
-                    Err(_) => {} // File doesn't exist — not an error.
-                }
-            }
-        }
+        self.try_load_module_stub(&alias_name);
 
         if let Some(ParsedTy::AttrSet(attr)) = self.aliases.get(&alias_name).cloned() {
             let mut context_args = HashMap::new();
@@ -614,6 +594,60 @@ impl TypeAliasRegistry {
         }
 
         None
+    }
+
+    /// Best-effort load of a module stub from `builtin_stubs_dir`.
+    ///
+    /// Given an alias name like `"Pkgs"`, looks for `pkgs.tix` in the stubs
+    /// directory. If found and not already loaded, parses it and merges its
+    /// declarations into the registry. This is a no-op when `builtin_stubs_dir`
+    /// isn't set or the file doesn't exist.
+    fn try_load_module_stub(&mut self, alias_name: &SmolStr) {
+        if self.loaded_module_stubs.contains(alias_name) {
+            return;
+        }
+        if let Some(ref dir) = self.builtin_stubs_dir {
+            let module_name = alias_name.to_ascii_lowercase();
+            let module_path = dir.join(format!("{module_name}.tix"));
+            match std::fs::read_to_string(&module_path) {
+                Ok(source) => match comment_parser::parse_tix_file(&source) {
+                    Ok(file) => {
+                        self.load_tix_file_with_path(&file, &module_path);
+                        self.loaded_module_stubs.insert(alias_name.clone());
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to parse {}: {e}", module_path.display())
+                    }
+                },
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    log::warn!("Failed to read {}: {e}", module_path.display())
+                }
+                Err(_) => {} // File doesn't exist — not an error.
+            }
+        }
+    }
+
+    /// Scan context args for type alias references and preload their module
+    /// stubs from `builtin_stubs_dir`.
+    ///
+    /// Context files like `nixos.tix` declare `val pkgs :: Pkgs;` — the `Pkgs`
+    /// alias from `lib.tix` only has hand-curated entries, but `pkgs.tix` in
+    /// the generated stubs directory has all ~24K nixpkgs attributes. Without
+    /// this preloading, `pkgs.` completions only show the hand-curated subset.
+    fn preload_module_stubs_for_context_args(&mut self, args: &HashMap<SmolStr, ParsedTy>) {
+        // Collect references first to avoid borrow issues.
+        let refs: Vec<SmolStr> = args
+            .values()
+            .filter_map(|ty| match ty {
+                ParsedTy::TyVar(comment_parser::TypeVarValue::Reference(name)) => {
+                    Some(name.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        for alias_name in refs {
+            self.try_load_module_stub(&alias_name);
+        }
     }
 
     /// Validate the registry for cycles in alias references.
@@ -1527,6 +1561,68 @@ mod tests {
         }
 
         // Clean up.
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn context_file_preloads_referenced_module_stubs() {
+        // When a context file (e.g. nixos.tix) declares `val pkgs :: Pkgs;`,
+        // the module stub pkgs.tix should be loaded so that Pkgs has all fields.
+        let tmp =
+            std::env::temp_dir().join(format!("tix_test_context_preload_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+
+        // Write a context file that references Pkgs.
+        std::fs::write(
+            tmp.join("myctx.tix"),
+            r#"
+            val pkgs :: Pkgs;
+            val lib :: Lib;
+            "#,
+        )
+        .expect("write myctx.tix");
+
+        // Write a pkgs module stub with extra packages.
+        std::fs::write(
+            tmp.join("pkgs.tix"),
+            r#"
+            module pkgs {
+                val gh :: { name: string, ... };
+                val ripgrep :: { name: string, ... };
+            }
+            "#,
+        )
+        .expect("write pkgs.tix");
+
+        let mut registry = TypeAliasRegistry::with_builtins();
+        registry.set_builtin_stubs_dir(tmp.clone());
+
+        let result = registry.load_context_by_name("myctx");
+        assert!(result.is_some(), "@myctx should resolve from file");
+        let context_args = result.unwrap().expect("should parse");
+
+        // pkgs should be typed as Pkgs.
+        assert!(
+            context_args.contains_key("pkgs"),
+            "pkgs should be in context"
+        );
+
+        // Verify that the Pkgs alias now contains fields from pkgs.tix.
+        match registry.aliases.get(&SmolStr::from("Pkgs")) {
+            Some(ParsedTy::AttrSet(attr)) => {
+                assert!(
+                    attr.fields.contains_key("gh"),
+                    "Pkgs alias should contain 'gh' from pkgs.tix, fields: {:?}",
+                    attr.fields.keys().collect::<Vec<_>>()
+                );
+                assert!(
+                    attr.fields.contains_key("ripgrep"),
+                    "Pkgs alias should contain 'ripgrep' from pkgs.tix"
+                );
+            }
+            other => panic!("expected Pkgs to be an AttrSet, got: {other:?}"),
+        }
+
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
