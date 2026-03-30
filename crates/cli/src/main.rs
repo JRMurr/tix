@@ -220,6 +220,7 @@ impl From<CommonGenStubsArgs> for gen_stubs::CommonOptions {
             output: args.output,
             max_depth: args.max_depth,
             descriptions: args.descriptions,
+            source_roots: Vec::new(),
         }
     }
 }
@@ -399,6 +400,7 @@ fn run_gen_stubs(source: GenStubsSource) -> Result<(), Box<dyn Error>> {
             from_json,
             output,
             max_depth,
+            source_roots: Vec::new(),
         }),
     }
 }

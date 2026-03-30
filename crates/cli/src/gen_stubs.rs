@@ -13,12 +13,68 @@ use std::process::Command;
 use serde::Deserialize;
 
 // =============================================================================
+// @source annotation helpers
+// =============================================================================
+
+/// Try to format a `NixPosition` as an `@source` annotation string.
+///
+/// Strips the absolute path against configured source roots to produce a
+/// relative annotation like `@source nixpkgs:lib/trivial.nix:61:8`.
+/// Returns `None` if no source root matches the position's file path.
+fn format_source_annotation(
+    pos: &NixPosition,
+    source_roots: &[(String, PathBuf)],
+    indent: &str,
+) -> Option<String> {
+    for (id, root) in source_roots {
+        let root_str = root.to_string_lossy();
+        // Ensure the root ends with / for clean stripping.
+        let prefix = if root_str.ends_with('/') {
+            root_str.to_string()
+        } else {
+            format!("{root_str}/")
+        };
+        if pos.file.starts_with(&prefix) {
+            let relative = &pos.file[prefix.len()..];
+            return Some(format!(
+                "{indent}@source {id}:{relative}:{}:{}",
+                pos.line, pos.column
+            ));
+        }
+    }
+    None
+}
+
+/// Convenience: emit `@source` for an optional `NixPosition`, pushing to lines if matched.
+fn maybe_emit_source(
+    pos: Option<&NixPosition>,
+    source_roots: &[(String, PathBuf)],
+    indent: &str,
+    lines: &mut Vec<String>,
+) {
+    if let Some(pos) = pos {
+        if let Some(annotation) = format_source_annotation(pos, source_roots, indent) {
+            lines.push(annotation);
+        }
+    }
+}
+
+// =============================================================================
 // NixOS Option JSON Schema
 // =============================================================================
 //
 // These types mirror the JSON structure produced by tools/extract-options.nix.
 // The option tree is a recursive structure where each node is either a leaf
 // option (with type info) or a namespace containing children.
+
+/// Source position from `builtins.unsafeGetAttrPos`, as serialized in JSON
+/// from the Nix extraction scripts.
+#[derive(Debug, Deserialize, PartialEq, Clone, Default)]
+pub struct NixPosition {
+    pub file: String,
+    pub line: u32,
+    pub column: u32,
+}
 
 #[derive(Debug, Deserialize, PartialEq)]
 #[serde(untagged)]
@@ -43,6 +99,8 @@ pub struct OptionLeaf {
     /// default almost always means non-null (`{}`), so we strip `| null`.
     #[serde(default, rename = "hasDefault")]
     pub has_default: bool,
+    #[serde(default)]
+    pub pos: Option<NixPosition>,
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
@@ -50,6 +108,8 @@ pub struct NamespaceNode {
     #[serde(rename = "_isOption")]
     pub _is_option: bool, // always false
     pub children: std::collections::BTreeMap<String, OptionNode>,
+    #[serde(default)]
+    pub pos: Option<NixPosition>,
 }
 
 /// Type representation extracted from NixOS option declarations.
@@ -515,6 +575,12 @@ pub struct CommonOptions {
     pub max_depth: u32,
     /// Emit `##` doc comments with option descriptions.
     pub descriptions: bool,
+    /// Source roots for `@source` annotations. Each entry maps a source id
+    /// (e.g. "nixpkgs") to an absolute path. Absolute paths in `NixPosition.file`
+    /// are stripped against these roots to produce relative `@source` annotations.
+    /// TODO: wire through option stub emission (options_to_attrset_ty_inner)
+    #[allow(dead_code)]
+    pub source_roots: Vec<(String, PathBuf)>,
 }
 
 /// Options for the `gen-stubs nixos` subcommand.
@@ -743,6 +809,8 @@ pub struct PkgsOptions {
     /// Maximum depth for recursing into sub-package-sets (e.g. llvmPackages, python3Packages).
     /// 0 = flat (no recursion), 1 = one level deep (default).
     pub max_depth: u32,
+    /// Source roots for `@source` annotations (same as `CommonOptions.source_roots`).
+    pub source_roots: Vec<(String, PathBuf)>,
 }
 
 /// A classified nixpkgs attribute. The name is the map key (not stored here).
@@ -770,6 +838,8 @@ struct PkgClassification {
     /// positional (non-attrset-pattern) lambdas.
     #[serde(default)]
     function_args: Option<std::collections::BTreeMap<String, bool>>,
+    #[serde(default)]
+    pos: Option<NixPosition>,
 }
 
 /// Recursive tree of classified nixpkgs attributes.
@@ -905,7 +975,7 @@ fn capitalize(name: &str) -> String {
 ///   - `type == "set" && !is_derivation` without children → `val name :: { ... };` (opaque attrset)
 ///   - `type == "lambda"` → `val name :: a -> b;` (generic function, args unknowable without evaluation)
 ///   - Other types (string, list, etc.) → skip (rare, not useful as context args)
-fn generate_pkgs_tix(tree: &PkgTree) -> String {
+fn generate_pkgs_tix(tree: &PkgTree, source_roots: &[(String, PathBuf)]) -> String {
     let mut lines = vec![
         "# Auto-generated nixpkgs attribute stubs.".to_string(),
         "# Generated by: tix gen-stubs pkgs".to_string(),
@@ -921,7 +991,7 @@ fn generate_pkgs_tix(tree: &PkgTree) -> String {
     ];
 
     let mut stats = PkgsStats::default();
-    emit_pkg_tree(tree, 1, &mut lines, &mut stats);
+    emit_pkg_tree(tree, 1, &mut lines, &mut stats, source_roots);
 
     lines.push("}".to_string());
 
@@ -983,7 +1053,13 @@ const CURATED_TOP_LEVEL: &[&str] = &[
 /// Recursively emit val/module declarations for a package tree at the given
 /// indentation level. Names that cannot be valid bare identifiers are emitted
 /// as `val "quoted.name" :: ...;` rather than modules.
-fn emit_pkg_tree(tree: &PkgTree, indent: usize, lines: &mut Vec<String>, stats: &mut PkgsStats) {
+fn emit_pkg_tree(
+    tree: &PkgTree,
+    indent: usize,
+    lines: &mut Vec<String>,
+    stats: &mut PkgsStats,
+    source_roots: &[(String, PathBuf)],
+) {
     let pad = "  ".repeat(indent);
 
     for (name, pkg) in tree {
@@ -1012,6 +1088,7 @@ fn emit_pkg_tree(tree: &PkgTree, indent: usize, lines: &mut Vec<String>, stats: 
         if let Some(ref target) = pkg.alias_of {
             let alias_type = capitalize(target);
             stats.aliases += 1;
+            maybe_emit_source(pkg.pos.as_ref(), source_roots, &pad, lines);
             lines.push(format!("{pad}val {name} :: {alias_type};"));
             continue;
         }
@@ -1019,6 +1096,7 @@ fn emit_pkg_tree(tree: &PkgTree, indent: usize, lines: &mut Vec<String>, stats: 
         match (pkg.nix_type.as_str(), pkg.is_derivation) {
             ("set", true) => {
                 stats.derivations += 1;
+                maybe_emit_source(pkg.pos.as_ref(), source_roots, &pad, lines);
                 lines.push(format!("{pad}val {name} :: Derivation;"));
             }
             ("set", false) => {
@@ -1026,8 +1104,9 @@ fn emit_pkg_tree(tree: &PkgTree, indent: usize, lines: &mut Vec<String>, stats: 
                 if let Some(ref children) = pkg.children {
                     if !children.is_empty() {
                         stats.sub_package_sets += 1;
+                        maybe_emit_source(pkg.pos.as_ref(), source_roots, &pad, lines);
                         lines.push(format!("{pad}module {name} {{"));
-                        emit_pkg_tree(children, indent + 1, lines, stats);
+                        emit_pkg_tree(children, indent + 1, lines, stats, source_roots);
                         lines.push(format!("{pad}}}"));
                         continue;
                     }
@@ -1037,6 +1116,7 @@ fn emit_pkg_tree(tree: &PkgTree, indent: usize, lines: &mut Vec<String>, stats: 
                 // so the type checker recognizes these as callable.
                 if pkg.has_functor {
                     stats.functors += 1;
+                    maybe_emit_source(pkg.pos.as_ref(), source_roots, &pad, lines);
                     lines.push(format!(
                         "{pad}val {name} :: {{ __functor: a -> b -> c, ... }};"
                     ));
@@ -1044,10 +1124,12 @@ fn emit_pkg_tree(tree: &PkgTree, indent: usize, lines: &mut Vec<String>, stats: 
                 }
 
                 stats.attrsets += 1;
+                maybe_emit_source(pkg.pos.as_ref(), source_roots, &pad, lines);
                 lines.push(format!("{pad}val {name} :: {{ ... }};"));
             }
             ("lambda", _) => {
                 stats.functions += 1;
+                maybe_emit_source(pkg.pos.as_ref(), source_roots, &pad, lines);
                 // When functionArgs is available (attrset-pattern lambda), emit
                 // a typed parameter set instead of the generic `a -> b`.
                 if let Some(ref args) = pkg.function_args {
@@ -1102,7 +1184,7 @@ pub fn run_pkgs(opts: PkgsOptions) -> Result<(), Box<dyn std::error::Error>> {
         }
         None => invoke_pkgs_classify(&opts.nixpkgs, opts.max_depth)?,
     };
-    let tix_content = generate_pkgs_tix(&tree);
+    let tix_content = generate_pkgs_tix(&tree, &opts.source_roots);
     write_generated_stubs(&tix_content, opts.output.as_ref(), "pkgs")
 }
 
@@ -1530,6 +1612,7 @@ mod tests {
                 },
                 description: None,
                 has_default: false,
+                pos: None,
             }),
         );
         let ty = NixosTypeInfo::Submodule { options: opts };
@@ -1560,6 +1643,7 @@ mod tests {
                 },
                 description: None,
                 has_default: false,
+                pos: None,
             }),
         );
         opts.insert(
@@ -1571,6 +1655,7 @@ mod tests {
                 },
                 description: None,
                 has_default: false,
+                pos: None,
             }),
         );
         let result = options_to_attrset_ty(&opts, 0);
@@ -1591,6 +1676,7 @@ mod tests {
                 },
                 description: None,
                 has_default: false,
+                pos: None,
             }),
         );
         let mut outer = BTreeMap::new();
@@ -1599,6 +1685,7 @@ mod tests {
             OptionNode::Namespace(NamespaceNode {
                 _is_option: false,
                 children: inner,
+                pos: None,
             }),
         );
         let result = options_to_attrset_ty(&outer, 0);
@@ -1623,6 +1710,7 @@ mod tests {
                 },
                 description: None,
                 has_default: false,
+                pos: None,
             }),
         );
         openssh.insert(
@@ -1636,6 +1724,7 @@ mod tests {
                 },
                 description: None,
                 has_default: false,
+                pos: None,
             }),
         );
         services.insert(
@@ -1643,6 +1732,7 @@ mod tests {
             OptionNode::Namespace(NamespaceNode {
                 _is_option: false,
                 children: openssh,
+                pos: None,
             }),
         );
 
@@ -1652,6 +1742,7 @@ mod tests {
             OptionNode::Namespace(NamespaceNode {
                 _is_option: false,
                 children: services,
+                pos: None,
             }),
         );
         tree.insert(
@@ -1669,6 +1760,7 @@ mod tests {
                             },
                             description: None,
                             has_default: false,
+                            pos: None,
                         }),
                     );
                     m.insert(
@@ -1686,6 +1778,7 @@ mod tests {
                                         },
                                         description: None,
                                         has_default: false,
+                                        pos: None,
                                     }),
                                 );
                                 fw.insert(
@@ -1699,14 +1792,17 @@ mod tests {
                                         },
                                         description: None,
                                         has_default: false,
+                                        pos: None,
                                     }),
                                 );
                                 fw
                             },
+                            pos: None,
                         }),
                     );
                     m
                 },
+                pos: None,
             }),
         );
 
@@ -1735,6 +1831,7 @@ mod tests {
                 },
                 description: None,
                 has_default: false,
+                pos: None,
             }),
         );
         tree.insert(
@@ -1746,6 +1843,7 @@ mod tests {
                 },
                 description: None,
                 has_default: false,
+                pos: None,
             }),
         );
         tree.insert(
@@ -1759,6 +1857,7 @@ mod tests {
                 },
                 description: None,
                 has_default: false,
+                pos: None,
             }),
         );
 
@@ -1796,6 +1895,7 @@ mod tests {
                                     },
                                     description: None,
                                     has_default: false,
+                                    pos: None,
                                 }),
                             );
                             m
@@ -1804,6 +1904,7 @@ mod tests {
                 },
                 description: None,
                 has_default: true,
+                pos: None,
             }),
         );
 
@@ -1834,6 +1935,7 @@ mod tests {
                 },
                 description: None,
                 has_default: true,
+                pos: None,
             }),
         );
 
@@ -1857,6 +1959,7 @@ mod tests {
                 },
                 description: None,
                 has_default: false,
+                pos: None,
             }),
         );
 
@@ -1881,6 +1984,7 @@ mod tests {
                 },
                 description: None,
                 has_default: true,
+                pos: None,
             }),
         );
 
@@ -1908,6 +2012,7 @@ mod tests {
                 },
                 description: None,
                 has_default: true,
+                pos: None,
             }),
         );
 
@@ -1956,10 +2061,12 @@ mod tests {
                             },
                             description: None,
                             has_default: false,
+                            pos: None,
                         }),
                     );
                     m
                 },
+                pos: None,
             }),
         );
         tree.insert(
@@ -1967,6 +2074,7 @@ mod tests {
             OptionNode::Namespace(NamespaceNode {
                 _is_option: false,
                 children: boot,
+                pos: None,
             }),
         );
 
@@ -1995,6 +2103,7 @@ mod tests {
                 output: None,
                 max_depth: 4, // shallow for speed
                 descriptions: false,
+                source_roots: Vec::new(),
             },
             hostname: None,
         };
@@ -2033,6 +2142,7 @@ mod tests {
                 },
                 description: None,
                 has_default: false,
+                pos: None,
             }),
         );
         tree.insert(
@@ -2050,6 +2160,7 @@ mod tests {
                             },
                             description: None,
                             has_default: false,
+                            pos: None,
                         }),
                     );
                     m.insert(
@@ -2061,6 +2172,7 @@ mod tests {
                             },
                             description: None,
                             has_default: false,
+                            pos: None,
                         }),
                     );
                     m.insert(
@@ -2072,10 +2184,12 @@ mod tests {
                             },
                             description: None,
                             has_default: false,
+                            pos: None,
                         }),
                     );
                     m
                 },
+                pos: None,
             }),
         );
 
@@ -2107,6 +2221,7 @@ mod tests {
                 output: None,
                 max_depth: 3, // shallow for speed
                 descriptions: false,
+                source_roots: Vec::new(),
             },
             home_manager: None,
             username: None,
@@ -2171,6 +2286,7 @@ mod tests {
                 },
                 description: None,
                 has_default: false,
+                pos: None,
             }),
         );
 
@@ -2180,6 +2296,7 @@ mod tests {
             OptionNode::Namespace(NamespaceNode {
                 _is_option: false,
                 children: sysctl,
+                pos: None,
             }),
         );
 
@@ -2210,6 +2327,7 @@ mod tests {
                 },
                 description: Some("Whether to enable the service.".to_string()),
                 has_default: false,
+                pos: None,
             }),
         );
         tree.insert(
@@ -2221,6 +2339,7 @@ mod tests {
                 },
                 description: None,
                 has_default: false,
+                pos: None,
             }),
         );
 
@@ -2259,6 +2378,7 @@ mod tests {
                 },
                 description: Some("Whether to enable OpenSSH.".to_string()),
                 has_default: false,
+                pos: None,
             }),
         );
         tree.insert(
@@ -2266,6 +2386,7 @@ mod tests {
             OptionNode::Namespace(NamespaceNode {
                 _is_option: false,
                 children: services,
+                pos: None,
             }),
         );
 
@@ -2314,6 +2435,7 @@ mod tests {
                 },
                 description: Some("Whether to enable.".to_string()),
                 has_default: false,
+                pos: None,
             }),
         );
 
@@ -2338,6 +2460,7 @@ mod tests {
             alias_of: None,
             has_functor: false,
             function_args: None,
+            pos: None,
         }
     }
 
@@ -2350,6 +2473,7 @@ mod tests {
             alias_of: None,
             has_functor: false,
             function_args: None,
+            pos: None,
         }
     }
 
@@ -2362,6 +2486,7 @@ mod tests {
             alias_of: Some(target.to_string()),
             has_functor: false,
             function_args: None,
+            pos: None,
         }
     }
 
@@ -2374,6 +2499,7 @@ mod tests {
             alias_of: None,
             has_functor: true,
             function_args: None,
+            pos: None,
         }
     }
 
@@ -2388,6 +2514,7 @@ mod tests {
             alias_of: None,
             has_functor: false,
             function_args: Some(function_args),
+            pos: None,
         }
     }
 
@@ -2396,7 +2523,7 @@ mod tests {
         let mut tree = PkgTree::new();
         tree.insert("hello".to_string(), pkg("set", true));
         tree.insert("coreutils".to_string(), pkg("set", true));
-        let tix = generate_pkgs_tix(&tree);
+        let tix = generate_pkgs_tix(&tree, &[]);
         assert!(tix.contains("val hello :: Derivation;"));
         assert!(tix.contains("val coreutils :: Derivation;"));
     }
@@ -2406,7 +2533,7 @@ mod tests {
         let mut tree = PkgTree::new();
         tree.insert("xorg".to_string(), pkg("set", false));
         tree.insert("someFunc".to_string(), pkg("lambda", false));
-        let tix = generate_pkgs_tix(&tree);
+        let tix = generate_pkgs_tix(&tree, &[]);
         assert!(tix.contains("val xorg :: { ... };"));
         assert!(tix.contains("val someFunc :: a -> b;"));
     }
@@ -2416,7 +2543,7 @@ mod tests {
         let mut tree = PkgTree::new();
         tree.insert("version".to_string(), pkg("string", false));
         tree.insert("hello".to_string(), pkg("set", true));
-        let tix = generate_pkgs_tix(&tree);
+        let tix = generate_pkgs_tix(&tree, &[]);
         assert!(!tix.contains("val version"));
         assert!(tix.contains("val hello :: Derivation;"));
     }
@@ -2425,7 +2552,7 @@ mod tests {
     fn generate_pkgs_tix_wrapped_in_module() {
         let mut tree = PkgTree::new();
         tree.insert("hello".to_string(), pkg("set", true));
-        let tix = generate_pkgs_tix(&tree);
+        let tix = generate_pkgs_tix(&tree, &[]);
         assert!(
             tix.contains("module pkgs {"),
             "should wrap vals in module pkgs"
@@ -2439,7 +2566,7 @@ mod tests {
         // merges into the Pkgs alias, giving both hand-curated and generated fields.
         let mut tree = PkgTree::new();
         tree.insert("hello".to_string(), pkg("set", true));
-        let tix = generate_pkgs_tix(&tree);
+        let tix = generate_pkgs_tix(&tree, &[]);
         let file = comment_parser::parse_tix_file(&tix).expect("should parse");
 
         let mut registry = lang_check::aliases::TypeAliasRegistry::with_builtins();
@@ -2469,7 +2596,7 @@ mod tests {
         tree.insert("hello".to_string(), pkg("set", true));
         tree.insert("pythonPackages".to_string(), pkg("set", false));
         tree.insert("buildSomething".to_string(), pkg("lambda", false));
-        let tix = generate_pkgs_tix(&tree);
+        let tix = generate_pkgs_tix(&tree, &[]);
         comment_parser::parse_tix_file(&tix).unwrap_or_else(|e| {
             panic!(
                 "Generated pkgs .tix failed to parse:\n{}\n\nError: {}",
@@ -2513,7 +2640,7 @@ mod tests {
         tree.insert("hello".to_string(), pkg("set", true));
         tree.insert("llvmPackages".to_string(), pkg_with_children(children));
 
-        let tix = generate_pkgs_tix(&tree);
+        let tix = generate_pkgs_tix(&tree, &[]);
         assert!(tix.contains("val hello :: Derivation;"));
         assert!(
             tix.contains("module llvmPackages {"),
@@ -2537,7 +2664,7 @@ mod tests {
         tree.insert("llvmPackages".to_string(), pkg_with_children(children));
         tree.insert("buildSomething".to_string(), pkg("lambda", false));
 
-        let tix = generate_pkgs_tix(&tree);
+        let tix = generate_pkgs_tix(&tree, &[]);
         comment_parser::parse_tix_file(&tix).unwrap_or_else(|e| {
             panic!(
                 "Generated nested pkgs .tix failed to parse:\n{}\n\nError: {}",
@@ -2556,7 +2683,7 @@ mod tests {
         tree.insert("hello".to_string(), pkg("set", true));
         tree.insert("llvmPackages".to_string(), pkg_with_children(children));
 
-        let tix = generate_pkgs_tix(&tree);
+        let tix = generate_pkgs_tix(&tree, &[]);
         let file = comment_parser::parse_tix_file(&tix).expect("should parse");
 
         let mut registry = lang_check::aliases::TypeAliasRegistry::with_builtins();
@@ -2583,7 +2710,7 @@ mod tests {
         // An attrset with empty children should not become a module.
         let mut tree = PkgTree::new();
         tree.insert("emptySet".to_string(), pkg_with_children(PkgTree::new()));
-        let tix = generate_pkgs_tix(&tree);
+        let tix = generate_pkgs_tix(&tree, &[]);
         assert!(
             tix.contains("val emptySet :: { ... };"),
             "empty children should fall back to val: {tix}"
@@ -2606,7 +2733,7 @@ mod tests {
         tree.insert("name.with.dots".to_string(), pkg_with_children(children));
         tree.insert("m+".to_string(), pkg("set", true));
         tree.insert("hello".to_string(), pkg("set", true));
-        let tix = generate_pkgs_tix(&tree);
+        let tix = generate_pkgs_tix(&tree, &[]);
         assert!(
             !tix.contains("name.with.dots"),
             "dotted name should be skipped: {tix}"
@@ -2657,7 +2784,7 @@ mod tests {
             pkg_alias("python313Packages"),
         );
 
-        let tix = generate_pkgs_tix(&tree);
+        let tix = generate_pkgs_tix(&tree, &[]);
         assert!(
             tix.contains("module python313Packages {"),
             "should emit module for recursed set: {tix}"
@@ -2686,7 +2813,7 @@ mod tests {
             pkg_alias("python313Packages"),
         );
 
-        let tix = generate_pkgs_tix(&tree);
+        let tix = generate_pkgs_tix(&tree, &[]);
         comment_parser::parse_tix_file(&tix).unwrap_or_else(|e| {
             panic!("Alias pkgs .tix failed to parse:\n{tix}\n\nError: {e}");
         });
@@ -2706,7 +2833,7 @@ mod tests {
             pkg_alias("python313Packages"),
         );
 
-        let tix = generate_pkgs_tix(&tree);
+        let tix = generate_pkgs_tix(&tree, &[]);
         let file = comment_parser::parse_tix_file(&tix).expect("should parse");
 
         let mut registry = lang_check::aliases::TypeAliasRegistry::with_builtins();
@@ -2769,7 +2896,7 @@ mod tests {
         let mut tree = PkgTree::new();
         tree.insert("buildGoModule".to_string(), pkg_functor());
         tree.insert("hello".to_string(), pkg("set", true));
-        let tix = generate_pkgs_tix(&tree);
+        let tix = generate_pkgs_tix(&tree, &[]);
         assert!(
             tix.contains("val buildGoModule :: { __functor: a -> b -> c, ... };"),
             "functor should emit __functor field: {tix}"
@@ -2782,7 +2909,7 @@ mod tests {
         let mut tree = PkgTree::new();
         tree.insert("buildGoModule".to_string(), pkg_functor());
         tree.insert("hello".to_string(), pkg("set", true));
-        let tix = generate_pkgs_tix(&tree);
+        let tix = generate_pkgs_tix(&tree, &[]);
         comment_parser::parse_tix_file(&tix).unwrap_or_else(|e| {
             panic!("Functor pkgs .tix failed to parse:\n{tix}\n\nError: {e}");
         });
@@ -2814,7 +2941,7 @@ mod tests {
             "myBuilder".to_string(),
             pkg_lambda_with_args(vec![("name", false), ("src", true)]),
         );
-        let tix = generate_pkgs_tix(&tree);
+        let tix = generate_pkgs_tix(&tree, &[]);
         // BTreeMap sorts alphabetically: name, src
         assert!(
             tix.contains("val myBuilder :: { name: a, src?: b, ... } -> a;"),
@@ -2828,7 +2955,7 @@ mod tests {
         // get the generic `a -> b` signature.
         let mut tree = PkgTree::new();
         tree.insert("myFunc".to_string(), pkg_lambda_with_args(vec![]));
-        let tix = generate_pkgs_tix(&tree);
+        let tix = generate_pkgs_tix(&tree, &[]);
         assert!(
             tix.contains("val myFunc :: a -> b;"),
             "empty functionArgs should fall back to a -> b: {tix}"
@@ -2843,7 +2970,7 @@ mod tests {
             pkg_lambda_with_args(vec![("name", false), ("src", true), ("buildInputs", true)]),
         );
         tree.insert("hello".to_string(), pkg("set", true));
-        let tix = generate_pkgs_tix(&tree);
+        let tix = generate_pkgs_tix(&tree, &[]);
         comment_parser::parse_tix_file(&tix).unwrap_or_else(|e| {
             panic!("FunctionArgs pkgs .tix failed to parse:\n{tix}\n\nError: {e}");
         });
@@ -2863,7 +2990,7 @@ mod tests {
         tree.insert("overrideScope'".to_string(), pkg("lambda", false));
         tree.insert("newScope".to_string(), pkg("lambda", false));
         tree.insert("recurseForDerivations".to_string(), pkg("set", false));
-        let tix = generate_pkgs_tix(&tree);
+        let tix = generate_pkgs_tix(&tree, &[]);
         assert!(tix.contains("val hello :: Derivation;"));
         assert!(
             !tix.contains("override"),
@@ -2891,7 +3018,7 @@ mod tests {
         tree.insert("fetchurl".to_string(), pkg_functor());
         tree.insert("callPackage".to_string(), pkg("lambda", false));
         tree.insert("lib".to_string(), pkg("set", false));
-        let tix = generate_pkgs_tix(&tree);
+        let tix = generate_pkgs_tix(&tree, &[]);
         assert!(tix.contains("val hello :: Derivation;"));
         assert!(
             !tix.contains("val stdenv"),
@@ -2922,7 +3049,7 @@ mod tests {
 
         let mut tree = PkgTree::new();
         tree.insert("llvmPackages".to_string(), pkg_with_children(children));
-        let tix = generate_pkgs_tix(&tree);
+        let tix = generate_pkgs_tix(&tree, &[]);
         assert!(
             tix.contains("val stdenv :: Derivation;"),
             "curated names should appear inside nested modules: {tix}"

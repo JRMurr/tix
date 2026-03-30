@@ -143,7 +143,11 @@ let
         in
         if !val.success then []
         else
-          let v = val.value; in
+          let
+            v = val.value;
+            # Source position of the attribute (for @source annotations).
+            pos = (builtins.tryEval (builtins.unsafeGetAttrPos name opts)).value or null;
+          in
           if isOption v then
             let
               typeInfo = builtins.tryEval (extractType (depth - 1) v.type);
@@ -170,7 +174,8 @@ let
                 # unavailable package). The Rust stub generator uses this flag
                 # together with the inner type to decide whether to strip | null.
               } // (if v ? default then { hasDefault = true; } else {})
-                // (if desc != null then { description = desc; } else {});
+                // (if desc != null then { description = desc; } else {})
+                // (if pos != null then { inherit pos; } else {});
             }]
           else if builtins.isAttrs v then
             [{
@@ -178,7 +183,7 @@ let
               value = {
                 _isOption = false;
                 children = walkOptions (depth - 1) v;
-              };
+              } // (if pos != null then { inherit pos; } else {});
             }]
           else []
       ) safeNames);

@@ -140,6 +140,8 @@ let
                 (builtins.tryEval (builtins.functionArgs v.value)).value or null
               else
                 null;
+            # Source position of the attribute binding (for @source annotations).
+            pos = (builtins.tryEval (builtins.unsafeGetAttrPos name attrset)).value or null;
           in
           [
             {
@@ -151,7 +153,8 @@ let
                 }
                 // (if hasFunctor then { has_functor = true; } else { })
                 // (if funcArgs != null then { function_args = funcArgs; } else { })
-                // (if children != null then { inherit children; } else { });
+                // (if children != null then { inherit children; } else { })
+                // (if pos != null then { inherit pos; } else { });
             }
           ]
       ) (builtins.attrNames attrset)
