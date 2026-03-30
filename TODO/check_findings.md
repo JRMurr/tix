@@ -82,58 +82,7 @@ or `outPath` — that's separate).
 
 ---
 
-## 3. Cross-file optional parameter typed as default only
-
-**~13 errors** (E001) all in nixvim telescope extensions
-
-When a function has `settingsExample ? null` and is exported cross-file,
-the parameter type is fixed to `null` (the default). Callers passing attrsets
-get a type mismatch.
-
-```nix
-# nixvim:plugins/by-name/telescope/extensions/_mk-extension.nix:7
-{
-  settingsExample ? null,   # <-- parameter type becomes `null`
-  ...
-}:
-...
-
-# nixvim:plugins/by-name/telescope/extensions/advanced-git-search.nix:4
-mkExtension {
-  settingsExample = {       # <-- E001: expected `null`, got `{ ... }`
-    diff_plugin = "diffview";
-    git_flags = [ "-c" "delta.side-by-side=false" ];
-  };
-}
-
-# Same pattern in: file-browser.nix, frecency.nix, live-greps-args.nix,
-# manix.nix, media-files.nix, project.nix, ui-select.nix, undo.nix,
-# zf-native.nix, zoxide.nix
-```
-
-**Root cause**: In cross-file inference, the function's exported signature uses
-the parameter's inferred type from its own file only. Since `settingsExample`
-is only used as `example = settingsExample` (passed through), and the default
-is `null`, the type stays `null`. Call-site arguments from other files don't
-widen it.
-
-Within a single file this works — `constrain(default_ty, name_ty)` and
-`constrain(arg_ty, name_ty)` both add lower bounds, producing a union.
-Cross-file, the function type is frozen before callers are analyzed.
-
-**Fix**: Options:
-- Widen optional parameter types to `Top` in exported signatures (too loose)
-- Use `null | Top` for null-defaulted optional params (still too loose)
-- Accept this as a known limitation of modular type checking
-
-Also appears in nixvim `wrappers/hm.nix:20` and `wrappers/nixos.nix:20`
-(`expected null, got [string]`) — same pattern.
-
-**Effort**: Hard (architectural)
-
----
-
-## 4. `number` result from `*` doesn't flow to `int`
+## 3. `number` result from `*` doesn't flow to `int`
 
 **1 error** (E001) in nix-colors
 
@@ -169,31 +118,7 @@ track arithmetic results as variables until both operands are known.
 
 ---
 
-## 5. `||` narrowing misapplies negation in closures
-
-**2 errors** (E001) in nixpkgs-lib gvariant.nix
-
-```nix
-# nixpkgs-lib:gvariant.nix:141 and :149
-# E001: type mismatch: expected `bool | float`, got `int`
-```
-
-When `builtins.isInt v` narrows `v` to `int` in the then-branch, and a lambda
-inside that branch uses `||` with comparisons involving `v`, the narrowing
-logic misapplies negation types. The `||` analysis doesn't properly isolate
-which variable each predicate's narrowing applies to when closures capture
-outer narrowed bindings.
-
-**Fix**: Investigate `||` narrowing scope isolation in `infer_expr.rs`
-(`infer_with_narrowing` / `compute_narrow_override`). The narrowing predicates
-from the `||` sub-expressions need to be scoped to their own variables, not
-leak into the closure-captured variable's narrowing context.
-
-**Effort**: Medium-High
-
----
-
-## 6. `Path + string` fails in recursive functions
+## 4. `Path + string` fails in recursive functions
 
 **2 errors** (E003) in nixpkgs-lib fileset/internal.nix
 
@@ -224,7 +149,7 @@ variable before the `+` overload tries to resolve.
 
 ---
 
-## 7. Correct errors (not tix bugs)
+## 5. Correct errors (not tix bugs)
 
 These are legitimate type errors or known limitations, not worth fixing:
 
@@ -247,8 +172,6 @@ These are legitimate type errors or known limitations, not worth fixing:
 |---|-------|--------|--------|----------|
 | 1 | `mkDefault` etc. stubs hide `priority` | ~8 | Low | High |
 | 2 | Derivation/outPath + string coercion | ~5 | Medium | High |
-| 3 | Cross-file optional param typed as default | ~13 | Hard | Low |
-| 4 | `number` result from `*` won't refine to `int` | ~1 | Medium | Medium |
-| 5 | `\|\|` narrowing scope leak in closures | ~2 | Medium-High | Medium |
-| 6 | `Path + string` in recursive functions | ~2 | Medium | Medium |
-| 7 | Correct errors (not bugs) | ~30+ | N/A | N/A |
+| 3 | `number` result from `*` won't refine to `int` | ~1 | Medium | Medium |
+| 4 | `Path + string` in recursive functions | ~2 | Medium | Medium |
+| 5 | Correct errors (not bugs) | ~30+ | N/A | N/A |
