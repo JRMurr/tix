@@ -141,7 +141,32 @@ let
               else
                 null;
             # Source position of the attribute binding (for @source annotations).
-            pos = (builtins.tryEval (builtins.unsafeGetAttrPos name attrset)).value or null;
+            # unsafeGetAttrPos works for attrs defined in literal attrsets
+            # (e.g. all-packages.nix), but most callPackage results return null.
+            # For derivations, fall back to meta.position ("file:line" string).
+            attrPos = (builtins.tryEval (builtins.unsafeGetAttrPos name attrset)).value or null;
+            metaPos =
+              if attrPos != null || !isDrv then null
+              else
+                let
+                  raw = (builtins.tryEval (v.value.meta.position or null)).value or null;
+                in
+                if raw == null then null
+                else
+                  # meta.position format: "/nix/store/...:line"
+                  let
+                    parts = lib.splitString ":" raw;
+                    len = builtins.length parts;
+                  in
+                  if len >= 2 then {
+                    # Rejoin all parts except the last (file path may not contain ":"
+                    # but be defensive).
+                    file = lib.concatStringsSep ":" (lib.take (len - 1) parts);
+                    line = lib.toIntBase10 (builtins.elemAt parts (len - 1));
+                    column = 0;
+                  }
+                  else null;
+            pos = if attrPos != null then attrPos else metaPos;
           in
           [
             {
