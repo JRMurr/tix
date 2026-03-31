@@ -184,21 +184,23 @@ pub fn hover(
     try_attrpath_key_hover(analysis, &token, docs)
 }
 
-/// Resolved attrpath key context — shared between hover and field doc lookups.
-struct AttrpathKeyResolution {
-    full_path: Vec<smol_str::SmolStr>,
-    alias_name: Option<smol_str::SmolStr>,
-    config_ty: OutputTy,
+/// Resolved attrpath key context — shared between hover, field doc, and goto-def.
+pub(crate) struct AttrpathKeyResolution {
+    pub(crate) full_path: Vec<smol_str::SmolStr>,
+    pub(crate) alias_name: Option<smol_str::SmolStr>,
+    #[allow(dead_code)]
+    pub(crate) config_ty: OutputTy,
     /// The arena that owns TyRef indices inside `config_ty`. This is either
     /// `inference.arena` (for pattern-field types) or `context_arg_arena`
     /// (for context-arg fallback types). All navigation of `config_ty` must
     /// use this arena — do NOT substitute `inference.arena` here.
-    config_arena: std::sync::Arc<lang_ty::TypeArena>,
+    #[allow(dead_code)]
+    pub(crate) config_arena: std::sync::Arc<lang_ty::TypeArena>,
 }
 
 /// Resolve an attrpath key token to its config type, full path, and alias name.
-/// Shared by `try_attrpath_key_hover` and `try_attrpath_key_field_doc`.
-fn resolve_attrpath_key(
+/// Shared by hover, field doc lookup, and goto-def for config fields.
+pub(crate) fn resolve_attrpath_key(
     analysis: &FileSnapshot,
     token: &rowan::SyntaxToken<rnix::NixLanguage>,
 ) -> Option<AttrpathKeyResolution> {

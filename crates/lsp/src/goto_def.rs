@@ -44,6 +44,13 @@ pub fn goto_definition(
         token.text()
     );
 
+    // Attrpath keys (e.g. `timeZone` in `{ time.timeZone = "..."; }`) may
+    // not map to expression nodes in the source map — check them first using
+    // the raw token before the expression walk loop.
+    if let Some(location) = try_resolve_attrpath_field_source(state, analysis, &token) {
+        return Some(location);
+    }
+
     // Walk up from the token to find a node that maps to an expression.
     let mut node = token.parent()?;
     loop {
@@ -281,6 +288,29 @@ fn try_resolve_select_field(
     let target_range = target_line_index.range(target_node.text_range());
     let target_uri = Url::from_file_path(&resolved_target).ok()?;
     Some(Location::new(target_uri, target_range))
+}
+
+// ==============================================================================
+// Attrpath key → field @source: `timeZone` in `{ time.timeZone = "..."; }`
+// ==============================================================================
+
+/// Given a token inside an attrpath key (in an attrset definition, not a Select),
+/// resolve it to a field-level `@source` location from the stubs.
+///
+/// This enables go-to-definition for NixOS config fields like `time.timeZone`:
+/// the generated `nixos.tix` stubs carry `@source` annotations that point to
+/// the NixOS module source files where options are declared.
+fn try_resolve_attrpath_field_source(
+    state: &AnalysisState,
+    analysis: &FileSnapshot,
+    token: &rowan::SyntaxToken<rnix::NixLanguage>,
+) -> Option<Location> {
+    let res = crate::hover::resolve_attrpath_key(analysis, token)?;
+    let alias = res.alias_name.as_ref()?;
+    let source = state
+        .registry
+        .field_source_location(alias, &res.full_path)?;
+    resolve_source_location(source, state.registry.source_roots())
 }
 
 // ==============================================================================
@@ -811,5 +841,64 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&stub_path);
+    }
+
+    // ------------------------------------------------------------------
+    // Attrpath key → field @source: { time.timeZone = "..."; }
+    // ------------------------------------------------------------------
+    #[test]
+    fn attrpath_key_jumps_to_field_source() {
+        use crate::test_util::ContextTestSetup;
+        use std::sync::Arc;
+
+        // Create a fake source file at the target path.
+        let source_dir = crate::test_util::temp_path("nixpkgs_src");
+        std::fs::create_dir_all(source_dir.join("nixos/modules/config")).unwrap();
+        let source_file = source_dir.join("nixos/modules/config/time.nix");
+        // Write enough lines so line 50 exists.
+        let source_content = "# placeholder\n".repeat(60);
+        std::fs::write(&source_file, &source_content).unwrap();
+
+        let stubs = indoc! {"
+            type TestConfig = {
+                @source nixpkgs:nixos/modules/config/time.nix:42:5
+                time: {
+                    @source nixpkgs:nixos/modules/config/time.nix:50:10
+                    timeZone: string,
+                    ...
+                },
+                ...
+            };
+            val config :: TestConfig;
+        "};
+        let src = indoc! {"
+            { config, ... }: {
+              time.timeZone = \"America/New_York\";
+            #      ^1
+            }
+        "};
+        let markers = parse_markers(src);
+        let mut ctx = ContextTestSetup::new(src, stubs);
+
+        // Configure source root so @source annotations resolve.
+        Arc::make_mut(&mut ctx.state.registry).set_source_root("nixpkgs", source_dir.clone());
+
+        // Re-analyze to pick up the source root.
+        ctx.state.update_file(ctx.nix_path.clone(), src.to_string());
+
+        let analysis = ctx.snapshot();
+        let root = ctx.root();
+        let uri = Url::from_file_path(&ctx.nix_path).unwrap();
+
+        let pos = analysis.syntax.line_index.position(markers[&1]);
+        let result = goto_definition(&ctx.state, &analysis, pos, &uri, &root);
+
+        let loc = result.expect("should resolve attrpath key to source");
+        let expected_uri = Url::from_file_path(&source_file).unwrap();
+        assert_eq!(loc.uri, expected_uri, "should jump to the source file");
+        // @source line 50 → LSP line 49 (0-based)
+        assert_eq!(loc.range.start.line, 49);
+
+        let _ = std::fs::remove_dir_all(&source_dir);
     }
 }

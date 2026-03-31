@@ -145,6 +145,12 @@ pub struct TypeAliasRegistry {
     /// — compiled-in stubs (via `load_tix_file`) intentionally have no locations.
     decl_locations: HashMap<SmolStr, Vec<DeclLocation>>,
 
+    /// Source locations for fields within type aliases, from `@source` annotations
+    /// on attrset fields. Key: alias name, Value: field path → SourceLocation.
+    /// Used for go-to-definition on NixOS config fields and similar context-provided
+    /// attrset keys.
+    field_source_locations: HashMap<SmolStr, HashMap<Vec<SmolStr>, SourceLocation>>,
+
     /// Maps source identifiers to root paths for resolving `@source` annotations.
     /// e.g. `"nixpkgs"` → `/nix/store/...-source`, `"home-manager"` → `/nix/store/...-hm`.
     /// Set during stub generation/loading when the source roots are known.
@@ -217,6 +223,7 @@ impl TypeAliasRegistry {
         let mut target = ValTarget::GlobalVals;
         self.load_declarations(&file.declarations, &mut target);
         self.load_field_docs(&file.field_docs);
+        self.load_field_sources(&file.field_sources);
     }
 
     /// Load declarations from a parsed .tix file, recording source locations
@@ -292,6 +299,13 @@ impl TypeAliasRegistry {
             .get(name)
             .map(|v| v.as_slice())
             .unwrap_or_default()
+    }
+
+    /// Look up the `@source` location for a field within a type alias.
+    /// `alias` is the type alias name (e.g. "NixosConfig").
+    /// `path` is the dotted field path (e.g. ["time", "timeZone"]).
+    pub fn field_source_location(&self, alias: &str, path: &[SmolStr]) -> Option<&SourceLocation> {
+        self.field_source_locations.get(alias)?.get(path)
     }
 
     /// Register a source root for resolving `@source` annotations.
@@ -388,6 +402,20 @@ impl TypeAliasRegistry {
                 let field_path = field_doc.path[1..].to_vec();
                 self.docs
                     .insert_field_doc(alias, field_path, field_doc.doc.clone());
+            }
+        }
+    }
+
+    /// Load field-level `@source` annotations from a parsed .tix file.
+    fn load_field_sources(&mut self, field_sources: &[comment_parser::FieldSource]) {
+        for fs in field_sources {
+            if fs.path.len() >= 2 {
+                let alias = fs.path[0].clone();
+                let field_path = fs.path[1..].to_vec();
+                self.field_source_locations
+                    .entry(alias)
+                    .or_default()
+                    .insert(field_path, fs.source.clone());
             }
         }
     }
@@ -504,6 +532,7 @@ impl TypeAliasRegistry {
         let mut target = ValTarget::ContextMap(&mut context_args);
         self.load_declarations(&file.declarations, &mut target);
         self.load_field_docs(&file.field_docs);
+        self.load_field_sources(&file.field_sources);
         Ok(context_args)
     }
 

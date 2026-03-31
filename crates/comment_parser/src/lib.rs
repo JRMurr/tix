@@ -165,6 +165,10 @@ pub struct TixDeclFile {
     /// Field-level doc comments collected during parsing, with dotted paths
     /// from the parent type alias (e.g. `["NixosConfig", "services", "enable"]`).
     pub field_docs: Vec<FieldDoc>,
+    /// Field-level `@source` annotations collected during parsing, with dotted
+    /// paths from the parent type alias. Used for go-to-definition on NixOS
+    /// config fields and similar context-provided attrset keys.
+    pub field_sources: Vec<FieldSource>,
 }
 
 /// A doc comment attached to a field inside a type alias body.
@@ -173,6 +177,14 @@ pub struct FieldDoc {
     /// Path from the root type alias to the field (e.g. `["NixosConfig", "services", "enable"]`).
     pub path: Vec<SmolStr>,
     pub doc: SmolStr,
+}
+
+/// An `@source` annotation attached to a field inside a type alias body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldSource {
+    /// Path from the root type alias to the field (e.g. `["NixosConfig", "services", "enable"]`).
+    pub path: Vec<SmolStr>,
+    pub source: SourceLocation,
 }
 
 /// Original source location of a declaration, extracted from `@source` annotations.

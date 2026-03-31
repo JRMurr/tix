@@ -19,8 +19,8 @@ use std::collections::BTreeMap;
 
 use crate::tix_parser::Rule;
 use crate::{
-    CollectError, FieldDoc, ParsedTy, ParsedTyRef, SourceLocation, TixDeclFile, TixDeclaration,
-    TypeVarValue,
+    CollectError, FieldDoc, FieldSource, ParsedTy, ParsedTyRef, SourceLocation, TixDeclFile,
+    TixDeclaration, TypeVarValue,
 };
 
 // =============================================================================
@@ -122,6 +122,7 @@ pub fn collect_tix_file(pairs: Pairs<Rule>) -> Result<TixDeclFile, CollectError>
     Ok(TixDeclFile {
         declarations,
         field_docs: ctx.field_docs,
+        field_sources: ctx.field_sources,
     })
 }
 
@@ -227,25 +228,29 @@ fn collect_tix_file_inner(
 // Collection context
 // =============================================================================
 //
-// Field-level doc comments are parsed inside attrsets but need to be reported
-// at the TixDeclFile level. `CollectCtx` carries this mutable state explicitly
-// through the recursive collection functions, avoiding hidden thread-local state.
+// Field-level doc comments and @source annotations are parsed inside attrsets
+// but need to be reported at the TixDeclFile level. `CollectCtx` carries this
+// mutable state explicitly through the recursive collection functions, avoiding
+// hidden thread-local state.
 
 struct CollectCtx {
     field_docs: Vec<FieldDoc>,
-    field_doc_path: Vec<SmolStr>,
+    field_sources: Vec<FieldSource>,
+    /// Current nesting path within a type alias body (e.g. `["NixosConfig", "services"]`).
+    field_path: Vec<SmolStr>,
 }
 
 impl CollectCtx {
     fn new() -> Self {
         Self {
             field_docs: Vec::new(),
-            field_doc_path: Vec::new(),
+            field_sources: Vec::new(),
+            field_path: Vec::new(),
         }
     }
 
     fn push_field_doc(&mut self, field_name: SmolStr, doc: SmolStr) {
-        let mut full_path = self.field_doc_path.clone();
+        let mut full_path = self.field_path.clone();
         full_path.push(field_name);
         self.field_docs.push(FieldDoc {
             path: full_path,
@@ -253,12 +258,21 @@ impl CollectCtx {
         });
     }
 
+    fn push_field_source(&mut self, field_name: SmolStr, source: SourceLocation) {
+        let mut full_path = self.field_path.clone();
+        full_path.push(field_name);
+        self.field_sources.push(FieldSource {
+            path: full_path,
+            source,
+        });
+    }
+
     fn set_path(&mut self, path: Vec<SmolStr>) {
-        self.field_doc_path = path;
+        self.field_path = path;
     }
 
     fn path(&self) -> &[SmolStr] {
-        &self.field_doc_path
+        &self.field_path
     }
 }
 
@@ -524,11 +538,7 @@ fn collect_attrset(pairs: Pairs<Rule>, ctx: &mut CollectCtx) -> Result<ParsedTy,
                 // Check for a doc_block on the field.
                 let field_doc = take_doc_block(&mut inner);
 
-                // Consume optional @source annotation on the field.
-                // We capture it but don't store it here — the source
-                // location for fields is only used when loading stubs
-                // at the declaration level, not inside type expressions.
-                let _field_source = take_source_annotation(&mut inner);
+                let field_source = take_source_annotation(&mut inner);
 
                 let name_pair = inner
                     .next()
@@ -551,13 +561,16 @@ fn collect_attrset(pairs: Pairs<Rule>, ctx: &mut CollectCtx) -> Result<ParsedTy,
                     optional_fields.insert(name.clone());
                 }
 
-                // If this field has a doc comment, record it.
+                // If this field has a doc comment or @source, record them.
                 if let Some(doc) = field_doc {
                     ctx.push_field_doc(name.clone(), doc);
                 }
+                if let Some(source) = field_source {
+                    ctx.push_field_source(name.clone(), source);
+                }
 
                 // Set path context for nested attrsets so their field docs
-                // get the correct prefix.
+                // and @source annotations get the correct prefix.
                 let mut child_path = parent_path.clone();
                 child_path.push(name.clone());
                 ctx.set_path(child_path);
@@ -1300,5 +1313,49 @@ mod tests {
             }
             other => panic!("expected ValDecl, got: {other:?}"),
         }
+    }
+
+    #[test]
+    fn field_source_annotations_collected() {
+        let src = r#"
+            type NixosConfig = {
+                @source nixpkgs:nixos/modules/config/time.nix:42:5
+                time: {
+                    @source nixpkgs:nixos/modules/config/time.nix:50:10
+                    timeZone: string,
+                    ...
+                },
+                ...
+            };
+        "#;
+        let file = parse_tix_file(src).expect("parse error");
+
+        assert_eq!(file.field_sources.len(), 2);
+
+        // First: NixosConfig.time
+        assert_eq!(
+            file.field_sources[0].path,
+            vec![
+                smol_str::SmolStr::from("NixosConfig"),
+                smol_str::SmolStr::from("time"),
+            ]
+        );
+        assert_eq!(file.field_sources[0].source.source_id.as_str(), "nixpkgs");
+        assert_eq!(
+            file.field_sources[0].source.relative_path.as_str(),
+            "nixos/modules/config/time.nix"
+        );
+        assert_eq!(file.field_sources[0].source.line, 42);
+
+        // Second: NixosConfig.time.timeZone
+        assert_eq!(
+            file.field_sources[1].path,
+            vec![
+                smol_str::SmolStr::from("NixosConfig"),
+                smol_str::SmolStr::from("time"),
+                smol_str::SmolStr::from("timeZone"),
+            ]
+        );
+        assert_eq!(file.field_sources[1].source.line, 50);
     }
 }

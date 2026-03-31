@@ -72,6 +72,10 @@ pub fn goto_type_definition(
                 if !locs.is_empty() {
                     return locs;
                 }
+                // Attrpath key in a config attrset: resolve via field @source.
+                if let Some(loc) = try_resolve_attrpath_field_source(analysis, &token, registry) {
+                    return vec![loc];
+                }
             }
             return Vec::new();
         }
@@ -123,6 +127,19 @@ fn resolve_decl_locations(
             ))
         })
         .collect()
+}
+
+/// Given a token inside an attrpath key, resolve it to a field-level `@source`
+/// location from the stubs.
+fn try_resolve_attrpath_field_source(
+    analysis: &FileSnapshot,
+    token: &rowan::SyntaxToken<rnix::NixLanguage>,
+    registry: &TypeAliasRegistry,
+) -> Option<Location> {
+    let res = crate::hover::resolve_attrpath_key(analysis, token)?;
+    let alias = res.alias_name.as_ref()?;
+    let source = registry.field_source_location(alias, &res.full_path)?;
+    crate::goto_def::resolve_source_location(source, registry.source_roots())
 }
 
 /// If the span text contains a `{`, return the byte offset just past it
