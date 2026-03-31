@@ -1,3 +1,4 @@
 ## Pending issues
 
 - Regenerating `stubs/lib.tix` via `gen_lib_stubs.py` produces some invalid type signatures from newer noogle data (e.g. `{ [string] : a }`, pipe's pseudo-syntax). Needs manual overrides added for `attrVals`, `attrValues`, and other newly-broken signatures before regenerating. The `@source` emission code in `gen_lib_stubs.py` is correct and tested, but the stubs aren't regenerated yet due to these unrelated noogle data regressions.
+- When `set_builtin_stubs_dir` is called multiple times with different directories, module aliases (e.g. `Pkgs`) from the old directory persist in `self.aliases` because `load_declarations` merges modules. This is harmless in practice (the LSP only calls `set_builtin_stubs_dir` once), but could cause stale fields to accumulate if the method were called repeatedly with different dirs.

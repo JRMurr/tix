@@ -3898,6 +3898,63 @@ fn callpackage_context_loads_pkgs_from_builtin_stubs_dir() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
+/// Regression: `set_builtin_stubs_dir` must invalidate cached context args and
+/// loaded module stubs. Without this, context lookups after stub generation
+/// return stale cached results and never load the generated stubs.
+///
+/// This mirrors the real LSP flow: initial check runs before stubs are
+/// generated (caching context from built-in stubs), then `set_builtin_stubs_dir`
+/// is called when generation completes, and re-analysis must pick up the new
+/// stubs.
+#[test]
+fn set_builtin_stubs_dir_invalidates_caches() {
+    let mut registry = TypeAliasRegistry::with_builtins();
+
+    // Simulate the initial check: load context before any stubs dir is set.
+    // This caches the result from compiled-in stubs.
+    let ctx_before = registry
+        .load_context_by_name("callpackage")
+        .unwrap()
+        .unwrap();
+    // Built-in lib.tix has a small hand-curated `module pkgs`, so we get
+    // some entries but NOT `extraTestPackage`.
+    assert!(
+        !ctx_before.contains_key("extraTestPackage"),
+        "built-in stubs should not have `extraTestPackage`"
+    );
+
+    // Now simulate stub generation completing: create a stubs dir with
+    // a pkgs.tix that adds `extraTestPackage`.
+    let dir = std::env::temp_dir().join(format!("tix_test_stubs_cache_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    std::fs::write(
+        dir.join("pkgs.tix"),
+        r#"
+        module pkgs {
+            val extraTestPackage :: { name: string, ... };
+        }
+        "#,
+    )
+    .expect("write pkgs.tix");
+
+    registry.set_builtin_stubs_dir(dir.clone());
+
+    // After setting the new stubs dir, context lookup must return fresh
+    // results that include the generated stubs.
+    let ctx_after = registry
+        .load_context_by_name("callpackage")
+        .unwrap()
+        .unwrap();
+    assert!(
+        ctx_after.contains_key("extraTestPackage"),
+        "after set_builtin_stubs_dir, context should include generated `extraTestPackage` \
+         (got keys: {:?})",
+        ctx_after.keys().collect::<Vec<_>>()
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // =============================================================================
 // Optional fields (pattern defaults)
 // =============================================================================

@@ -184,7 +184,16 @@ impl TypeAliasRegistry {
     /// When resolving `@nixos` or `/** context: nixos */`, the registry
     /// will check for `<dir>/nixos.tix` before falling back to the
     /// compiled-in minimal stubs.
+    ///
+    /// Clears `cached_context_args` and `loaded_module_stubs` so that
+    /// subsequent lookups re-read from the new directory.
     pub fn set_builtin_stubs_dir(&mut self, dir: PathBuf) {
+        // Invalidate caches so that subsequent calls to `load_context_by_name()`
+        // and `try_load_module_stub()` re-read from the new directory instead
+        // of returning stale results from the previous stubs dir.
+        self.cached_context_args.clear();
+        self.loaded_module_stubs.clear();
+
         // If the directory contains lib.tix, reload it with path tracking.
         // The type data is identical to what `with_builtins()` already loaded
         // (inserts overwrite), but now `DeclLocation` entries exist so
