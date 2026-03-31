@@ -1,8 +1,9 @@
 # LSP
 
-## Nested arg autocomplete doesn't work
-`bubblewrap_helper { args = [ ] }` — cursor inside `args` list doesn't get element-type
-completions, only top-level attr keys. Top-level completion works fine.
+## ~~Nested arg autocomplete doesn't work~~ (Fixed)
+Expected-type-aware completion now resolves the expected type at cursor by walking
+up the syntax tree to the callsite, then down through the function's parameter type.
+For unions, suggests fields from ALL variants. Filters already-present fields.
 
 ## did_change_configuration bypasses DashMap snapshots
 When stubs change via `did_change_configuration`, `reload_registry` runs analysis via the

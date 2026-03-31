@@ -281,6 +281,56 @@ pub(crate) fn extract_lambda_param(arena: &TypeArena, ty: &OutputTy) -> Option<O
     }
 }
 
+/// Extract the element type from a list type, unwrapping Named and
+/// Union/Intersection wrappers as needed.
+pub(crate) fn extract_list_element_ty(arena: &TypeArena, ty: &OutputTy) -> Option<OutputTy> {
+    match ty {
+        OutputTy::List(elem) => Some(arena[*elem].clone()),
+        OutputTy::Named(_, inner) => extract_list_element_ty(arena, &arena[*inner]),
+        OutputTy::Intersection(members) | OutputTy::Union(members) => members
+            .iter()
+            .find_map(|&m| extract_list_element_ty(arena, &arena[m])),
+        _ => None,
+    }
+}
+
+/// Collect attrset fields from ALL union variants (not just common ones).
+///
+/// Unlike `collect_attrset_fields` which intersects union members (only keeping
+/// fields common to ALL variants), this function merges fields from ALL variants.
+/// Used for expected-type completion where the user is constructing a value and
+/// can choose ANY variant of a union.
+pub(crate) fn collect_union_all_fields(
+    arena: &TypeArena,
+    ty: &OutputTy,
+) -> BTreeMap<SmolStr, TyRef> {
+    match ty {
+        OutputTy::Union(members) => {
+            let mut merged = BTreeMap::new();
+            for &m in members {
+                for (k, v) in collect_union_all_fields(arena, &arena[m]) {
+                    merged.entry(k).or_insert(v);
+                }
+            }
+            merged
+        }
+        // Unwrap Named and Intersection so that a union inside gets the
+        // all-variants treatment rather than falling through to
+        // collect_attrset_fields (which intersects union members).
+        OutputTy::Named(_, inner) => collect_union_all_fields(arena, &arena[*inner]),
+        OutputTy::Intersection(members) => {
+            let mut merged = BTreeMap::new();
+            for &m in members {
+                for (k, v) in collect_union_all_fields(arena, &arena[m]) {
+                    merged.entry(k).or_insert(v);
+                }
+            }
+            merged
+        }
+        other => collect_attrset_fields(arena, other),
+    }
+}
+
 /// Extract the type alias name from an OutputTy, if it's a Named type.
 pub(crate) fn extract_alias_name(ty: &OutputTy) -> Option<&SmolStr> {
     match ty {
@@ -506,5 +556,117 @@ mod tests {
         let ty = OutputTy::Union(vec![lam1, lam2]);
         let result = extract_lambda_param(&arena, &ty);
         assert_eq!(result, Some(OutputTy::Primitive(PrimitiveTy::Int)));
+    }
+
+    // ------------------------------------------------------------------
+    // extract_list_element_ty
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn extract_list_element() {
+        let mut arena = TypeArena::new();
+        let str_ref = mk_string(&mut arena);
+        let list_ref = arena.intern(OutputTy::List(str_ref));
+        let ty = arena[list_ref].clone();
+        assert_eq!(
+            extract_list_element_ty(&arena, &ty),
+            Some(OutputTy::Primitive(PrimitiveTy::String))
+        );
+    }
+
+    #[test]
+    fn extract_list_element_named() {
+        let mut arena = TypeArena::new();
+        let int_ref = mk_int(&mut arena);
+        let list_ref = arena.intern(OutputTy::List(int_ref));
+        let named_ref = arena.intern(OutputTy::Named(SmolStr::from("MyList"), list_ref));
+        let ty = arena[named_ref].clone();
+        assert_eq!(
+            extract_list_element_ty(&arena, &ty),
+            Some(OutputTy::Primitive(PrimitiveTy::Int))
+        );
+    }
+
+    #[test]
+    fn extract_list_element_non_list() {
+        let mut arena = TypeArena::new();
+        let int_ref = mk_int(&mut arena);
+        let ty = arena[int_ref].clone();
+        assert_eq!(extract_list_element_ty(&arena, &ty), None);
+    }
+
+    // ------------------------------------------------------------------
+    // collect_union_all_fields
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn collect_union_all_fields_basic() {
+        let mut arena = TypeArena::new();
+        let str_ref = mk_string(&mut arena);
+        let a = mk_attrset(&mut arena, &[("escaped", str_ref)]);
+        let b = mk_attrset(&mut arena, &[("tmpfs", str_ref)]);
+        let c = mk_attrset(&mut arena, &[("unescaped", str_ref)]);
+        let ty = OutputTy::Union(vec![a, b, c]);
+        let fields = collect_union_all_fields(&arena, &ty);
+        assert_eq!(fields.len(), 3);
+        assert!(fields.contains_key("escaped"));
+        assert!(fields.contains_key("tmpfs"));
+        assert!(fields.contains_key("unescaped"));
+    }
+
+    #[test]
+    fn collect_union_all_fields_non_attrset_skipped() {
+        let mut arena = TypeArena::new();
+        let str_ref = mk_string(&mut arena);
+        let a = mk_attrset(&mut arena, &[("escaped", str_ref)]);
+        let ty = OutputTy::Union(vec![str_ref, a]);
+        let fields = collect_union_all_fields(&arena, &ty);
+        assert_eq!(fields.len(), 1);
+        assert!(fields.contains_key("escaped"));
+    }
+
+    #[test]
+    fn collect_union_all_fields_plain_attrset() {
+        let mut arena = TypeArena::new();
+        let str_ref = mk_string(&mut arena);
+        let attrset_ref = mk_attrset(&mut arena, &[("x", str_ref)]);
+        let ty = arena[attrset_ref].clone();
+        let fields = collect_union_all_fields(&arena, &ty);
+        assert_eq!(fields.len(), 1);
+        assert!(fields.contains_key("x"));
+    }
+
+    #[test]
+    fn collect_union_all_fields_named_union() {
+        // Named("Foo", Union([{a: int}, {b: str}])) should unwrap Named
+        // and collect from ALL union variants.
+        let mut arena = TypeArena::new();
+        let int_ref = mk_int(&mut arena);
+        let str_ref = mk_string(&mut arena);
+        let a = mk_attrset(&mut arena, &[("a", int_ref)]);
+        let b = mk_attrset(&mut arena, &[("b", str_ref)]);
+        let union_ref = arena.intern(OutputTy::Union(vec![a, b]));
+        let named_ref = arena.intern(OutputTy::Named(SmolStr::from("Foo"), union_ref));
+        let ty = arena[named_ref].clone();
+        let fields = collect_union_all_fields(&arena, &ty);
+        assert_eq!(fields.len(), 2);
+        assert!(fields.contains_key("a"));
+        assert!(fields.contains_key("b"));
+    }
+
+    #[test]
+    fn collect_union_all_fields_overlapping() {
+        let mut arena = TypeArena::new();
+        let int_ref = mk_int(&mut arena);
+        let str_ref = mk_string(&mut arena);
+        let bool_ref = mk_bool(&mut arena);
+        let a = mk_attrset(&mut arena, &[("x", int_ref), ("y", str_ref)]);
+        let b = mk_attrset(&mut arena, &[("x", bool_ref), ("z", str_ref)]);
+        let ty = OutputTy::Union(vec![a, b]);
+        let fields = collect_union_all_fields(&arena, &ty);
+        assert_eq!(fields.len(), 3, "all 3 fields: {fields:?}");
+        assert!(fields.contains_key("x"));
+        assert!(fields.contains_key("y"));
+        assert!(fields.contains_key("z"));
     }
 }

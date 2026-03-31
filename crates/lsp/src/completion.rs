@@ -107,6 +107,14 @@ pub fn completion(
             }
         }
 
+        // Try expected-type completion (cursor inside a value position of a
+        // callsite arg, e.g. inside `[ ]` in `f { args = [ | ] }`).
+        if let Some(items) = try_expected_type_completion(analysis, inf, &token, docs) {
+            if !items.is_empty() {
+                return Some(CompletionResponse::Array(items));
+            }
+        }
+
         // Try binding type completion (cursor inside `{ }` of an annotated let binding).
         if let Some(items) = try_binding_type_completion(analysis, inf, &token, docs, file_path) {
             if !items.is_empty() {
@@ -449,8 +457,9 @@ fn collect_typed_segments(
 }
 
 use crate::ty_nav::{
-    collect_attrset_fields, collect_parent_attrpath_context, extract_alias_name,
-    extract_lambda_param, get_module_config_type, get_str_literal, resolve_through_segments,
+    collect_attrset_fields, collect_parent_attrpath_context, collect_union_all_fields,
+    extract_alias_name, extract_lambda_param, get_module_config_type, get_str_literal,
+    resolve_through_segments,
 };
 
 // ==============================================================================
@@ -578,6 +587,12 @@ fn try_callsite_completion(
     //    Pattern → Lambda → Apply
     let (apply_node, existing) =
         if let Some(attrset_node) = node.ancestors().find_map(rnix::ast::AttrSet::cast) {
+            // Bail if cursor is inside a field value (e.g. inside `[ ]` in
+            // `args = [ | ]`). Callsite completion only applies when the
+            // cursor is at the top level of the attrset, typing a new field.
+            if cursor_is_in_attrset_value(&attrset_node, token.text_range().start()) {
+                return None;
+            }
             let apply = attrset_node
                 .syntax()
                 .parent()
@@ -685,6 +700,210 @@ fn collect_existing_fields(
     }
 }
 
+/// Check if a token offset falls inside the value expression of any
+/// `AttrpathValue` entry in the given attrset. Used to distinguish
+/// cursor-in-key-position (top level, ready for a new field name) from
+/// cursor-in-value-position (nested inside `args = [ | ]`).
+fn cursor_is_in_attrset_value(attrset_node: &rnix::ast::AttrSet, offset: rowan::TextSize) -> bool {
+    use rnix::ast::HasEntry;
+    attrset_node.attrpath_values().any(|apv| {
+        apv.value()
+            .is_some_and(|v| v.syntax().text_range().contains(offset))
+    })
+}
+
+// ==============================================================================
+// Expected-type completion: cursor inside a value position of a callsite arg
+// ==============================================================================
+//
+// When the cursor is nested inside a field value of a callsite attrset
+// (e.g. inside the `[ ]` of `f { args = [ | ] }`), walk up the syntax
+// tree to find the callsite, then walk down through the function's
+// parameter type following the nesting path to determine the expected
+// type at the cursor position. If the expected type has attrset fields
+// (including union variants), suggest them.
+
+/// Steps collected while walking UP from the cursor to the callsite root.
+#[derive(Debug)]
+enum ExpectedTypeStep {
+    /// Cursor is inside a list — expected type is the element type.
+    ListElement,
+    /// Cursor is inside a field value — expected type is the field's type.
+    FieldValue(SmolStr),
+}
+
+/// Result of walking up the syntax tree from cursor to callsite.
+struct ExpectedTypePath {
+    apply: rnix::ast::Apply,
+    steps: Vec<ExpectedTypeStep>,
+    /// The nearest ancestor AttrSet the cursor is directly inside
+    /// (for filtering already-present fields). `None` when the cursor
+    /// is inside a List or other non-attrset context.
+    nearest_attrset: Option<rnix::ast::AttrSet>,
+}
+
+/// Walk UP the syntax tree from the cursor token to find a callsite
+/// (Apply node) and collect the nesting path along the way.
+///
+/// Path steps are ordered bottom-up (innermost step first).
+fn collect_expected_type_path(
+    token: &rowan::SyntaxToken<rnix::NixLanguage>,
+) -> Option<ExpectedTypePath> {
+    let mut steps = Vec::new();
+    let mut nearest_attrset: Option<rnix::ast::AttrSet> = None;
+    let node = token.parent()?;
+
+    for ancestor in node.ancestors() {
+        if rnix::ast::List::cast(ancestor.clone()).is_some() {
+            steps.push(ExpectedTypeStep::ListElement);
+            continue;
+        }
+
+        if let Some(apv) = rnix::ast::AttrpathValue::cast(ancestor.clone()) {
+            // Only record a step if the cursor is inside the value side.
+            if let Some(value_expr) = apv.value() {
+                if value_expr
+                    .syntax()
+                    .text_range()
+                    .contains(token.text_range().start())
+                {
+                    if let Some(attrpath) = apv.attrpath() {
+                        if let Some(first_attr) = attrpath.attrs().next() {
+                            let name = match first_attr {
+                                rnix::ast::Attr::Ident(ident) => {
+                                    ident.ident_token().map(|t| SmolStr::from(t.text()))
+                                }
+                                _ => None,
+                            };
+                            if let Some(name) = name {
+                                steps.push(ExpectedTypeStep::FieldValue(name));
+                            }
+                        }
+                    }
+                    continue;
+                }
+            }
+        }
+
+        if let Some(attrset_node) = rnix::ast::AttrSet::cast(ancestor.clone()) {
+            // Check if this attrset is a direct argument to an Apply.
+            if let Some(apply) = attrset_node
+                .syntax()
+                .parent()
+                .and_then(rnix::ast::Apply::cast)
+            {
+                return Some(ExpectedTypePath {
+                    apply,
+                    steps,
+                    nearest_attrset,
+                });
+            }
+            // Not a callsite attrset — track as nearest for field filtering.
+            if nearest_attrset.is_none() {
+                nearest_attrset = Some(attrset_node);
+            }
+            // Continue walking up.
+        }
+    }
+
+    None
+}
+
+/// Resolve the expected type at the cursor by walking DOWN through the
+/// function's parameter type following the collected path steps.
+fn resolve_expected_type(
+    arena: &lang_ty::TypeArena,
+    param_ty: &lang_ty::OutputTy,
+    steps: &[ExpectedTypeStep],
+) -> Option<lang_ty::OutputTy> {
+    use crate::ty_nav::extract_list_element_ty;
+
+    let mut current = param_ty.clone();
+
+    // Steps are bottom-up; walk them in reverse (outermost first).
+    for step in steps.iter().rev() {
+        match step {
+            ExpectedTypeStep::FieldValue(name) => {
+                let fields = collect_attrset_fields(arena, &current);
+                let field_ref = fields.get(name)?;
+                current = arena[*field_ref].clone();
+            }
+            ExpectedTypeStep::ListElement => {
+                current = extract_list_element_ty(arena, &current)?;
+            }
+        }
+    }
+
+    Some(current)
+}
+
+fn try_expected_type_completion(
+    analysis: &FileSnapshot,
+    inference: &lang_check::InferenceResult,
+    token: &rowan::SyntaxToken<rnix::NixLanguage>,
+    docs: &lang_check::aliases::DocIndex,
+) -> Option<Vec<CompletionItem>> {
+    let path = collect_expected_type_path(token)?;
+
+    log::debug!("expected_type: steps={:?}", path.steps);
+
+    // Must have at least one nesting step (otherwise callsite completion
+    // handles it directly).
+    if path.steps.is_empty() {
+        return None;
+    }
+
+    let fun_expr = path.apply.lambda()?;
+    let arena = &*inference.arena;
+
+    // Resolve the function type (same pattern as try_callsite_completion).
+    let fun_ty = match analysis
+        .syntax
+        .source_map
+        .expr_for_node(AstPtr::new(fun_expr.syntax()))
+    {
+        Some(fun_expr_id) => {
+            let &ty_ref = inference.expr_ty_map.get(fun_expr_id)?;
+            arena[ty_ref].clone()
+        }
+        None => {
+            let fun_name_text = extract_ident_text(&fun_expr)?;
+            find_name_type_by_text(analysis, inference, &fun_name_text)?
+        }
+    };
+
+    let param_ty = extract_lambda_param(arena, &fun_ty)?;
+    let expected_ty = resolve_expected_type(arena, &param_ty, &path.steps)?;
+
+    log::debug!("expected_type_completion: expected_ty={expected_ty:?}");
+
+    // Collect fields from the expected type. For unions, include fields
+    // from ALL variants (the user can construct any variant).
+    let mut fields = collect_union_all_fields(arena, &expected_ty);
+    if fields.is_empty() {
+        return None;
+    }
+
+    // Filter out fields already present in the nearest enclosing attrset.
+    if let Some(ref attrset_node) = path.nearest_attrset {
+        let existing = collect_existing_fields(analysis, attrset_node);
+        let existing = if existing.is_empty() {
+            collect_existing_fields_from_tree(attrset_node)
+        } else {
+            existing
+        };
+        fields.retain(|k, _| !existing.contains(k));
+        if fields.is_empty() {
+            return None;
+        }
+    }
+
+    let alias = extract_alias_name(&expected_ty);
+    let doc_ctx = alias.map(|a| (docs, a.as_str(), &[] as &[SmolStr]));
+
+    Some(fields_to_completion_items(arena, &fields, doc_ctx))
+}
+
 // ==============================================================================
 // Binding type completion: cursor inside `{ }` of an annotated let binding
 // ==============================================================================
@@ -712,6 +931,9 @@ fn try_binding_type_completion(
     //    AttrpathValue(cfg, Lambda(Pattern({a}), ...))
     let (apv, existing) =
         if let Some(attrset_node) = node.ancestors().find_map(rnix::ast::AttrSet::cast) {
+            if cursor_is_in_attrset_value(&attrset_node, token.text_range().start()) {
+                return None;
+            }
             let apv = attrset_node
                 .syntax()
                 .parent()
@@ -1855,6 +2077,76 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
+    // Callsite completion must NOT fire inside a field value
+    // ------------------------------------------------------------------
+
+    /// Callsite completion should not fire when cursor is inside a list
+    /// that is a field value of the callsite attrset.
+    #[test]
+    fn callsite_completion_not_inside_list_value() {
+        let src = indoc! {r#"
+            let
+              f = { args, name, script }: name;
+            in f { args = [  ]; }
+            #               ^1
+        "#};
+        let results = complete_at_markers(src);
+        let names = labels(&results[&1]);
+        assert!(
+            !names.contains(&"args"),
+            "should NOT suggest callsite fields inside list value, got: {names:?}"
+        );
+        assert!(
+            !names.contains(&"name"),
+            "should NOT suggest callsite fields inside list value, got: {names:?}"
+        );
+    }
+
+    /// Callsite completion should not fire when cursor is inside a nested
+    /// attrset that is a field value.
+    #[test]
+    fn callsite_completion_not_inside_attrset_value() {
+        let src = indoc! {r#"
+            let
+              f = { config, name }: name;
+            in f { config = {  }; }
+            #                 ^1
+        "#};
+        let results = complete_at_markers(src);
+        let names = labels(&results[&1]);
+        assert!(
+            !names.contains(&"config"),
+            "should NOT suggest callsite fields inside nested attrset value, got: {names:?}"
+        );
+        assert!(
+            !names.contains(&"name"),
+            "should NOT suggest callsite fields inside nested attrset value, got: {names:?}"
+        );
+    }
+
+    /// Regression: top-level callsite completion still works after the
+    /// cursor-in-value guard.
+    #[test]
+    fn callsite_completion_still_works_after_value_guard() {
+        let src = indoc! {r#"
+            let
+              f = { args, name, script }: name;
+            in f { args = []; }
+            #                  ^1
+        "#};
+        let results = complete_at_markers(src);
+        let names = labels(&results[&1]);
+        assert!(
+            names.contains(&"name"),
+            "should still complete name at top level, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"script"),
+            "should still complete script at top level, got: {names:?}"
+        );
+    }
+
+    // ------------------------------------------------------------------
     // Binding type completion (annotation-based)
     // ------------------------------------------------------------------
 
@@ -2291,6 +2583,257 @@ mod tests {
         assert!(
             names.contains(&"pkgs"),
             "should suggest pkgs from outer let, got: {names:?}"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Expected-type completion (value position inside callsite arguments)
+    // ------------------------------------------------------------------
+
+    /// Core feature: cursor inside a list value of a callsite attrset
+    /// should suggest fields from ALL union variants of the expected
+    /// element type.
+    #[test]
+    fn expected_type_completion_list_element_union() {
+        use lang_check::aliases::TypeAliasRegistry;
+
+        // Use `val` declaration so the function type is fully specified
+        // (annotations on let bindings don't expand alias internals).
+        let stubs = r#"
+            type BwrapArg = { escaped: string } | { tmpfs: string } | { unescaped: string };
+            val f :: { args: [BwrapArg], name: string } -> string;
+        "#;
+        let file = comment_parser::parse_tix_file(stubs).expect("parse stubs");
+        let mut registry = TypeAliasRegistry::new();
+        registry.load_tix_file(&file);
+
+        let src = indoc! {r#"
+            f { args = [  ]; }
+            #           ^1
+        "#};
+
+        let t = TestAnalysis::with_registry(src, registry);
+        let analysis = t.snapshot();
+        let markers = parse_markers(src);
+        let pos = analysis.syntax.line_index.position(markers[&1]);
+        let docs = DocIndex::new();
+
+        let items = match completion(
+            &analysis,
+            pos,
+            &t.root,
+            &docs,
+            &analysis.syntax.line_index,
+            None,
+        ) {
+            Some(CompletionResponse::Array(items)) => items,
+            _ => Vec::new(),
+        };
+        let names = labels(&items);
+        assert!(
+            names.contains(&"escaped"),
+            "should suggest escaped from union variant, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"tmpfs"),
+            "should suggest tmpfs from union variant, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"unescaped"),
+            "should suggest unescaped from union variant, got: {names:?}"
+        );
+    }
+
+    /// Expected-type completion for a nested attrset field inside a callsite.
+    #[test]
+    fn expected_type_completion_nested_attrset_field() {
+        use lang_check::aliases::TypeAliasRegistry;
+
+        let stubs = r#"
+            type Pasta = { tcpForward: [int], udpForward: [int], extraFlags: [string] };
+            val f :: { pasta: Pasta, name: string } -> string;
+        "#;
+        let file = comment_parser::parse_tix_file(stubs).expect("parse stubs");
+        let mut registry = TypeAliasRegistry::new();
+        registry.load_tix_file(&file);
+
+        let src = indoc! {r#"
+            f { pasta = {  }; }
+            #            ^1
+        "#};
+
+        let t = TestAnalysis::with_registry(src, registry);
+        let analysis = t.snapshot();
+        let markers = parse_markers(src);
+        let pos = analysis.syntax.line_index.position(markers[&1]);
+        let docs = DocIndex::new();
+
+        let items = match completion(
+            &analysis,
+            pos,
+            &t.root,
+            &docs,
+            &analysis.syntax.line_index,
+            None,
+        ) {
+            Some(CompletionResponse::Array(items)) => items,
+            _ => Vec::new(),
+        };
+        let names = labels(&items);
+        assert!(
+            names.contains(&"tcpForward"),
+            "should suggest tcpForward from Pasta type, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"udpForward"),
+            "should suggest udpForward, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"extraFlags"),
+            "should suggest extraFlags, got: {names:?}"
+        );
+    }
+
+    /// When the expected type at cursor has no attrset fields (e.g. a
+    /// TyVar from an unconstrained parameter), expected-type completion
+    /// returns nothing and falls through to identifier completion.
+    #[test]
+    fn expected_type_falls_through_for_unconstrained() {
+        let src = indoc! {r#"
+            let
+              f = { name, src }: name;
+            in f { src = [  ]; }
+            #             ^1
+        "#};
+        let results = complete_at_markers(src);
+        let names = labels(&results[&1]);
+        // `src` is unused in body → TyVar → list element is TyVar → no fields.
+        // Should fall through to identifier completion.
+        assert!(
+            names.contains(&"f"),
+            "should fall through to identifier completion, got: {names:?}"
+        );
+        // Should NOT contain callsite fields
+        assert!(
+            !names.contains(&"name"),
+            "should NOT suggest callsite fields inside a value, got: {names:?}"
+        );
+    }
+
+    /// Expected-type completion should filter out fields already present
+    /// in the nearest enclosing attrset.
+    #[test]
+    fn expected_type_filters_existing_nested_fields() {
+        use lang_check::aliases::TypeAliasRegistry;
+
+        let stubs = r#"
+            type Pasta = { tcpForward: [int], udpForward: [int], extraFlags: [string] };
+            val f :: { pasta: Pasta, name: string } -> string;
+        "#;
+        let file = comment_parser::parse_tix_file(stubs).expect("parse stubs");
+        let mut registry = TypeAliasRegistry::new();
+        registry.load_tix_file(&file);
+
+        let src = indoc! {r#"
+            f { pasta = { tcpForward = [];  }; }
+            #                              ^1
+        "#};
+
+        let t = TestAnalysis::with_registry(src, registry);
+        let analysis = t.snapshot();
+        let markers = parse_markers(src);
+        let pos = analysis.syntax.line_index.position(markers[&1]);
+        let docs = DocIndex::new();
+
+        let items = match completion(
+            &analysis,
+            pos,
+            &t.root,
+            &docs,
+            &analysis.syntax.line_index,
+            None,
+        ) {
+            Some(CompletionResponse::Array(items)) => items,
+            _ => Vec::new(),
+        };
+        let names = labels(&items);
+        assert!(
+            !names.contains(&"tcpForward"),
+            "should NOT suggest already-present tcpForward, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"udpForward"),
+            "should suggest udpForward, got: {names:?}"
+        );
+    }
+
+    /// Expected-type completion with purely inferred types (no stubs).
+    #[test]
+    fn expected_type_completion_inferred_from_body() {
+        let src = indoc! {r#"
+            let
+              f = { items }:
+                builtins.map (item: "${item.name}: ${item.value}") items;
+            in f { items = [  ]; }
+            #                ^1
+        "#};
+        let results = complete_at_markers(src);
+        let names = labels(&results[&1]);
+        assert!(
+            names.contains(&"name"),
+            "should suggest name from inferred list element type, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"value"),
+            "should suggest value from inferred list element type, got: {names:?}"
+        );
+    }
+
+    /// Expected-type completion items include type detail and kind.
+    #[test]
+    fn expected_type_completion_includes_detail() {
+        use lang_check::aliases::TypeAliasRegistry;
+
+        let stubs = r#"
+            type BwrapArg = { escaped: string } | { tmpfs: string };
+            val f :: { args: [BwrapArg] } -> string;
+        "#;
+        let file = comment_parser::parse_tix_file(stubs).expect("parse stubs");
+        let mut registry = TypeAliasRegistry::new();
+        registry.load_tix_file(&file);
+
+        let src = indoc! {r#"
+            f { args = [  ]; }
+            #           ^1
+        "#};
+
+        let t = TestAnalysis::with_registry(src, registry);
+        let analysis = t.snapshot();
+        let markers = parse_markers(src);
+        let pos = analysis.syntax.line_index.position(markers[&1]);
+        let docs = DocIndex::new();
+
+        let items = match completion(
+            &analysis,
+            pos,
+            &t.root,
+            &docs,
+            &analysis.syntax.line_index,
+            None,
+        ) {
+            Some(CompletionResponse::Array(items)) => items,
+            _ => Vec::new(),
+        };
+        let escaped_item = items.iter().find(|i| i.label == "escaped");
+        assert!(escaped_item.is_some(), "should have escaped item");
+        assert!(
+            escaped_item.unwrap().detail.is_some(),
+            "escaped item should have type detail"
+        );
+        assert_eq!(
+            escaped_item.unwrap().kind,
+            Some(CompletionItemKind::FIELD),
+            "expected-type items should have FIELD kind"
         );
     }
 
