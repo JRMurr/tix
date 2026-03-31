@@ -31,30 +31,39 @@ clippy:
 # =============================================================================
 
 stubs_dir := "stubs/generated"
+nixpkgs_src := `nix eval --raw nixpkgs#path 2>/dev/null || echo ""`
 
 # Generate NixOS option stubs (with doc comments)
 gen-stubs-nixos *args="": _ensure-stubs-dir
-    cargo run --bin tix -- gen-stubs nixos --descriptions -o {{ stubs_dir }}/nixos.tix {{ args }}
+    cargo run --bin tix -- gen-stubs nixos --descriptions \
+        --source-root nixpkgs={{ nixpkgs_src }} \
+        -o {{ stubs_dir }}/nixos.tix {{ args }}
 
 # Generate Home Manager option stubs (with doc comments)
 gen-stubs-home-manager *args="": _ensure-stubs-dir
-    cargo run --bin tix -- gen-stubs home-manager --descriptions -o {{ stubs_dir }}/home-manager.tix {{ args }}
+    cargo run --bin tix -- gen-stubs home-manager --descriptions \
+        --source-root nixpkgs={{ nixpkgs_src }} \
+        -o {{ stubs_dir }}/home-manager.tix {{ args }}
 
 # Generate NixOS stubs from a flake's nixosConfigurations
 gen-stubs-nixos-flake flake hostname="": _ensure-stubs-dir
     cargo run --bin tix -- gen-stubs nixos --descriptions --flake {{ flake }} \
         {{ if hostname != "" { "--hostname " + hostname } else { "" } }} \
+        --source-root nixpkgs={{ nixpkgs_src }} \
         -o {{ stubs_dir }}/nixos.tix
 
 # Generate Home Manager stubs from a flake's homeConfigurations
 gen-stubs-hm-flake flake username="": _ensure-stubs-dir
     cargo run --bin tix -- gen-stubs home-manager --descriptions --flake {{ flake }} \
         {{ if username != "" { "--username " + username } else { "" } }} \
+        --source-root nixpkgs={{ nixpkgs_src }} \
         -o {{ stubs_dir }}/home-manager.tix
 
 # Generate nixpkgs top-level package stubs (for @callpackage context)
 gen-stubs-pkgs *args="": _ensure-stubs-dir
-    cargo run --bin tix -- gen-stubs pkgs -o {{ stubs_dir }}/pkgs.tix {{ args }}
+    cargo run --bin tix -- gen-stubs pkgs \
+        --source-root nixpkgs={{ nixpkgs_src }} \
+        -o {{ stubs_dir }}/pkgs.tix {{ args }}
 
 # Generate all stubs (NixOS + Home Manager + Pkgs)
 gen-stubs: gen-stubs-nixos gen-stubs-home-manager gen-stubs-pkgs

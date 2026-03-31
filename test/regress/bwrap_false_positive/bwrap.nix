@@ -95,9 +95,7 @@ let
 
       bwrap_args = lib.concatMapStringsSep " " render_arg args;
 
-      _ =
-        lib.throwIf (nix_proxy_enabled && paths != null)
-          "nixProxy is incompatible with paths";
+      _ = lib.throwIf (nix_proxy_enabled && paths != null) "nixProxy is incompatible with paths";
 
       pasta_base =
         if pasta != null then
