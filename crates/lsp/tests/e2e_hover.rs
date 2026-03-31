@@ -110,6 +110,50 @@ async fn hover_updates_after_edit() {
     h.shutdown().await;
 }
 
+/// Hover on a narrowed parameter reference shows the narrowed type.
+///
+/// When `name` has default `? null` and is inside `if name != null then ...`,
+/// hovering on `name` in `builtins.stringLength name` should show `string`
+/// (narrowed), not `string | null` (un-narrowed).
+#[tokio::test]
+async fn hover_narrowed_param_ref_shows_narrowed_type() {
+    let mut h = LspTestHarness::new(&[(
+        "test.nix",
+        indoc! {"
+            { name ? null }:
+            if name != null then builtins.stringLength name else 0
+            #                                           ^1
+        "},
+    )])
+    .await;
+
+    h.open("test.nix").await;
+    let _ = h.wait_for_diagnostics("test.nix", TIMEOUT).await;
+
+    let m = h.markers("test.nix");
+    let hover = h
+        .hover("test.nix", m[&1].line, m[&1].character)
+        .await
+        .expect("hover on narrowed param ref");
+
+    let HoverContents::Markup(content) = &hover.contents else {
+        panic!("expected MarkupContent");
+    };
+    // The hover should show `string`, not `string | null`.
+    assert!(
+        content.value.contains("string"),
+        "narrowed hover should contain 'string', got: {}",
+        content.value,
+    );
+    assert!(
+        !content.value.contains("null"),
+        "narrowed hover should NOT contain 'null', got: {}",
+        content.value,
+    );
+
+    h.shutdown().await;
+}
+
 /// Hover on an attrset field shows the field type.
 #[tokio::test]
 async fn hover_on_attrset_field() {

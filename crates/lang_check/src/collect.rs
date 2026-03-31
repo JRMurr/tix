@@ -509,9 +509,53 @@ impl<'a> Canonicalizer<'a> {
                 // Unlike variable-bound intersections (negative polarity only),
                 // Inter types from narrowing can appear in either polarity and
                 // may contain contradictions like String ∧ Int = ⊥.
-                if has_type_contradiction(&self.arena, &concrete) {
-                    return OutputTy::Bottom;
-                }
+                //
+                // When a contradiction is detected and one member is a variable,
+                // retry with the variable expanded at the opposite polarity.
+                // This handles narrowing patterns like Inter(param_var, ~Null)
+                // where the param's positive expansion only contains the default
+                // (`null` from `? null`), but the upper bounds (negative polarity)
+                // capture the full type (`string | null`). Without the retry,
+                // `null & ~null` falsely produces Bottom.
+                let concrete = if has_type_contradiction(&self.arena, &concrete) {
+                    let a_is_var = matches!(self.table.get(*a), TypeEntry::Variable(_));
+                    let b_is_var = matches!(self.table.get(*b), TypeEntry::Variable(_));
+
+                    if a_is_var || b_is_var {
+                        // Re-canonicalize variable members at the flipped polarity.
+                        // Non-variable members reuse the cached result (O(1)).
+                        let ca_retry = if a_is_var {
+                            self.canonicalize(*a, polarity.flip())
+                        } else {
+                            self.canonicalize(*a, polarity)
+                        };
+                        let cb_retry = if b_is_var {
+                            self.canonicalize(*b, polarity.flip())
+                        } else {
+                            self.canonicalize(*b, polarity)
+                        };
+                        let retry_members =
+                            flatten_intersection(&self.arena, vec![ca_retry, cb_retry]);
+                        let retry_concrete: Vec<OutputTy> = retry_members
+                            .into_iter()
+                            .filter(|m| {
+                                !matches!(m, OutputTy::TyVar(_) | OutputTy::Bottom | OutputTy::Top)
+                            })
+                            .collect();
+                        // Distribute negations into unions before re-checking.
+                        let retry_concrete =
+                            simplify_union_neg_intersection(&mut self.arena, retry_concrete);
+                        if has_type_contradiction(&self.arena, &retry_concrete) {
+                            return OutputTy::Bottom;
+                        }
+                        retry_concrete
+                    } else {
+                        return OutputTy::Bottom;
+                    }
+                } else {
+                    concrete
+                };
+
                 let had_concrete = !concrete.is_empty();
                 let concrete = match polarity {
                     Positive => {
@@ -523,6 +567,9 @@ impl<'a> Canonicalizer<'a> {
                         remove_redundant_negations(&self.arena, c)
                     }
                 };
+                // Distribute negations into unions (handles cases that bypass
+                // the contradiction retry path).
+                let concrete = simplify_union_neg_intersection(&mut self.arena, concrete);
                 // Factor shared members from intersections of unions:
                 // (A|C) & (B|C) = C | (A&B).
                 let concrete = factor_shared_from_intersection(&mut self.arena, concrete);
@@ -1125,6 +1172,91 @@ fn remove_redundant_negations(arena: &TypeArena, members: Vec<OutputTy>) -> Vec<
         .collect()
 }
 
+/// Simplify `(A | B) & ~T` by removing union members that are subtypes of `T`.
+///
+/// Distributes the negation constraint into the union:
+///   (A | B) & ~C  =  (A & ~C) | (B & ~C)
+/// When `B <: C`, `B & ~C = Bottom`, so the result is `A & ~C`.
+/// After filtering, `remove_redundant_negations` cleans up negations that
+/// are disjoint from all remaining positives (e.g. `string & ~null → string`).
+///
+/// Examples:
+/// - `(string | null) & ~null` → `string`
+/// - `(int | float) & ~int` → `float`
+fn simplify_union_neg_intersection(arena: &mut TypeArena, members: Vec<OutputTy>) -> Vec<OutputTy> {
+    // Collect negated inner types (cloned to avoid borrowing arena during mutation).
+    let negated_inners: SmallVec<[OutputTy; 4]> = members
+        .iter()
+        .filter_map(|m| match m {
+            OutputTy::Neg(inner) => Some(arena[*inner].clone()),
+            _ => None,
+        })
+        .collect();
+
+    if negated_inners.is_empty() {
+        return members;
+    }
+
+    // Check if any member is a Union.
+    let has_union = members.iter().any(|m| matches!(m, OutputTy::Union(_)));
+    if !has_union {
+        // No unions to distribute into, but we can still try removing
+        // redundant negations against concrete positives.
+        return remove_redundant_negations(arena, members);
+    }
+
+    let mut result: Vec<OutputTy> = Vec::with_capacity(members.len());
+    let mut changed = false;
+
+    for m in &members {
+        match m {
+            OutputTy::Union(union_members) => {
+                // Clone union members from arena to avoid borrow conflict.
+                let inner_tys: Vec<OutputTy> =
+                    union_members.iter().map(|&r| arena[r].clone()).collect();
+
+                // Filter out union members that are subtypes of any negated type.
+                let filtered: Vec<OutputTy> = inner_tys
+                    .into_iter()
+                    .filter(|um| {
+                        !negated_inners
+                            .iter()
+                            .any(|neg| is_output_subtype_or_equal(um, neg))
+                    })
+                    .collect();
+
+                if filtered.len() < union_members.len() {
+                    changed = true;
+                }
+
+                match filtered.len() {
+                    0 => result.push(OutputTy::Bottom),
+                    1 => result.push(filtered.into_iter().next().unwrap()),
+                    _ => {
+                        let refs: Vec<_> =
+                            filtered.into_iter().map(|ty| arena.intern(ty)).collect();
+                        result.push(OutputTy::Union(refs));
+                    }
+                }
+            }
+            other => result.push(other.clone()),
+        }
+    }
+
+    if changed {
+        // Filter out Bottom members introduced by fully-consumed unions.
+        let result: Vec<OutputTy> = result
+            .into_iter()
+            .filter(|m| !matches!(m, OutputTy::Bottom))
+            .collect();
+        // Re-run remove_redundant_negations: the simplified union may now
+        // be a concrete type disjoint from the negation (e.g. string & ~null).
+        remove_redundant_negations(arena, result)
+    } else {
+        result
+    }
+}
+
 /// Flatten a nested composite type (union or intersection) and deduplicate members.
 /// `extract_nested` returns the inner members if the OutputTy is the matching
 /// composite variant (Union or Intersection), or None for other variants.
@@ -1671,6 +1803,57 @@ mod tests {
             string(),
             "string & ~null should simplify to string, got: {:?}",
             result_arena[result_ty]
+        );
+    }
+
+    // -- simplify_union_neg_intersection tests ----------------------------------
+
+    #[test]
+    fn simplify_union_null_neg_null_to_string() {
+        // (string | null) & ~null → string
+        let mut a = TypeArena::new();
+        let members = vec![union(&mut a, vec![string(), null()]), neg(&mut a, null())];
+        let result = simplify_union_neg_intersection(&mut a, members);
+        assert_eq!(
+            result,
+            vec![string()],
+            "(string | null) & ~null should simplify to [string], got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn simplify_union_int_float_neg_int_to_float() {
+        // (int | float) & ~int → float
+        let mut a = TypeArena::new();
+        let members = vec![union(&mut a, vec![int(), float()]), neg(&mut a, int())];
+        let result = simplify_union_neg_intersection(&mut a, members);
+        assert_eq!(
+            result,
+            vec![float()],
+            "(int | float) & ~int should simplify to [float], got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn simplify_no_neg_passthrough() {
+        // [string, int] (no Neg) → unchanged
+        let mut a = TypeArena::new();
+        let members = vec![string(), int()];
+        let result = simplify_union_neg_intersection(&mut a, members.clone());
+        assert_eq!(result, members, "no Neg → unchanged");
+    }
+
+    #[test]
+    fn simplify_no_union_passthrough() {
+        // [string, ~null] (no Union) → unchanged
+        let mut a = TypeArena::new();
+        let members = vec![string(), neg(&mut a, null())];
+        let result = simplify_union_neg_intersection(&mut a, members.clone());
+        // remove_redundant_negations should remove ~null since string is disjoint
+        assert_eq!(
+            result,
+            vec![string()],
+            "string & ~null should simplify to [string]"
         );
     }
 

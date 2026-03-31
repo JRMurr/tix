@@ -10,7 +10,7 @@
 use lang_ast::nameres::ResolveResult;
 use lang_ast::{AstPtr, Expr, NameKind};
 use lang_check::aliases::DocIndex;
-use lang_ty::OutputTy;
+use lang_ty::{OutputTy, PrimitiveTy};
 use rowan::ast::AstNode;
 use tower_lsp::lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind, Position, Range};
 
@@ -136,13 +136,17 @@ pub fn hover(
                     };
 
                     // Same-level parameter references degrade in expr_ty_map:
-                    // - Un-narrowed refs get only the default's type as a
-                    //   concrete lower bound (e.g. `null` from `? null`)
+                    // - Un-narrowed refs with `? null` get Primitive(Null)
                     // - Narrowed refs lose even that and become bare TyVar
-                    // In both cases, fall back to name_ty_map which has the
-                    // correct full type from early canonicalization.
+                    // Fall back to name_ty_map for the full type. Only match
+                    // Primitive(Null) specifically — other primitives like
+                    // Primitive(String) may be correct narrowed types (e.g.
+                    // `name` narrowed from `string | null` to `string`).
                     if is_param_ref
-                        && matches!(tmp[normalized], OutputTy::TyVar(_) | OutputTy::Primitive(_))
+                        && matches!(
+                            tmp[normalized],
+                            OutputTy::TyVar(_) | OutputTy::Primitive(PrimitiveTy::Null)
+                        )
                     {
                         if let Some(name_ty) =
                             param_name_id.and_then(|nid| inference.name_ty_map.get(nid).copied())

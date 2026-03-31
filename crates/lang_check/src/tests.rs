@@ -7134,6 +7134,55 @@ fn narrow_null_let_bound_recursive_fn() {
     let _ty = get_inferred_root(nix);
 }
 
+/// Hovering on `name` inside `builtins.stringLength name` (inside the
+/// then-branch of `if name != null`) should show `string`, not `string | null`.
+///
+/// Regression: the narrowed type `Inter(name_var, Neg(Null))` canonicalized to
+/// Bottom because positive-polarity expansion of name_var only had `null` from
+/// the `? null` default. The hover then fell back to name_ty_map which showed
+/// the un-narrowed `string | null`.
+#[test]
+fn narrow_null_guard_expr_ty_is_string() {
+    let nix = r#"{ name ? null }: if name != null then builtins.stringLength name else 0"#;
+    let (module, inference) = check_str(nix);
+    let inference = inference.expect("should not produce a type error");
+
+    // Find the `name` reference in `builtins.stringLength name` — this is
+    // inside the then-branch where narrowing eliminates null.
+    // Collect all references to "name" and their expr_ty_map types.
+    let name_ref_types: Vec<_> = module
+        .exprs()
+        .filter_map(|(expr_id, expr)| {
+            if let Expr::Reference(ref name) = expr {
+                if name == "name" {
+                    return inference
+                        .expr_ty_map
+                        .get(expr_id)
+                        .map(|&ty| inference.arena[ty].clone());
+                }
+            }
+            None
+        })
+        .collect();
+
+    // There should be at least 2 references: one in the condition, one in
+    // the then-branch. The last one is in `builtins.stringLength name`.
+    assert!(
+        name_ref_types.len() >= 2,
+        "expected at least 2 name references, got {}",
+        name_ref_types.len()
+    );
+
+    // The last `name` reference (in `stringLength name`) should have type
+    // `string` — narrowed from `string | null`.
+    let last_ty = name_ref_types.last().unwrap();
+    assert_eq!(
+        *last_ty,
+        OutputTy::Primitive(PrimitiveTy::String),
+        "narrowed name reference should be string, got: {last_ty:?}",
+    );
+}
+
 /// `builtins.storePath` should be typed as `path -> path`.
 #[test]
 fn builtin_store_path() {
