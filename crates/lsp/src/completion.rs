@@ -3363,6 +3363,324 @@ mod tests {
     }
 
     // ======================================================================
+    // Module stub merging: pkgs.tix extends Pkgs for dot-completion
+    // ======================================================================
+
+    #[test]
+    fn pkgs_dot_completion_with_module_stub_merging() {
+        // When builtin_stubs_dir contains pkgs.tix alongside nixos.tix,
+        // `pkgs.` completions should include entries from pkgs.tix — not
+        // just the hand-curated subset from lib.tix.
+        //
+        // This is the core scenario: @nixos declares `val pkgs :: Pkgs;`,
+        // lib.tix defines `module pkgs { ... }` with ~28 entries, and
+        // pkgs.tix in the generated stubs dir adds thousands more. The
+        // `try_load_module_stub` mechanism should merge pkgs.tix into the
+        // Pkgs alias so that dot-completion sees the full set.
+        let nixos_stubs = indoc! {"
+            val config :: { ... };
+            val lib :: Lib;
+            val pkgs :: Pkgs;
+        "};
+        let pkgs_stubs = indoc! {"
+            module pkgs {
+                val hello :: Derivation;
+                val curl :: Derivation;
+                val jq :: Derivation;
+                val ripgrep :: Derivation;
+            }
+        "};
+        let mut project = make_builtin_fixture(
+            &[("nixos", &["**/*.nix"])],
+            Some(&[("nixos", nixos_stubs), ("pkgs", pkgs_stubs)]),
+        );
+        project.add_file(
+            "test.nix",
+            indoc! {"
+                { pkgs, ... }: let foo = pkgs. ; in foo
+                #                             ^1
+            "},
+        );
+        let results = project.complete_at_markers("test.nix");
+        let names = labels(&results[&1]);
+        assert!(
+            names.contains(&"hello"),
+            "pkgs. should include 'hello' from pkgs.tix module stub, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"ripgrep"),
+            "pkgs. should include 'ripgrep' from pkgs.tix module stub, got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn pkgs_dot_completion_without_module_stub_only_has_lib_tix_entries() {
+        // Without a pkgs.tix in builtin_stubs_dir, `pkgs.` should only
+        // show the entries from the hand-curated lib.tix module pkgs block.
+        // This documents the current (limited) behavior as a baseline.
+        //
+        // Uses with_builtins() so lib.tix's `module pkgs { ... }` is loaded,
+        // giving us the Pkgs alias with its ~28 hand-curated entries.
+        let nixos_stubs = indoc! {"
+            val config :: { ... };
+            val lib :: Lib;
+            val pkgs :: Pkgs;
+        "};
+        // Only nixos.tix — no pkgs.tix in the override dir.
+        // Set up manually with with_builtins() to have lib.tix loaded.
+        let id = next_fixture_id();
+        let temp_dir =
+            std::env::temp_dir().join(format!("tix_pkgs_no_stub_{}_{id}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let temp_dir = temp_dir.canonicalize().unwrap();
+
+        let mut registry = TypeAliasRegistry::with_builtins();
+        let override_dir = temp_dir.join("builtin_override");
+        std::fs::create_dir_all(&override_dir).unwrap();
+        std::fs::write(override_dir.join("nixos.tix"), nixos_stubs).unwrap();
+        registry.set_builtin_stubs_dir(override_dir);
+
+        let mut context_map = std::collections::HashMap::new();
+        context_map.insert(
+            "nixos".to_string(),
+            ContextConfig {
+                includes: vec!["**/*.nix".to_string()],
+                excludes: vec![],
+                stubs: vec!["@nixos".to_string()],
+            },
+        );
+        let mut state = AnalysisState::new(registry);
+        state.project_config = Some(ProjectConfig {
+            stubs: Default::default(),
+            context: context_map,
+            project: None,
+            diagnostics: None,
+        });
+        state.config_dir = Some(temp_dir.clone());
+
+        let src = indoc! {"
+            { pkgs, ... }: let foo = pkgs. ; in foo
+            #                             ^1
+        "};
+        let nix_path = temp_dir.join("test.nix");
+        std::fs::write(&nix_path, src).unwrap();
+        state.update_file(nix_path.clone(), src.to_string());
+
+        let analysis = state.get_file(&nix_path).unwrap().to_snapshot();
+        let root = rnix::Root::parse(src).tree();
+        let docs = &state.registry.docs;
+        let markers = parse_markers(src);
+        let pos = analysis.syntax.line_index.position(markers[&1]);
+        let items = match completion(
+            &analysis,
+            pos,
+            &root,
+            docs,
+            &analysis.syntax.line_index,
+            Some(&nix_path),
+        ) {
+            Some(CompletionResponse::Array(items)) => items,
+            _ => Vec::new(),
+        };
+
+        let names: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        // Should still have the lib.tix hand-curated entries
+        assert!(
+            names.contains(&"mkShell"),
+            "pkgs. should include 'mkShell' from lib.tix, got: {names:?}"
+        );
+        // Should NOT have entries that only exist in a generated pkgs.tix
+        assert!(
+            !names.contains(&"hello"),
+            "pkgs. should NOT include 'hello' without pkgs.tix module stub, got: {names:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn pkgs_dot_completion_merges_lib_tix_and_module_stub() {
+        // The generated pkgs.tix should merge WITH lib.tix's module pkgs
+        // entries, not replace them. Both hand-curated entries (mkShell)
+        // and generated entries (hello) should appear.
+        //
+        // Uses with_builtins() so lib.tix is loaded (giving mkShell etc.),
+        // then sets builtin_stubs_dir with a pkgs.tix that adds more entries.
+        let nixos_stubs = indoc! {"
+            val config :: { ... };
+            val lib :: Lib;
+            val pkgs :: Pkgs;
+        "};
+        let pkgs_stubs = indoc! {"
+            module pkgs {
+                val hello :: Derivation;
+                val someObscurePackage :: Derivation;
+            }
+        "};
+
+        let id = next_fixture_id();
+        let temp_dir =
+            std::env::temp_dir().join(format!("tix_pkgs_merge_{}_{id}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let temp_dir = temp_dir.canonicalize().unwrap();
+
+        let mut registry = TypeAliasRegistry::with_builtins();
+        let override_dir = temp_dir.join("builtin_override");
+        std::fs::create_dir_all(&override_dir).unwrap();
+        std::fs::write(override_dir.join("nixos.tix"), nixos_stubs).unwrap();
+        std::fs::write(override_dir.join("pkgs.tix"), pkgs_stubs).unwrap();
+        registry.set_builtin_stubs_dir(override_dir);
+
+        let mut context_map = std::collections::HashMap::new();
+        context_map.insert(
+            "nixos".to_string(),
+            ContextConfig {
+                includes: vec!["**/*.nix".to_string()],
+                excludes: vec![],
+                stubs: vec!["@nixos".to_string()],
+            },
+        );
+        let mut state = AnalysisState::new(registry);
+        state.project_config = Some(ProjectConfig {
+            stubs: Default::default(),
+            context: context_map,
+            project: None,
+            diagnostics: None,
+        });
+        state.config_dir = Some(temp_dir.clone());
+
+        let src = indoc! {"
+            { pkgs, ... }: let foo = pkgs. ; in foo
+            #                             ^1
+        "};
+        let nix_path = temp_dir.join("test.nix");
+        std::fs::write(&nix_path, src).unwrap();
+        state.update_file(nix_path.clone(), src.to_string());
+
+        let analysis = state.get_file(&nix_path).unwrap().to_snapshot();
+        let root = rnix::Root::parse(src).tree();
+        let docs = &state.registry.docs;
+        let markers = parse_markers(src);
+        let pos = analysis.syntax.line_index.position(markers[&1]);
+        let items = match completion(
+            &analysis,
+            pos,
+            &root,
+            docs,
+            &analysis.syntax.line_index,
+            Some(&nix_path),
+        ) {
+            Some(CompletionResponse::Array(items)) => items,
+            _ => Vec::new(),
+        };
+
+        let names: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        // From lib.tix hand-curated entries
+        assert!(
+            names.contains(&"mkShell"),
+            "should include 'mkShell' from lib.tix, got: {names:?}"
+        );
+        // From generated pkgs.tix module stub
+        assert!(
+            names.contains(&"hello"),
+            "should include 'hello' from pkgs.tix, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"someObscurePackage"),
+            "should include 'someObscurePackage' from pkgs.tix, got: {names:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn pkgs_dot_completion_stubs_dir_without_pkgs_tix_still_shows_lib_tix_entries() {
+        // Regression test for the real-world scenario: TIX_BUILTIN_STUBS
+        // points to a directory with lib.tix (which defines `module pkgs`)
+        // but NO pkgs.tix. The @nixos context declares `val pkgs :: Pkgs`.
+        //
+        // Even without a generated pkgs.tix, the hand-curated entries from
+        // lib.tix's `module pkgs { ... }` should still appear in pkgs.
+        // completions (mkShell, fetchurl, stdenv, etc.).
+        let nixos_stubs = indoc! {"
+            val config :: { ... };
+            val lib :: Lib;
+            val pkgs :: Pkgs;
+        "};
+
+        let id = next_fixture_id();
+        let temp_dir =
+            std::env::temp_dir().join(format!("tix_pkgs_no_generated_{}_{id}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let temp_dir = temp_dir.canonicalize().unwrap();
+
+        // with_builtins() loads lib.tix which defines `module pkgs { ... }`
+        let mut registry = TypeAliasRegistry::with_builtins();
+        // Override dir has nixos.tix but NOT pkgs.tix — simulates
+        // TIX_BUILTIN_STUBS pointing to stubs/ without generated/
+        let override_dir = temp_dir.join("builtin_override");
+        std::fs::create_dir_all(&override_dir).unwrap();
+        std::fs::write(override_dir.join("nixos.tix"), nixos_stubs).unwrap();
+        registry.set_builtin_stubs_dir(override_dir);
+
+        let mut context_map = std::collections::HashMap::new();
+        context_map.insert(
+            "nixos".to_string(),
+            ContextConfig {
+                includes: vec!["**/*.nix".to_string()],
+                excludes: vec![],
+                stubs: vec!["@nixos".to_string()],
+            },
+        );
+        let mut state = AnalysisState::new(registry);
+        state.project_config = Some(ProjectConfig {
+            stubs: Default::default(),
+            context: context_map,
+            project: None,
+            diagnostics: None,
+        });
+        state.config_dir = Some(temp_dir.clone());
+
+        let src = indoc! {"
+            { pkgs, ... }: let foo = pkgs. ; in foo
+            #                             ^1
+        "};
+        let nix_path = temp_dir.join("test.nix");
+        std::fs::write(&nix_path, src).unwrap();
+        state.update_file(nix_path.clone(), src.to_string());
+
+        let analysis = state.get_file(&nix_path).unwrap().to_snapshot();
+        let root = rnix::Root::parse(src).tree();
+        let docs = &state.registry.docs;
+        let markers = parse_markers(src);
+        let pos = analysis.syntax.line_index.position(markers[&1]);
+        let items = match completion(
+            &analysis,
+            pos,
+            &root,
+            docs,
+            &analysis.syntax.line_index,
+            Some(&nix_path),
+        ) {
+            Some(CompletionResponse::Array(items)) => items,
+            _ => Vec::new(),
+        };
+
+        let names: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        // Hand-curated entries from lib.tix should be present
+        assert!(
+            names.contains(&"mkShell"),
+            "pkgs. should include 'mkShell' from lib.tix even without pkgs.tix, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"fetchurl"),
+            "pkgs. should include 'fetchurl' from lib.tix, got: {names:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    // ======================================================================
     // On-disk fixture tests (test/nixos_fixture/)
     // ======================================================================
     //

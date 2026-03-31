@@ -38,6 +38,7 @@ pkgs.writeShellScriptBin name ''
   cat > "$data_dir/tix-lsp-wrapper" <<WRAPPER
   #!/bin/sh
   export TIX_ROOT="''${TIX_ROOT:-$PWD}"
+  export TIX_BUILTIN_STUBS="\$TIX_ROOT/stubs/generated"
   exec ${serverPath} ${builtins.concatStringsSep " " serverArgs} "\$@"
   WRAPPER
   chmod +x "$data_dir/tix-lsp-wrapper"
