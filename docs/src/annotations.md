@@ -72,6 +72,8 @@ pkgs = import <nixpkgs> {};
 
 The same syntax works in doc comments and `.tix` stub files.
 
+Casing matters: lowercase names like `a` and `b` are generic type variables (implicitly universally quantified), while uppercase names like `Foo` or `Lib` are references to type aliases. This is how the parser tells them apart — `val id :: a -> a` means "for any type `a`", whereas `val f :: Lib -> Lib` means "takes and returns the specific `Lib` type". This is also why `module lib { ... }` generates a *capitalized* alias `Lib`: the module's name is lowercase (matching Nix convention), but its type alias must be uppercase to be usable in type expressions.
+
 | Syntax | Meaning |
 |--------|---------|
 | `int`, `string`, `bool`, `float`, `path`, `null` | Primitives |
