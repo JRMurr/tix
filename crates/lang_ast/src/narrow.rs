@@ -115,6 +115,57 @@ const CONDITIONAL_FN_NAMES: &[(&str, ConditionalFn)] = &[
     ("mkIf", ConditionalFn::MkIf),
 ];
 
+/// Primitive type predicates: isNull, isString, isInt, etc.
+/// Both then-branch and else-branch get narrowing (IsType / IsNotType).
+const TYPE_PREDICATES: &[(&str, NarrowPrimitive)] = &[
+    ("isNull", NarrowPrimitive::Null),
+    ("isString", NarrowPrimitive::String),
+    ("isInt", NarrowPrimitive::Int),
+    ("isFloat", NarrowPrimitive::Float),
+    ("isBool", NarrowPrimitive::Bool),
+    ("isPath", NarrowPrimitive::Path),
+];
+
+/// Compound-type predicates: isAttrs, isList, isFunction.
+/// Only the then-branch gets narrowing — negating compound types (¬{..}) is
+/// not yet supported in the solver.
+const COMPOUND_PREDICATES: &[(&str, NarrowPredicate)] = &[
+    ("isAttrs", NarrowPredicate::IsAttrSet),
+    ("isList", NarrowPredicate::IsList),
+    ("isFunction", NarrowPredicate::IsFunction),
+];
+
+/// Look up a narrowing predicate by builtin leaf name and return the
+/// corresponding NarrowInfo for the given variable.
+fn narrow_info_for_predicate(leaf_name: &str, narrowed_var: NameId) -> Option<NarrowInfo> {
+    for &(pred_name, prim) in TYPE_PREDICATES {
+        if leaf_name == pred_name {
+            return Some(NarrowInfo {
+                then_branch: vec![NarrowBinding {
+                    name: narrowed_var,
+                    predicate: NarrowPredicate::IsType(prim),
+                }],
+                else_branch: vec![NarrowBinding {
+                    name: narrowed_var,
+                    predicate: NarrowPredicate::IsNotType(prim),
+                }],
+            });
+        }
+    }
+    for &(pred_name, ref pred) in COMPOUND_PREDICATES {
+        if leaf_name == pred_name {
+            return Some(NarrowInfo {
+                then_branch: vec![NarrowBinding {
+                    name: narrowed_var,
+                    predicate: pred.clone(),
+                }],
+                else_branch: vec![],
+            });
+        }
+    }
+    None
+}
+
 // ==============================================================================
 // Module + NameResolution convenience alias
 // ==============================================================================
@@ -257,60 +308,21 @@ pub fn analyze_condition(
         //
         // In the AST this is Apply { fun, arg } where fun resolves to
         // a builtin type predicate and arg is a reference to a local name.
+        // ── is* builtins: isNull, isString, isInt, isAttrs, etc. ────
         Expr::Apply { fun, arg } => {
-            // All recognized type predicates and their corresponding primitive.
-            const TYPE_PREDICATES: &[(&str, NarrowPrimitive)] = &[
-                ("isNull", NarrowPrimitive::Null),
-                ("isString", NarrowPrimitive::String),
-                ("isInt", NarrowPrimitive::Int),
-                ("isFloat", NarrowPrimitive::Float),
-                ("isBool", NarrowPrimitive::Bool),
-                ("isPath", NarrowPrimitive::Path),
-            ];
-
-            for &(builtin_name, prim) in TYPE_PREDICATES {
+            // Try each known type-predicate builtin as a direct call.
+            let all_predicate_names = TYPE_PREDICATES
+                .iter()
+                .map(|&(n, _)| n)
+                .chain(COMPOUND_PREDICATES.iter().map(|(n, _)| *n));
+            for builtin_name in all_predicate_names {
                 if is_builtin_call(module, name_res, binding_exprs, *fun, builtin_name) {
                     let Some(name) = expr_as_local_name(module, name_res, *arg) else {
                         return NarrowInfo::default();
                     };
-                    return NarrowInfo {
-                        then_branch: vec![NarrowBinding {
-                            name,
-                            predicate: NarrowPredicate::IsType(prim),
-                        }],
-                        else_branch: vec![NarrowBinding {
-                            name,
-                            predicate: NarrowPredicate::IsNotType(prim),
-                        }],
-                    };
-                }
-            }
-
-            // Compound-type predicates: isAttrs, isList, isFunction.
-            // These narrow to compound types ({..}, [α], α → β) which
-            // don't have primitive representations. Only the then-branch
-            // gets narrowing — negating compound types (¬{..}) is not yet
-            // supported in the solver.
-            const COMPOUND_PREDICATES: &[(&str, NarrowPredicate)] = &[
-                ("isAttrs", NarrowPredicate::IsAttrSet),
-                ("isList", NarrowPredicate::IsList),
-                ("isFunction", NarrowPredicate::IsFunction),
-            ];
-
-            for &(builtin_name, ref pred) in COMPOUND_PREDICATES {
-                if is_builtin_call(module, name_res, binding_exprs, *fun, builtin_name) {
-                    let Some(name) = expr_as_local_name(module, name_res, *arg) else {
-                        return NarrowInfo::default();
-                    };
-                    return NarrowInfo {
-                        then_branch: vec![NarrowBinding {
-                            name,
-                            predicate: pred.clone(),
-                        }],
-                        // No useful else-branch narrowing — negation of
-                        // compound types is not yet implemented.
-                        else_branch: vec![],
-                    };
+                    if let Some(info) = narrow_info_for_predicate(builtin_name, name) {
+                        return info;
+                    }
                 }
             }
 
@@ -328,30 +340,8 @@ pub fn analyze_condition(
             // `lib.trivial.isFunction`, `lib.isAttrs` where the function
             // is a Select chain that doesn't resolve to a builtin.
             if let Some((leaf, name)) = try_select_chain_predicate(module, name_res, *fun, *arg) {
-                for &(pred_name, prim) in TYPE_PREDICATES {
-                    if leaf == pred_name {
-                        return NarrowInfo {
-                            then_branch: vec![NarrowBinding {
-                                name,
-                                predicate: NarrowPredicate::IsType(prim),
-                            }],
-                            else_branch: vec![NarrowBinding {
-                                name,
-                                predicate: NarrowPredicate::IsNotType(prim),
-                            }],
-                        };
-                    }
-                }
-                for &(pred_name, ref pred) in COMPOUND_PREDICATES {
-                    if leaf == pred_name {
-                        return NarrowInfo {
-                            then_branch: vec![NarrowBinding {
-                                name,
-                                predicate: pred.clone(),
-                            }],
-                            else_branch: vec![],
-                        };
-                    }
+                if let Some(info) = narrow_info_for_predicate(&leaf, name) {
+                    return info;
                 }
             }
 

@@ -72,27 +72,6 @@ impl<RefType: Clone + Debug> AttrSetTy<RefType> {
             optional_fields: optional,
         }
     }
-
-    pub fn get_sub_set(&self, keys: impl Iterator<Item = SmolStr>) -> Self {
-        let mut fields = BTreeMap::new();
-        let mut optional = BTreeSet::new();
-        for key in keys {
-            let value = self
-                .get(&key)
-                .unwrap_or_else(|| panic!("Missing key {key}"));
-            fields.insert(key.clone(), value.clone());
-            if self.optional_fields.contains(&key) {
-                optional.insert(key);
-            }
-        }
-
-        Self {
-            fields,
-            dyn_ty: self.dyn_ty.clone(),
-            open: self.open,
-            optional_fields: optional,
-        }
-    }
 }
 
 impl PartialOrd for AttrSetTy<TyRef> {

@@ -70,8 +70,9 @@ impl SyntaxProvider for CliSyntaxProvider {
 
 /// Per-file rendering metadata collected during Phase 1. SyntaxBundles go to
 /// the coordinator; this struct holds what Phase 3 needs for diagnostics.
+/// The file path is not stored here — it's the key in the DashMap and returned
+/// on removal.
 struct FileMetadata {
-    file_path: PathBuf,
     source_text: String,
     source_map: ModuleSourceMap,
 }
@@ -112,6 +113,7 @@ pub fn run_check_project(
 
     // Step 1: Find and load tix.toml.
     let (toml_config, config_dir) = find_and_load_config(config_path)?;
+    let compiled_contexts = config::CompiledContexts::new(&toml_config);
 
     // Step 2: Build shared TypeAliasRegistry.
     let mut registry = build_registry(no_default_stubs, &[])?;
@@ -245,7 +247,7 @@ pub fn run_check_project(
         if let Some(warning) = validate_classification(
             &pf.original_path,
             &classification,
-            &toml_config,
+            &compiled_contexts,
             &config_dir,
         ) {
             config_warnings.push(warning);
@@ -315,7 +317,6 @@ pub fn run_check_project(
         metadata_map.insert(
             pp.canonical_path.clone(),
             FileMetadata {
-                file_path: pp.canonical_path.clone(),
                 source_text: pp.source_text,
                 source_map: pp.source_map,
             },
@@ -380,22 +381,22 @@ pub fn run_check_project(
     // Shared inference logic for a single file. Used by both the sequential
     // (heavy) and parallel (light) paths.
     let infer_one = |path: &PathBuf| -> Option<RenderableResult> {
-        let (_, fm) = metadata_map.remove(path)?;
+        let (file_path, fm) = metadata_map.remove(path)?;
 
         let expr_count = expr_counts.get(path).copied().unwrap_or(0);
         tracing::debug!(
-            file = %lang_ast::display_path(&fm.file_path),
+            file = %lang_ast::display_path(&file_path),
             exprs = expr_count,
             rss_mb = format_args!("{:.0}", lang_check::rss_mb()),
             "starting file"
         );
 
         // Consume the pre-extracted SyntaxBundle from the DashMap.
-        let bundle = match syntax_provider.syntax_for_file(&fm.file_path) {
+        let bundle = match syntax_provider.syntax_for_file(&file_path) {
             Some(b) => b,
             None => {
                 return Some(RenderableResult {
-                    file_path: fm.file_path,
+                    file_path,
                     source_text: fm.source_text,
                     source_map: fm.source_map,
                     diagnostics: vec![],
@@ -405,7 +406,7 @@ pub fn run_check_project(
             }
         };
 
-        let base_dir = fm.file_path.parent().unwrap_or(std::path::Path::new("/"));
+        let base_dir = file_path.parent().unwrap_or(std::path::Path::new("/"));
 
         // Resolve imports from the coordinator cache. Prior layers'
         // signatures are available; intra-SCC imports get ⊤.
@@ -429,7 +430,7 @@ pub fn run_check_project(
             import_diagnostics,
             context_args: bundle.context_args,
             rss_limit_mb: None,
-            file_path: Some(fm.file_path.clone()),
+            file_path: Some(file_path.clone()),
             imported_type_exports: std::collections::HashMap::new(),
             typeof_import_types: std::collections::HashMap::new(),
             file_base_dir: None,
@@ -441,11 +442,11 @@ pub fn run_check_project(
         if let Some(sig) =
             lang_check::extract_file_signature(&check_result, inputs.module.entry_expr)
         {
-            coordinator.set_signature(&fm.file_path, sig);
+            coordinator.set_signature(&file_path, sig);
         }
 
         tracing::debug!(
-            file = %lang_ast::display_path(&fm.file_path),
+            file = %lang_ast::display_path(&file_path),
             rss_mb = format_args!("{:.0}", lang_check::rss_mb()),
             diags = check_result.diagnostics.len(),
             bailed_out = check_result.bailed_out,
@@ -458,7 +459,7 @@ pub fn run_check_project(
         // Extract only diagnostics. The heavy InferenceResult is dropped
         // here, keeping memory bounded.
         Some(RenderableResult {
-            file_path: fm.file_path,
+            file_path,
             source_text: fm.source_text,
             source_map: fm.source_map,
             diagnostics: check_result.diagnostics,
@@ -706,7 +707,7 @@ fn expected_context_name(kind: NixFileKind) -> Option<&'static str> {
 fn validate_classification(
     file_path: &std::path::Path,
     classification: &lang_ast::classify::Classification,
-    config: &TixConfig,
+    compiled_contexts: &config::CompiledContexts,
     config_dir: &std::path::Path,
 ) -> Option<String> {
     // Skip low-confidence classifications.
@@ -717,7 +718,7 @@ fn validate_classification(
     let relative = file_path.strip_prefix(config_dir).unwrap_or(file_path);
 
     let expected = expected_context_name(classification.kind);
-    let actual = config::find_matching_context(file_path, config, config_dir);
+    let actual = compiled_contexts.find_matching(file_path, config_dir);
 
     match (expected, actual) {
         // File needs a context but doesn't have one in config.

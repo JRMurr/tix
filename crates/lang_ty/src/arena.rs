@@ -155,6 +155,19 @@ impl TypeArena {
         result
     }
 
+    /// Check if `normalize_replacing_unknown` would actually mutate the arena.
+    /// Returns false when the type has no free vars and isn't a bare TyVar,
+    /// meaning normalization would return the input unchanged.
+    pub fn needs_var_normalization(&self, ty: TyRef) -> bool {
+        if matches!(self[ty], OutputTy::Extern(_)) {
+            return false;
+        }
+        if matches!(self[ty], OutputTy::TyVar(_)) {
+            return true;
+        }
+        !self.free_type_vars(ty).is_empty()
+    }
+
     /// Like `normalize_vars`, but displays `?` when the entire type is a bare
     /// type variable (meaning "unconstrained / unknown").
     pub fn normalize_replacing_unknown(&mut self, ty: TyRef) -> TyRef {
@@ -371,11 +384,14 @@ impl TypeArena {
             return cached;
         }
 
-        let node = self[ty].clone();
-        let result = match &node {
+        // Clone only what's needed: members vec for Union/Intersection (to release
+        // the borrow before calling &mut self methods), full node only for the
+        // fallback case that needs map_children.
+        let result = match &self[ty] {
             OutputTy::Union(members) => {
+                let members = members.clone();
                 let mut flat = Vec::new();
-                self.flatten_set_op_cached(&members.clone(), &mut flat, cache, true);
+                self.flatten_set_op_cached(&members, &mut flat, cache, true);
                 flat.sort_by(|a, b| self[*a].cmp(&self[*b]));
                 flat.dedup();
                 if flat.len() == 1 {
@@ -385,8 +401,9 @@ impl TypeArena {
                 }
             }
             OutputTy::Intersection(members) => {
+                let members = members.clone();
                 let mut flat = Vec::new();
-                self.flatten_set_op_cached(&members.clone(), &mut flat, cache, false);
+                self.flatten_set_op_cached(&members, &mut flat, cache, false);
                 flat.sort_by(|a, b| self[*a].cmp(&self[*b]));
                 flat.dedup();
                 if flat.len() == 1 {
@@ -395,7 +412,9 @@ impl TypeArena {
                     self.intern(OutputTy::Intersection(flat))
                 }
             }
+            OutputTy::TyVar(_) | OutputTy::Primitive(_) | OutputTy::Top | OutputTy::Bottom => ty,
             _ => {
+                let node = self[ty].clone();
                 let new_node =
                     node.map_children(&mut |child| self.normalize_set_ops_cached(child, cache));
                 self.intern(new_node)

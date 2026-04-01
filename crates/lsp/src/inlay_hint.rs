@@ -69,11 +69,12 @@ pub fn inlay_hints(analysis: &FileSnapshot, range: Range, root: &rnix::Root) -> 
         let dc = lang_ty::DisplayConfig::inlay();
         let ty_str = if matches!(name.kind, NameKind::Param | NameKind::PatField) {
             inference.arena.display_truncated(*ty, &dc)
-        } else {
-            // normalize_replacing_unknown requires &mut TypeArena, so clone locally.
+        } else if inference.arena.needs_var_normalization(*ty) {
             let mut tmp = (*inference.arena).clone();
             let normalized = tmp.normalize_replacing_unknown(*ty);
             tmp.display_truncated(normalized, &dc)
+        } else {
+            inference.arena.display_truncated(*ty, &dc)
         };
 
         hints.push(InlayHint {

@@ -43,49 +43,32 @@ pub enum RawTy {
 // ==============================================================================
 
 impl RawTy {
-    pub fn contains_intersection(&self) -> bool {
+    /// Generic tree traversal: returns true if any node matches `pred`.
+    fn any_node(&self, pred: &impl Fn(&RawTy) -> bool) -> bool {
+        if pred(self) {
+            return true;
+        }
         match self {
-            RawTy::Intersection(_) => true,
-            RawTy::List(inner) | RawTy::Neg(inner) | RawTy::Named(_, inner) => {
-                inner.contains_intersection()
+            RawTy::List(inner) | RawTy::Neg(inner) | RawTy::Named(_, inner) => inner.any_node(pred),
+            RawTy::Lambda { param, body } => param.any_node(pred) || body.any_node(pred),
+            RawTy::AttrSet(fields) => fields.values().any(|v| v.any_node(pred)),
+            RawTy::Union(members) | RawTy::Intersection(members) => {
+                members.iter().any(|m| m.any_node(pred))
             }
-            RawTy::Lambda { param, body } => {
-                param.contains_intersection() || body.contains_intersection()
-            }
-            RawTy::AttrSet(fields) => fields.values().any(|v| v.contains_intersection()),
-            RawTy::Union(members) => members.iter().any(|m| m.contains_intersection()),
             _ => false,
         }
+    }
+
+    pub fn contains_intersection(&self) -> bool {
+        self.any_node(&|ty| matches!(ty, RawTy::Intersection(_)))
     }
 
     pub fn contains_neg(&self) -> bool {
-        match self {
-            RawTy::Neg(_) => true,
-            RawTy::List(inner) | RawTy::Named(_, inner) => inner.contains_neg(),
-            RawTy::Lambda { param, body } => param.contains_neg() || body.contains_neg(),
-            RawTy::AttrSet(fields) => fields.values().any(|v| v.contains_neg()),
-            RawTy::Union(members) | RawTy::Intersection(members) => {
-                members.iter().any(|m| m.contains_neg())
-            }
-            _ => false,
-        }
+        self.any_node(&|ty| matches!(ty, RawTy::Neg(_)))
     }
 
     pub fn contains_top_or_bottom(&self) -> bool {
-        match self {
-            RawTy::Top | RawTy::Bottom => true,
-            RawTy::List(inner) | RawTy::Neg(inner) | RawTy::Named(_, inner) => {
-                inner.contains_top_or_bottom()
-            }
-            RawTy::Lambda { param, body } => {
-                param.contains_top_or_bottom() || body.contains_top_or_bottom()
-            }
-            RawTy::AttrSet(fields) => fields.values().any(|v| v.contains_top_or_bottom()),
-            RawTy::Union(members) | RawTy::Intersection(members) => {
-                members.iter().any(|m| m.contains_top_or_bottom())
-            }
-            _ => false,
-        }
+        self.any_node(&|ty| matches!(ty, RawTy::Top | RawTy::Bottom))
     }
 
     pub fn contains_bare_tyvar(&self) -> bool {
@@ -105,30 +88,11 @@ impl RawTy {
     }
 
     pub fn contains_named(&self) -> bool {
-        match self {
-            RawTy::Named(_, _) => true,
-            RawTy::List(inner) | RawTy::Neg(inner) => inner.contains_named(),
-            RawTy::Lambda { param, body } => param.contains_named() || body.contains_named(),
-            RawTy::AttrSet(fields) => fields.values().any(|v| v.contains_named()),
-            RawTy::Union(members) | RawTy::Intersection(members) => {
-                members.iter().any(|m| m.contains_named())
-            }
-            _ => false,
-        }
+        self.any_node(&|ty| matches!(ty, RawTy::Named(_, _)))
     }
 
     pub fn contains_union_or_intersection(&self) -> bool {
-        match self {
-            RawTy::Union(_) | RawTy::Intersection(_) => true,
-            RawTy::List(inner) | RawTy::Neg(inner) | RawTy::Named(_, inner) => {
-                inner.contains_union_or_intersection()
-            }
-            RawTy::Lambda { param, body } => {
-                param.contains_union_or_intersection() || body.contains_union_or_intersection()
-            }
-            RawTy::AttrSet(fields) => fields.values().any(|v| v.contains_union_or_intersection()),
-            _ => false,
-        }
+        self.any_node(&|ty| matches!(ty, RawTy::Union(_) | RawTy::Intersection(_)))
     }
 
     /// True if any lambda param is not a primitive and not a TyVar.

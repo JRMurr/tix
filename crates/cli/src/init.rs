@@ -312,6 +312,9 @@ fn merge_sibling_globs(
 /// If `dir/sub/**/*.nix` is the only pattern under `dir/` and no other-kind
 /// files exist under `dir/` outside of `sub/`, promote to `dir/**/*.nix`.
 fn try_promote_pass(patterns: &mut [String], other_kind_paths: &[&Path]) -> bool {
+    // Build a set for O(1) existence checks.
+    let pattern_set: std::collections::HashSet<&str> =
+        patterns.iter().map(String::as_str).collect();
     // Only consider recursive globs for promotion.
     let mut by_parent: HashMap<PathBuf, Vec<usize>> = HashMap::new();
     for (i, pattern) in patterns.iter().enumerate() {
@@ -333,7 +336,7 @@ fn try_promote_pass(patterns: &mut [String], other_kind_paths: &[&Path]) -> bool
         }
 
         let parent_glob = format!("{}/**/*.nix", parent.display());
-        if patterns.contains(&parent_glob) {
+        if pattern_set.contains(parent_glob.as_str()) {
             continue;
         }
 
@@ -360,6 +363,9 @@ fn try_merge_pass(
     excludes: &mut Vec<String>,
     other_kind_paths: &[&Path],
 ) -> bool {
+    // Build a set for O(1) existence checks.
+    let pattern_set: std::collections::HashSet<&str> =
+        patterns.iter().map(String::as_str).collect();
     // Group current patterns by what their "parent directory" would be if merged.
     // For "dir/**/*.nix" → parent is dir's parent.
     // For "dir/file.nix" → parent is dir.
@@ -383,7 +389,7 @@ fn try_merge_pass(
         let parent_glob = format!("{}/**/*.nix", parent.display());
 
         // If this parent glob already exists, skip.
-        if patterns.contains(&parent_glob) {
+        if pattern_set.contains(parent_glob.as_str()) {
             continue;
         }
 
@@ -409,12 +415,13 @@ fn try_merge_pass(
 
         if merged_count < current_count {
             // Merge: replace all child patterns with the parent glob.
-            // Remove indices in reverse order to keep indices valid.
-            let mut sorted_indices = indices.clone();
-            sorted_indices.sort_unstable();
-            for &i in sorted_indices.iter().rev() {
-                patterns.remove(i);
-            }
+            let remove_set: std::collections::HashSet<usize> = indices.iter().copied().collect();
+            let mut idx = 0;
+            patterns.retain(|_| {
+                let keep = !remove_set.contains(&idx);
+                idx += 1;
+                keep
+            });
             patterns.push(parent_glob);
             excludes.extend(new_excludes);
             patterns.sort();

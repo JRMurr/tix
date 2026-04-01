@@ -129,41 +129,54 @@ fn walk_nix_files(root: &Path, exclude_set: &Option<globset::GlobSet>) -> Vec<Pa
     paths
 }
 
-/// Check if a file path matches any context in the config.
-/// Returns the context name if matched, or None.
-pub fn find_matching_context<'a>(
-    file_path: &Path,
-    config: &'a TixConfig,
-    config_dir: &Path,
-) -> Option<&'a str> {
-    let relative = file_path.strip_prefix(config_dir).unwrap_or(file_path);
+/// Pre-compiled context glob patterns for efficient per-file matching.
+/// Build once via `CompiledContexts::new()`, then call `find_matching()`
+/// per file — avoids recompiling glob patterns on every call.
+pub struct CompiledContexts {
+    /// (context_name, includes_set, excludes_set)
+    contexts: Vec<(String, globset::GlobSet, globset::GlobSet)>,
+}
 
-    for (name, ctx) in &config.context {
-        let matched = ctx.includes.iter().any(|pattern| {
-            globset::GlobBuilder::new(pattern)
-                .literal_separator(true)
-                .build()
-                .ok()
-                .and_then(|g| g.compile_matcher().is_match(relative).then_some(()))
-                .is_some()
-        });
-
-        let excluded = matched
-            && ctx.excludes.iter().any(|pattern| {
-                globset::GlobBuilder::new(pattern)
-                    .literal_separator(true)
-                    .build()
-                    .ok()
-                    .and_then(|g| g.compile_matcher().is_match(relative).then_some(()))
-                    .is_some()
-            });
-
-        if matched && !excluded {
-            return Some(name.as_str());
-        }
+impl CompiledContexts {
+    pub fn new(config: &TixConfig) -> Self {
+        let contexts = config
+            .context
+            .iter()
+            .map(|(name, ctx)| {
+                let includes = compile_glob_set(&ctx.includes);
+                let excludes = compile_glob_set(&ctx.excludes);
+                (name.clone(), includes, excludes)
+            })
+            .collect();
+        Self { contexts }
     }
 
-    None
+    /// Check if a file path matches any context. Returns the context name
+    /// if matched, or None.
+    pub fn find_matching<'a>(&'a self, file_path: &Path, config_dir: &Path) -> Option<&'a str> {
+        let relative = file_path.strip_prefix(config_dir).unwrap_or(file_path);
+        for (name, includes, excludes) in &self.contexts {
+            if includes.is_match(relative) && !excludes.is_match(relative) {
+                return Some(name.as_str());
+            }
+        }
+        None
+    }
+}
+
+fn compile_glob_set(patterns: &[String]) -> globset::GlobSet {
+    let mut builder = globset::GlobSetBuilder::new();
+    for pattern in patterns {
+        if let Ok(glob) = globset::GlobBuilder::new(pattern)
+            .literal_separator(true)
+            .build()
+        {
+            builder.add(glob);
+        }
+    }
+    builder
+        .build()
+        .unwrap_or_else(|_| globset::GlobSet::empty())
 }
 
 #[cfg(test)]
@@ -335,17 +348,15 @@ mod tests {
         )
         .expect("parse error");
 
+        let compiled = CompiledContexts::new(&config);
+
         // A file in common/ matches nixos context (not excluded).
-        let result =
-            find_matching_context(Path::new("common/programs.nix"), &config, Path::new("."));
+        let result = compiled.find_matching(Path::new("common/programs.nix"), Path::new("."));
         assert_eq!(result, Some("nixos"));
 
         // A file in common/homemanager/ is excluded from nixos, falls through to home.
-        let result = find_matching_context(
-            Path::new("common/homemanager/default.nix"),
-            &config,
-            Path::new("."),
-        );
+        let result =
+            compiled.find_matching(Path::new("common/homemanager/default.nix"), Path::new("."));
         assert_eq!(result, Some("home"));
     }
 

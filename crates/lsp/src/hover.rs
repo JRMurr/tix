@@ -65,12 +65,12 @@ pub fn hover(
                 let dc = lang_ty::DisplayConfig::hover();
                 let ty_str = if is_param_kind(kind) {
                     inference.arena.display_truncated(ty_ref, &dc)
-                } else {
-                    // normalize_replacing_unknown needs &mut TypeArena; clone to a
-                    // temporary so we don't need to mutate the shared Arc.
+                } else if inference.arena.needs_var_normalization(ty_ref) {
                     let mut tmp = (*inference.arena).clone();
                     let normalized = tmp.normalize_replacing_unknown(ty_ref);
                     tmp.display_truncated(normalized, &dc)
+                } else {
+                    inference.arena.display_truncated(ty_ref, &dc)
                 };
 
                 // When the type is `?`, append an actionable explanation.
@@ -127,7 +127,10 @@ pub fn hover(
                 let dc = lang_ty::DisplayConfig::hover();
                 // normalize_replacing_unknown / normalize_vars both need &mut
                 // TypeArena; clone to a temporary to avoid mutating the shared Arc.
-                let ty_str = {
+                // Skip the clone when no normalization is needed (common case).
+                let ty_str = if !is_param_ref && !inference.arena.needs_var_normalization(ty_ref) {
+                    inference.arena.display_truncated(ty_ref, &dc)
+                } else {
                     let mut tmp = (*inference.arena).clone();
                     let normalized = if is_param_ref {
                         tmp.normalize_vars(ty_ref)

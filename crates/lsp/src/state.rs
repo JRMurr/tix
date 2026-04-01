@@ -484,6 +484,27 @@ impl AnalysisState {
         }
     }
 
+    /// Resolve context args for a file from the project's tix.toml config.
+    fn resolve_context_args(
+        &mut self,
+        path: &Path,
+    ) -> Arc<HashMap<SmolStr, comment_parser::ParsedTy>> {
+        if let (Some(ref cfg), Some(ref dir)) = (&self.project_config, &self.config_dir) {
+            crate::project_config::resolve_context_for_file(
+                path,
+                cfg,
+                dir,
+                Arc::make_mut(&mut self.registry),
+            )
+            .unwrap_or_else(|e| {
+                log::warn!("Failed to resolve context for {}: {e}", path.display());
+                Arc::default()
+            })
+        } else {
+            Arc::default()
+        }
+    }
+
     /// Update file contents and re-run analysis. Returns the cached analysis
     /// and a timing breakdown of each pipeline phase.
     ///
@@ -539,23 +560,7 @@ impl AnalysisState {
         let name_to_import =
             build_name_to_import(&module, &import_targets, &grouped, file_dir.as_deref());
 
-        // Resolve context args for this file from the project's tix.toml.
-        let context_args: Arc<HashMap<SmolStr, comment_parser::ParsedTy>> =
-            if let (Some(ref cfg), Some(ref dir)) = (&self.project_config, &self.config_dir) {
-                crate::project_config::resolve_context_for_file(
-                    &path,
-                    cfg,
-                    dir,
-                    Arc::make_mut(&mut self.registry),
-                )
-                .unwrap_or_else(|e| {
-                    log::warn!("Failed to resolve context for {}: {e}", path.display());
-                    Arc::default()
-                })
-            } else {
-                Arc::default()
-            };
-
+        let context_args = self.resolve_context_args(&path);
         let (context_arg_types, context_arg_arena) =
             crate::ty_nav::convert_context_args(&context_args, &self.registry);
         let t_imports = t0.elapsed();
@@ -667,23 +672,7 @@ impl AnalysisState {
         let scopes = lang_ast::scopes(&self.db, nix_file);
         let grouped = lang_ast::group_def(&self.db, nix_file);
 
-        // Resolve context args (fast, depends only on project config).
-        let context_args: Arc<HashMap<SmolStr, comment_parser::ParsedTy>> =
-            if let (Some(ref cfg), Some(ref dir)) = (&self.project_config, &self.config_dir) {
-                crate::project_config::resolve_context_for_file(
-                    &path,
-                    cfg,
-                    dir,
-                    Arc::make_mut(&mut self.registry),
-                )
-                .unwrap_or_else(|e| {
-                    log::warn!("Failed to resolve context for {}: {e}", path.display());
-                    Arc::default()
-                })
-            } else {
-                Arc::default()
-            };
-
+        let context_args = self.resolve_context_args(&path);
         let (context_arg_types, context_arg_arena) =
             crate::ty_nav::convert_context_args(&context_args, &self.registry);
 
@@ -961,7 +950,7 @@ pub fn resolve_nix_path(base_dir: &Path, path_str: &str) -> Option<PathBuf> {
     } else if resolved.is_dir() {
         let default = resolved.join("default.nix");
         if default.is_file() {
-            Some(default.canonicalize().ok().unwrap_or(default))
+            default.canonicalize().ok()
         } else {
             None
         }

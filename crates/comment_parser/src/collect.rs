@@ -289,10 +289,7 @@ fn extract_import_path(pair: pest::iterators::Pair<Rule>) -> Result<String, Coll
     Ok(unquote_string_literal(path_pair.as_str()))
 }
 
-/// Strip surrounding double quotes from a string literal.
-fn unquote_string_literal(s: &str) -> String {
-    s.trim_matches('"').to_string()
-}
+use crate::collect_shared::{normalize_set_type, unquote_string_literal};
 
 /// Collect a union type from its children: `isect_type ("|" isect_type)*`.
 /// If only one member, returns it directly (no spurious Union wrapper).
@@ -300,18 +297,7 @@ fn collect_union(pairs: Pairs<Rule>) -> Result<ParsedTy, CollectError> {
     let members: Result<Vec<ParsedTyRef>, CollectError> = pairs
         .map(|p| collect_one(p).map(ParsedTyRef::from))
         .collect();
-    let mut members = members?;
-
-    match members.len() {
-        0 => Err(CollectError::new(
-            "union type must have at least one member",
-        )),
-        1 => {
-            let single = members.pop().expect("len checked above");
-            Ok((*single.0).clone())
-        }
-        _ => Ok(ParsedTy::Union(members)),
-    }
+    normalize_set_type(members?, "union", ParsedTy::Union)
 }
 
 /// Collect an intersection type from its children: `atom_type ("&" atom_type)*`.
@@ -320,18 +306,7 @@ fn collect_intersection(pairs: Pairs<Rule>) -> Result<ParsedTy, CollectError> {
     let members: Result<Vec<ParsedTyRef>, CollectError> = pairs
         .map(|p| collect_one(p).map(ParsedTyRef::from))
         .collect();
-    let mut members = members?;
-
-    match members.len() {
-        0 => Err(CollectError::new(
-            "intersection type must have at least one member",
-        )),
-        1 => {
-            let single = members.pop().expect("len checked above");
-            Ok((*single.0).clone())
-        }
-        _ => Ok(ParsedTy::Intersection(members)),
-    }
+    normalize_set_type(members?, "intersection", ParsedTy::Intersection)
 }
 
 /// Collect an attrset type from its children: `named_field*`, optional `dyn_field`,

@@ -263,16 +263,14 @@ fn apply_simplification(
             let simplified: Vec<TyRef> = members
                 .iter()
                 .filter_map(|&m| {
-                    let m_node = arena[m].clone();
-                    if is_removable_var_member(arena, &m_node, substitution, removable) {
+                    if is_removable_var_member(arena, &arena[m], substitution, removable) {
                         return None;
                     }
                     let s = apply_simplification(arena, m, substitution, removable);
-                    let s_node = arena[s].clone();
-                    if matches!(s_node, OutputTy::Bottom) {
+                    if matches!(&arena[s], OutputTy::Bottom) {
                         return None;
                     }
-                    if matches!(s_node, OutputTy::Top) {
+                    if matches!(&arena[s], OutputTy::Top) {
                         return Some(arena.intern(OutputTy::Top));
                     }
                     Some(s)
@@ -288,11 +286,11 @@ fn apply_simplification(
 
             // Flatten nested unions
             let mut flat = Vec::with_capacity(simplified.len());
-            for m in &simplified {
-                if let OutputTy::Union(inner) = arena[*m].clone() {
-                    flat.extend(inner);
+            for &m in &simplified {
+                if let OutputTy::Union(inner) = &arena[m] {
+                    flat.extend(inner.iter().copied());
                 } else {
-                    flat.push(*m);
+                    flat.push(m);
                 }
             }
             flat.dedup();
@@ -308,13 +306,11 @@ fn apply_simplification(
             let simplified: Vec<TyRef> = members
                 .iter()
                 .filter_map(|&m| {
-                    let m_node = arena[m].clone();
-                    if is_removable_var_member(arena, &m_node, substitution, removable) {
+                    if is_removable_var_member(arena, &arena[m], substitution, removable) {
                         return None;
                     }
                     let s = apply_simplification(arena, m, substitution, removable);
-                    let s_node = arena[s].clone();
-                    if matches!(s_node, OutputTy::Top) {
+                    if matches!(&arena[s], OutputTy::Top) {
                         return None;
                     }
                     Some(s)
@@ -330,11 +326,11 @@ fn apply_simplification(
 
             // Flatten nested intersections
             let mut flat = Vec::with_capacity(simplified.len());
-            for m in &simplified {
-                if let OutputTy::Intersection(inner) = arena[*m].clone() {
-                    flat.extend(inner);
+            for &m in &simplified {
+                if let OutputTy::Intersection(inner) = &arena[m] {
+                    flat.extend(inner.iter().copied());
                 } else {
-                    flat.push(*m);
+                    flat.push(m);
                 }
             }
             flat.dedup();

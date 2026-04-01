@@ -1,4 +1,5 @@
 mod collect;
+mod collect_shared;
 pub mod tix_collect;
 pub mod tix_parser;
 
