@@ -261,16 +261,27 @@ impl TypeAliasRegistry {
                     source,
                     ..
                 } => {
-                    // Modules generate a capitalized alias (e.g. "lib" -> "Lib").
+                    let decl_loc = DeclLocation {
+                        file_path: path.to_path_buf(),
+                        span: *span,
+                        source: source.clone(),
+                    };
+                    // Modules generate a capitalized alias (e.g. "lib" -> "Lib")
+                    // used for type alias lookups.
                     let alias_name = capitalize(name);
                     self.decl_locations
-                        .entry(alias_name)
+                        .entry(alias_name.clone())
                         .or_default()
-                        .push(DeclLocation {
-                            file_path: path.to_path_buf(),
-                            span: *span,
-                            source: source.clone(),
-                        });
+                        .push(decl_loc.clone());
+                    // Also register under the original (uncapitalized) name so
+                    // goto-definition on Select field names (e.g. `strings` in
+                    // `lib.strings.toLower`) resolves correctly.
+                    if alias_name.as_str() != name.as_str() {
+                        self.decl_locations
+                            .entry(name.clone())
+                            .or_default()
+                            .push(decl_loc);
+                    }
                     // Recurse into nested modules.
                     self.record_decl_locations(nested, path);
                 }

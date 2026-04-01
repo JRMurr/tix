@@ -732,6 +732,129 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
+    // Nested select: lib.strings.toLower → stub val
+    // ------------------------------------------------------------------
+    #[test]
+    fn nested_select_field_jumps_to_stub_val() {
+        let stub = indoc! {"
+            module lib {
+                module strings {
+                    val toLower :: string -> string;
+                }
+            }
+        "};
+        let (registry, stub_path) = registry_with_stub(stub);
+
+        let src = indoc! {"
+            let
+                /** type: lib :: Lib */
+                lib = { strings = { toLower = x: x; }; };
+            in lib.strings.toLower \"hi\"
+            #              ^1
+        "};
+        let markers = parse_markers(src);
+
+        let project = TempProject::new(&[("main.nix", src)]);
+        let main_path = project.path("main.nix");
+
+        let mut state = AnalysisState::new(registry);
+        let (uri, contents) = analyze(&mut state, &main_path);
+        let analysis = state.get_file(&main_path).unwrap().to_snapshot();
+        let root = rnix::Root::parse(&contents).tree();
+
+        let pos = analysis.syntax.line_index.position(markers[&1]);
+        let loc = goto_definition(&state, &analysis, pos, &uri, &root);
+        let loc = loc.expect("should resolve nested select field to stub val");
+
+        let stub_uri = Url::from_file_path(&stub_path).unwrap();
+        assert_eq!(loc.uri, stub_uri, "should jump to stub file");
+
+        let _ = std::fs::remove_file(&stub_path);
+    }
+
+    // ------------------------------------------------------------------
+    // Select on module name: lib.strings → stub module
+    // ------------------------------------------------------------------
+    #[test]
+    fn select_module_name_jumps_to_stub() {
+        let stub = indoc! {"
+            module lib {
+                module strings {
+                    val toLower :: string -> string;
+                }
+            }
+        "};
+        let (registry, stub_path) = registry_with_stub(stub);
+
+        let src = indoc! {"
+            let
+                /** type: lib :: Lib */
+                lib = { strings = { toLower = x: x; }; };
+            in lib.strings.toLower \"hi\"
+            #      ^1
+        "};
+        let markers = parse_markers(src);
+
+        let project = TempProject::new(&[("main.nix", src)]);
+        let main_path = project.path("main.nix");
+
+        let mut state = AnalysisState::new(registry);
+        let (uri, contents) = analyze(&mut state, &main_path);
+        let analysis = state.get_file(&main_path).unwrap().to_snapshot();
+        let root = rnix::Root::parse(&contents).tree();
+
+        let pos = analysis.syntax.line_index.position(markers[&1]);
+        let loc = goto_definition(&state, &analysis, pos, &uri, &root);
+        let loc = loc.expect("should resolve module name to stub module");
+
+        let stub_uri = Url::from_file_path(&stub_path).unwrap();
+        assert_eq!(loc.uri, stub_uri, "should jump to stub file");
+
+        let _ = std::fs::remove_file(&stub_path);
+    }
+
+    // ------------------------------------------------------------------
+    // Lambda pattern annotation: goto-def on select field
+    // ------------------------------------------------------------------
+    #[test]
+    fn lambda_pattern_select_field_jumps_to_stub_val() {
+        let stub = indoc! {"
+            module lib {
+                val id :: a -> a;
+            }
+        "};
+        let (registry, stub_path) = registry_with_stub(stub);
+
+        let src = indoc! {"
+            {
+              # type: lib :: Lib
+              lib,
+              ...
+            }:
+            lib.id 42
+            #   ^1
+        "};
+        let markers = parse_markers(src);
+
+        let project = TempProject::new(&[("main.nix", src)]);
+        let main_path = project.path("main.nix");
+
+        let mut state = AnalysisState::new(registry);
+        let (uri, contents) = analyze(&mut state, &main_path);
+        let analysis = state.get_file(&main_path).unwrap().to_snapshot();
+        let root = rnix::Root::parse(&contents).tree();
+
+        let pos = analysis.syntax.line_index.position(markers[&1]);
+        let loc = goto_definition(&state, &analysis, pos, &uri, &root);
+        let loc = loc.expect("should resolve select field with lambda annotation");
+
+        let stub_uri = Url::from_file_path(&stub_path).unwrap();
+        assert_eq!(loc.uri, stub_uri, "should jump to stub file");
+
+        let _ = std::fs::remove_file(&stub_path);
+    }
+
+    // ------------------------------------------------------------------
     // Unresolved ref with no stub → still returns None
     // ------------------------------------------------------------------
     #[test]
