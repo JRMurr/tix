@@ -12,6 +12,8 @@ mod hover;
 mod inlay_hint;
 #[cfg(test)]
 mod pbt;
+#[cfg(test)]
+mod pbt_stubs;
 pub mod project_config;
 mod references;
 mod rename;
