@@ -5,13 +5,18 @@
   pkgs,
 }:
 
-let 
+let
 
   foo = pkgs.lib.strings.concatStringsSep " ";
 
+  bar = x: if x != null then builtins.stringLength x else 0;
 
-  x = foo [""];
+  sadFoo = foo [ 1 ];
+
+  sadBar = bar 1;
 
 in
-
-foo [1];
+[
+  sadFoo
+  sadBar
+]
