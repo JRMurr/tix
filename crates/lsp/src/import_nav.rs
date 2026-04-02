@@ -58,10 +58,37 @@ pub fn resolve_field_transitively(
             .names()
             .find(|(_, name)| name.text == field_name);
 
+        let name_res = lang_ast::name_resolution(&state.db, target_file);
+        let indices = lang_ast::module_indices(&state.db, target_file);
+        let base_dir = current_path.parent().unwrap_or(Path::new("/"));
+
         let (target_name_id, _) = match found {
             Some(hit) => hit,
             None => {
-                // No matching name — jump to file start (like a bare import).
+                // No matching name in this file. Check if the file's return value
+                // is a pass-through reference to an import (e.g. `let res = import ./x.nix; in res`).
+                // If so, follow through to the imported file and look for the field there.
+                let import_resolution =
+                    resolve_import_types(&target_module, &name_res, base_dir, |_| None, None);
+                if let Some(next_path) = resolve_return_value_import(
+                    &target_module,
+                    &name_res,
+                    &indices,
+                    &import_resolution.targets,
+                ) {
+                    log::debug!(
+                        "resolve_field_transitively: file returns import pass-through -> {}",
+                        next_path.display()
+                    );
+                    current_path = if next_path.is_dir() {
+                        next_path.join("default.nix")
+                    } else {
+                        next_path
+                    };
+                    continue;
+                }
+
+                // Truly no match — jump to file start.
                 let target_uri = Url::from_file_path(&current_path).ok()?;
                 return Some(Location::new(
                     target_uri,
@@ -69,13 +96,6 @@ pub fn resolve_field_transitively(
                 ));
             }
         };
-
-        // Check if this name is bound to an import (barrel re-export).
-        // Use module_indices (covers all bindings including non-rec attrsets)
-        // rather than build_name_to_import (which only covers SCC-grouped names).
-        let name_res = lang_ast::name_resolution(&state.db, target_file);
-        let indices = lang_ast::module_indices(&state.db, target_file);
-        let base_dir = current_path.parent().unwrap_or(Path::new("/"));
 
         // Cheap import resolution — only resolves paths, no type inference.
         let import_resolution =
@@ -207,6 +227,44 @@ fn scan_file_for_field_references(
     }
 
     locations
+}
+
+/// Check if a file's return value is a reference to an import (pass-through pattern).
+///
+/// Unwraps through Lambda and LetIn to find the innermost body expression.
+/// If it's a Reference that resolves to a name bound to an import, returns the
+/// import target path. This handles the pattern:
+/// ```nix
+/// { pkgs }: let res = import ./real.nix { inherit pkgs; }; in res
+/// ```
+fn resolve_return_value_import(
+    module: &Module,
+    name_res: &lang_ast::NameResolution,
+    indices: &lang_ast::ModuleIndices,
+    import_targets: &std::collections::HashMap<ExprId, PathBuf>,
+) -> Option<PathBuf> {
+    // Unwrap through Lambda/LetIn to find the innermost return expression.
+    let mut expr_id = module.entry_expr;
+    for _ in 0..20 {
+        match &module[expr_id] {
+            Expr::Lambda { body, .. } => expr_id = *body,
+            Expr::LetIn { body, .. } => expr_id = *body,
+            _ => break,
+        }
+    }
+
+    // Check if the return expression is a reference.
+    if let Expr::Reference(_) = &module[expr_id] {
+        if let Some(ResolveResult::Definition(name_id)) = name_res.get(expr_id) {
+            // Check if the referenced name is bound to an import.
+            if let Some(&binding_expr) = indices.binding_expr.get(name_id) {
+                return chase_import_target(module, import_targets, binding_expr);
+            }
+        }
+    }
+
+    // Also handle direct import as return value: `import ./foo.nix`
+    chase_import_target(module, import_targets, expr_id)
 }
 
 /// Chase through Apply chains to find an import target path.

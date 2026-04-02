@@ -581,6 +581,43 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
+    // Select through pass-through barrel: res.hello where barrel returns
+    // an import (barrel doesn't define `hello` itself)
+    // ------------------------------------------------------------------
+    #[test]
+    fn select_through_passthrough_barrel() {
+        let src = indoc! {"
+            let res = import ./barrel.nix; in res.hello
+            #                                     ^1
+        "};
+        let markers = parse_markers(src);
+
+        let project = TempProject::new(&[
+            ("main.nix", src),
+            // barrel.nix is a pass-through: imports default.nix and returns it
+            ("barrel.nix", "let res = import ./real.nix; in res"),
+            ("real.nix", "{ hello = 42; }"),
+        ]);
+        let main_path = project.path("main.nix");
+        let real_path = project.path("real.nix");
+
+        let mut state = AnalysisState::new(TypeAliasRegistry::default());
+        let (uri, contents) = analyze(&mut state, &main_path);
+        let analysis = state.get_file(&main_path).unwrap().to_snapshot();
+        let root = rnix::Root::parse(&contents).tree();
+
+        let pos = analysis.syntax.line_index.position(markers[&1]);
+        let loc = goto_definition(&state, &analysis, pos, &uri, &root);
+        let loc = loc.expect("should resolve through passthrough barrel");
+
+        let real_uri = Url::from_file_path(&real_path).unwrap();
+        assert_eq!(
+            loc.uri, real_uri,
+            "should follow through passthrough barrel to real.nix"
+        );
+    }
+
+    // ------------------------------------------------------------------
     // No result for non-navigable expressions
     // ------------------------------------------------------------------
     #[test]

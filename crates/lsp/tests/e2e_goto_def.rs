@@ -132,6 +132,63 @@ async fn goto_def_through_barrel_reexport() {
     h.shutdown().await;
 }
 
+/// Go-to-definition through a pass-through barrel: barrel.nix imports
+/// default.nix and returns it directly, so `res.hello` should land in default.nix.
+#[tokio::test]
+async fn goto_def_through_passthrough_barrel() {
+    let mut h = LspTestHarness::new(&[
+        (
+            "default.nix",
+            indoc! {"
+                { hello = 42; }
+                # ^1
+            "},
+        ),
+        ("barrel.nix", "let res = import ./default.nix; in res"),
+        (
+            "main.nix",
+            indoc! {"
+                let res = import ./barrel.nix;
+                in res.hello
+                #      ^2
+            "},
+        ),
+    ])
+    .await;
+
+    h.open("default.nix").await;
+    let _ = h.wait_for_diagnostics("default.nix", TIMEOUT).await;
+    h.open("barrel.nix").await;
+    let _ = h.wait_for_diagnostics("barrel.nix", TIMEOUT).await;
+    h.open("main.nix").await;
+    let _ = h.wait_for_diagnostics("main.nix", TIMEOUT).await;
+
+    let m_main = h.markers("main.nix");
+    let m_default = h.markers("default.nix");
+    let result = h
+        .goto_def("main.nix", m_main[&2].line, m_main[&2].character)
+        .await
+        .expect("goto_def should return a result");
+
+    let (target_uri, target_pos) = match &result {
+        GotoDefinitionResponse::Scalar(loc) => (&loc.uri, loc.range.start),
+        GotoDefinitionResponse::Array(locs) => (&locs[0].uri, locs[0].range.start),
+        GotoDefinitionResponse::Link(links) => (&links[0].target_uri, links[0].target_range.start),
+    };
+
+    let default_uri = Url::from_file_path(h.workspace.path("default.nix")).unwrap();
+    assert_eq!(
+        target_uri, &default_uri,
+        "goto_def should follow through passthrough barrel to default.nix"
+    );
+    assert_eq!(
+        target_pos, m_default[&1],
+        "goto_def should point to hello definition in default.nix"
+    );
+
+    h.shutdown().await;
+}
+
 /// When the barrel binding is NOT an import, goto-def should stop at the
 /// barrel file's binding (existing behavior preserved).
 #[tokio::test]
