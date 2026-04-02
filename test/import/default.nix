@@ -2,4 +2,7 @@
   # type: pkgs :: Pkgs
   pkgs,
 }:
-pkgs.hello
+
+{
+  hello = pkgs.hello;
+}

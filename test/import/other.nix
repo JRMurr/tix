@@ -6,8 +6,8 @@ let
 
   lib = pkgs.lib;
 
-  res = import ./default.nix { inherit pkgs; };
+  res = import ./barrel.nix { inherit pkgs; };
 
 in
 
-res
+res.hello
