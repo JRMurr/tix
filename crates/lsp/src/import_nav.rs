@@ -146,6 +146,10 @@ pub fn resolve_field_transitively(
 /// Scans all analyzed files that import `origin_path` for Select expressions
 /// like `lib.field_name` where `lib` is bound to the import.
 ///
+/// When a dependent is a pass-through barrel (imports origin_path and returns
+/// the result directly without accessing the field), recursively searches
+/// the barrel's own dependents.
+///
 /// Only searches files with existing snapshots (open/analyzed files). Files
 /// that haven't been analyzed yet are skipped.
 pub fn find_cross_file_field_references(
@@ -154,8 +158,32 @@ pub fn find_cross_file_field_references(
     origin_path: &Path,
     field_name: &str,
 ) -> Vec<Location> {
-    let dependents = state.coordinator.get_dependents(origin_path);
     let mut locations = Vec::new();
+    let mut visited = HashSet::new();
+    find_cross_file_field_references_inner(
+        state,
+        snapshots,
+        origin_path,
+        field_name,
+        &mut locations,
+        &mut visited,
+    );
+    locations
+}
+
+fn find_cross_file_field_references_inner(
+    state: &AnalysisState,
+    snapshots: &dashmap::DashMap<PathBuf, crate::state::FileSnapshot>,
+    origin_path: &Path,
+    field_name: &str,
+    locations: &mut Vec<Location>,
+    visited: &mut HashSet<PathBuf>,
+) {
+    if !visited.insert(origin_path.to_path_buf()) {
+        return;
+    }
+
+    let dependents = state.coordinator.get_dependents(origin_path);
 
     for importer_path in &dependents {
         if let Some(snap) = snapshots.get(importer_path) {
@@ -165,11 +193,60 @@ pub fn find_cross_file_field_references(
                 field_name,
                 importer_path,
             );
-            locations.extend(refs);
+
+            if refs.is_empty() {
+                // No direct field references in this file. Check if it's a
+                // pass-through barrel that re-exports origin_path's value.
+                // If so, files importing THIS file might access the field.
+                if is_passthrough_of(&snap.syntax, origin_path) {
+                    find_cross_file_field_references_inner(
+                        state,
+                        snapshots,
+                        importer_path,
+                        field_name,
+                        locations,
+                        visited,
+                    );
+                }
+            } else {
+                locations.extend(refs);
+            }
+        }
+    }
+}
+
+/// Check if a file is a pass-through barrel for the given origin path.
+/// A pass-through file imports origin_path and returns the result directly.
+fn is_passthrough_of(syntax: &SyntaxData, origin_path: &Path) -> bool {
+    // Check if any name in this file is bound to an import of origin_path.
+    let import_names: Vec<_> = syntax
+        .name_to_import
+        .iter()
+        .filter(|(_, path)| paths_equal(path, origin_path))
+        .map(|(&name_id, _)| name_id)
+        .collect();
+
+    if import_names.is_empty() {
+        return false;
+    }
+
+    // Check if the file's return value is a reference to one of those import names.
+    let mut expr_id = syntax.module.entry_expr;
+    for _ in 0..20 {
+        match &syntax.module[expr_id] {
+            Expr::Lambda { body, .. } => expr_id = *body,
+            Expr::LetIn { body, .. } => expr_id = *body,
+            _ => break,
         }
     }
 
-    locations
+    if let Expr::Reference(_) = &syntax.module[expr_id] {
+        if let Some(ResolveResult::Definition(name_id)) = syntax.name_res.get(expr_id) {
+            return import_names.contains(name_id);
+        }
+    }
+
+    false
 }
 
 /// Scan a single file's syntax data for Select expressions accessing `field_name`

@@ -5,9 +5,11 @@
 // Also provides `name_at_position`, a shared helper used by document highlight
 // and rename to resolve the NameId under the cursor.
 
+use std::path::PathBuf;
+
 use dashmap::DashMap;
 use lang_ast::nameres::ResolveResult;
-use lang_ast::{AstPtr, Expr, NameId};
+use lang_ast::{AstPtr, Expr, Literal, NameId};
 use rowan::ast::AstNode;
 use tower_lsp::lsp_types::{Location, Position, Url};
 
@@ -111,37 +113,139 @@ pub fn find_references(
 
 /// Find all references to a name, including cross-file references via imports.
 ///
-/// Extends `find_references` with cross-file search: if the cursor is on a name
-/// defined in this file's top-level attrset, also finds `x.name` usages in files
-/// that import this file.
+/// Extends `find_references` with cross-file search:
+/// - If the cursor is on a name definition or reference, finds `x.name` usages
+///   in files that import this file.
+/// - If the cursor is on a Select field literal (e.g. `helper` in `lib.helper`),
+///   resolves to the target file's definition and finds all references from there.
 pub fn find_references_cross_file(
     state: &AnalysisState,
-    snapshots: &DashMap<std::path::PathBuf, FileSnapshot>,
+    snapshots: &DashMap<PathBuf, FileSnapshot>,
     analysis: &FileSnapshot,
     pos: Position,
     uri: &Url,
     root: &rnix::Root,
     include_declaration: bool,
 ) -> Vec<Location> {
-    // Same-file references (existing logic).
-    let mut locations = find_references(analysis, pos, uri, root, include_declaration);
+    // Try the normal name-based path first.
+    if let Some(target_name_id) = name_at_position(analysis, pos, root) {
+        let mut locations = find_references(analysis, pos, uri, root, include_declaration);
 
-    // Cross-file search requires the file path for coordinator lookup.
-    let file_path = match uri.to_file_path() {
-        Ok(p) => p,
-        Err(_) => return locations,
-    };
+        let file_path = match uri.to_file_path() {
+            Ok(p) => p,
+            Err(_) => return locations,
+        };
+        let name_text = &analysis.syntax.module[target_name_id].text;
 
-    // Determine the name text for cross-file search.
-    let target_name_id = match name_at_position(analysis, pos, root) {
-        Some(n) => n,
-        None => return locations,
-    };
-    let name_text = &analysis.syntax.module[target_name_id].text;
+        let cross_file = crate::import_nav::find_cross_file_field_references(
+            state, snapshots, &file_path, name_text,
+        );
+        locations.extend(cross_file);
 
-    // Find cross-file references: `x.name_text` in files that import this file.
+        return locations;
+    }
+
+    // No NameId under cursor — check if it's a Select field literal.
+    // e.g. cursor on `helper` in `lib.helper` where lib = import ./lib.nix.
+    if let Some((target_file_path, field_name)) =
+        resolve_select_field_at_position(analysis, pos, root)
+    {
+        return references_for_field_in_file(
+            state,
+            snapshots,
+            &target_file_path,
+            &field_name,
+            include_declaration,
+        );
+    }
+
+    Vec::new()
+}
+
+/// When the cursor is on a Select field literal (e.g. `helper` in `lib.helper`),
+/// resolve it to the target file path and field name. Uses the same import
+/// resolution as goto-def.
+fn resolve_select_field_at_position(
+    analysis: &FileSnapshot,
+    pos: Position,
+    root: &rnix::Root,
+) -> Option<(PathBuf, String)> {
+    let offset = analysis.syntax.line_index.offset(pos);
+    let token = root
+        .syntax()
+        .token_at_offset(rowan::TextSize::from(offset))
+        .right_biased()?;
+
+    let mut node = token.parent()?;
+    loop {
+        let ptr = AstPtr::new(&node);
+        if let Some(expr_id) = analysis.syntax.source_map.expr_for_node(ptr) {
+            // Check if this is a string literal inside a Select (field name).
+            if let Expr::Literal(Literal::String(field_name)) = &analysis.syntax.module[expr_id] {
+                // Walk up to find the enclosing Select.
+                let select_node = node.ancestors().find_map(rnix::ast::Select::cast)?;
+                let base_syntax = select_node.expr()?;
+                let base_ptr = AstPtr::new(base_syntax.syntax());
+                let base_expr_id = analysis.syntax.source_map.expr_for_node(base_ptr)?;
+
+                // Resolve the base to an import target path.
+                let target_path =
+                    if let Some(path) = analysis.syntax.import_targets.get(&base_expr_id) {
+                        path.clone()
+                    } else if let Expr::Reference(_) = &analysis.syntax.module[base_expr_id] {
+                        let res = analysis.syntax.name_res.get(base_expr_id)?;
+                        if let ResolveResult::Definition(name_id) = res {
+                            analysis.syntax.name_to_import.get(name_id)?.clone()
+                        } else {
+                            return None;
+                        }
+                    } else {
+                        return None;
+                    };
+
+                return Some((target_path, field_name.to_string()));
+            }
+            return None;
+        }
+        node = node.parent()?;
+    }
+}
+
+/// Find all references to a field defined in a specific file.
+/// Returns the declaration in the target file + cross-file usages.
+fn references_for_field_in_file(
+    state: &AnalysisState,
+    snapshots: &DashMap<PathBuf, FileSnapshot>,
+    target_file_path: &std::path::Path,
+    field_name: &str,
+    include_declaration: bool,
+) -> Vec<Location> {
+    let mut locations = Vec::new();
+
+    // Resolve transitively through barrels to find the actual definition file.
+    // This reuses the same logic as goto-def.
+    let resolved =
+        crate::import_nav::resolve_field_transitively(state, target_file_path, field_name);
+
+    // Add the declaration site if requested.
+    if include_declaration {
+        if let Some(loc) = &resolved {
+            locations.push(loc.clone());
+        }
+    }
+
+    // Determine which file actually defines this field (after barrel resolution).
+    let def_file_path = resolved
+        .as_ref()
+        .and_then(|loc| loc.uri.to_file_path().ok())
+        .unwrap_or_else(|| target_file_path.to_path_buf());
+
+    // Find cross-file references from the definition file.
     let cross_file = crate::import_nav::find_cross_file_field_references(
-        state, snapshots, &file_path, name_text,
+        state,
+        snapshots,
+        &def_file_path,
+        field_name,
     );
     locations.extend(cross_file);
 

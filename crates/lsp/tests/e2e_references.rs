@@ -158,3 +158,91 @@ async fn cross_file_references_multiple_importers() {
 
     h.shutdown().await;
 }
+
+/// Find references from a Select field literal: cursor on `helper` in
+/// `lib.helper` should find the definition in lib.nix and other usages.
+#[tokio::test]
+async fn references_from_select_field() {
+    let mut h = LspTestHarness::new(&[
+        (
+            "lib.nix",
+            indoc! {"
+                { helper = x: x + 1; }
+            "},
+        ),
+        (
+            "a.nix",
+            indoc! {"
+                let lib = import ./lib.nix;
+                in lib.helper 42
+                #      ^1
+            "},
+        ),
+    ])
+    .await;
+
+    h.open("lib.nix").await;
+    let _ = h.wait_for_diagnostics("lib.nix", TIMEOUT).await;
+    h.open("a.nix").await;
+    let _ = h.wait_for_diagnostics("a.nix", TIMEOUT).await;
+
+    let m = h.markers("a.nix");
+    let refs = h
+        .references("a.nix", m[&1].line, m[&1].character, true)
+        .await
+        .expect("references should return results");
+
+    // Should find at least: declaration in lib.nix + usage at cursor in a.nix
+    let lib_uri = tower_lsp::lsp_types::Url::from_file_path(h.workspace.path("lib.nix")).unwrap();
+    let has_lib = refs.iter().any(|loc| loc.uri == lib_uri);
+    assert!(has_lib, "expected the definition in lib.nix, got: {refs:?}");
+    assert!(
+        refs.len() >= 2,
+        "expected at least 2 references, got: {}",
+        refs.len()
+    );
+
+    h.shutdown().await;
+}
+
+/// Find references transitively through a pass-through barrel.
+/// other.nix imports barrel.nix which re-exports default.nix.
+/// Refs on `hello` in default.nix should find `res.hello` in other.nix.
+#[tokio::test]
+async fn cross_file_references_through_barrel() {
+    let mut h = LspTestHarness::new(&[
+        (
+            "default.nix",
+            indoc! {"
+                { hello = 42; }
+                # ^1
+            "},
+        ),
+        ("barrel.nix", "let res = import ./default.nix; in res"),
+        ("other.nix", "let res = import ./barrel.nix; in res.hello"),
+    ])
+    .await;
+
+    h.open("default.nix").await;
+    let _ = h.wait_for_diagnostics("default.nix", TIMEOUT).await;
+    h.open("barrel.nix").await;
+    let _ = h.wait_for_diagnostics("barrel.nix", TIMEOUT).await;
+    h.open("other.nix").await;
+    let _ = h.wait_for_diagnostics("other.nix", TIMEOUT).await;
+
+    let m = h.markers("default.nix");
+    let refs = h
+        .references("default.nix", m[&1].line, m[&1].character, true)
+        .await
+        .expect("references should return results");
+
+    let other_uri =
+        tower_lsp::lsp_types::Url::from_file_path(h.workspace.path("other.nix")).unwrap();
+    let has_other = refs.iter().any(|loc| loc.uri == other_uri);
+    assert!(
+        has_other,
+        "expected a reference in other.nix (through barrel), got: {refs:?}"
+    );
+
+    h.shutdown().await;
+}
