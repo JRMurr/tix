@@ -9,6 +9,7 @@ mod document_symbol;
 mod formatting;
 mod goto_def;
 mod hover;
+mod import_nav;
 mod inlay_hint;
 #[cfg(test)]
 mod pbt;

@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use lang_ast::nameres::ResolveResult;
-use lang_ast::{AstDb, AstPtr, Expr, Literal};
+use lang_ast::{AstPtr, Expr, Literal};
 use lang_check::aliases::DeclLocation;
 use rowan::ast::AstNode;
 use smol_str::SmolStr;
@@ -263,31 +263,8 @@ fn try_resolve_select_field(
         return None;
     };
 
-    // If the target path is a directory, Nix loads `default.nix` from it.
-    let resolved_target = if target_path.is_dir() {
-        target_path.join("default.nix")
-    } else {
-        target_path.clone()
-    };
-
-    // Load the target file and find the field definition.
-    let target_file = state.db.load_file(&resolved_target)?;
-    let (target_module, target_source_map) =
-        lang_ast::module_and_source_maps(&state.db, target_file);
-    let target_contents = target_file.contents(&state.db);
-    let target_root = rnix::Root::parse(target_contents).tree();
-
-    // Find a name in the target module matching the field name.
-    let (target_name_id, _) = target_module
-        .names()
-        .find(|(_, name)| name.text == field_name)?;
-
-    let target_ptr = target_source_map.nodes_for_name(target_name_id).next()?;
-    let target_node = target_ptr.to_node(target_root.syntax());
-    let target_line_index = crate::convert::LineIndex::new(target_contents);
-    let target_range = target_line_index.range(target_node.text_range());
-    let target_uri = Url::from_file_path(&resolved_target).ok()?;
-    Some(Location::new(target_uri, target_range))
+    // Resolve the field transitively through barrel re-exports.
+    crate::import_nav::resolve_field_transitively(state, target_path, field_name)
 }
 
 // ==============================================================================
@@ -566,6 +543,41 @@ mod tests {
         let expected_offset = find_offset(&pkg_contents, "name = a");
         let expected_pos = pkg_line_index.position(expected_offset);
         assert_eq!(loc.range.start, expected_pos);
+    }
+
+    // ------------------------------------------------------------------
+    // Select through barrel: lib.val where barrel has val = import ./real.nix
+    // ------------------------------------------------------------------
+    #[test]
+    fn select_through_barrel_reexport() {
+        let src = indoc! {"
+            let lib = import ./barrel.nix; in lib.val
+            #                                     ^1
+        "};
+        let markers = parse_markers(src);
+
+        let project = TempProject::new(&[
+            ("main.nix", src),
+            ("barrel.nix", "{ val = import ./real.nix; }"),
+            ("real.nix", "42"),
+        ]);
+        let main_path = project.path("main.nix");
+        let real_path = project.path("real.nix");
+
+        let mut state = AnalysisState::new(TypeAliasRegistry::default());
+        let (uri, contents) = analyze(&mut state, &main_path);
+        let analysis = state.get_file(&main_path).unwrap().to_snapshot();
+        let root = rnix::Root::parse(&contents).tree();
+
+        let pos = analysis.syntax.line_index.position(markers[&1]);
+        let loc = goto_definition(&state, &analysis, pos, &uri, &root);
+        let loc = loc.expect("should resolve through barrel reexport");
+
+        let real_uri = Url::from_file_path(&real_path).unwrap();
+        assert_eq!(
+            loc.uri, real_uri,
+            "should follow through barrel to real.nix"
+        );
     }
 
     // ------------------------------------------------------------------

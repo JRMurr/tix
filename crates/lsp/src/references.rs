@@ -5,12 +5,13 @@
 // Also provides `name_at_position`, a shared helper used by document highlight
 // and rename to resolve the NameId under the cursor.
 
+use dashmap::DashMap;
 use lang_ast::nameres::ResolveResult;
 use lang_ast::{AstPtr, Expr, NameId};
 use rowan::ast::AstNode;
 use tower_lsp::lsp_types::{Location, Position, Url};
 
-use crate::state::FileSnapshot;
+use crate::state::{AnalysisState, FileSnapshot};
 
 /// Find the NameId under the cursor. Works on both definition sites (where a
 /// name is bound) and reference sites (where a name is used).
@@ -104,6 +105,45 @@ pub fn find_references(
             locations.push(Location::new(uri.clone(), range));
         }
     }
+
+    locations
+}
+
+/// Find all references to a name, including cross-file references via imports.
+///
+/// Extends `find_references` with cross-file search: if the cursor is on a name
+/// defined in this file's top-level attrset, also finds `x.name` usages in files
+/// that import this file.
+pub fn find_references_cross_file(
+    state: &AnalysisState,
+    snapshots: &DashMap<std::path::PathBuf, FileSnapshot>,
+    analysis: &FileSnapshot,
+    pos: Position,
+    uri: &Url,
+    root: &rnix::Root,
+    include_declaration: bool,
+) -> Vec<Location> {
+    // Same-file references (existing logic).
+    let mut locations = find_references(analysis, pos, uri, root, include_declaration);
+
+    // Cross-file search requires the file path for coordinator lookup.
+    let file_path = match uri.to_file_path() {
+        Ok(p) => p,
+        Err(_) => return locations,
+    };
+
+    // Determine the name text for cross-file search.
+    let target_name_id = match name_at_position(analysis, pos, root) {
+        Some(n) => n,
+        None => return locations,
+    };
+    let name_text = &analysis.syntax.module[target_name_id].text;
+
+    // Find cross-file references: `x.name_text` in files that import this file.
+    let cross_file = crate::import_nav::find_cross_file_field_references(
+        state, snapshots, &file_path, name_text,
+    );
+    locations.extend(cross_file);
 
     locations
 }

@@ -87,3 +87,101 @@ async fn goto_def_cross_file() {
 
     h.shutdown().await;
 }
+
+/// Go-to-definition through a barrel re-export: `lib.val` where barrel.nix
+/// has `{ val = import ./real.nix; }` should follow through to real.nix.
+#[tokio::test]
+async fn goto_def_through_barrel_reexport() {
+    let mut h = LspTestHarness::new(&[
+        ("real.nix", "42"),
+        ("barrel.nix", "{ val = import ./real.nix; }"),
+        (
+            "main.nix",
+            indoc! {"
+                let lib = import ./barrel.nix;
+                in lib.val
+                #      ^1
+            "},
+        ),
+    ])
+    .await;
+
+    h.open("barrel.nix").await;
+    let _ = h.wait_for_diagnostics("barrel.nix", TIMEOUT).await;
+    h.open("main.nix").await;
+    let _ = h.wait_for_diagnostics("main.nix", TIMEOUT).await;
+
+    let m = h.markers("main.nix");
+    let result = h
+        .goto_def("main.nix", m[&1].line, m[&1].character)
+        .await
+        .expect("goto_def should return a result");
+
+    let target_uri = match &result {
+        GotoDefinitionResponse::Scalar(loc) => &loc.uri,
+        GotoDefinitionResponse::Array(locs) => &locs[0].uri,
+        GotoDefinitionResponse::Link(links) => &links[0].target_uri,
+    };
+
+    let real_uri = Url::from_file_path(h.workspace.path("real.nix")).unwrap();
+    assert_eq!(
+        target_uri, &real_uri,
+        "goto_def should follow through barrel to real.nix"
+    );
+
+    h.shutdown().await;
+}
+
+/// When the barrel binding is NOT an import, goto-def should stop at the
+/// barrel file's binding (existing behavior preserved).
+#[tokio::test]
+async fn goto_def_barrel_non_import_stops() {
+    let mut h = LspTestHarness::new(&[
+        (
+            "barrel.nix",
+            indoc! {"
+                { val = 42; }
+                # ^1
+            "},
+        ),
+        (
+            "main.nix",
+            indoc! {"
+                let lib = import ./barrel.nix;
+                in lib.val
+                #      ^2
+            "},
+        ),
+    ])
+    .await;
+
+    h.open("barrel.nix").await;
+    let _ = h.wait_for_diagnostics("barrel.nix", TIMEOUT).await;
+    h.open("main.nix").await;
+    let _ = h.wait_for_diagnostics("main.nix", TIMEOUT).await;
+
+    let m_main = h.markers("main.nix");
+    let m_barrel = h.markers("barrel.nix");
+    let result = h
+        .goto_def("main.nix", m_main[&2].line, m_main[&2].character)
+        .await
+        .expect("goto_def should return a result");
+
+    let (target_uri, target_pos) = match &result {
+        GotoDefinitionResponse::Scalar(loc) => (&loc.uri, loc.range.start),
+        GotoDefinitionResponse::Array(locs) => (&locs[0].uri, locs[0].range.start),
+        GotoDefinitionResponse::Link(links) => (&links[0].target_uri, links[0].target_range.start),
+    };
+
+    let barrel_uri = Url::from_file_path(h.workspace.path("barrel.nix")).unwrap();
+    assert_eq!(
+        target_uri, &barrel_uri,
+        "goto_def should land in barrel.nix for non-import binding"
+    );
+    assert_eq!(
+        target_pos, m_barrel[&1],
+        "goto_def should point to val definition in barrel.nix"
+    );
+
+    h.shutdown().await;
+}

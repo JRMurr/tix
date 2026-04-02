@@ -1339,15 +1339,27 @@ impl LanguageServer for TixLanguageServer {
         let uri = params.text_document_position.text_document.uri;
         let pos = params.text_document_position.position;
         let include_declaration = params.context.include_declaration;
-        self.with_snapshot(&uri, |snapshot, root| {
-            Some(crate::references::find_references(
-                snapshot,
-                pos,
-                &uri,
-                root,
-                include_declaration,
-            ))
-        })
+        // Cross-file references need &AnalysisState for coordinator access
+        // (reverse dependency lookup). Same lock pattern as goto_definition.
+        let path = match uri_to_path(&uri) {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+        let snap_ref = match self.snapshots.get(&path) {
+            Some(s) => s,
+            None => return Err(content_modified_error()),
+        };
+        let root = snap_ref.syntax.parsed.tree();
+        let state = self.state.lock();
+        Ok(Some(crate::references::find_references_cross_file(
+            &state,
+            &self.snapshots,
+            &snap_ref,
+            pos,
+            &uri,
+            &root,
+            include_declaration,
+        )))
     }
 
     async fn document_highlight(
