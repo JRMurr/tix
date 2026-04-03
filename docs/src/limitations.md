@@ -43,7 +43,7 @@ Narrowing works well for most common patterns (see [Type System](./type-system.m
 
 ## Cross-file inference
 
-- **Imports without stubs** are inferred as `any` (the top type). For precise cross-file types, use `[project] analyze` in `tix.toml` or generate stubs with `tix stubs infer`.
+- **Imports without stubs** are inferred as `any` (the top type). For precise cross-file types, use `[project] analyze` in `tix.toml` or write `.tix` stubs.
 - **Overloaded operators** (like `+` with polymorphic arguments) don't survive file boundaries. If a generic function using `+` is imported from another file, the overload may not resolve correctly.
 
 ## Recursive attrsets

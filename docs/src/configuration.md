@@ -174,17 +174,6 @@ nixpkgs = { expr = "(builtins.getFlake (toString ./.)).inputs.nixpkgs" }
 
 **Requirements:** The tix binary must be installed via Nix (running from `/nix/store/...`). In dev mode (cargo build), use `TIX_BUILTIN_STUBS` or `nix build .#stubs` instead.
 
-**Debugging:** To run the stub generation pipeline manually (with debug logging), use:
-
-```bash
-tix stubs run-pipeline                        # Uses tix.toml from current directory
-tix stubs run-pipeline --config /path/to/tix.toml
-tix stubs run-pipeline --no-cache             # Force fresh nix build (skip cache)
-tix stubs run-pipeline --log-level trace      # Maximum detail
-```
-
-This runs the same pipeline that `tix check` and the LSP use, but with verbose output to stderr. The generated stubs directory is printed to stdout.
-
 ### Generating tix.toml
 
 Run `tix init` to automatically generate a `tix.toml` for your project:

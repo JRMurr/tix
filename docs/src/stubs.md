@@ -79,22 +79,6 @@ When used in a `tix.toml` context, `@`-prefixed stub names refer to built-in con
 
 `@callpackage` doesn't require a separate stub file. It extracts the fields of the `Pkgs` type alias (created by `module pkgs { ... }` in the built-in stubs) and provides them as context args. This is the same mechanism that any `module foo { ... }` declaration uses: `@foo` resolves to `Foo`.
 
-## Generating stubs from Nix files
-
-`tix stubs infer` infers a Nix file's type and emits it as a `.tix` `val` declaration:
-
-```bash
-tix stubs infer lib/utils.nix
-# Output: val utils :: { concatPaths: [path] -> path, ... };
-
-tix stubs infer lib/utils.nix -o stubs/utils.tix
-# Writes the stub to a file
-```
-
-This is useful for creating stubs for project files that other files import. Combined with `[project] analyze` in `tix.toml`, you can choose between automatic ephemeral stubs (LSP-only) and persistent `.tix` stubs (works with CLI too).
-
-Imports without stubs are inferred as `any` (the top type). For more precise cross-file types, either add the imported file to `[project] analyze` or generate a stub with `tix stubs infer`.
-
 ## Generating stubs from NixOS/Home Manager
 
 Tix can generate stubs from NixOS options, Home Manager options, and nixpkgs package sets. This gives you typed access to `config`, `lib`, `pkgs`, and other parameters in your Nix files.
@@ -103,16 +87,16 @@ Tix can generate stubs from NixOS options, Home Manager options, and nixpkgs pac
 
 ```bash
 # NixOS options
-tix stubs infers nixos --flake . --hostname myhost -o nixos.tix
+tix stubs generate nixos --flake . --hostname myhost -o nixos.tix
 
 # Home Manager options
-tix stubs infers home-manager --flake . --username jr -o hm.tix
+tix stubs generate home-manager --flake . --username jr -o hm.tix
 ```
 
 ### From nixpkgs directly
 
 ```bash
-tix stubs infers nixos --nixpkgs /path/to/nixpkgs -o nixos.tix
+tix stubs generate nixos --nixpkgs /path/to/nixpkgs -o nixos.tix
 ```
 
 ### Options
@@ -133,7 +117,7 @@ tix stubs infers nixos --nixpkgs /path/to/nixpkgs -o nixos.tix
 For `callPackage`-style files, you can auto-generate `val` declarations for all of nixpkgs:
 
 ```bash
-tix stubs infers pkgs -o generated-pkgs.tix
+tix stubs generate pkgs -o generated-pkgs.tix
 ```
 
 This evaluates nixpkgs and classifies each attribute:
@@ -164,16 +148,16 @@ The output is a `module pkgs { ... }` block that merges with the hand-curated `m
 
 ```bash
 # Generate from specific nixpkgs
-tix stubs infers pkgs --nixpkgs /path/to/nixpkgs -o generated-pkgs.tix
+tix stubs generate pkgs --nixpkgs /path/to/nixpkgs -o generated-pkgs.tix
 
 # Recurse deeper into sub-package-sets
-tix stubs infers pkgs --max-depth 2 -o generated-pkgs.tix
+tix stubs generate pkgs --max-depth 2 -o generated-pkgs.tix
 
 # Flat output (no sub-package-set recursion, like pre-v0.x behavior)
-tix stubs infers pkgs --max-depth 0 -o generated-pkgs.tix
+tix stubs generate pkgs --max-depth 0 -o generated-pkgs.tix
 
 # From pre-computed JSON (for reproducibility or CI)
-tix stubs infers pkgs --from-json classified.json -o generated-pkgs.tix
+tix stubs generate pkgs --from-json classified.json -o generated-pkgs.tix
 ```
 
 Load the generated file via `--stubs` or the `stubs` config key:
