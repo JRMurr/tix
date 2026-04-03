@@ -723,31 +723,55 @@ fn generate_toml(
         }
     }
 
-    // Overlay / Library / Flake files — commented out as informational.
-    // Exclude patterns already claimed by a context section.
-    for (kind, label) in [
-        (NixFileKind::Overlay, "overlay"),
-        (NixFileKind::Library, "library"),
-        (NixFileKind::Flake, "flake"),
+    // Collect patterns for non-context files (overlay, library, flake, plain expression)
+    // to include in [project] includes for LSP background analysis.
+    let mut all_include_patterns: Vec<String> = used_patterns.iter().cloned().collect();
+    for kind in [
+        NixFileKind::Overlay,
+        NixFileKind::Library,
+        NixFileKind::Flake,
+        NixFileKind::PlainExpression,
     ] {
         if let Some(files) = by_kind.get(&kind) {
             let result = derive_glob_patterns(files, &all_files);
-            let unique: Vec<_> = result
-                .paths
-                .into_iter()
-                .filter(|p| !used_patterns.contains(p))
-                .collect();
-            if !unique.is_empty() {
-                sections.push(format!(
-                    "# {label} files (no context needed): {}\n",
-                    unique.join(", ")
-                ));
+            for p in result.paths {
+                if !all_include_patterns.contains(&p) {
+                    all_include_patterns.push(p);
+                }
             }
         }
     }
+    // Remove individual files already covered by a recursive glob from the same
+    // or parent directory (e.g. "test/basic.nix" is subsumed by "test/**/*.nix").
+    let recursive_globs: Vec<String> = all_include_patterns
+        .iter()
+        .filter_map(|p| p.strip_suffix("/**/*.nix").map(|s| s.to_string()))
+        .collect();
+    all_include_patterns.retain(|p| {
+        if p.ends_with("/**/*.nix") {
+            return true;
+        }
+        let parent = Path::new(p)
+            .parent()
+            .and_then(|pp| pp.to_str())
+            .unwrap_or("");
+        !recursive_globs
+            .iter()
+            .any(|g| parent == g.as_str() || parent.starts_with(&format!("{g}/")))
+    });
+    remove_subsumed(&mut all_include_patterns);
+    all_include_patterns.sort();
 
-    // Project section with exclude defaults.
-    sections.push("[project]\nexcludes = [\"result\", \".direnv\"]\n".to_string());
+    // Project section.
+    let mut project_section = "[project]\n".to_string();
+    if !all_include_patterns.is_empty() {
+        project_section.push_str(&format!(
+            "includes = [{}]\n",
+            format_string_array(&all_include_patterns),
+        ));
+    }
+    project_section.push_str("excludes = [\"result\", \".direnv\"]\n");
+    sections.push(project_section);
 
     sections.join("\n")
 }
@@ -1677,6 +1701,81 @@ mod tests {
         assert!(
             toml.contains("(<import pinned_nixpkgs>)"),
             "should contain expr example"
+        );
+    }
+
+    #[test]
+    fn generate_toml_project_includes_all_files() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let mut by_kind = HashMap::new();
+        // Context files (nixos).
+        by_kind.insert(
+            NixFileKind::NixosModule,
+            vec![
+                (
+                    PathBuf::from("modules/a.nix"),
+                    classification(NixFileKind::NixosModule),
+                ),
+                (
+                    PathBuf::from("modules/b.nix"),
+                    classification(NixFileKind::NixosModule),
+                ),
+            ],
+        );
+        // Non-context files (library).
+        by_kind.insert(
+            NixFileKind::Library,
+            vec![(
+                PathBuf::from("lib/utils.nix"),
+                classification(NixFileKind::Library),
+            )],
+        );
+
+        let toml = generate_toml(&by_kind, dir.path());
+
+        // [project] includes should cover both context and non-context files.
+        // Extract the [project] section specifically.
+        let project_section = toml
+            .split("[project]")
+            .nth(1)
+            .expect("should have [project] section");
+        assert!(
+            project_section.contains("includes = ["),
+            "should have project includes: {toml}"
+        );
+        assert!(
+            project_section.contains("modules/**/*.nix"),
+            "should include context patterns in project includes: {toml}"
+        );
+        assert!(
+            project_section.contains("lib/utils.nix"),
+            "should include library patterns in project includes: {toml}"
+        );
+    }
+
+    #[test]
+    fn generate_toml_project_includes_plain_expressions() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let mut by_kind = HashMap::new();
+        by_kind.insert(
+            NixFileKind::PlainExpression,
+            vec![(
+                PathBuf::from("test/foo.nix"),
+                classification(NixFileKind::PlainExpression),
+            )],
+        );
+
+        let toml = generate_toml(&by_kind, dir.path());
+
+        assert!(
+            toml.contains("includes = ["),
+            "should have project includes: {toml}"
+        );
+        assert!(
+            toml.contains("test/foo.nix"),
+            "should include plain expression files: {toml}"
         );
     }
 

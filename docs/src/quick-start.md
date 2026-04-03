@@ -26,7 +26,7 @@ From your project root:
 tix init
 ```
 
-This scans your `.nix` files, classifies them (NixOS module, Home Manager module, callPackage, etc.), and writes a `tix.toml`. Preview first with `tix init --dry-run`.
+This scans your `.nix` files, classifies them (NixOS module, Home Manager module, callPackage, etc.), and writes a `tix.toml` with context sections, stub generation config, and `[project] includes` patterns for LSP background analysis. Preview first with `tix init --dry-run`.
 
 ## 3. Stub generation
 
