@@ -128,7 +128,8 @@ fn nixpkgs_lib() {
         let rel = file.strip_prefix(&nixpkgs).unwrap_or(file);
 
         let mut cmd = Command::new(tix_cli());
-        cmd.arg(file)
+        cmd.arg("inspect")
+            .arg(file)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
 

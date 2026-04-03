@@ -256,15 +256,15 @@ pkgs.runCommand "tix-stubs"
       ./tix
 
     mkdir -p $out
-    ./tix gen-stubs nixos --from-json ${nixosJsonFile} --descriptions \
+    ./tix stubs generate nixos --from-json ${nixosJsonFile} --descriptions \
       --source-root ${nixpkgsSourceRoot} -o $out/nixos.tix
     ${lib.optionalString (hmJsonFile != null) ''
-      ./tix gen-stubs home-manager --from-json ${hmJsonFile} --descriptions \
+      ./tix stubs generate home-manager --from-json ${hmJsonFile} --descriptions \
         --source-root ${nixpkgsSourceRoot} \
         ${lib.optionalString (hmSourceRoot != null) "--source-root ${hmSourceRoot}"} \
         -o $out/home-manager.tix
     ''}
-    ./tix gen-stubs pkgs --from-json ${pkgsJsonFile} \
+    ./tix stubs generate pkgs --from-json ${pkgsJsonFile} \
       --source-root ${nixpkgsSourceRoot} -o $out/pkgs.tix
     cp ${lib-tix-path} $out/lib.tix
   ''

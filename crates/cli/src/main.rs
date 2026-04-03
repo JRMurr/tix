@@ -48,58 +48,25 @@ static ALLOC: dhat::Alloc = dhat::Alloc;
 // CLI Argument Parsing
 // =============================================================================
 //
-// The CLI supports two modes:
-//   1. Type-check mode (default): `tix file.nix [--stubs ...]`
-//   2. Subcommand mode: `tix gen-stubs nixos [...]`, `tix lsp`, etc.
-//
-// Backward compatibility: bare `tix file.nix` works because `file_path`
-// is parsed when no subcommand matches.
+// A subcommand is always required. The main user-facing commands are:
+//   - `tix check`   — type-check a project via tix.toml
+//   - `tix inspect`  — debug a single file (show all inferred bindings)
+//   - `tix init`    — scaffold a tix.toml
+//   - `tix stubs`   — generate, verify, and inspect .tix stub files
+//   - `tix lsp`     — start the language server
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
     #[command(subcommand)]
-    command: Option<Command>,
-
-    /// Path to the Nix file to type-check
-    file_path: Option<PathBuf>,
-
-    /// Paths to .tix stub files or directories (recursive)
-    #[arg(long = "stubs", value_name = "PATH")]
-    stub_paths: Vec<PathBuf>,
-
-    /// Do not load the built-in nixpkgs stubs
-    #[arg(long)]
-    no_default_stubs: bool,
-
-    /// Path to tix.toml config file (auto-discovered if not specified)
-    #[arg(long = "config", value_name = "PATH")]
-    config_path: Option<PathBuf>,
-
-    /// Print per-phase timing and memory usage
-    #[arg(long)]
-    timing: bool,
-
-    /// Show complete types without truncation
-    #[arg(long)]
-    full_types: bool,
-
-    /// Output format: human (default) or json
-    #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
-    format: OutputFormat,
+    command: Command,
 }
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Generate .tix stub files from external sources
-    GenStubs {
-        #[command(subcommand)]
-        source: GenStubsSource,
-    },
-
-    /// Infer a Nix file's type and emit it as a .tix val declaration
-    GenStub {
-        /// Path to the Nix file to infer
+    /// Inspect a single Nix file: show all inferred bindings and diagnostics
+    Inspect {
+        /// Path to the Nix file to type-check
         file_path: PathBuf,
 
         /// Paths to .tix stub files or directories (recursive)
@@ -110,9 +77,21 @@ enum Command {
         #[arg(long)]
         no_default_stubs: bool,
 
-        /// Output file path (default: stdout)
-        #[arg(short, long)]
-        output: Option<PathBuf>,
+        /// Path to tix.toml config file (auto-discovered if not specified)
+        #[arg(long = "config", value_name = "PATH")]
+        config_path: Option<PathBuf>,
+
+        /// Print per-phase timing and memory usage
+        #[arg(long)]
+        timing: bool,
+
+        /// Show complete types without truncation
+        #[arg(long)]
+        full_types: bool,
+
+        /// Output format: human (default) or json
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        format: OutputFormat,
     },
 
     /// Scaffold a tix.toml by scanning and classifying project files
@@ -153,12 +132,40 @@ enum Command {
         timing: bool,
 
         /// Output format: human (default) or json
-        #[arg(long, value_enum)]
-        format: Option<OutputFormat>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        format: OutputFormat,
+    },
+
+    /// Manage .tix stub files: generate, verify, and inspect
+    Stubs {
+        #[command(subcommand)]
+        command: StubsCommand,
+    },
+
+    /// Start the Language Server (LSP) on stdin/stdout
+    Lsp {
+        /// RSS memory limit in MiB (default: 80% of system RAM).
+        /// Set to 0 to disable. Overrides TIX_MEM_LIMIT env var.
+        #[arg(long, value_name = "MIB")]
+        mem_limit: Option<u64>,
+
+        /// Log level for tix crates (default: info).
+        /// Overridden by the RUST_LOG env var if set.
+        #[arg(long, value_name = "LEVEL", default_value = "info")]
+        log_level: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum StubsCommand {
+    /// Generate .tix stub files from external sources
+    Generate {
+        #[command(subcommand)]
+        source: GenStubsSource,
     },
 
     /// Verify that a .tix stub matches the inferred type of a Nix file
-    VerifyStubs {
+    Verify {
         /// Path to the Nix file to verify
         file_path: PathBuf,
 
@@ -175,13 +182,33 @@ enum Command {
         no_default_stubs: bool,
     },
 
+    /// Infer a Nix file's type and emit it as a .tix val declaration
+    #[command(hide = true)]
+    Infer {
+        /// Path to the Nix file to infer
+        file_path: PathBuf,
+
+        /// Paths to .tix stub files or directories (recursive)
+        #[arg(long = "stubs", value_name = "PATH")]
+        stub_paths: Vec<PathBuf>,
+
+        /// Do not load the built-in nixpkgs stubs
+        #[arg(long)]
+        no_default_stubs: bool,
+
+        /// Output file path (default: stdout)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+
     /// Run the runtime stub generation pipeline from tix.toml config
     ///
     /// Resolves [stubs.generate] from tix.toml, evaluates Nix source
     /// expressions, and generates .tix stubs via nix build. Useful for
     /// debugging the same pipeline that `tix check` and the LSP run
     /// automatically.
-    GenerateStubs {
+    #[command(hide = true)]
+    RunPipeline {
         /// Path to tix.toml config file (auto-discovered if not specified)
         #[arg(long = "config", value_name = "PATH")]
         config_path: Option<PathBuf>,
@@ -193,19 +220,6 @@ enum Command {
         /// Skip the file cache and force a fresh nix build
         #[arg(long)]
         no_cache: bool,
-    },
-
-    /// Start the Language Server (LSP) on stdin/stdout
-    Lsp {
-        /// RSS memory limit in MiB (default: 80% of system RAM).
-        /// Set to 0 to disable. Overrides TIX_MEM_LIMIT env var.
-        #[arg(long, value_name = "MIB")]
-        mem_limit: Option<u64>,
-
-        /// Log level for tix crates (default: info).
-        /// Overridden by the RUST_LOG env var if set.
-        #[arg(long, value_name = "LEVEL", default_value = "info")]
-        log_level: String,
     },
 }
 
@@ -314,45 +328,80 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let args = Cli::parse();
 
-    // The LSP and generate-stubs commands set up their own loggers with
+    // The LSP and stubs run-pipeline commands set up their own loggers with
     // custom filters, so skip the default tracing init for them.
-    if !matches!(
-        args.command,
-        Some(Command::Lsp { .. }) | Some(Command::GenerateStubs { .. })
-    ) {
-        timing::init_tracing(args.timing);
+    let show_timing = matches!(
+        &args.command,
+        Command::Inspect { timing: true, .. } | Command::Check { timing: true, .. }
+    );
+    let skip_tracing = matches!(
+        &args.command,
+        Command::Lsp { .. }
+            | Command::Stubs {
+                command: StubsCommand::RunPipeline { .. }
+            }
+    );
+    if !skip_tracing {
+        timing::init_tracing(show_timing);
     }
 
     match args.command {
-        Some(Command::Init { path, yes, dry_run }) => init::run_init(path, yes, dry_run),
-        Some(Command::Check {
+        Command::Inspect {
+            file_path,
+            stub_paths,
+            no_default_stubs,
+            config_path,
+            timing,
+            full_types,
+            format,
+        } => run_check(
+            file_path,
+            stub_paths,
+            no_default_stubs,
+            config_path,
+            timing,
+            full_types,
+            format,
+        ),
+        Command::Init { path, yes, dry_run } => init::run_init(path, yes, dry_run),
+        Command::Check {
             config_path,
             no_default_stubs,
             verbose,
             jobs,
             timing,
             format,
-        }) => check::run_check_project(
-            config_path,
-            no_default_stubs,
-            verbose,
-            jobs,
-            timing,
-            format.unwrap_or(args.format.clone()),
-        ),
-        Some(Command::GenStubs { source }) => run_gen_stubs(source),
-        Some(Command::GenStub {
+        } => check::run_check_project(config_path, no_default_stubs, verbose, jobs, timing, format),
+        Command::Stubs { command } => run_stubs_command(command),
+        Command::Lsp {
+            mem_limit,
+            log_level,
+        } => {
+            tix_lsp::run_lsp(mem_limit, Some(log_level));
+            Ok(())
+        }
+    }
+}
+
+// =============================================================================
+// stubs: dispatch stubs subcommands
+// =============================================================================
+
+fn run_stubs_command(command: StubsCommand) -> Result<(), Box<dyn Error>> {
+    match command {
+        StubsCommand::Generate { source } => run_gen_stubs(source),
+        StubsCommand::Infer {
             file_path,
             stub_paths,
             no_default_stubs,
             output,
-        }) => run_gen_stub(file_path, stub_paths, no_default_stubs, output),
-        Some(Command::VerifyStubs {
+        } => run_gen_stub(file_path, stub_paths, no_default_stubs, output),
+        StubsCommand::Verify {
             file_path,
             stub_path,
             extra_stubs,
             no_default_stubs,
-        }) => {
+        } => {
             let mismatches = run_verify_stubs(
                 file_path.clone(),
                 stub_path.clone(),
@@ -385,37 +434,16 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
             Ok(())
         }
-        Some(Command::GenerateStubs {
+        StubsCommand::RunPipeline {
             config_path,
             log_level,
             no_cache,
-        }) => run_generate_stubs(config_path, log_level, no_cache),
-        Some(Command::Lsp {
-            mem_limit,
-            log_level,
-        }) => {
-            tix_lsp::run_lsp(mem_limit, Some(log_level));
-            Ok(())
-        }
-        None => {
-            let file_path = args
-                .file_path
-                .ok_or("No file path provided. Usage: tix <file.nix> or tix gen-stubs <source>")?;
-            run_check(
-                file_path,
-                args.stub_paths,
-                args.no_default_stubs,
-                args.config_path,
-                args.timing,
-                args.full_types,
-                args.format,
-            )
-        }
+        } => run_generate_stubs(config_path, log_level, no_cache),
     }
 }
 
 // =============================================================================
-// generate-stubs: run the runtime stub generation pipeline from tix.toml
+// stubs run-pipeline: run the runtime stub generation pipeline from tix.toml
 // =============================================================================
 
 fn run_generate_stubs(
@@ -490,7 +518,7 @@ fn run_generate_stubs(
 }
 
 // =============================================================================
-// gen-stubs dispatch
+// stubs generate: dispatch gen-stubs subcommands
 // =============================================================================
 
 fn run_gen_stubs(source: GenStubsSource) -> Result<(), Box<dyn Error>> {
@@ -527,7 +555,7 @@ fn run_gen_stubs(source: GenStubsSource) -> Result<(), Box<dyn Error>> {
 }
 
 // =============================================================================
-// gen-stub: infer a file and emit its type as a .tix declaration
+// stubs infer: infer a file and emit its type as a .tix declaration
 // =============================================================================
 
 fn run_gen_stub(

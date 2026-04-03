@@ -177,10 +177,10 @@ nixpkgs = { expr = "(builtins.getFlake (toString ./.)).inputs.nixpkgs" }
 **Debugging:** To run the stub generation pipeline manually (with debug logging), use:
 
 ```bash
-tix generate-stubs                        # Uses tix.toml from current directory
-tix generate-stubs --config /path/to/tix.toml
-tix generate-stubs --no-cache             # Force fresh nix build (skip cache)
-tix generate-stubs --log-level trace      # Maximum detail
+tix stubs run-pipeline                        # Uses tix.toml from current directory
+tix stubs run-pipeline --config /path/to/tix.toml
+tix stubs run-pipeline --no-cache             # Force fresh nix build (skip cache)
+tix stubs run-pipeline --log-level trace      # Maximum detail
 ```
 
 This runs the same pipeline that `tix check` and the LSP use, but with verbose output to stderr. The generated stubs directory is printed to stdout.

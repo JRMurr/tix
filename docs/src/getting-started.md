@@ -7,7 +7,7 @@
 The fastest way to try tix — no installation required:
 
 ```bash
-nix run github:JRMurr/tix -- my-file.nix
+nix run github:JRMurr/tix -- inspect my-file.nix
 ```
 
 ### Nix Flake (recommended)
@@ -111,7 +111,7 @@ nix build .#
 ### Type-check a file
 
 ```bash
-tix my-file.nix
+tix inspect my-file.nix
 ```
 
 This prints the inferred type of each top-level binding and the root expression.
@@ -119,7 +119,7 @@ This prints the inferred type of each top-level binding and the root expression.
 ### With stubs
 
 ```bash
-tix my-file.nix --stubs ./my-stubs/
+tix inspect my-file.nix --stubs ./my-stubs/
 ```
 
 `--stubs` accepts file paths or directories (recursively finds `.tix` files). Can be passed multiple times. The built-in nixpkgs stubs are loaded by default — use `--no-default-stubs` to disable.
@@ -161,7 +161,7 @@ Exit code is 1 if any type errors are found, 0 otherwise (config warnings don't 
 For CI pipelines and tool integration, use `--format json` to get structured JSON output on stdout:
 
 ```bash
-tix my-file.nix --format json
+tix inspect my-file.nix --format json
 tix check --format json
 ```
 
@@ -204,7 +204,7 @@ The `bindings` and `root_type` fields are only present in single-file mode. The 
 By default, large types are truncated for readability (fields, union members, nesting depth, and total characters are bounded). To see complete types without truncation:
 
 ```bash
-tix my-file.nix --full-types
+tix inspect my-file.nix --full-types
 ```
 
 ### Timing and profiling
@@ -212,7 +212,7 @@ tix my-file.nix --full-types
 Show per-phase timing and RSS memory usage:
 
 ```bash
-tix my-file.nix --timing
+tix inspect my-file.nix --timing
 tix check --timing
 ```
 
@@ -222,7 +222,7 @@ For detailed heap profiling, build with the `dhat-heap` feature:
 
 ```bash
 cargo build --release --features dhat-heap
-tix my-file.nix    # produces dhat-heap.json
+tix inspect my-file.nix    # produces dhat-heap.json
 ```
 
 View the result at [dhat-viewer](https://nnethercote.github.io/dh_view/dh_view.html).
@@ -233,11 +233,11 @@ Generate typed stubs from your NixOS or Home Manager configuration:
 
 ```bash
 # From a flake
-tix gen-stubs nixos --flake . --hostname myhost -o nixos.tix
-tix gen-stubs home-manager --flake . --username jr -o hm.tix
+tix stubs generate nixos --flake . --hostname myhost -o nixos.tix
+tix stubs generate home-manager --flake . --username jr -o hm.tix
 
 # From nixpkgs directly
-tix gen-stubs nixos --nixpkgs /path/to/nixpkgs -o nixos.tix
+tix stubs generate nixos --nixpkgs /path/to/nixpkgs -o nixos.tix
 ```
 
 See the [Stubs](./stubs.md) chapter for details.

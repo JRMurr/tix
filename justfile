@@ -35,33 +35,33 @@ nixpkgs_src := `nix eval --raw nixpkgs#path 2>/dev/null || echo ""`
 
 # Generate NixOS option stubs (with doc comments)
 gen-stubs-nixos *args="": _ensure-stubs-dir
-    cargo run --bin tix -- gen-stubs nixos --descriptions \
+    cargo run --bin tix -- stubs generate nixos --descriptions \
         --source-root nixpkgs={{ nixpkgs_src }} \
         -o {{ stubs_dir }}/nixos.tix {{ args }}
 
 # Generate Home Manager option stubs (with doc comments)
 gen-stubs-home-manager *args="": _ensure-stubs-dir
-    cargo run --bin tix -- gen-stubs home-manager --descriptions \
+    cargo run --bin tix -- stubs generate home-manager --descriptions \
         --source-root nixpkgs={{ nixpkgs_src }} \
         -o {{ stubs_dir }}/home-manager.tix {{ args }}
 
 # Generate NixOS stubs from a flake's nixosConfigurations
 gen-stubs-nixos-flake flake hostname="": _ensure-stubs-dir
-    cargo run --bin tix -- gen-stubs nixos --descriptions --flake {{ flake }} \
+    cargo run --bin tix -- stubs generate nixos --descriptions --flake {{ flake }} \
         {{ if hostname != "" { "--hostname " + hostname } else { "" } }} \
         --source-root nixpkgs={{ nixpkgs_src }} \
         -o {{ stubs_dir }}/nixos.tix
 
 # Generate Home Manager stubs from a flake's homeConfigurations
 gen-stubs-hm-flake flake username="": _ensure-stubs-dir
-    cargo run --bin tix -- gen-stubs home-manager --descriptions --flake {{ flake }} \
+    cargo run --bin tix -- stubs generate home-manager --descriptions --flake {{ flake }} \
         {{ if username != "" { "--username " + username } else { "" } }} \
         --source-root nixpkgs={{ nixpkgs_src }} \
         -o {{ stubs_dir }}/home-manager.tix
 
 # Generate nixpkgs top-level package stubs (for @callpackage context)
 gen-stubs-pkgs *args="": _ensure-stubs-dir
-    cargo run --bin tix -- gen-stubs pkgs \
+    cargo run --bin tix -- stubs generate pkgs \
         --source-root nixpkgs={{ nixpkgs_src }} \
         -o {{ stubs_dir }}/pkgs.tix {{ args }}
 

@@ -16,7 +16,7 @@ TLDR: try to be typescript for nix
   <summary>nix run (try without installing)</summary>
 
 ```bash
-nix run github:JRMurr/tix -- my-file.nix
+nix run github:JRMurr/tix -- inspect my-file.nix
 ```
 
 </details>
@@ -92,7 +92,7 @@ nix-env -f https://github.com/JRMurr/tix/archive/main.tar.gz -iA packages.x86_64
 ### Type-check a file
 
 ```bash
-tix my-file.nix
+tix inspect my-file.nix
 ```
 
 ### Use the LSP
@@ -106,9 +106,9 @@ Works with any editor that supports LSP. Provides hover types, completions, go-t
 ### CLI flags
 
 ```
-tix <file.nix> [--stubs path/to/stubs/] [--no-default-stubs] [--config tix.toml]
-tix gen-stubs nixos [--flake .] [--hostname myhost] [-o nixos.tix]
-tix gen-stubs home-manager [--flake .] [--username jr] [-o hm.tix]
+tix inspect <file.nix> [--stubs path/to/stubs/] [--no-default-stubs] [--config tix.toml]
+tix stubs generate nixos [--flake .] [--hostname myhost] [-o nixos.tix]
+tix stubs generate home-manager [--flake .] [--username jr] [-o hm.tix]
 ```
 
 ## What does it do?

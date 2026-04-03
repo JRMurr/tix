@@ -162,7 +162,7 @@ in
         GNU_TIME="$(command -v time)"
         CMD+=("$GNU_TIME" -v)
       fi
-      CMD+=("$TIX_CLI" "$FILE" "''${TIX_ARGS[@]}")
+      CMD+=("$TIX_CLI" inspect "$FILE" "''${TIX_ARGS[@]}")
 
       if [[ -n "$LOG_FILE" ]]; then
         echo "Log file: $LOG_FILE" >&2
@@ -321,8 +321,7 @@ in
       cat "$WORK_DIR/tix.toml" >&2
       echo "---" >&2
 
-      # Build tix check args. --format is a top-level flag, must come before subcommand.
-      CHECK_ARGS=(--format "$FORMAT" check --config "$WORK_DIR/tix.toml")
+      CHECK_ARGS=(check --config "$WORK_DIR/tix.toml" --format "$FORMAT")
       if [[ -n "$JOBS" ]]; then
         CHECK_ARGS+=(-j "$JOBS")
       fi

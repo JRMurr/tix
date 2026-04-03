@@ -77,6 +77,7 @@ fn builtin_stubs_env_override_nixos() {
     .unwrap();
 
     let output = Command::new(tix_cli())
+        .arg("inspect")
         .arg(root.join("test/nixos_module.nix"))
         .arg("--config")
         .arg(root.join("test/tix.toml"))
@@ -134,6 +135,7 @@ fn builtin_stubs_env_override_home_manager() {
     .unwrap();
 
     let output = Command::new(tix_cli())
+        .arg("inspect")
         .arg(root.join("test/nixos_fixture/home/shell.nix"))
         .arg("--config")
         .arg(root.join("test/nixos_fixture/tix.toml"))
@@ -167,6 +169,7 @@ fn builtin_stubs_fallback_without_env() {
     let root = repo_root();
 
     let output = Command::new(tix_cli())
+        .arg("inspect")
         .arg(root.join("test/nixos_module.nix"))
         .arg("--config")
         .arg(root.join("test/tix.toml"))
@@ -254,6 +257,7 @@ fn module_merge_builtins_and_local_stubs() {
     .unwrap();
 
     let output = Command::new(tix_cli())
+        .arg("inspect")
         .arg(&nix_file)
         .arg("--stubs")
         .arg(&custom_stub)
@@ -297,6 +301,7 @@ fn wrong_stubs_cause_type_error() {
     .unwrap();
 
     let output = Command::new(tix_cli())
+        .arg("inspect")
         .arg(root.join("test/nixos_module.nix"))
         .arg("--config")
         .arg(root.join("test/tix.toml"))
