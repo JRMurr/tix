@@ -185,7 +185,7 @@ tix init --yes        # Overwrite existing tix.toml
 tix init /path/to/project  # Specify project directory
 ```
 
-The command scans all `.nix` files, classifies each by its structural signals (parameter names, body references, attrset keys), and generates context sections mapping file paths to the appropriate stubs.
+The command scans all `.nix` files, classifies each by its structural signals (parameter names, body references, attrset keys), and generates context sections mapping file paths to the appropriate stubs. For flake projects, it also auto-detects nixpkgs and home-manager inputs from `flake.lock` and generates the [`[stubs.generate]`](#runtime-stub-generation) section.
 
 ### No-module escape hatch
 

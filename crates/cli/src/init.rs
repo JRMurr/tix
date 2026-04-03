@@ -641,7 +641,7 @@ fn compress_excludes(
 /// Generate the tix.toml content from classified files.
 fn generate_toml(
     by_kind: &HashMap<NixFileKind, Vec<(PathBuf, Classification)>>,
-    _project_root: &Path,
+    project_root: &Path,
 ) -> String {
     // Flatten all files for cross-kind conflict detection in derive_glob_patterns.
     let all_files: Vec<(PathBuf, Classification)> = by_kind
@@ -656,6 +656,9 @@ fn generate_toml(
 
     // Track patterns used by context sections so we can omit them from comments.
     let mut used_patterns: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // Track which @-stubs were referenced (for conditional home-manager in stubs.generate).
+    let mut has_hm_context = false;
 
     // Context sections (nixos, home-manager, callpackage).
     let context_kinds = [
@@ -672,6 +675,9 @@ fn generate_toml(
             let result = derive_glob_patterns(files, &all_files);
             if !result.paths.is_empty() {
                 used_patterns.extend(result.paths.iter().cloned());
+                if *stub == "@home-manager" {
+                    has_hm_context = true;
+                }
                 let mut section = format!(
                     "[context.{name}]\nincludes = [{}]\n",
                     format_string_array(&result.paths),
@@ -685,6 +691,35 @@ fn generate_toml(
                 section.push_str(&format!("stubs = [\"{stub}\"]\n"));
                 sections.push(section);
             }
+        }
+    }
+
+    // Stubs generation section — auto-detect from flake.lock.
+    match detect_flake_inputs(project_root) {
+        Some(flake) => {
+            let mut section = format!(
+                "[stubs.generate]\nnixpkgs = {{ expr = \"(builtins.getFlake (toString ./.)).inputs.{}\" }}\n",
+                flake.nixpkgs_input,
+            );
+            if has_hm_context {
+                if let Some(hm_input) = &flake.home_manager_input {
+                    section.push_str(&format!(
+                        "home-manager = {{ expr = \"(builtins.getFlake (toString ./.)).inputs.{}\" }}\n",
+                        hm_input,
+                    ));
+                }
+            }
+            sections.push(section);
+        }
+        None => {
+            sections.push(
+                "# Tip: add [stubs.generate] to enable richer type information from nixpkgs.\n\
+                 # See: https://jrmurr.github.io/tix/configuration.html#runtime-stub-generation\n\
+                 # [stubs.generate]\n\
+                 # nixpkgs = \"/path/to/nixpkgs\"\n\
+                 # nixpkgs = { expr = \"(<import pinned_nixpkgs>).path\" }\n"
+                    .to_string(),
+            );
         }
     }
 
@@ -715,6 +750,62 @@ fn generate_toml(
     sections.push("[project]\nexcludes = [\"result\", \".direnv\"]\n".to_string());
 
     sections.join("\n")
+}
+
+// ==============================================================================
+// Flake input detection
+// ==============================================================================
+
+/// Detected flake inputs relevant for `[stubs.generate]`.
+struct FlakeInputs {
+    /// The input name for nixpkgs (e.g. "nixpkgs", "nixpkgs-unstable").
+    nixpkgs_input: String,
+    /// The input name for home-manager, if present.
+    home_manager_input: Option<String>,
+}
+
+/// Parse `flake.lock` in the project root and detect nixpkgs/home-manager inputs.
+///
+/// Returns `None` if there is no `flake.lock` or it doesn't contain a nixpkgs input.
+fn detect_flake_inputs(project_root: &Path) -> Option<FlakeInputs> {
+    let lock_path = project_root.join("flake.lock");
+    let content = std::fs::read_to_string(lock_path).ok()?;
+    let lock: serde_json::Value = serde_json::from_str(&content).ok()?;
+
+    let nodes = lock.get("nodes")?.as_object()?;
+    let root_node = nodes.get("root")?;
+    let root_inputs = root_node.get("inputs")?.as_object()?;
+
+    let mut nixpkgs_input = None;
+    let mut home_manager_input = None;
+
+    for (input_name, node_key) in root_inputs {
+        // The value in root.inputs can be a string (node key) or an array
+        // (for inputs that follow another input). We only care about strings.
+        let node_key_str = node_key.as_str()?;
+        let node = nodes.get(node_key_str)?;
+        let original = node.get("original")?.as_object()?;
+
+        let repo = original.get("repo").and_then(|v| v.as_str());
+
+        match repo {
+            Some("nixpkgs") if nixpkgs_input.is_none() => {
+                nixpkgs_input = Some(input_name.clone());
+            }
+            Some("home-manager") => {
+                let owner = original.get("owner").and_then(|v| v.as_str());
+                if owner == Some("nix-community") {
+                    home_manager_input = Some(input_name.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Some(FlakeInputs {
+        nixpkgs_input: nixpkgs_input?,
+        home_manager_input,
+    })
 }
 
 /// Format a list of strings as a TOML inline array.
@@ -1424,6 +1515,169 @@ mod tests {
             "should keep individual files when merge is not concise"
         );
         assert!(result.excludes.is_empty());
+    }
+
+    // ======================================================================
+    // Flake input detection tests
+    // ======================================================================
+
+    /// Helper to write a minimal flake.lock with the given root inputs.
+    /// Each input is (input_name, node_key, owner, repo).
+    fn write_flake_lock(root: &Path, inputs: &[(&str, &str, &str, &str)]) {
+        let mut nodes = serde_json::Map::new();
+
+        let mut root_inputs = serde_json::Map::new();
+        for (input_name, node_key, owner, repo) in inputs {
+            root_inputs.insert(
+                input_name.to_string(),
+                serde_json::Value::String(node_key.to_string()),
+            );
+            nodes.insert(
+                node_key.to_string(),
+                serde_json::json!({
+                    "locked": { "type": "github" },
+                    "original": { "owner": owner, "repo": repo, "type": "github" }
+                }),
+            );
+        }
+
+        nodes.insert(
+            "root".to_string(),
+            serde_json::json!({ "inputs": root_inputs }),
+        );
+
+        let lock = serde_json::json!({ "nodes": nodes, "root": "root", "version": 7 });
+        std::fs::write(root.join("flake.lock"), lock.to_string()).unwrap();
+    }
+
+    #[test]
+    fn detect_flake_inputs_nixpkgs_only() {
+        let dir = tempfile::tempdir().unwrap();
+        write_flake_lock(dir.path(), &[("nixpkgs", "nixpkgs", "nixos", "nixpkgs")]);
+
+        let result = detect_flake_inputs(dir.path()).expect("should detect nixpkgs");
+        assert_eq!(result.nixpkgs_input, "nixpkgs");
+        assert!(result.home_manager_input.is_none());
+    }
+
+    #[test]
+    fn detect_flake_inputs_with_home_manager() {
+        let dir = tempfile::tempdir().unwrap();
+        write_flake_lock(
+            dir.path(),
+            &[
+                ("nixpkgs", "nixpkgs", "nixos", "nixpkgs"),
+                (
+                    "home-manager",
+                    "home-manager",
+                    "nix-community",
+                    "home-manager",
+                ),
+            ],
+        );
+
+        let result = detect_flake_inputs(dir.path()).expect("should detect both");
+        assert_eq!(result.nixpkgs_input, "nixpkgs");
+        assert_eq!(result.home_manager_input.as_deref(), Some("home-manager"));
+    }
+
+    #[test]
+    fn detect_flake_inputs_custom_nixpkgs_name() {
+        let dir = tempfile::tempdir().unwrap();
+        write_flake_lock(
+            dir.path(),
+            &[("nixpkgs-unstable", "nixpkgs-unstable", "nixos", "nixpkgs")],
+        );
+
+        let result = detect_flake_inputs(dir.path()).expect("should detect renamed nixpkgs");
+        assert_eq!(result.nixpkgs_input, "nixpkgs-unstable");
+    }
+
+    #[test]
+    fn detect_flake_inputs_no_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(detect_flake_inputs(dir.path()).is_none());
+    }
+
+    #[test]
+    fn generate_toml_emits_stubs_generate_for_flake() {
+        let dir = tempfile::tempdir().unwrap();
+        write_flake_lock(dir.path(), &[("nixpkgs", "nixpkgs", "nixos", "nixpkgs")]);
+
+        // Even with no context kinds, nixpkgs stubs.generate should be emitted.
+        let by_kind = HashMap::new();
+        let toml = generate_toml(&by_kind, dir.path());
+
+        assert!(
+            toml.contains("[stubs.generate]"),
+            "should contain stubs.generate section"
+        );
+        assert!(
+            toml.contains("(builtins.getFlake (toString ./.)).inputs.nixpkgs"),
+            "should reference nixpkgs input"
+        );
+    }
+
+    #[test]
+    fn generate_toml_includes_hm_only_when_context_and_input() {
+        let dir = tempfile::tempdir().unwrap();
+        write_flake_lock(
+            dir.path(),
+            &[
+                ("nixpkgs", "nixpkgs", "nixos", "nixpkgs"),
+                (
+                    "home-manager",
+                    "home-manager",
+                    "nix-community",
+                    "home-manager",
+                ),
+            ],
+        );
+
+        // With home-manager context.
+        let mut by_kind = HashMap::new();
+        by_kind.insert(
+            NixFileKind::HomeManagerModule,
+            vec![(
+                PathBuf::from("home/foo.nix"),
+                classification(NixFileKind::HomeManagerModule),
+            )],
+        );
+        let toml = generate_toml(&by_kind, dir.path());
+        assert!(
+            toml.contains("home-manager"),
+            "should include home-manager in stubs.generate when context exists"
+        );
+
+        // Without home-manager context — hm line should be absent even though input exists.
+        let by_kind_no_hm = HashMap::new();
+        let toml_no_hm = generate_toml(&by_kind_no_hm, dir.path());
+        assert!(
+            !toml_no_hm.contains("home-manager"),
+            "should not include home-manager without HM context"
+        );
+    }
+
+    #[test]
+    fn generate_toml_no_flake_emits_comment() {
+        let dir = tempfile::tempdir().unwrap();
+        // No flake.lock.
+
+        let by_kind = HashMap::new();
+        let toml = generate_toml(&by_kind, dir.path());
+
+        assert!(
+            toml.contains("# [stubs.generate]"),
+            "should contain commented-out stubs.generate hint"
+        );
+        assert!(
+            toml.contains("# nixpkgs = \"/path/to/nixpkgs\""),
+            "should contain path example"
+        );
+        assert!(
+            toml.contains("(<import pinned_nixpkgs>)"),
+            "should contain expr example"
+        );
     }
 
     fn dummy_classification() -> Classification {
