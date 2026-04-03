@@ -1,6 +1,7 @@
 # Summary
 
 - [Introduction](./introduction.md)
+- [Quick Start](./quick-start.md)
 - [Getting Started](./getting-started.md)
 - [Type System](./type-system.md)
 - [Type Annotations](./annotations.md)
