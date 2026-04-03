@@ -134,10 +134,10 @@
                   chmod -R u+w test_files
 
                   # Test @nixos context: test/tix.toml maps nixos_module.nix to @nixos
-                  tix test_files/nixos_module.nix --config test_files/tix.toml
+                  tix inspect test_files/nixos_module.nix --config test_files/tix.toml
 
                   # Test @home-manager context: nixos_fixture/tix.toml maps home/*.nix to @home-manager
-                  tix test_files/nixos_fixture/home/shell.nix \
+                  tix inspect test_files/nixos_fixture/home/shell.nix \
                     --config test_files/nixos_fixture/tix.toml
 
                   touch $out
