@@ -38,8 +38,14 @@
           */
           pkgs = import nixpkgs { inherit system overlays; };
           rustAttrs = import ./nix/rust.nix { inherit pkgs crane; };
-          tix-lsp-dev = import ./nix/lsp-local.nix { inherit pkgs; name = "tix-lsp-dev"; };
-          tix-lsp-release = import ./nix/lsp-local.nix { inherit pkgs; profile = "release"; };
+          tix-lsp-dev = import ./nix/lsp-local.nix {
+            inherit pkgs;
+            name = "tix-lsp-dev";
+          };
+          tix-lsp-release = import ./nix/lsp-local.nix {
+            inherit pkgs;
+            profile = "release";
+          };
           tix-code = import ./nix/vscode.nix {
             inherit pkgs;
             serverPath = "${tix-with-stubs}/bin/tix";
@@ -110,7 +116,10 @@
             docs = pkgs.stdenv.mkDerivation {
               name = "tix-docs";
               src = ./docs;
-              nativeBuildInputs = [ pkgs.mdbook pkgs.mdbook-mermaid ];
+              nativeBuildInputs = [
+                pkgs.mdbook
+                pkgs.mdbook-mermaid
+              ];
               buildPhase = ''
                 mdbook-mermaid install .
                 mdbook build -d $out
@@ -153,7 +162,10 @@
               in
               pkgs.runCommand "tix-check-stub-generation"
                 {
-                  nativeBuildInputs = [ tix-with-stubs pkgs.jq ];
+                  nativeBuildInputs = [
+                    tix-with-stubs
+                    pkgs.jq
+                  ];
                 }
                 ''
                   echo "=== Checking generated stubs exist ==="
@@ -193,7 +205,7 @@
 
                   echo "=== Checking generated stubs parse ==="
                   for f in nixos.tix pkgs.tix lib.tix; do
-                    tix --no-default-stubs --stubs ${stubs}/$f /dev/null \
+                    tix inspect --no-default-stubs --stubs ${stubs}/$f /dev/null \
                       || { echo "FAIL: $f failed to parse"; exit 1; }
                     echo "  $f parses OK"
                   done
