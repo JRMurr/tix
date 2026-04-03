@@ -79,6 +79,10 @@ _ensure-stubs-dir:
 code dir="test/nixos_fixture": build
     nix run .#tix-code-dev  -- {{ dir }}
 
+# Serve the documentation locally (with live reload)
+docs:
+    cd docs && mdbook-mermaid install . && mdbook serve
+
 # Build all crates (release)
 build-release:
     cargo build --release
