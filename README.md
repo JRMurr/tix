@@ -8,7 +8,7 @@ The goal is to have inference do as much of the work as possible but when it get
 
 TLDR: try to be typescript for nix
 
-Its currently still in progress so you will might see weird type errors but has been decently usable on real projects
+Its currently still in progress so you might see weird type errors but has been decently usable on real projects
 
 ## Quick Start
 
