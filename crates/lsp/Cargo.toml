@@ -30,7 +30,7 @@ thiserror = { workspace = true }
 dirs = { workspace = true }
 
 [dev-dependencies]
-indoc = "2.0.5"
+indoc = { workspace = true }
 proptest = { workspace = true }
 tempfile = "3"
 futures = "0.3"

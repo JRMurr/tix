@@ -665,24 +665,7 @@ mod tests {
         (db, file, module)
     }
 
-    /// Find a NameId by its text. Panics if not found.
-    fn find_name(module: &crate::Module, text: &str) -> NameId {
-        module
-            .names()
-            .find(|(_, n)| n.text == text)
-            .unwrap_or_else(|| panic!("name {text:?} not found"))
-            .0
-    }
-
-    /// Find the ExprId of the first `Expr::Reference` whose name string
-    /// matches `text`.
-    fn find_ref_expr(module: &crate::Module, text: &str) -> ExprId {
-        module
-            .exprs()
-            .find(|(_, e)| matches!(e, crate::Expr::Reference(n) if n == text))
-            .unwrap_or_else(|| panic!("reference to {text:?} not found"))
-            .0
-    }
+    use crate::tests::{find_name, find_ref_expr};
 
     // ==================================================================
     // Existing tests

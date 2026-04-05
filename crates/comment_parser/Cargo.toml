@@ -13,4 +13,4 @@ derive_more = { workspace = true, features = ["debug"] }
 # la-arena = { workspace = true }
 
 [dev-dependencies]
-indoc = "2.0.5"
+indoc = { workspace = true }
