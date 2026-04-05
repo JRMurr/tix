@@ -160,9 +160,12 @@ pub struct CustomSystem {
     #[serde(default)]
     pub example_glob: Option<String>,
 
-    /// Optional extra modules layered onto `options_expr`'s eval. These
-    /// are spliced into the evaluation the same way
-    /// `nixos-modules` is layered onto eval-config.nix.
+    /// Reserved: a future version will splice these modules into the
+    /// `options_expr` eval (mirroring the nixos-modules /
+    /// home-manager-modules path). Currently these entries contribute
+    /// to the cache key only — editing them invalidates the cache, but
+    /// users must import the modules directly inside `options_expr`
+    /// themselves for now.
     #[serde(default)]
     pub modules: Vec<ModuleSource>,
 }
@@ -245,6 +248,7 @@ fn load_stub_entry(
         // alias (e.g. @foo → `Foo` alias from a `module foo { ... }` stub).
         registry
             .load_context_by_name(name)
+            .transpose()?
             .ok_or_else(|| -> Box<dyn std::error::Error> {
                 // Inline capitalize (aliases::capitalize is file-private).
                 let mut chars = name.chars();
@@ -256,7 +260,7 @@ fn load_stub_entry(
                     "Context '@{name}' not found: no built-in source and no '{capitalized}' alias is registered. \
                      Add a stub file to [stubs] paths, or declare `module {name} {{ ... }}` in a stub."
                 ).into()
-            })??
+            })?
     } else {
         let path = config_dir.join(entry);
         let source = std::fs::read_to_string(&path)

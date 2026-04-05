@@ -488,13 +488,22 @@ fn run_stubs_command(command: StubsCommand) -> Result<(), Box<dyn Error>> {
 
 fn run_stubs_refresh() -> Result<(), Box<dyn Error>> {
     match tix_lsp::store_stubs::clear_all_cache()? {
-        Some(n) => {
-            let dir = tix_lsp::store_stubs::cache_dir()
+        Some(stats) => {
+            let store_dir = tix_lsp::store_stubs::cache_dir()
                 .map(|d| d.display().to_string())
                 .unwrap_or_else(|| "<unknown>".to_string());
+            let custom_dir = tix_lsp::store_stubs::custom_stubs_cache_dir()
+                .map(|d| d.display().to_string())
+                .unwrap_or_else(|| "<unknown>".to_string());
+            let n = stats.store_entries;
             println!(
-                "Cleared {n} cache entr{} in {dir}",
+                "Cleared {n} cache entr{} in {store_dir}",
                 if n == 1 { "y" } else { "ies" }
+            );
+            let m = stats.custom_dirs;
+            println!(
+                "Cleared {m} custom-stubs dir{} in {custom_dir}",
+                if m == 1 { "" } else { "s" }
             );
             println!("Restart tix / the LSP to re-run stub generation.");
         }

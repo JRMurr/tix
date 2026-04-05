@@ -89,7 +89,7 @@ pub fn generate_stubs_with_options(
 
     // Serialize custom-system definitions for cache-key hashing. The actual
     // system generation happens *after* nix build completes (see below).
-    let systems_digest = digest_systems_config(&config.systems);
+    let systems_digest = digest_systems_config(&config.systems, config_dir)?;
 
     // Check the lightweight file cache before invoking nix.
     let cache_key = compute_cache_key(
@@ -215,6 +215,14 @@ fn populate_merged_stubs_dir(
 }
 
 fn custom_stubs_dir() -> Option<PathBuf> {
+    custom_stubs_cache_dir()
+}
+
+/// Return the merged custom-stubs cache directory
+/// (`~/.cache/tix/custom-stubs/`). Each entry under this path is a
+/// `<hash>/` subdirectory containing the merged built-ins + generated
+/// custom-system stubs for a given cache key.
+pub fn custom_stubs_cache_dir() -> Option<PathBuf> {
     dirs::cache_dir().map(|d| d.join("tix/custom-stubs"))
 }
 
@@ -231,15 +239,24 @@ fn generate_custom_system(
     let tix_exe = std::env::current_exe()
         .map_err(|e| Error::NixCommand(format!("cannot locate current tix binary: {e}")))?;
 
-    // Layer any system-level modules onto the options_expr by wrapping
-    // it in `modules` that evalModules would see. But since we only have
-    // an `options_expr` (not a direct evalModules call), we expect users
-    // to bake their modules into `options_expr` themselves. The optional
-    // `modules` list is reserved for future use; for now it's hashed
-    // into the cache key and logged.
-    if !sys.modules.is_empty() {
+    // Log the spawned binary path once per session so users can spot
+    // mismatches between the LSP's tix and their shell's tix.
+    static LOG_TIX_EXE: std::sync::Once = std::sync::Once::new();
+    LOG_TIX_EXE.call_once(|| {
         log::info!(
-            "custom system '{name}' has {} extra modules — ensure options_expr imports them",
+            "custom-system generation uses tix binary: {}",
+            tix_exe.display()
+        );
+    });
+
+    // `sys.modules` is reserved — it doesn't splice into options_expr
+    // today. Warn loudly if users populated it, since the doc is
+    // aspirational.
+    if !sys.modules.is_empty() {
+        log::warn!(
+            "custom system '{name}' has {} entries in `modules` — these are NOT yet spliced \
+             into options_expr; the field is currently cache-key-only. Import the modules inside \
+             options_expr directly.",
             sys.modules.len()
         );
     }
@@ -425,14 +442,59 @@ pub fn clear_cache_in_dir(dir: &Path) -> std::io::Result<usize> {
     Ok(count)
 }
 
-/// Delete all entries in the default cache dir (`~/.cache/tix/store-stubs/`).
-/// Returns the number of entries removed, or `None` if the cache dir can't
-/// be located on this platform.
-pub fn clear_all_cache() -> std::io::Result<Option<usize>> {
-    match cache_dir() {
-        Some(dir) => clear_cache_in_dir(&dir).map(Some),
-        None => Ok(None),
+/// Delete every top-level subdirectory in `dir`. Returns the number
+/// of directories removed. Top-level files and non-directories are
+/// skipped (symmetric with `clear_cache_in_dir` which does the
+/// opposite). Missing `dir` is a no-op (returns 0).
+///
+/// Used to clear `~/.cache/tix/custom-stubs/` where entries are
+/// `<hash>/` directories, not flat files.
+pub fn clear_custom_stubs_dir(dir: &Path) -> std::io::Result<usize> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(err) => return Err(err),
+    };
+
+    let mut count = 0;
+    for entry in entries {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            std::fs::remove_dir_all(entry.path())?;
+            count += 1;
+        }
     }
+    Ok(count)
+}
+
+/// Counts returned by [`clear_all_cache`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClearStats {
+    /// Files removed from `~/.cache/tix/store-stubs/`.
+    pub store_entries: usize,
+    /// Subdirectories removed from `~/.cache/tix/custom-stubs/`.
+    pub custom_dirs: usize,
+}
+
+/// Delete all entries in both cache dirs (`store-stubs/` and
+/// `custom-stubs/`). Returns the combined counts, or `None` if the
+/// platform has no standard cache dir.
+pub fn clear_all_cache() -> std::io::Result<Option<ClearStats>> {
+    let Some(store) = cache_dir() else {
+        return Ok(None);
+    };
+    let store_entries = clear_cache_in_dir(&store)?;
+    // custom_stubs_dir() shares the same cache-dir root, so if store is
+    // Some the custom path is too — but guard anyway for safety.
+    let custom_dirs = match custom_stubs_cache_dir() {
+        Some(dir) => clear_custom_stubs_dir(&dir)?,
+        None => 0,
+    };
+    Ok(Some(ClearStats {
+        store_entries,
+        custom_dirs,
+    }))
 }
 
 /// Compute a cache key from input store paths and the Nix-literal
@@ -465,11 +527,18 @@ fn compute_cache_key(
 /// Produce a deterministic string fingerprint of the custom-systems
 /// config. Systems are emitted in sorted-name order so hash stability
 /// doesn't depend on HashMap iteration order.
+///
+/// Module lists are resolved via [`build_module_list`] so that Path
+/// entries hash as their canonicalized absolute path (matching the
+/// `extra_nixos_modules` / `extra_hm_modules` digest shape and
+/// preventing two projects in different dirs from accidentally sharing
+/// a cache entry when they both write `./modules/foo.nix`).
 fn digest_systems_config(
     systems: &std::collections::HashMap<String, crate::project_config::CustomSystem>,
-) -> String {
+    config_dir: &Path,
+) -> Result<String, Error> {
     if systems.is_empty() {
-        return String::new();
+        return Ok(String::new());
     }
     let mut names: Vec<&String> = systems.keys().collect();
     names.sort();
@@ -490,19 +559,10 @@ fn digest_systems_config(
             out.push_str(glob);
         }
         out.push('\0');
-        // Module list hashes as its Nix-literal form (but we can't call
-        // build_module_list here because we don't have the config_dir
-        // available at hash time; use the raw TOML form for now).
-        for m in &sys.modules {
-            match m {
-                crate::project_config::ModuleSource::Path(p) => out.push_str(p),
-                crate::project_config::ModuleSource::Expr { expr } => out.push_str(expr),
-            }
-            out.push(',');
-        }
+        out.push_str(&build_module_list(&sys.modules, config_dir)?);
         out.push('\n');
     }
-    out
+    Ok(out)
 }
 
 /// Check if a cached store path exists and is still valid.
@@ -929,8 +989,9 @@ mod tests {
                 modules: vec![],
             },
         );
-        let d1 = digest_systems_config(&systems);
-        let d2 = digest_systems_config(&systems);
+        let dir = tempfile::tempdir().unwrap();
+        let d1 = digest_systems_config(&systems, dir.path()).unwrap();
+        let d2 = digest_systems_config(&systems, dir.path()).unwrap();
         assert_eq!(d1, d2, "digest should be stable across calls");
         // devenv comes first alphabetically.
         let devenv_idx = d1.find("devenv").expect("devenv in digest");
@@ -940,8 +1001,103 @@ mod tests {
 
     #[test]
     fn digest_systems_config_empty_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
         let systems = std::collections::HashMap::new();
-        assert_eq!(digest_systems_config(&systems), "");
+        assert_eq!(digest_systems_config(&systems, dir.path()).unwrap(), "");
+    }
+
+    #[test]
+    fn digest_systems_config_resolves_module_paths() {
+        // Path entries in `sys.modules` should hash as the canonicalized
+        // absolute path (via build_module_list), not as the raw relative
+        // form — so two projects in different dirs writing the same
+        // `./modules/foo.nix` produce distinct digests.
+        use crate::project_config::{CustomSystem, ModuleSource};
+        let dir = tempfile::tempdir().unwrap();
+        let module_path = dir.path().join("a.nix");
+        std::fs::write(&module_path, "{ }").unwrap();
+
+        let mut systems = std::collections::HashMap::new();
+        systems.insert(
+            "mysys".into(),
+            CustomSystem {
+                options_expr: "(x)".into(),
+                context_args: vec![],
+                example_glob: None,
+                modules: vec![ModuleSource::Path("a.nix".into())],
+            },
+        );
+
+        let digest = digest_systems_config(&systems, dir.path()).unwrap();
+        let abs = module_path.canonicalize().unwrap();
+        assert!(
+            digest.contains(&abs.display().to_string()),
+            "digest should contain canonicalized module path, got: {digest}"
+        );
+        // Raw relative form must not appear on its own (it's a substring
+        // of the absolute path only if the tempdir happens to contain
+        // 'a.nix' literally, which is fine — the check above is the
+        // positive assertion).
+    }
+
+    #[test]
+    fn digest_systems_config_missing_module_path_errors() {
+        use crate::project_config::{CustomSystem, ModuleSource};
+        let dir = tempfile::tempdir().unwrap();
+        let mut systems = std::collections::HashMap::new();
+        systems.insert(
+            "mysys".into(),
+            CustomSystem {
+                options_expr: "(x)".into(),
+                context_args: vec![],
+                example_glob: None,
+                modules: vec![ModuleSource::Path("nope.nix".into())],
+            },
+        );
+        let err = digest_systems_config(&systems, dir.path());
+        assert!(err.is_err(), "expected error for missing module path");
+    }
+
+    #[test]
+    fn clear_custom_stubs_dir_removes_nested_subdirs() {
+        // Each entry in `custom-stubs/` is a `<hash>/` directory holding
+        // merged built-ins + custom stubs. `clear_custom_stubs_dir`
+        // should reclaim them wholesale.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("hash1")).unwrap();
+        std::fs::write(dir.path().join("hash1/foo.tix"), "# foo\n").unwrap();
+        std::fs::create_dir(dir.path().join("hash2")).unwrap();
+        std::fs::write(dir.path().join("hash2/bar.tix"), "# bar\n").unwrap();
+
+        let removed = clear_custom_stubs_dir(dir.path()).unwrap();
+        assert_eq!(removed, 2);
+
+        assert!(dir.path().exists());
+        assert!(!dir.path().join("hash1").exists());
+        assert!(!dir.path().join("hash2").exists());
+    }
+
+    #[test]
+    fn clear_custom_stubs_dir_missing_dir_ok() {
+        // Symmetric with clear_cache_in_dir_missing_dir_ok: the cache
+        // dir may simply not exist yet.
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("does-not-exist");
+        let removed = clear_custom_stubs_dir(&missing).unwrap();
+        assert_eq!(removed, 0);
+    }
+
+    #[test]
+    fn clear_custom_stubs_dir_ignores_top_level_files() {
+        // Only directories are reclaimed. A stray file (shouldn't
+        // exist in normal operation, but be resilient) is left alone.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("stray.txt"), "x").unwrap();
+        std::fs::create_dir(dir.path().join("hash1")).unwrap();
+        let removed = clear_custom_stubs_dir(dir.path()).unwrap();
+        assert_eq!(removed, 1);
+        assert!(dir.path().join("stray.txt").exists());
+        assert!(!dir.path().join("hash1").exists());
     }
 
     #[test]
