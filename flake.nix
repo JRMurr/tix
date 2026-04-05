@@ -99,6 +99,9 @@
                 scripts.tixc
                 scripts.nixpkgs-test
 
+                # needed by LSP textDocument/formatting, which shells out
+                pkgs.nixfmt
+
                 # common
                 pkgs.just
                 pkgs.mdbook

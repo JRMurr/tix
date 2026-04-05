@@ -12,10 +12,28 @@ concurrency:
 
 jobs:
   nix-check:
-    name: Nix checks
+    name: Nix checks (unit tests, clippy, fmt, pbt, docs)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/magic-nix-cache-action@main
       - run: nix flake check
+
+  integration-tests:
+    # Integration tests (crates/*/tests/*.rs) run outside the nix build
+    # sandbox so they can spawn `nix eval` / `nix build` subprocesses.
+    # nix-check filters these out via `-E 'not kind(test)'` — this job
+    # re-runs them through the devShell with real nix available.
+    name: Integration tests (with nix)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - uses: Swatinem/rust-cache@v2
+      - name: Run integration tests
+        run: |
+          nix develop --command cargo nextest run \
+            -E 'kind(test)' \
+            --failure-output immediate --success-output never

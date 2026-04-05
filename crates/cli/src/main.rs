@@ -221,6 +221,15 @@ enum StubsCommand {
         #[arg(long)]
         no_cache: bool,
     },
+
+    /// Clear cached runtime-generated stubs.
+    ///
+    /// Removes every entry in `~/.cache/tix/store-stubs/`. The next run of
+    /// tix check or the LSP will re-invoke `nix build` to regenerate stubs
+    /// from `[stubs.generate]`. Run this after editing any file referenced
+    /// by `nixos-modules`, `home-manager-modules`, or any custom system's
+    /// `options_expr`. Restart the LSP after running.
+    Refresh,
 }
 
 /// Shared CLI arguments for all gen-stubs subcommands.
@@ -319,6 +328,35 @@ enum GenStubsSource {
         /// Can be repeated for multiple roots.
         #[arg(long = "source-root", value_parser = parse_source_root)]
         source_roots: Vec<(String, PathBuf)>,
+    },
+
+    /// Generate stubs from an arbitrary module system's options tree.
+    ///
+    /// Wraps a user-supplied Nix expression (evaluating to an options
+    /// attrset) with the generic extract-options extractor, then emits
+    /// a .tix file whose context args match the supplied arg names.
+    /// Use this for flake-parts, devenv, nix-darwin, or any other
+    /// `evalModules`-based module system.
+    Module {
+        #[command(flatten)]
+        common: CommonGenStubsArgs,
+
+        /// System name (kebab-case). Becomes the output file name and
+        /// the basis of the `<Name>Config` type alias.
+        #[arg(long)]
+        name: String,
+
+        /// Nix expression producing the options tree. Required unless
+        /// `--from-json` is passed.
+        #[arg(long)]
+        options_expr: Option<String>,
+
+        /// A module-arg name to emit as a `val` declaration. Repeatable.
+        /// The first arg gets typed as `<Name>Config`; subsequent
+        /// known names (`lib`, `pkgs`) map to their standard types,
+        /// others to `{ ... }`. Defaults to `config` if unspecified.
+        #[arg(long = "context-arg")]
+        context_args: Vec<String>,
     },
 }
 
@@ -439,7 +477,32 @@ fn run_stubs_command(command: StubsCommand) -> Result<(), Box<dyn Error>> {
             log_level,
             no_cache,
         } => run_generate_stubs(config_path, log_level, no_cache),
+        StubsCommand::Refresh => run_stubs_refresh(),
     }
+}
+
+fn run_stubs_refresh() -> Result<(), Box<dyn Error>> {
+    match tix_lsp::store_stubs::clear_all_cache()? {
+        Some(stats) => {
+            let n = stats.store_entries;
+            println!(
+                "Cleared {n} cache entr{} in {}",
+                if n == 1 { "y" } else { "ies" },
+                stats.store_dir.display(),
+            );
+            let m = stats.custom_dirs;
+            println!(
+                "Cleared {m} custom-stubs dir{} in {}",
+                if m == 1 { "" } else { "s" },
+                stats.custom_dir.display(),
+            );
+            println!("Restart tix / the LSP to re-run stub generation.");
+        }
+        None => {
+            eprintln!("Warning: could not locate a cache directory on this platform.");
+        }
+    }
+    Ok(())
 }
 
 // =============================================================================
@@ -550,6 +613,17 @@ fn run_gen_stubs(source: GenStubsSource) -> Result<(), Box<dyn Error>> {
             output,
             max_depth,
             source_roots,
+        }),
+        GenStubsSource::Module {
+            common,
+            name,
+            options_expr,
+            context_args,
+        } => gen_stubs::run_module(gen_stubs::ModuleOptions {
+            common: common.into(),
+            name,
+            options_expr,
+            context_args,
         }),
     }
 }

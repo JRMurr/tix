@@ -450,34 +450,60 @@ fn format_description(desc: &str) -> String {
 pub enum StubKind {
     Nixos,
     HomeManager,
+    /// A user-defined module system — e.g. `flake-parts`, `devenv`. The
+    /// options tree produces a `<Name>Config` type alias, and the supplied
+    /// context-arg list becomes the emitted `val` declarations.
+    Custom {
+        /// System name in kebab-case (e.g. `"flake-parts"`). Used for
+        /// filenames, header text, and as the basis of `type_name`.
+        name: String,
+        /// Module arg names to emit as `val` declarations. The first arg
+        /// gets typed as `<Name>Config`; others get known mappings
+        /// (`lib` → `Lib`, `pkgs` → `Pkgs`) or `{ ... }` as a fallback.
+        context_args: Vec<String>,
+    },
 }
 
 impl StubKind {
-    fn type_name(&self) -> &'static str {
-        match self {
-            StubKind::Nixos => "NixosConfig",
-            StubKind::HomeManager => "HomeManagerConfig",
+    /// Construct a [`StubKind::Custom`] with a kebab-case name.
+    pub fn custom(name: impl Into<String>, context_args: Vec<String>) -> Self {
+        StubKind::Custom {
+            name: name.into(),
+            context_args,
         }
     }
 
-    fn label(&self) -> &'static str {
+    fn type_name(&self) -> String {
         match self {
-            StubKind::Nixos => "NixOS",
-            StubKind::HomeManager => "Home Manager",
+            StubKind::Nixos => "NixosConfig".into(),
+            StubKind::HomeManager => "HomeManagerConfig".into(),
+            StubKind::Custom { name, .. } => format!("{}Config", pascal_case(name)),
         }
     }
 
-    fn command(&self) -> &'static str {
+    fn label(&self) -> String {
         match self {
-            StubKind::Nixos => "tix gen-stubs nixos",
-            StubKind::HomeManager => "tix gen-stubs home-manager",
+            StubKind::Nixos => "NixOS".into(),
+            StubKind::HomeManager => "Home Manager".into(),
+            StubKind::Custom { name, .. } => name.clone(),
         }
     }
 
-    fn context_key(&self) -> &'static str {
+    fn command(&self) -> String {
         match self {
-            StubKind::Nixos => "nixos",
-            StubKind::HomeManager => "home",
+            StubKind::Nixos => "tix stubs generate nixos".into(),
+            StubKind::HomeManager => "tix stubs generate home-manager".into(),
+            StubKind::Custom { name, .. } => {
+                format!("tix stubs generate module --name {name}")
+            }
+        }
+    }
+
+    fn context_key(&self) -> String {
+        match self {
+            StubKind::Nixos => "nixos".into(),
+            StubKind::HomeManager => "home".into(),
+            StubKind::Custom { name, .. } => name.clone(),
         }
     }
 
@@ -485,32 +511,71 @@ impl StubKind {
         match self {
             StubKind::Nixos => "modules/**/*.nix",
             StubKind::HomeManager => "home/**/*.nix",
+            StubKind::Custom { .. } => "modules/**/*.nix",
         }
     }
 
-    fn context_vals(&self) -> &'static str {
+    fn context_vals(&self) -> String {
         match self {
             // NixOS module arguments: { config, lib, pkgs, options, modulesPath, ... }
             // `options` is the option *declaration* tree, not the evaluated config.
             // Each leaf is an option descriptor, not the final value — use `{ ... }`
             // rather than NixosConfig to avoid false type errors on `options.*.default`.
-            StubKind::Nixos => {
-                "val config :: NixosConfig;\n\
+            StubKind::Nixos => "val config :: NixosConfig;\n\
                  val lib :: Lib;\n\
                  val pkgs :: Pkgs;\n\
                  val options :: { ... };\n\
                  val modulesPath :: path;\n"
-            }
+                .into(),
             // Home Manager module arguments: { config, lib, pkgs, options, osConfig, ... }
-            StubKind::HomeManager => {
-                "val config :: HomeManagerConfig;\n\
+            StubKind::HomeManager => "val config :: HomeManagerConfig;\n\
                  val lib :: Lib;\n\
                  val pkgs :: Pkgs;\n\
                  val options :: { ... };\n\
                  val osConfig :: { ... };\n"
+                .into(),
+            StubKind::Custom { context_args, .. } => {
+                let type_name = self.type_name();
+                context_args
+                    .iter()
+                    .map(|arg| format!("val {arg} :: {};\n", arg_type(arg, &type_name)))
+                    .collect()
             }
         }
     }
+}
+
+/// Map a module-arg name to its emitted type. `config` is the conventional
+/// name for the options tree, so it gets the system's `<Name>Config` type;
+/// other known names map to their canonical aliases. Unknown names fall
+/// through to an open attrset, which users can override precisely by
+/// layering a hand-written `.tix` after the generated stub in
+/// `[context.*].stubs` (later entries win on name collisions).
+fn arg_type(arg: &str, system_type: &str) -> String {
+    match arg {
+        "config" => system_type.into(),
+        "lib" => "Lib".into(),
+        "pkgs" => "Pkgs".into(),
+        _ => "{ ... }".into(),
+    }
+}
+
+/// Convert a kebab-case (or snake_case) identifier to PascalCase.
+/// `"flake-parts"` → `"FlakeParts"`, `"devenv"` → `"Devenv"`.
+fn pascal_case(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut capitalize_next = true;
+    for c in s.chars() {
+        if c == '-' || c == '_' {
+            capitalize_next = true;
+        } else if capitalize_next {
+            out.extend(c.to_uppercase());
+            capitalize_next = false;
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Generate a complete .tix file string from an option tree.
@@ -804,6 +869,63 @@ pub fn run_home_manager(opts: HomeManagerOptions) -> Result<(), Box<dyn std::err
         &opts.common.source_roots,
     );
     write_generated_stubs(&tix_content, opts.common.output.as_ref(), "Home Manager")
+}
+
+// =============================================================================
+// Generic module-system generation
+// =============================================================================
+
+/// Options for the `stubs generate module` subcommand.
+pub struct ModuleOptions {
+    pub common: CommonOptions,
+    /// System name (kebab-case) — used for filename, header text, and
+    /// as the basis of the `<Name>Config` type alias.
+    pub name: String,
+    /// Nix expression producing an evalModules-style options tree.
+    /// Ignored if `common.from_json` is set.
+    pub options_expr: Option<String>,
+    /// Context-arg names to emit as `val` declarations.
+    pub context_args: Vec<String>,
+}
+
+/// Wrap the user's options expression in the generic `extract-options.nix`
+/// helper, then run `nix eval --json` and return the parsed tree.
+fn invoke_module_nix_eval(
+    opts: &ModuleOptions,
+) -> Result<std::collections::BTreeMap<String, OptionNode>, Box<dyn std::error::Error>> {
+    let options_expr = opts
+        .options_expr
+        .as_deref()
+        .ok_or("--options-expr is required unless --from-json is given")?;
+    let extractor = include_str!("../../../tools/extract-options.nix");
+    let expr = format!(
+        "let extract = {extractor}; in extract {{ options = ({options_expr}); maxDepth = {}; }}",
+        opts.common.max_depth,
+    );
+    invoke_nix_eval_common(&expr, &opts.name)
+}
+
+/// Run the `stubs generate module` subcommand.
+pub fn run_module(opts: ModuleOptions) -> Result<(), Box<dyn std::error::Error>> {
+    let tree = match opts.common.from_json {
+        Some(ref path) => read_json_file(path)?,
+        None => invoke_module_nix_eval(&opts)?,
+    };
+    // Normalize empty → `["config"]` once here so CLI and LSP subprocess
+    // callers can both pass `context_args` through unchanged.
+    let context_args = if opts.context_args.is_empty() {
+        vec!["config".to_string()]
+    } else {
+        opts.context_args.clone()
+    };
+    let kind = StubKind::custom(opts.name.clone(), context_args);
+    let tix_content = generate_tix_file_with_docs(
+        &tree,
+        &kind,
+        opts.common.descriptions,
+        &opts.common.source_roots,
+    );
+    write_generated_stubs(&tix_content, opts.common.output.as_ref(), &opts.name)
 }
 
 // =============================================================================
@@ -1241,6 +1363,110 @@ fn write_generated_stubs(
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    // -------------------------------------------------------------------------
+    // StubKind::Custom
+    // -------------------------------------------------------------------------
+
+    fn simple_options_tree() -> BTreeMap<String, OptionNode> {
+        let mut tree = BTreeMap::new();
+        tree.insert(
+            "foo".to_string(),
+            OptionNode::Option(OptionLeaf {
+                _is_option: true,
+                type_info: NixosTypeInfo::Primitive {
+                    value: "string".into(),
+                },
+                description: None,
+                has_default: false,
+                pos: None,
+            }),
+        );
+        tree
+    }
+
+    #[test]
+    fn custom_stub_kind_uses_pascal_case_type_name() {
+        let kind = StubKind::custom("flake-parts", vec!["config".into()]);
+        assert_eq!(kind.type_name(), "FlakePartsConfig");
+    }
+
+    #[test]
+    fn custom_stub_kind_single_word_name() {
+        let kind = StubKind::custom("devenv", vec!["config".into()]);
+        assert_eq!(kind.type_name(), "DevenvConfig");
+    }
+
+    #[test]
+    fn custom_stub_kind_maps_by_name() {
+        // `config` gets the options-tree type regardless of position;
+        // unknown names (self, inputs, withSystem) get the opaque attrset.
+        let kind = StubKind::custom(
+            "flake-parts",
+            vec![
+                "self".into(),
+                "inputs".into(),
+                "config".into(),
+                "withSystem".into(),
+            ],
+        );
+        let vals = kind.context_vals();
+        assert!(
+            vals.contains("val config :: FlakePartsConfig"),
+            "got: {vals}"
+        );
+        assert!(vals.contains("val self :: { ... }"), "got: {vals}");
+        assert!(vals.contains("val inputs :: { ... }"), "got: {vals}");
+        assert!(vals.contains("val withSystem :: { ... }"), "got: {vals}");
+    }
+
+    #[test]
+    fn custom_stub_kind_reorder_is_order_independent() {
+        // Reordering the list must not change the emitted types — the
+        // type of each arg is determined by its name, not its position.
+        let ordering_a =
+            StubKind::custom("mysys", vec!["config".into(), "lib".into(), "pkgs".into()])
+                .context_vals();
+        let ordering_b =
+            StubKind::custom("mysys", vec!["pkgs".into(), "config".into(), "lib".into()])
+                .context_vals();
+        let ordering_c =
+            StubKind::custom("mysys", vec!["lib".into(), "pkgs".into(), "config".into()])
+                .context_vals();
+        let extract = |vals: &str| -> std::collections::BTreeSet<String> {
+            vals.lines().map(|l| l.trim().to_string()).collect()
+        };
+        assert_eq!(extract(&ordering_a), extract(&ordering_b));
+        assert_eq!(extract(&ordering_a), extract(&ordering_c));
+        // Sanity: `config` maps to the system type in every ordering.
+        assert!(ordering_a.contains("val config :: MysysConfig"));
+        assert!(ordering_b.contains("val config :: MysysConfig"));
+        assert!(ordering_c.contains("val config :: MysysConfig"));
+    }
+
+    #[test]
+    fn custom_stub_kind_emits_known_arg_types() {
+        let kind = StubKind::custom("mysys", vec!["config".into(), "lib".into(), "pkgs".into()]);
+        let vals = kind.context_vals();
+        assert!(vals.contains("val config :: MysysConfig"), "got: {vals}");
+        assert!(vals.contains("val lib :: Lib"), "got: {vals}");
+        assert!(vals.contains("val pkgs :: Pkgs"), "got: {vals}");
+    }
+
+    #[test]
+    fn custom_stub_kind_generates_valid_tix_file() {
+        let tree = simple_options_tree();
+        let kind = StubKind::custom("flake-parts", vec!["config".into(), "inputs".into()]);
+        let content = generate_tix_file_with_docs(&tree, &kind, false, &[]);
+        // Must parse as a valid .tix file.
+        comment_parser::parse_tix_file(&content)
+            .unwrap_or_else(|e| panic!("generated .tix failed to parse:\n{content}\n\nError: {e}"));
+        // Should reference the custom system name in the file header and
+        // the type alias.
+        assert!(content.contains("FlakePartsConfig"));
+        // Custom systems always use the generic placeholder glob.
+        assert!(content.contains("modules/**/*.nix"));
+    }
 
     // -------------------------------------------------------------------------
     // JSON deserialization

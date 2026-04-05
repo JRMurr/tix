@@ -5,9 +5,9 @@
 // Mirrors the CLI's config module for discovering and loading `tix.toml` files.
 // Provides per-file context resolution for NixOS/Home Manager module typing.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use comment_parser::ParsedTy;
 use lang_check::aliases::TypeAliasRegistry;
@@ -102,12 +102,64 @@ pub enum NixSource {
     Expr { expr: String },
 }
 
+/// A reference to a Nix module — either a `.nix` file on disk (path
+/// relative to the tix.toml directory) or an expression evaluating to
+/// a module value (attrset or function). Unlike `NixSource`, these do
+/// **not** resolve to store paths; they are spliced into a Nix list
+/// passed to `evalModules` directly.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum ModuleSource {
+    /// Relative path to a `.nix` file.
+    Path(String),
+    /// Nix expression evaluating to a module.
+    Expr { expr: String },
+}
+
 /// Configuration for runtime stub generation via Nix.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct StubsGenerateConfig {
     pub nixpkgs: Option<NixSource>,
     #[serde(default, rename = "home-manager")]
     pub home_manager: Option<NixSource>,
+
+    /// Extra NixOS modules appended to the options-schema eval. Their
+    /// declared `options.*` entries appear in the generated `nixos.tix`
+    /// alongside the upstream NixOS schema.
+    #[serde(default, rename = "nixos-modules")]
+    pub nixos_modules: Vec<ModuleSource>,
+
+    /// Extra Home Manager modules appended to the HM options eval.
+    #[serde(default, rename = "home-manager-modules")]
+    pub home_manager_modules: Vec<ModuleSource>,
+
+    /// Arbitrary user-defined module systems, keyed by name. Each
+    /// generates a `<name>.tix` file that `@<name>` resolves to when
+    /// referenced from a `[context.*]` stubs list.
+    #[serde(default)]
+    pub systems: HashMap<String, CustomSystem>,
+}
+
+/// Configuration for a single custom module system (e.g. flake-parts,
+/// devenv). Users supply a Nix expression that evaluates to an options
+/// tree, plus the module arg names to emit as context args.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CustomSystem {
+    /// Nix expression producing an `evalModules`-style options attrset.
+    pub options_expr: String,
+
+    /// Module arg names emitted as `val` declarations in the generated
+    /// stub. Types are assigned by name, not position: `config` → the
+    /// options tree (`<Name>Config`), `lib` → `Lib`, `pkgs` → `Pkgs`,
+    /// anything else → `{ ... }`. Order doesn't matter. Defaults to
+    /// `["config"]` if empty.
+    ///
+    /// For precise types on args beyond the known names (e.g.
+    /// flake-parts `withSystem`), layer a hand-written `.tix` after
+    /// the generated entry in `[context.*].stubs`: later entries
+    /// override earlier ones on name collisions.
+    #[serde(default)]
+    pub context_args: Vec<String>,
 }
 
 /// The `[diagnostics]` section of `tix.toml`.
@@ -182,16 +234,49 @@ fn load_stub_entry(
     config_dir: &Path,
     registry: &mut TypeAliasRegistry,
 ) -> Result<Arc<HashMap<SmolStr, ParsedTy>>, Box<dyn std::error::Error>> {
-    if let Some(builtin_name) = entry.strip_prefix('@') {
+    let result = if let Some(name) = entry.strip_prefix('@') {
+        // `@name` resolves via built-in context sources (e.g. @nixos,
+        // @home-manager) first, then falls back to a registered capitalized
+        // alias (e.g. @foo → `Foo` alias from a `module foo { ... }` stub).
         registry
-            .load_context_by_name(builtin_name)
-            .ok_or_else(|| format!("Unknown built-in context: @{builtin_name}"))?
+            .load_context_by_name(name)
+            .transpose()?
+            .ok_or_else(|| -> Box<dyn std::error::Error> {
+                let capitalized = lang_check::aliases::capitalize(name);
+                format!(
+                    "Context '@{name}' not found: no built-in source and no '{capitalized}' alias is registered. \
+                     Add a stub file to [stubs] paths, or declare `module {name} {{ ... }}` in a stub."
+                ).into()
+            })?
     } else {
         let path = config_dir.join(entry);
         let source = std::fs::read_to_string(&path)
             .map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
-        registry.load_context_stubs(&source).map(Arc::new)
+        registry.load_context_stubs(&source).map(Arc::new)?
+    };
+
+    // Warn on silent misconfiguration: a stub file with only type aliases
+    // (no top-level `val` or `module` blocks) produces no context args.
+    // `load_stub_entry` is called per-file during warmup + on every edit,
+    // so dedupe the warning by entry name to avoid log spam.
+    if result.is_empty() && warn_empty_context_once(entry) {
+        log::warn!(
+            "Context stub '{entry}' loaded 0 context args. Add top-level `val` declarations \
+             or a `module` block whose fields become context args."
+        );
     }
+    Ok(result)
+}
+
+/// Returns `true` the first time `entry` is seen, `false` on subsequent
+/// calls. Used to log the empty-context warning at most once per entry.
+fn warn_empty_context_once(entry: &str) -> bool {
+    static WARNED: OnceLock<Mutex<HashSet<SmolStr>>> = OnceLock::new();
+    let mut set = WARNED
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .unwrap();
+    set.insert(entry.into())
 }
 
 /// Resolve context args for a file based on `tix.toml` context definitions.
@@ -234,7 +319,11 @@ pub fn resolve_context_for_file(
                 return load_stub_entry(&ctx.stubs[0], config_dir, registry);
             }
 
-            // Multi-stub: merge all entries into a new HashMap.
+            // Multi-stub: merge all entries into a new HashMap. Later
+            // entries override earlier ones on name collisions — users
+            // rely on this to refine opaque types from a generated stub
+            // (e.g. `["@flake-parts", "./extras.tix"]` to give precise
+            // types to args the generator doesn't know about).
             let mut merged = HashMap::new();
             for stub_entry in &ctx.stubs {
                 match load_stub_entry(stub_entry, config_dir, registry) {
@@ -670,5 +759,76 @@ mod tests {
         assert!(config.stubs.paths().is_empty());
         assert!(config.stubs.generate().is_none());
         assert!(config.stubs.is_empty());
+    }
+
+    #[test]
+    fn stubs_generate_with_nixos_modules() {
+        let toml_str = r#"
+            [stubs.generate]
+            nixpkgs = "/nix/store/abc-nixpkgs-src"
+            nixos-modules = [
+              "./modules/myproj.nix",
+              { expr = "(builtins.getFlake (toString ./.)).nixosModules.default" },
+            ]
+            home-manager-modules = ["./hm/custom.nix"]
+        "#;
+        let config: ProjectConfig = toml::from_str(toml_str).expect("parse error");
+        let gen = config.stubs.generate().expect("generate should be present");
+
+        assert_eq!(gen.nixos_modules.len(), 2);
+        assert!(matches!(
+            &gen.nixos_modules[0],
+            ModuleSource::Path(p) if p == "./modules/myproj.nix"
+        ));
+        assert!(matches!(
+            &gen.nixos_modules[1],
+            ModuleSource::Expr { expr } if expr.contains("nixosModules.default")
+        ));
+
+        assert_eq!(gen.home_manager_modules.len(), 1);
+        assert!(matches!(
+            &gen.home_manager_modules[0],
+            ModuleSource::Path(p) if p == "./hm/custom.nix"
+        ));
+    }
+
+    #[test]
+    fn stubs_generate_modules_default_empty() {
+        let toml_str = r#"
+            [stubs.generate]
+            nixpkgs = "/nix/store/abc"
+        "#;
+        let config: ProjectConfig = toml::from_str(toml_str).expect("parse error");
+        let gen = config.stubs.generate().expect("generate should be present");
+        assert!(gen.nixos_modules.is_empty());
+        assert!(gen.home_manager_modules.is_empty());
+        assert!(gen.systems.is_empty());
+    }
+
+    #[test]
+    fn stubs_generate_custom_systems() {
+        let toml_str = r#"
+            [stubs.generate]
+            nixpkgs = "/nix/store/abc"
+
+            [stubs.generate.systems.flake-parts]
+            options_expr = "(builtins.getFlake (toString ./.)).inputs.flake-parts.lib.evalFlakeModule {} {}"
+            context_args = ["config", "inputs", "self"]
+
+            [stubs.generate.systems.devenv]
+            options_expr = "(import ./devenv-opts.nix)"
+        "#;
+        let config: ProjectConfig = toml::from_str(toml_str).expect("parse error");
+        let gen = config.stubs.generate().expect("generate should be present");
+
+        assert_eq!(gen.systems.len(), 2);
+
+        let fp = gen.systems.get("flake-parts").expect("flake-parts");
+        assert!(fp.options_expr.contains("evalFlakeModule"));
+        assert_eq!(fp.context_args, vec!["config", "inputs", "self"]);
+
+        let de = gen.systems.get("devenv").expect("devenv");
+        assert!(de.options_expr.contains("devenv-opts"));
+        assert!(de.context_args.is_empty()); // default
     }
 }

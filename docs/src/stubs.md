@@ -79,6 +79,33 @@ When used in a `tix.toml` context, `@`-prefixed stub names refer to built-in con
 
 `@callpackage` doesn't require a separate stub file. It extracts the fields of the `Pkgs` type alias (created by `module pkgs { ... }` in the built-in stubs) and provides them as context args. This is the same mechanism that any `module foo { ... }` declaration uses: `@foo` resolves to `Foo`.
 
+### Custom context stubs from a file
+
+For module systems not shipped as a built-in (e.g. flake-parts, devenv, custom
+NixOS-like systems), point a context at a local `.tix` file. The file can use
+either top-level `val` declarations or a `module` block — each field becomes
+a context arg:
+
+```toml
+[context.flake-parts]
+includes = ["modules/**/*.nix"]
+stubs = ["./flake-parts.tix"]
+```
+
+```tix
+# flake-parts.tix
+module flakeparts {
+    val config :: { perSystem: a -> b, ... };
+    val lib :: Lib;
+}
+```
+
+Files matching `modules/**/*.nix` see `config` and `lib` as typed lambda
+parameters. When a top-level `val` and a module field share a name, the
+top-level `val` wins (more explicit). Tix logs a warning if a stub file
+produces zero context args — usually a sign that the file contains only
+`type` aliases with no `val` or `module` declarations.
+
 ## Generating stubs from NixOS/Home Manager
 
 Tix can generate stubs from NixOS options, Home Manager options, and nixpkgs package sets. This gives you typed access to `config`, `lib`, `pkgs`, and other parameters in your Nix files.
@@ -173,6 +200,128 @@ stubs = ["@callpackage"]
 ### Using generated stubs with tix.toml
 
 Once generated, point your `tix.toml` at them. See [Configuration](./configuration.md).
+
+## Custom module systems (flake-parts, devenv, nix-darwin, ...)
+
+For any module system that ships its own `evalModules`-style API, you
+can generate typed stubs the same way NixOS and HM do. The flow is
+**iterate with the CLI first, promote to tix.toml once happy**.
+
+### 1. Iterate manually with the CLI
+
+`tix stubs generate module` wraps an arbitrary options expression in
+the generic extractor and emits a `.tix`. This gives immediate
+feedback with no LSP restart loop.
+
+```bash
+tix stubs generate module \
+  --name flake-parts \
+  --options-expr '(inputs.flake-parts.lib.evalFlakeModule { self = self; } { imports = [ ]; }).options' \
+  --context-arg config \
+  --context-arg lib \
+  --context-arg pkgs \
+  -o flake-parts.tix
+```
+
+Inspect the output, tweak the expression, re-run. The generated file
+contains a `type FlakePartsConfig = { ... }` alias and one `val`
+declaration per `--context-arg`. Types are assigned by **name**, not
+position: `config` → `FlakePartsConfig` (the options tree), `lib` →
+`Lib`, `pkgs` → `Pkgs`, any other name → `{ ... }`. Order doesn't
+matter — reordering the args produces the same output.
+
+Optional two-step debugging:
+
+```bash
+# Inspect the raw options tree first.
+nix eval --json --impure --expr '...' > options.json
+tix stubs generate module --from-json options.json --name flake-parts ... -o flake-parts.tix
+```
+
+### 2. Promote to tix.toml
+
+Once the CLI command produces a good stub, copy the expression into
+`[stubs.generate.systems.<name>]`. The LSP runs the same pipeline on
+startup and writes `<name>.tix` into its cache, so `@<name>` just
+works as a context stub.
+
+```toml
+[stubs.generate]
+nixpkgs = { expr = "(builtins.getFlake (toString ./.)).inputs.nixpkgs" }
+
+[stubs.generate.systems.flake-parts]
+options_expr = '''
+  (inputs.flake-parts.lib.evalFlakeModule
+    { self = self; } { imports = [ ]; }).options
+'''
+context_args = ["config", "lib", "pkgs"]
+
+[context.flake-parts]
+includes = ["flake-modules/**/*.nix"]
+stubs = ["@flake-parts"]
+```
+
+### 3. Typing extra module args precisely
+
+Args beyond `config`/`lib`/`pkgs` (e.g. flake-parts `withSystem`,
+`inputs`, `self`; devenv `inputs'`) are typed as `{ ... }` in the
+generated stub. That's enough for the checker to recognise the name,
+but calls against it aren't checked — `withSystem "x86_64-linux" foo`
+just returns an opaque attrset.
+
+To give specific args precise types, write a companion `.tix` and
+layer it **after** the generated stub in the context's `stubs`
+array. Later entries override earlier ones on name collisions:
+
+```tix
+# flake-parts-extras.tix
+val withSystem :: string -> a -> a;
+val inputs :: { self: { ... }, nixpkgs: { ... }, ... };
+```
+
+```toml
+[stubs.generate.systems.flake-parts]
+options_expr = "..."
+context_args = ["config", "lib", "pkgs", "withSystem", "inputs"]
+
+[context.flake-parts]
+includes = ["flake-modules/**/*.nix"]
+stubs = ["@flake-parts", "./flake-parts-extras.tix"]  # extras win
+```
+
+The generated stub still types `config`/`lib`/`pkgs`; the extras
+file refines `withSystem` and `inputs` to precise types. Top-level
+`val` decls from all files in `stubs` are unioned into the context,
+so extras.tix can also add new arg names not declared in
+`context_args` at all — handy for iterating without re-running
+`tix stubs refresh`.
+
+### 4. After edits
+
+The LSP generates custom-system stubs once at startup. If you change
+the `options_expr`, `context_args`, or any module referenced from
+them, run `tix stubs refresh` and restart the LSP.
+
+## Refreshing generated stubs
+
+Runtime-generated stubs (from `[stubs.generate]` in `tix.toml`) are
+cached in `~/.cache/tix/store-stubs/`. The cache keys on the inputs
+that feed into `nix build` — primarily the nixpkgs + home-manager
+store paths — so bumping pinned inputs via `flake.lock` invalidates
+the cache naturally.
+
+The cache does **not** content-hash your own files. When you edit
+anything that the stub pipeline depends on (e.g. a Nix expression in
+`[stubs.generate]`, future user-module configurations), the cache
+keeps serving stale stubs until you invalidate it manually:
+
+```bash
+tix stubs refresh
+```
+
+This clears the cache directory; the next run of the LSP or `tix
+check` will re-invoke `nix build`. **Restart the LSP afterward** —
+the LSP only runs stub generation at startup today.
 
 ## Source annotations
 

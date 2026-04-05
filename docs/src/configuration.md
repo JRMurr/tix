@@ -64,6 +64,20 @@ stubs = ["@callpackage"]
 
 `@callpackage` derives its types from the built-in `Pkgs` module (the same one that types `pkgs.stdenv.mkDerivation`, `pkgs.fetchurl`, etc.). Parameters not covered by the built-in stubs remain untyped. For broader coverage, [generate pkgs stubs](./stubs.md#generating-pkgs-stubs) and load them via `--stubs` or the `stubs` config key — they merge into the `Pkgs` type alias automatically.
 
+### Custom context stubs
+
+For module systems other than NixOS/Home Manager (e.g. flake-parts, devenv),
+point `stubs` at a local `.tix` file:
+
+```toml
+[context.flake-parts]
+includes = ["modules/**/*.nix"]
+stubs = ["./flake-parts.tix"]
+```
+
+The file can contain top-level `val` declarations and/or `module` blocks;
+both contribute to context args. See [Custom context stubs from a file](./stubs.md#custom-context-stubs-from-a-file) for the full pattern.
+
 ### Inline context annotation
 
 You can also set context per-file with a doc comment at the top:
@@ -154,6 +168,35 @@ home-manager = { expr = "(builtins.getFlake (toString ./.)).inputs.home-manager"
 
 - **nixpkgs** (required) — path to nixpkgs source, or `{ expr = "..." }` to evaluate
 - **home-manager** (optional) — path to home-manager source; omit to skip HM stubs
+- **nixos-modules** (optional) — extra NixOS modules appended to the option-tree eval. Their `options.*` declarations show up in the generated `nixos.tix`, so `config.myproj.databaseUrl` is typed, not just upstream NixOS options.
+- **home-manager-modules** (optional) — same, for Home Manager.
+
+```toml
+[stubs.generate]
+nixpkgs = { expr = "(builtins.getFlake (toString ./.)).inputs.nixpkgs" }
+nixos-modules = [
+  "./modules/myproj.nix",
+  { expr = "(builtins.getFlake (toString ./.)).nixosModules.default" },
+]
+```
+
+Entries can be plain path strings (relative to `tix.toml`) or `{ expr = "..." }` for modules sourced from a flake.
+
+**Debugging the extracted schema:** the equivalent manual CLI invocation is `tix stubs generate nixos --flake . --hostname <NAME>` — this evaluates a live NixOS configuration (including your user modules) and emits the stub to stdout or `-o <path>`, so you can inspect exactly what the schema extractor sees before letting the LSP drive it. Home Manager has an equivalent `tix stubs generate home-manager --flake . --username <NAME>`.
+
+**Module edits are not auto-detected.** After changing any file listed under `nixos-modules` / `home-manager-modules`, run `tix stubs refresh` and restart the LSP.
+
+#### Custom module systems
+
+For arbitrary module systems (flake-parts, devenv, nix-darwin, custom `evalModules` setups), add a `[stubs.generate.systems.<name>]` table:
+
+```toml
+[stubs.generate.systems.flake-parts]
+options_expr = "(inputs.flake-parts.lib.evalFlakeModule {...} {...}).options"
+context_args = ["config", "lib", "pkgs"]
+```
+
+Each custom system generates a `<name>.tix` file that you reference in contexts as `@<name>`. Types are assigned by name: `config` → `<Name>Config`, `lib` → `Lib`, `pkgs` → `Pkgs`, any other name → `{ ... }`. For precise types on extra args (e.g. flake-parts `withSystem`), layer a hand-written `.tix` after `@<name>` in the context's `stubs` array — see [Typing extra module args precisely](./stubs.md#3-typing-extra-module-args-precisely). Start by prototyping the `options_expr` manually with `tix stubs generate module` — see [Custom module systems](./stubs.md#custom-module-systems-flake-parts-devenv-nix-darwin-) for the full CLI-first iteration workflow.
 
 On first run, tix invokes `nix build` to generate `.tix` stubs from the NixOS option tree, Home Manager options, and nixpkgs package set. This takes 30-60 seconds. Subsequent runs are instant thanks to a lightweight file cache (`~/.cache/tix/store-stubs/`). Changing either nixpkgs or tix version triggers regeneration.
 

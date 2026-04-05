@@ -323,3 +323,61 @@ async fn callpackage_context_nixpkgs_toml_format() {
 
     h.shutdown().await;
 }
+
+/// Regression test for issue #6 (comment 3): a `[context.*]` with
+/// `stubs = ["./foo.tix"]` pointing at a file that uses a top-level
+/// `module foo { ... }` block should populate context args from the
+/// module's fields. Previously only top-level `val` decls were picked
+/// up, so users had to split their stubs across a separate `[stubs]`
+/// section plus `stubs = ["@name"]` — this test pins down the unified
+/// single-file behaviour.
+#[tokio::test]
+async fn tix_toml_context_with_module_stub() {
+    let mut h = LspTestHarness::new(&[
+        (
+            "tix.toml",
+            indoc! {"
+                [context.foo]
+                includes = [\"modules/*.nix\"]
+                stubs = [\"./foo.tix\"]
+            "},
+        ),
+        (
+            "foo.tix",
+            indoc! {"
+                module foo {
+                    val config :: { bar: string };
+                }
+            "},
+        ),
+        (
+            "modules/test.nix",
+            indoc! {"
+                { config, ... }:
+                config.bar
+                #      ^1
+            "},
+        ),
+    ])
+    .await;
+
+    h.open("modules/test.nix").await;
+    let _ = h.wait_for_diagnostics("modules/test.nix", TIMEOUT).await;
+
+    let m = h.markers("modules/test.nix");
+    let hover = h
+        .hover("modules/test.nix", m[&1].line, m[&1].character)
+        .await
+        .expect("hover on config.bar should return a result");
+    let HoverContents::Markup(content) = &hover.contents else {
+        panic!("expected MarkupContent, got {:?}", hover.contents);
+    };
+    eprintln!("config.bar hover: {}", content.value);
+    assert!(
+        content.value.contains("string"),
+        "hover on config.bar should show `string` from module stub, got: {}",
+        content.value,
+    );
+
+    h.shutdown().await;
+}

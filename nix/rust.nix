@@ -73,10 +73,14 @@ let
     cargoClippyExtraArgs = "-- -D warnings";
   });
 
+  # Unit tests only. Integration tests (crates/*/tests/*.rs) are gated out
+  # with `not kind(test)` because some of them need a real `nix` binary
+  # available as a subprocess, which the nix build sandbox lacks. A
+  # separate GitHub Actions step runs `kind(test)` via `nix develop`.
   rustTests = craneLib.cargoNextest (commonArgs // {
     inherit cargoArtifacts;
     nativeBuildInputs = [ pkgs.cargo-nextest pkgs.nixfmt ];
-    cargoNextestExtraArgs = "--failure-output immediate --success-output never";
+    cargoNextestExtraArgs = "-E 'not kind(test)' --failure-output immediate --success-output never";
   });
 
   # PBT runs two groups with different case counts (mirroring scripts/pbt.sh).

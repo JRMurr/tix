@@ -19,6 +19,12 @@
   # In pure flake evaluation, builtins.currentSystem isn't available.
   # The flake passes system explicitly; runtime (impure) uses the default.
   system ? builtins.currentSystem,
+  # User-supplied extra modules to append to the NixOS / HM options
+  # evals. These make user-declared options visible in the generated
+  # stubs (e.g. `options.myproj.dbUrl` in a user module shows up in
+  # the resulting `nixos.tix`).
+  extra-nixos-modules ? [ ],
+  extra-hm-modules ? [ ],
 }:
 
 let
@@ -56,7 +62,7 @@ let
     (import (nixpkgs-path + "/nixos/lib/eval-config.nix") {
       lib = quietLib;
       system = pkgs.stdenv.hostPlatform.system;
-      modules = [ { _module.check = false; } ];
+      modules = [ { _module.check = false; } ] ++ extra-nixos-modules;
     }).options;
 
   nixosOptionsJson = builtins.toJSON (
@@ -92,7 +98,7 @@ let
                 osConfig = { };
               };
             }
-          ];
+          ] ++ extra-hm-modules;
         };
       in
       builtins.toJSON (
