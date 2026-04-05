@@ -195,8 +195,42 @@ fn find_generate_nix(tix_store_path: &Path) -> Result<PathBuf, Error> {
 // Lightweight file cache (~/.cache/tix/store-stubs/)
 // ==============================================================================
 
-fn cache_dir() -> Option<PathBuf> {
+/// Return the cache directory path (`~/.cache/tix/store-stubs/`).
+/// Returns `None` if the platform has no standard cache dir.
+pub fn cache_dir() -> Option<PathBuf> {
     dirs::cache_dir().map(|d| d.join("tix/store-stubs"))
+}
+
+/// Delete every top-level file in `dir`. Returns the number of entries
+/// removed. Subdirectories and non-regular files are skipped. Missing
+/// `dir` is a no-op (returns 0).
+pub fn clear_cache_in_dir(dir: &Path) -> std::io::Result<usize> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(err) => return Err(err),
+    };
+
+    let mut count = 0;
+    for entry in entries {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_file() || file_type.is_symlink() {
+            std::fs::remove_file(entry.path())?;
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+/// Delete all entries in the default cache dir (`~/.cache/tix/store-stubs/`).
+/// Returns the number of entries removed, or `None` if the cache dir can't
+/// be located on this platform.
+pub fn clear_all_cache() -> std::io::Result<Option<usize>> {
+    match cache_dir() {
+        Some(dir) => clear_cache_in_dir(&dir).map(Some),
+        None => Ok(None),
+    }
 }
 
 /// Compute a cache key from input store paths.
@@ -408,5 +442,48 @@ mod tests {
         let read_path = PathBuf::from(contents.trim());
         assert_eq!(read_path, store_path);
         assert!(read_path.exists());
+    }
+
+    #[test]
+    fn clear_cache_in_dir_removes_files() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Populate some fake cache entries.
+        std::fs::write(dir.path().join("abc123"), "/nix/store/aaa").unwrap();
+        std::fs::write(dir.path().join("def456"), "/nix/store/bbb").unwrap();
+        std::fs::write(dir.path().join("ghi789"), "/nix/store/ccc").unwrap();
+
+        let removed = clear_cache_in_dir(dir.path()).unwrap();
+        assert_eq!(removed, 3);
+
+        // Directory should still exist but be empty.
+        assert!(dir.path().exists());
+        let remaining: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
+        assert!(remaining.is_empty());
+    }
+
+    #[test]
+    fn clear_cache_in_dir_missing_dir_ok() {
+        // Clearing a non-existent dir is a no-op — not an error.
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("does-not-exist");
+        let removed = clear_cache_in_dir(&missing).unwrap();
+        assert_eq!(removed, 0);
+    }
+
+    #[test]
+    fn clear_cache_in_dir_ignores_subdirectories() {
+        // The cache dir only contains flat files keyed by hash. If a user
+        // accidentally creates a subdir, we shouldn't error — just skip it.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("abc123"), "/nix/store/aaa").unwrap();
+        std::fs::create_dir(dir.path().join("subdir")).unwrap();
+        std::fs::write(dir.path().join("subdir/nested"), "content").unwrap();
+
+        let removed = clear_cache_in_dir(dir.path()).unwrap();
+        assert_eq!(removed, 1);
+
+        // The subdir survives.
+        assert!(dir.path().join("subdir").exists());
     }
 }

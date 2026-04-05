@@ -201,6 +201,27 @@ stubs = ["@callpackage"]
 
 Once generated, point your `tix.toml` at them. See [Configuration](./configuration.md).
 
+## Refreshing generated stubs
+
+Runtime-generated stubs (from `[stubs.generate]` in `tix.toml`) are
+cached in `~/.cache/tix/store-stubs/`. The cache keys on the inputs
+that feed into `nix build` — primarily the nixpkgs + home-manager
+store paths — so bumping pinned inputs via `flake.lock` invalidates
+the cache naturally.
+
+The cache does **not** content-hash your own files. When you edit
+anything that the stub pipeline depends on (e.g. a Nix expression in
+`[stubs.generate]`, future user-module configurations), the cache
+keeps serving stale stubs until you invalidate it manually:
+
+```bash
+tix stubs refresh
+```
+
+This clears the cache directory; the next run of the LSP or `tix
+check` will re-invoke `nix build`. **Restart the LSP afterward** —
+the LSP only runs stub generation at startup today.
+
 ## Source annotations
 
 Stub declarations can carry `@source` annotations that link back to the

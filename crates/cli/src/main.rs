@@ -221,6 +221,15 @@ enum StubsCommand {
         #[arg(long)]
         no_cache: bool,
     },
+
+    /// Clear cached runtime-generated stubs.
+    ///
+    /// Removes every entry in `~/.cache/tix/store-stubs/`. The next run of
+    /// tix check or the LSP will re-invoke `nix build` to regenerate stubs
+    /// from `[stubs.generate]`. Run this after editing any file referenced
+    /// by `nixos-modules`, `home-manager-modules`, or any custom system's
+    /// `options_expr`. Restart the LSP after running.
+    Refresh,
 }
 
 /// Shared CLI arguments for all gen-stubs subcommands.
@@ -439,7 +448,27 @@ fn run_stubs_command(command: StubsCommand) -> Result<(), Box<dyn Error>> {
             log_level,
             no_cache,
         } => run_generate_stubs(config_path, log_level, no_cache),
+        StubsCommand::Refresh => run_stubs_refresh(),
     }
+}
+
+fn run_stubs_refresh() -> Result<(), Box<dyn Error>> {
+    match tix_lsp::store_stubs::clear_all_cache()? {
+        Some(n) => {
+            let dir = tix_lsp::store_stubs::cache_dir()
+                .map(|d| d.display().to_string())
+                .unwrap_or_else(|| "<unknown>".to_string());
+            println!(
+                "Cleared {n} cache entr{} in {dir}",
+                if n == 1 { "y" } else { "ies" }
+            );
+            println!("Restart tix / the LSP to re-run stub generation.");
+        }
+        None => {
+            eprintln!("Warning: could not locate a cache directory on this platform.");
+        }
+    }
+    Ok(())
 }
 
 // =============================================================================
