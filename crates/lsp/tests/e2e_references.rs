@@ -1,6 +1,6 @@
 mod common;
 
-use common::{LspTestHarness, TIMEOUT};
+use common::LspTestHarness;
 use indoc::indoc;
 
 /// Find references with includeDeclaration returns definition + all uses.
@@ -15,8 +15,7 @@ async fn references_include_declaration() {
     )])
     .await;
 
-    h.open("test.nix").await;
-    let _ = h.wait_for_diagnostics("test.nix", TIMEOUT).await;
+    h.open_and_wait("test.nix").await;
 
     let m = h.markers("test.nix");
 
@@ -48,8 +47,7 @@ async fn references_exclude_declaration() {
     )])
     .await;
 
-    h.open("test.nix").await;
-    let _ = h.wait_for_diagnostics("test.nix", TIMEOUT).await;
+    h.open_and_wait("test.nix").await;
 
     let m = h.markers("test.nix");
 
@@ -85,10 +83,8 @@ async fn cross_file_references() {
     ])
     .await;
 
-    h.open("lib.nix").await;
-    let _ = h.wait_for_diagnostics("lib.nix", TIMEOUT).await;
-    h.open("a.nix").await;
-    let _ = h.wait_for_diagnostics("a.nix", TIMEOUT).await;
+    h.open_and_wait("lib.nix").await;
+    h.open_and_wait("a.nix").await;
 
     let m = h.markers("lib.nix");
     let refs = h
@@ -128,12 +124,9 @@ async fn cross_file_references_multiple_importers() {
     ])
     .await;
 
-    h.open("lib.nix").await;
-    let _ = h.wait_for_diagnostics("lib.nix", TIMEOUT).await;
-    h.open("a.nix").await;
-    let _ = h.wait_for_diagnostics("a.nix", TIMEOUT).await;
-    h.open("b.nix").await;
-    let _ = h.wait_for_diagnostics("b.nix", TIMEOUT).await;
+    h.open_and_wait("lib.nix").await;
+    h.open_and_wait("a.nix").await;
+    h.open_and_wait("b.nix").await;
 
     let m = h.markers("lib.nix");
     let refs = h
@@ -181,10 +174,8 @@ async fn references_from_select_field() {
     ])
     .await;
 
-    h.open("lib.nix").await;
-    let _ = h.wait_for_diagnostics("lib.nix", TIMEOUT).await;
-    h.open("a.nix").await;
-    let _ = h.wait_for_diagnostics("a.nix", TIMEOUT).await;
+    h.open_and_wait("lib.nix").await;
+    h.open_and_wait("a.nix").await;
 
     let m = h.markers("a.nix");
     let refs = h
@@ -223,12 +214,9 @@ async fn cross_file_references_through_barrel() {
     ])
     .await;
 
-    h.open("default.nix").await;
-    let _ = h.wait_for_diagnostics("default.nix", TIMEOUT).await;
-    h.open("barrel.nix").await;
-    let _ = h.wait_for_diagnostics("barrel.nix", TIMEOUT).await;
-    h.open("other.nix").await;
-    let _ = h.wait_for_diagnostics("other.nix", TIMEOUT).await;
+    h.open_and_wait("default.nix").await;
+    h.open_and_wait("barrel.nix").await;
+    h.open_and_wait("other.nix").await;
 
     let m = h.markers("default.nix");
     let refs = h

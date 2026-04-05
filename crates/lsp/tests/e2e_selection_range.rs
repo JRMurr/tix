@@ -1,6 +1,6 @@
 mod common;
 
-use common::{LspTestHarness, TIMEOUT};
+use common::LspTestHarness;
 use indoc::indoc;
 
 /// Selection range returns a linked-list parent chain.
@@ -15,8 +15,7 @@ async fn selection_range_nesting() {
     )])
     .await;
 
-    h.open("test.nix").await;
-    let _ = h.wait_for_diagnostics("test.nix", TIMEOUT).await;
+    h.open_and_wait("test.nix").await;
 
     let m = h.markers("test.nix");
 
@@ -59,8 +58,7 @@ async fn selection_range_multiple_positions() {
     )])
     .await;
 
-    h.open("test.nix").await;
-    let _ = h.wait_for_diagnostics("test.nix", TIMEOUT).await;
+    h.open_and_wait("test.nix").await;
 
     let m = h.markers("test.nix");
 

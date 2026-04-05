@@ -16,8 +16,7 @@ async fn hover_shows_type_after_analysis() {
     )])
     .await;
 
-    h.open("test.nix").await;
-    let _ = h.wait_for_diagnostics("test.nix", TIMEOUT).await;
+    h.open_and_wait("test.nix").await;
 
     let m = h.markers("test.nix");
 
@@ -66,8 +65,7 @@ async fn hover_updates_after_edit() {
     )])
     .await;
 
-    h.open("test.nix").await;
-    let _ = h.wait_for_diagnostics("test.nix", TIMEOUT).await;
+    h.open_and_wait("test.nix").await;
 
     let m = h.markers("test.nix");
     let hover = h
@@ -127,8 +125,7 @@ async fn hover_narrowed_param_ref_shows_narrowed_type() {
     )])
     .await;
 
-    h.open("test.nix").await;
-    let _ = h.wait_for_diagnostics("test.nix", TIMEOUT).await;
+    h.open_and_wait("test.nix").await;
 
     let m = h.markers("test.nix");
     let hover = h
@@ -167,8 +164,7 @@ async fn hover_on_attrset_field() {
     )])
     .await;
 
-    h.open("test.nix").await;
-    let _ = h.wait_for_diagnostics("test.nix", TIMEOUT).await;
+    h.open_and_wait("test.nix").await;
 
     let m = h.markers("test.nix");
     let hover = h

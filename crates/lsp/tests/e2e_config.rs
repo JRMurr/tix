@@ -1,6 +1,6 @@
 mod common;
 
-use common::{LspTestHarness, TIMEOUT};
+use common::LspTestHarness;
 use indoc::indoc;
 use tower_lsp::lsp_types::*;
 
@@ -32,8 +32,7 @@ async fn tix_toml_stubs() {
     ])
     .await;
 
-    h.open("test.nix").await;
-    let _ = h.wait_for_diagnostics("test.nix", TIMEOUT).await;
+    h.open_and_wait("test.nix").await;
 
     let m = h.markers("test.nix");
     let hover = h
@@ -88,8 +87,7 @@ async fn tix_toml_context() {
     ])
     .await;
 
-    h.open("modules/test.nix").await;
-    let _ = h.wait_for_diagnostics("modules/test.nix", TIMEOUT).await;
+    h.open_and_wait("modules/test.nix").await;
 
     let m = h.markers("modules/test.nix");
     let hover = h
@@ -147,8 +145,7 @@ async fn context_hover_on_pattern_field() {
     ])
     .await;
 
-    h.open("src/test.nix").await;
-    let _ = h.wait_for_diagnostics("src/test.nix", TIMEOUT).await;
+    h.open_and_wait("src/test.nix").await;
 
     let m = h.markers("src/test.nix");
     let hover = h
@@ -211,10 +208,7 @@ async fn callpackage_context_lib_hover() {
     )
     .await;
 
-    h.open("pkgs/beast/default.nix").await;
-    let _ = h
-        .wait_for_diagnostics("pkgs/beast/default.nix", TIMEOUT)
-        .await;
+    h.open_and_wait("pkgs/beast/default.nix").await;
 
     let m = h.markers("pkgs/beast/default.nix");
     let hover = h
@@ -284,10 +278,7 @@ async fn callpackage_context_nixpkgs_toml_format() {
     )
     .await;
 
-    h.open("pkgs/beast/default.nix").await;
-    let _ = h
-        .wait_for_diagnostics("pkgs/beast/default.nix", TIMEOUT)
-        .await;
+    h.open_and_wait("pkgs/beast/default.nix").await;
 
     let m = h.markers("pkgs/beast/default.nix");
 
@@ -361,8 +352,7 @@ async fn tix_toml_context_with_module_stub() {
     ])
     .await;
 
-    h.open("modules/test.nix").await;
-    let _ = h.wait_for_diagnostics("modules/test.nix", TIMEOUT).await;
+    h.open_and_wait("modules/test.nix").await;
 
     let m = h.markers("modules/test.nix");
     let hover = h

@@ -1,6 +1,6 @@
 mod common;
 
-use common::{LspTestHarness, TIMEOUT};
+use common::LspTestHarness;
 
 /// Formatting returns TextEdits when nixfmt reformats the document.
 ///
@@ -15,8 +15,7 @@ async fn formatting_returns_edits() {
     )])
     .await;
 
-    h.open("test.nix").await;
-    let _ = h.wait_for_diagnostics("test.nix", TIMEOUT).await;
+    h.open_and_wait("test.nix").await;
 
     let edits = h.formatting("test.nix").await;
 

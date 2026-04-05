@@ -214,6 +214,13 @@ impl LspTestHarness {
         self.send_notification(notif).await;
     }
 
+    /// Open a file and wait for its initial diagnostics. Convenience for the
+    /// common `open() + wait_for_diagnostics()` pattern.
+    pub async fn open_and_wait(&mut self, name: &str) -> Option<PublishDiagnosticsParams> {
+        self.open(name).await;
+        self.wait_for_diagnostics(name, TIMEOUT).await
+    }
+
     /// Send a full-text change for a file. Also writes the new text to disk
     /// so that `markers()` reads the updated content.
     pub async fn edit(&mut self, name: &str, new_text: &str) {

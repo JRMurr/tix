@@ -1,6 +1,6 @@
 mod common;
 
-use common::{LspTestHarness, TIMEOUT};
+use common::LspTestHarness;
 use indoc::indoc;
 
 /// An `import ./a.nix` expression produces a DocumentLink with a target URI.
@@ -17,8 +17,7 @@ async fn import_produces_link() {
     ])
     .await;
 
-    h.open("b.nix").await;
-    let _ = h.wait_for_diagnostics("b.nix", TIMEOUT).await;
+    h.open_and_wait("b.nix").await;
 
     let links = h
         .document_links("b.nix")

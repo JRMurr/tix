@@ -1,6 +1,6 @@
 mod common;
 
-use common::{LspTestHarness, TIMEOUT};
+use common::LspTestHarness;
 use indoc::indoc;
 use tower_lsp::lsp_types::*;
 
@@ -33,8 +33,7 @@ async fn goto_type_def_named_alias() {
     ])
     .await;
 
-    h.open("test.nix").await;
-    let _ = h.wait_for_diagnostics("test.nix", TIMEOUT).await;
+    h.open_and_wait("test.nix").await;
 
     let m = h.markers("test.nix");
 
@@ -108,8 +107,7 @@ async fn goto_type_def_multiple_stubs() {
     ])
     .await;
 
-    h.open("test.nix").await;
-    let _ = h.wait_for_diagnostics("test.nix", TIMEOUT).await;
+    h.open_and_wait("test.nix").await;
 
     let m = h.markers("test.nix");
 
@@ -159,8 +157,7 @@ async fn goto_type_def_plain_type_returns_null() {
     )])
     .await;
 
-    h.open("test.nix").await;
-    let _ = h.wait_for_diagnostics("test.nix", TIMEOUT).await;
+    h.open_and_wait("test.nix").await;
 
     let m = h.markers("test.nix");
 
