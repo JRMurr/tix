@@ -548,8 +548,6 @@ impl StubKind {
                 let type_name = self.type_name();
                 let mut out = String::new();
                 for (i, arg) in context_args.iter().enumerate() {
-                    // First arg is the typed config; subsequent args get
-                    // known mappings or `{ ... }` as a fallback.
                     let ty = if i == 0 {
                         type_name.clone()
                     } else {
@@ -926,9 +924,16 @@ pub fn run_module(opts: ModuleOptions) -> Result<(), Box<dyn std::error::Error>>
         Some(ref path) => read_json_file(path)?,
         None => invoke_module_nix_eval(&opts)?,
     };
+    // Normalize empty → `["config"]` once here so CLI and LSP subprocess
+    // callers can both pass `context_args` through unchanged.
+    let context_args = if opts.context_args.is_empty() {
+        vec!["config".to_string()]
+    } else {
+        opts.context_args.clone()
+    };
     let kind = StubKind::custom(
         opts.name.clone(),
-        opts.context_args.clone(),
+        context_args,
         Some(opts.example_glob.clone()),
     );
     let tix_content = generate_tix_file_with_docs(

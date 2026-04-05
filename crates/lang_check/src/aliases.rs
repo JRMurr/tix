@@ -778,7 +778,7 @@ enum VisitState {
 }
 
 /// Capitalize the first character of a string (e.g. "lib" -> "Lib").
-fn capitalize(s: &str) -> SmolStr {
+pub fn capitalize(s: &str) -> SmolStr {
     let mut chars = s.chars();
     match chars.next() {
         None => SmolStr::default(),

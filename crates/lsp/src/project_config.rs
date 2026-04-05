@@ -5,9 +5,9 @@
 // Mirrors the CLI's config module for discovering and loading `tix.toml` files.
 // Provides per-file context resolution for NixOS/Home Manager module typing.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use comment_parser::ParsedTy;
 use lang_check::aliases::TypeAliasRegistry;
@@ -241,12 +241,7 @@ fn load_stub_entry(
             .load_context_by_name(name)
             .transpose()?
             .ok_or_else(|| -> Box<dyn std::error::Error> {
-                // Inline capitalize (aliases::capitalize is file-private).
-                let mut chars = name.chars();
-                let capitalized: String = match chars.next() {
-                    None => String::new(),
-                    Some(c) => c.to_uppercase().chain(chars).collect(),
-                };
+                let capitalized = lang_check::aliases::capitalize(name);
                 format!(
                     "Context '@{name}' not found: no built-in source and no '{capitalized}' alias is registered. \
                      Add a stub file to [stubs] paths, or declare `module {name} {{ ... }}` in a stub."
@@ -261,13 +256,26 @@ fn load_stub_entry(
 
     // Warn on silent misconfiguration: a stub file with only type aliases
     // (no top-level `val` or `module` blocks) produces no context args.
-    if result.is_empty() {
+    // `load_stub_entry` is called per-file during warmup + on every edit,
+    // so dedupe the warning by entry name to avoid log spam.
+    if result.is_empty() && warn_empty_context_once(entry) {
         log::warn!(
             "Context stub '{entry}' loaded 0 context args. Add top-level `val` declarations \
              or a `module` block whose fields become context args."
         );
     }
     Ok(result)
+}
+
+/// Returns `true` the first time `entry` is seen, `false` on subsequent
+/// calls. Used to log the empty-context warning at most once per entry.
+fn warn_empty_context_once(entry: &str) -> bool {
+    static WARNED: OnceLock<Mutex<HashSet<SmolStr>>> = OnceLock::new();
+    let mut set = WARNED
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .unwrap();
+    set.insert(entry.into())
 }
 
 /// Resolve context args for a file based on `tix.toml` context definitions.

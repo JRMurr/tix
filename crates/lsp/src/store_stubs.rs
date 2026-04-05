@@ -163,7 +163,7 @@ fn build_merged_stubs_dir(
     cache_key: &str,
     systems: &HashMap<String, CustomSystem>,
 ) -> Result<PathBuf, Error> {
-    let merged_root = custom_stubs_dir()
+    let merged_root = custom_stubs_cache_dir()
         .ok_or_else(|| Error::Cache("cannot determine cache directory".into()))?;
     let merged = merged_root.join(cache_key);
     populate_merged_stubs_dir(built_in_dir, &merged, systems)?;
@@ -185,7 +185,6 @@ fn populate_merged_stubs_dir(
     std::fs::create_dir_all(merged)
         .map_err(|e| Error::Cache(format!("creating merged dir: {e}")))?;
 
-    // Copy every built-in .tix file.
     let entries = std::fs::read_dir(built_in_dir)
         .map_err(|e| Error::Cache(format!("reading {}: {e}", built_in_dir.display())))?;
     for entry in entries {
@@ -201,27 +200,34 @@ fn populate_merged_stubs_dir(
             .map_err(|e| Error::Cache(format!("copying {}: {e}", path.display())))?;
     }
 
-    // Generate each custom system into the merged dir. Failures are
-    // logged but don't abort the whole generation — users see the
-    // error in the LSP log and can iterate via the CLI equivalent.
-    for (name, sys) in systems {
-        if let Err(e) = generate_custom_system(name, sys, merged) {
-            log::warn!("Failed to generate custom system '{name}': {e}");
+    // Generate each custom system into the merged dir in parallel.
+    // Each call shells out to `nix eval` (seconds-to-minutes), and the
+    // calls are independent: they write to distinct `<name>.tix` files.
+    // Failures are logged but don't abort — users see the error in the
+    // LSP log and can iterate via the CLI equivalent.
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = systems
+            .iter()
+            .map(|(name, sys)| {
+                scope.spawn(move || (name, generate_custom_system(name, sys, merged)))
+            })
+            .collect();
+        for handle in handles {
+            let (name, result) = handle.join().expect("custom-system thread panicked");
+            if let Err(e) = result {
+                log::warn!("Failed to generate custom system '{name}': {e}");
+            }
         }
-    }
+    });
 
     Ok(())
-}
-
-fn custom_stubs_dir() -> Option<PathBuf> {
-    custom_stubs_cache_dir()
 }
 
 /// Return the merged custom-stubs cache directory
 /// (`~/.cache/tix/custom-stubs/`). Each entry under this path is a
 /// `<hash>/` subdirectory containing the merged built-ins + generated
 /// custom-system stubs for a given cache key.
-pub fn custom_stubs_cache_dir() -> Option<PathBuf> {
+fn custom_stubs_cache_dir() -> Option<PathBuf> {
     dirs::cache_dir().map(|d| d.join("tix/custom-stubs"))
 }
 
@@ -250,11 +256,10 @@ fn generate_custom_system(name: &str, sys: &CustomSystem, out_dir: &Path) -> Res
         .args(["-o"])
         .arg(&out_file);
 
+    // `run_module` normalizes empty → `["config"]`, so we can pass the
+    // user's context_args through unchanged (including an empty list).
     for arg in &sys.context_args {
         cmd.args(["--context-arg", arg]);
-    }
-    if sys.context_args.is_empty() {
-        cmd.args(["--context-arg", "config"]);
     }
 
     if let Some(glob) = &sys.example_glob {
@@ -380,7 +385,7 @@ fn module_source_to_nix(src: &ModuleSource, config_dir: &Path) -> Result<String,
 
 /// Build a Nix list literal from a slice of module sources. Empty slice
 /// returns `"[ ]"`.
-pub fn build_module_list(srcs: &[ModuleSource], config_dir: &Path) -> Result<String, Error> {
+fn build_module_list(srcs: &[ModuleSource], config_dir: &Path) -> Result<String, Error> {
     if srcs.is_empty() {
         return Ok("[ ]".to_string());
     }
@@ -397,14 +402,23 @@ pub fn build_module_list(srcs: &[ModuleSource], config_dir: &Path) -> Result<Str
 
 /// Return the cache directory path (`~/.cache/tix/store-stubs/`).
 /// Returns `None` if the platform has no standard cache dir.
-pub fn cache_dir() -> Option<PathBuf> {
+fn cache_dir() -> Option<PathBuf> {
     dirs::cache_dir().map(|d| d.join("tix/store-stubs"))
 }
 
-/// Delete every top-level file in `dir`. Returns the number of entries
-/// removed. Subdirectories and non-regular files are skipped. Missing
-/// `dir` is a no-op (returns 0).
-pub fn clear_cache_in_dir(dir: &Path) -> std::io::Result<usize> {
+/// Which top-level entries in a cache directory to reclaim.
+#[derive(Clone, Copy)]
+enum EntryKind {
+    /// Flat files (keyed `store-stubs/` entries).
+    Files,
+    /// Subdirectories (`<hash>/` bundles in `custom-stubs/`).
+    Dirs,
+}
+
+/// Delete entries of the given `kind` from `dir`. Returns the number
+/// removed. Entries of the opposite kind are skipped. Missing `dir` is
+/// a no-op (returns 0).
+fn clear_entries(dir: &Path, kind: EntryKind) -> std::io::Result<usize> {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(0),
@@ -415,65 +429,50 @@ pub fn clear_cache_in_dir(dir: &Path) -> std::io::Result<usize> {
     for entry in entries {
         let entry = entry?;
         let file_type = entry.file_type()?;
-        if file_type.is_file() || file_type.is_symlink() {
-            std::fs::remove_file(entry.path())?;
+        let matched = match kind {
+            EntryKind::Files => file_type.is_file() || file_type.is_symlink(),
+            EntryKind::Dirs => file_type.is_dir(),
+        };
+        if matched {
+            match kind {
+                EntryKind::Files => std::fs::remove_file(entry.path())?,
+                EntryKind::Dirs => std::fs::remove_dir_all(entry.path())?,
+            }
             count += 1;
         }
     }
     Ok(count)
 }
 
-/// Delete every top-level subdirectory in `dir`. Returns the number
-/// of directories removed. Top-level files and non-directories are
-/// skipped (symmetric with `clear_cache_in_dir` which does the
-/// opposite). Missing `dir` is a no-op (returns 0).
-///
-/// Used to clear `~/.cache/tix/custom-stubs/` where entries are
-/// `<hash>/` directories, not flat files.
-pub fn clear_custom_stubs_dir(dir: &Path) -> std::io::Result<usize> {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-        Err(err) => return Err(err),
-    };
-
-    let mut count = 0;
-    for entry in entries {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        if file_type.is_dir() {
-            std::fs::remove_dir_all(entry.path())?;
-            count += 1;
-        }
-    }
-    Ok(count)
-}
-
-/// Counts returned by [`clear_all_cache`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Counts and paths returned by [`clear_all_cache`].
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClearStats {
-    /// Files removed from `~/.cache/tix/store-stubs/`.
+    /// `~/.cache/tix/store-stubs/`.
+    pub store_dir: PathBuf,
+    /// Files removed from `store_dir`.
     pub store_entries: usize,
-    /// Subdirectories removed from `~/.cache/tix/custom-stubs/`.
+    /// `~/.cache/tix/custom-stubs/`.
+    pub custom_dir: PathBuf,
+    /// Subdirectories removed from `custom_dir`.
     pub custom_dirs: usize,
 }
 
 /// Delete all entries in both cache dirs (`store-stubs/` and
-/// `custom-stubs/`). Returns the combined counts, or `None` if the
-/// platform has no standard cache dir.
+/// `custom-stubs/`). Returns the combined counts + dirs, or `None` if
+/// the platform has no standard cache dir.
 pub fn clear_all_cache() -> std::io::Result<Option<ClearStats>> {
-    let Some(store) = cache_dir() else {
+    let Some(store_dir) = cache_dir() else {
         return Ok(None);
     };
-    let store_entries = clear_cache_in_dir(&store)?;
-    // custom_stubs_dir() shares the same cache-dir root, so if store is
-    // Some the custom path is too — but guard anyway for safety.
-    let custom_dirs = match custom_stubs_cache_dir() {
-        Some(dir) => clear_custom_stubs_dir(&dir)?,
-        None => 0,
+    let Some(custom_dir) = custom_stubs_cache_dir() else {
+        return Ok(None);
     };
+    let store_entries = clear_entries(&store_dir, EntryKind::Files)?;
+    let custom_dirs = clear_entries(&custom_dir, EntryKind::Dirs)?;
     Ok(Some(ClearStats {
+        store_dir,
         store_entries,
+        custom_dir,
         custom_dirs,
     }))
 }
@@ -764,7 +763,7 @@ mod tests {
     }
 
     #[test]
-    fn clear_cache_in_dir_removes_files() {
+    fn clear_entries_files_removes_flat_files() {
         let dir = tempfile::tempdir().unwrap();
 
         // Populate some fake cache entries.
@@ -772,7 +771,7 @@ mod tests {
         std::fs::write(dir.path().join("def456"), "/nix/store/bbb").unwrap();
         std::fs::write(dir.path().join("ghi789"), "/nix/store/ccc").unwrap();
 
-        let removed = clear_cache_in_dir(dir.path()).unwrap();
+        let removed = clear_entries(dir.path(), EntryKind::Files).unwrap();
         assert_eq!(removed, 3);
 
         // Directory should still exist but be empty.
@@ -782,12 +781,11 @@ mod tests {
     }
 
     #[test]
-    fn clear_cache_in_dir_missing_dir_ok() {
-        // Clearing a non-existent dir is a no-op — not an error.
+    fn clear_entries_missing_dir_ok() {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("does-not-exist");
-        let removed = clear_cache_in_dir(&missing).unwrap();
-        assert_eq!(removed, 0);
+        assert_eq!(clear_entries(&missing, EntryKind::Files).unwrap(), 0);
+        assert_eq!(clear_entries(&missing, EntryKind::Dirs).unwrap(), 0);
     }
 
     #[test]
@@ -991,17 +989,14 @@ mod tests {
     }
 
     #[test]
-    fn clear_custom_stubs_dir_removes_nested_subdirs() {
-        // Each entry in `custom-stubs/` is a `<hash>/` directory holding
-        // merged built-ins + custom stubs. `clear_custom_stubs_dir`
-        // should reclaim them wholesale.
+    fn clear_entries_dirs_removes_nested_subdirs() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("hash1")).unwrap();
         std::fs::write(dir.path().join("hash1/foo.tix"), "# foo\n").unwrap();
         std::fs::create_dir(dir.path().join("hash2")).unwrap();
         std::fs::write(dir.path().join("hash2/bar.tix"), "# bar\n").unwrap();
 
-        let removed = clear_custom_stubs_dir(dir.path()).unwrap();
+        let removed = clear_entries(dir.path(), EntryKind::Dirs).unwrap();
         assert_eq!(removed, 2);
 
         assert!(dir.path().exists());
@@ -1010,41 +1005,19 @@ mod tests {
     }
 
     #[test]
-    fn clear_custom_stubs_dir_missing_dir_ok() {
-        // Symmetric with clear_cache_in_dir_missing_dir_ok: the cache
-        // dir may simply not exist yet.
-        let dir = tempfile::tempdir().unwrap();
-        let missing = dir.path().join("does-not-exist");
-        let removed = clear_custom_stubs_dir(&missing).unwrap();
-        assert_eq!(removed, 0);
-    }
-
-    #[test]
-    fn clear_custom_stubs_dir_ignores_top_level_files() {
-        // Only directories are reclaimed. A stray file (shouldn't
-        // exist in normal operation, but be resilient) is left alone.
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("stray.txt"), "x").unwrap();
-        std::fs::create_dir(dir.path().join("hash1")).unwrap();
-        let removed = clear_custom_stubs_dir(dir.path()).unwrap();
-        assert_eq!(removed, 1);
-        assert!(dir.path().join("stray.txt").exists());
-        assert!(!dir.path().join("hash1").exists());
-    }
-
-    #[test]
-    fn clear_cache_in_dir_ignores_subdirectories() {
-        // The cache dir only contains flat files keyed by hash. If a user
-        // accidentally creates a subdir, we shouldn't error — just skip it.
+    fn clear_entries_respects_kind() {
+        // Each `EntryKind` ignores the other kind: Files skips dirs,
+        // Dirs skips top-level files.
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("abc123"), "/nix/store/aaa").unwrap();
         std::fs::create_dir(dir.path().join("subdir")).unwrap();
         std::fs::write(dir.path().join("subdir/nested"), "content").unwrap();
 
-        let removed = clear_cache_in_dir(dir.path()).unwrap();
-        assert_eq!(removed, 1);
-
-        // The subdir survives.
+        assert_eq!(clear_entries(dir.path(), EntryKind::Files).unwrap(), 1);
         assert!(dir.path().join("subdir").exists());
+        assert!(!dir.path().join("abc123").exists());
+
+        assert_eq!(clear_entries(dir.path(), EntryKind::Dirs).unwrap(), 1);
+        assert!(!dir.path().join("subdir").exists());
     }
 }
