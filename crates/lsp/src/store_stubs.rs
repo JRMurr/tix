@@ -12,11 +12,12 @@
 //   2. [stubs.generate] runtime generation (this module)
 //   3. Compiled-in minimal stubs (existing fallback)
 
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::project_config::{ModuleSource, NixSource, StubsGenerateConfig};
+use crate::project_config::{CustomSystem, ModuleSource, NixSource, StubsGenerateConfig};
 
 /// Result of successful stub generation: the stubs directory plus the resolved
 /// source roots for `@source` annotation resolution.
@@ -160,7 +161,7 @@ pub fn generate_stubs_with_options(
 fn build_merged_stubs_dir(
     built_in_dir: &Path,
     cache_key: &str,
-    systems: &std::collections::HashMap<String, crate::project_config::CustomSystem>,
+    systems: &HashMap<String, CustomSystem>,
 ) -> Result<PathBuf, Error> {
     let merged_root = custom_stubs_dir()
         .ok_or_else(|| Error::Cache("cannot determine cache directory".into()))?;
@@ -174,7 +175,7 @@ fn build_merged_stubs_dir(
 fn populate_merged_stubs_dir(
     built_in_dir: &Path,
     merged: &Path,
-    systems: &std::collections::HashMap<String, crate::project_config::CustomSystem>,
+    systems: &HashMap<String, CustomSystem>,
 ) -> Result<(), Error> {
     // Replace any existing dir atomically-ish: remove then recreate.
     if merged.exists() {
@@ -228,11 +229,7 @@ pub fn custom_stubs_cache_dir() -> Option<PathBuf> {
 /// as a subprocess with `stubs generate module`. Subprocess invocation
 /// mirrors the CLI workflow documented in the stubs guide — users can
 /// run the same command themselves to iterate.
-fn generate_custom_system(
-    name: &str,
-    sys: &crate::project_config::CustomSystem,
-    out_dir: &Path,
-) -> Result<(), Error> {
+fn generate_custom_system(name: &str, sys: &CustomSystem, out_dir: &Path) -> Result<(), Error> {
     let tix_exe = std::env::current_exe()
         .map_err(|e| Error::NixCommand(format!("cannot locate current tix binary: {e}")))?;
 
@@ -510,25 +507,19 @@ fn compute_cache_key(
 
 /// Produce a deterministic string fingerprint of the custom-systems
 /// config. Systems are emitted in sorted-name order so hash stability
-/// doesn't depend on HashMap iteration order.
+/// doesn't depend on HashMap iteration order. `options_expr` is
+/// trimmed so cosmetic whitespace edits don't bust the cache.
 ///
 /// Only the options_expr / context_args / example_glob trio is
 /// hashed — the expression is user-owned and may `import` whatever it
 /// needs, so any files it depends on fall outside tix's visibility.
 /// Users invalidate the cache manually via `tix stubs refresh` after
 /// editing module files referenced from options_expr.
-fn digest_systems_config(
-    systems: &std::collections::HashMap<String, crate::project_config::CustomSystem>,
-) -> String {
-    if systems.is_empty() {
-        return String::new();
-    }
-    let mut names: Vec<&String> = systems.keys().collect();
-    names.sort();
+fn digest_systems_config(systems: &HashMap<String, CustomSystem>) -> String {
+    let mut entries: Vec<_> = systems.iter().collect();
+    entries.sort_by_key(|(name, _)| *name);
     let mut out = String::new();
-    for name in names {
-        let sys = &systems[name];
-        // options_expr gets trimmed to absorb cosmetic whitespace edits.
+    for (name, sys) in entries {
         out.push_str(name);
         out.push('\0');
         out.push_str(sys.options_expr.trim());
@@ -896,7 +887,7 @@ mod tests {
 
         let merged_root = tempfile::tempdir().unwrap();
         let merged = merged_root.path().join("out");
-        let systems = std::collections::HashMap::new();
+        let systems = HashMap::new();
 
         populate_merged_stubs_dir(built_in.path(), &merged, &systems).unwrap();
 
@@ -919,7 +910,7 @@ mod tests {
 
         let merged_root = tempfile::tempdir().unwrap();
         let merged = merged_root.path().join("out");
-        let systems = std::collections::HashMap::new();
+        let systems = HashMap::new();
 
         populate_merged_stubs_dir(built_in_a.path(), &merged, &systems).unwrap();
         assert!(merged.join("a.tix").exists());
@@ -948,8 +939,7 @@ mod tests {
 
     #[test]
     fn digest_systems_config_is_deterministic() {
-        use crate::project_config::CustomSystem;
-        let mut systems = std::collections::HashMap::new();
+        let mut systems = HashMap::new();
         systems.insert(
             "flake-parts".into(),
             CustomSystem {
@@ -977,15 +967,14 @@ mod tests {
 
     #[test]
     fn digest_systems_config_empty_is_empty() {
-        let systems = std::collections::HashMap::new();
+        let systems = HashMap::new();
         assert_eq!(digest_systems_config(&systems), "");
     }
 
     #[test]
     fn digest_systems_config_differs_on_options_expr_change() {
-        use crate::project_config::CustomSystem;
         let mk = |expr: &str| {
-            let mut systems = std::collections::HashMap::new();
+            let mut systems = HashMap::new();
             systems.insert(
                 "mysys".into(),
                 CustomSystem {
