@@ -193,10 +193,10 @@ For arbitrary module systems (flake-parts, devenv, nix-darwin, custom `evalModul
 ```toml
 [stubs.generate.systems.flake-parts]
 options_expr = "(inputs.flake-parts.lib.evalFlakeModule {...} {...}).options"
-context_args = ["config", "inputs", "self"]
+context_args = ["config", "lib", "pkgs"]
 ```
 
-Each custom system generates a `<name>.tix` file that you reference in contexts as `@<name>`. Start by prototyping the `options_expr` manually with `tix stubs generate module` — see [Custom module systems](./stubs.md#custom-module-systems-flake-parts-devenv-nix-darwin-) for the full CLI-first iteration workflow.
+Each custom system generates a `<name>.tix` file that you reference in contexts as `@<name>`. Types are assigned by name: `config` → `<Name>Config`, `lib` → `Lib`, `pkgs` → `Pkgs`, any other name → `{ ... }`. For precise types on extra args (e.g. flake-parts `withSystem`), layer a hand-written `.tix` after `@<name>` in the context's `stubs` array — see [Typing extra module args precisely](./stubs.md#3-typing-extra-module-args-precisely). Start by prototyping the `options_expr` manually with `tix stubs generate module` — see [Custom module systems](./stubs.md#custom-module-systems-flake-parts-devenv-nix-darwin-) for the full CLI-first iteration workflow.
 
 On first run, tix invokes `nix build` to generate `.tix` stubs from the NixOS option tree, Home Manager options, and nixpkgs package set. This takes 30-60 seconds. Subsequent runs are instant thanks to a lightweight file cache (`~/.cache/tix/store-stubs/`). Changing either nixpkgs or tix version triggers regeneration.
 

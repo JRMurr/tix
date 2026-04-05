@@ -536,28 +536,27 @@ impl StubKind {
                 .into(),
             StubKind::Custom { context_args, .. } => {
                 let type_name = self.type_name();
-                let mut out = String::new();
-                for (i, arg) in context_args.iter().enumerate() {
-                    let ty = if i == 0 {
-                        type_name.clone()
-                    } else {
-                        known_arg_type(arg).to_string()
-                    };
-                    out.push_str(&format!("val {arg} :: {ty};\n"));
-                }
-                out
+                context_args
+                    .iter()
+                    .map(|arg| format!("val {arg} :: {};\n", arg_type(arg, &type_name)))
+                    .collect()
             }
         }
     }
 }
 
-/// Known mappings for module arg names beyond the first. The first arg
-/// always gets the system's `<Name>Config` type.
-fn known_arg_type(arg: &str) -> &'static str {
+/// Map a module-arg name to its emitted type. `config` is the conventional
+/// name for the options tree, so it gets the system's `<Name>Config` type;
+/// other known names map to their canonical aliases. Unknown names fall
+/// through to an open attrset, which users can override precisely by
+/// layering a hand-written `.tix` after the generated stub in
+/// `[context.*].stubs` (later entries win on name collisions).
+fn arg_type(arg: &str, system_type: &str) -> String {
     match arg {
-        "lib" => "Lib",
-        "pkgs" => "Pkgs",
-        _ => "{ ... }",
+        "config" => system_type.into(),
+        "lib" => "Lib".into(),
+        "pkgs" => "Pkgs".into(),
+        _ => "{ ... }".into(),
     }
 }
 
@@ -1399,19 +1398,50 @@ mod tests {
     }
 
     #[test]
-    fn custom_stub_kind_emits_first_arg_typed() {
+    fn custom_stub_kind_maps_by_name() {
+        // `config` gets the options-tree type regardless of position;
+        // unknown names (self, inputs, withSystem) get the opaque attrset.
         let kind = StubKind::custom(
             "flake-parts",
-            vec!["config".into(), "inputs".into(), "self".into()],
+            vec![
+                "self".into(),
+                "inputs".into(),
+                "config".into(),
+                "withSystem".into(),
+            ],
         );
         let vals = kind.context_vals();
         assert!(
             vals.contains("val config :: FlakePartsConfig"),
             "got: {vals}"
         );
-        // Unknown args get opaque attrset type.
-        assert!(vals.contains("val inputs :: { ... }"), "got: {vals}");
         assert!(vals.contains("val self :: { ... }"), "got: {vals}");
+        assert!(vals.contains("val inputs :: { ... }"), "got: {vals}");
+        assert!(vals.contains("val withSystem :: { ... }"), "got: {vals}");
+    }
+
+    #[test]
+    fn custom_stub_kind_reorder_is_order_independent() {
+        // Reordering the list must not change the emitted types — the
+        // type of each arg is determined by its name, not its position.
+        let ordering_a =
+            StubKind::custom("mysys", vec!["config".into(), "lib".into(), "pkgs".into()])
+                .context_vals();
+        let ordering_b =
+            StubKind::custom("mysys", vec!["pkgs".into(), "config".into(), "lib".into()])
+                .context_vals();
+        let ordering_c =
+            StubKind::custom("mysys", vec!["lib".into(), "pkgs".into(), "config".into()])
+                .context_vals();
+        let extract = |vals: &str| -> std::collections::BTreeSet<String> {
+            vals.lines().map(|l| l.trim().to_string()).collect()
+        };
+        assert_eq!(extract(&ordering_a), extract(&ordering_b));
+        assert_eq!(extract(&ordering_a), extract(&ordering_c));
+        // Sanity: `config` maps to the system type in every ordering.
+        assert!(ordering_a.contains("val config :: MysysConfig"));
+        assert!(ordering_b.contains("val config :: MysysConfig"));
+        assert!(ordering_c.contains("val config :: MysysConfig"));
     }
 
     #[test]

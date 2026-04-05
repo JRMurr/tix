@@ -218,15 +218,17 @@ tix stubs generate module \
   --name flake-parts \
   --options-expr '(inputs.flake-parts.lib.evalFlakeModule { self = self; } { imports = [ ]; }).options' \
   --context-arg config \
-  --context-arg inputs \
-  --context-arg self \
+  --context-arg lib \
+  --context-arg pkgs \
   -o flake-parts.tix
 ```
 
 Inspect the output, tweak the expression, re-run. The generated file
-contains a `type FlakePartsConfig = { ... }` alias and `val`
-declarations for each `--context-arg` — `config` gets typed as
-`FlakePartsConfig`, `lib` → `Lib`, `pkgs` → `Pkgs`, others → `{ ... }`.
+contains a `type FlakePartsConfig = { ... }` alias and one `val`
+declaration per `--context-arg`. Types are assigned by **name**, not
+position: `config` → `FlakePartsConfig` (the options tree), `lib` →
+`Lib`, `pkgs` → `Pkgs`, any other name → `{ ... }`. Order doesn't
+matter — reordering the args produces the same output.
 
 Optional two-step debugging:
 
@@ -252,14 +254,49 @@ options_expr = '''
   (inputs.flake-parts.lib.evalFlakeModule
     { self = self; } { imports = [ ]; }).options
 '''
-context_args = ["config", "inputs", "self"]
+context_args = ["config", "lib", "pkgs"]
 
 [context.flake-parts]
 includes = ["flake-modules/**/*.nix"]
 stubs = ["@flake-parts"]
 ```
 
-### 3. After edits
+### 3. Typing extra module args precisely
+
+Args beyond `config`/`lib`/`pkgs` (e.g. flake-parts `withSystem`,
+`inputs`, `self`; devenv `inputs'`) are typed as `{ ... }` in the
+generated stub. That's enough for the checker to recognise the name,
+but calls against it aren't checked — `withSystem "x86_64-linux" foo`
+just returns an opaque attrset.
+
+To give specific args precise types, write a companion `.tix` and
+layer it **after** the generated stub in the context's `stubs`
+array. Later entries override earlier ones on name collisions:
+
+```tix
+# flake-parts-extras.tix
+val withSystem :: string -> a -> a;
+val inputs :: { self: { ... }, nixpkgs: { ... }, ... };
+```
+
+```toml
+[stubs.generate.systems.flake-parts]
+options_expr = "..."
+context_args = ["config", "lib", "pkgs", "withSystem", "inputs"]
+
+[context.flake-parts]
+includes = ["flake-modules/**/*.nix"]
+stubs = ["@flake-parts", "./flake-parts-extras.tix"]  # extras win
+```
+
+The generated stub still types `config`/`lib`/`pkgs`; the extras
+file refines `withSystem` and `inputs` to precise types. Top-level
+`val` decls from all files in `stubs` are unioned into the context,
+so extras.tix can also add new arg names not declared in
+`context_args` at all — handy for iterating without re-running
+`tix stubs refresh`.
+
+### 4. After edits
 
 The LSP generates custom-system stubs once at startup. If you change
 the `options_expr`, `context_args`, or any module referenced from

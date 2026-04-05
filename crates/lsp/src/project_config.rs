@@ -149,9 +149,15 @@ pub struct CustomSystem {
     pub options_expr: String,
 
     /// Module arg names emitted as `val` declarations in the generated
-    /// stub. The first name gets typed as `<Name>Config`; subsequent
-    /// known names (`lib`, `pkgs`) get their canonical types, others
-    /// fall through to `{ ... }`. Defaults to `["config"]` if empty.
+    /// stub. Types are assigned by name, not position: `config` → the
+    /// options tree (`<Name>Config`), `lib` → `Lib`, `pkgs` → `Pkgs`,
+    /// anything else → `{ ... }`. Order doesn't matter. Defaults to
+    /// `["config"]` if empty.
+    ///
+    /// For precise types on args beyond the known names (e.g.
+    /// flake-parts `withSystem`), layer a hand-written `.tix` after
+    /// the generated entry in `[context.*].stubs`: later entries
+    /// override earlier ones on name collisions.
     #[serde(default)]
     pub context_args: Vec<String>,
 }
@@ -313,7 +319,11 @@ pub fn resolve_context_for_file(
                 return load_stub_entry(&ctx.stubs[0], config_dir, registry);
             }
 
-            // Multi-stub: merge all entries into a new HashMap.
+            // Multi-stub: merge all entries into a new HashMap. Later
+            // entries override earlier ones on name collisions — users
+            // rely on this to refine opaque types from a generated stub
+            // (e.g. `["@flake-parts", "./extras.tix"]` to give precise
+            // types to args the generator doesn't know about).
             let mut merged = HashMap::new();
             for stub_entry in &ctx.stubs {
                 match load_stub_entry(stub_entry, config_dir, registry) {

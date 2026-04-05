@@ -101,13 +101,17 @@ fn generate_module_stub_from_evalmodules_and_use_it() {
         nixpkgs = nixpkgs.display(),
     );
 
-    // Step 1: generate the stub.
+    // Step 1: generate the stub. `withSystem` is a made-up extra module
+    // arg that the generator doesn't know about — it should fall through
+    // to `{ ... }` in the generated file, and get a precise function
+    // type from an extras.tix layered below (see step 3).
     let stub_path = tmp.path().join("dummy.tix");
     let gen_output = Command::new(tix_cli())
         .args(["stubs", "generate", "module"])
         .args(["--name", "dummy"])
         .args(["--options-expr", &options_expr])
         .args(["--context-arg", "config"])
+        .args(["--context-arg", "withSystem"])
         .arg("-o")
         .arg(&stub_path)
         .output()
@@ -135,6 +139,9 @@ fn generate_module_stub_from_evalmodules_and_use_it() {
         "count",
         "int",
         "val config :: DummyConfig",
+        // `withSystem` is unknown to the generator, so it falls through
+        // to the opaque attrset fallback.
+        "val withSystem :: { ... }",
     ] {
         assert!(
             stub_content.contains(fragment),
@@ -142,28 +149,41 @@ fn generate_module_stub_from_evalmodules_and_use_it() {
         );
     }
 
-    // Step 3: wire up a tix.toml context pointing at the stub.
+    // Step 3: hand-write an extras.tix that overrides `withSystem` with
+    // a precise function type. Layering it after dummy.tix in the
+    // `stubs` array makes the override take effect (later entries win
+    // on name collisions — see project_config.rs merge loop).
+    std::fs::write(
+        tmp.path().join("extras.tix"),
+        "val withSystem :: string -> int -> int;\n",
+    )
+    .unwrap();
+
     std::fs::write(
         tmp.path().join("tix.toml"),
         indoc! {r#"
             [context.dummy]
             includes = ["modules/*.nix"]
-            stubs = ["./dummy.tix"]
+            stubs = ["./dummy.tix", "./extras.tix"]
         "#},
     )
     .unwrap();
 
-    // Step 4: write a module that uses config.greeting + config.count.
+    // Step 4: write a module that uses config.greeting + config.count +
+    // withSystem. The module-level `w` binding is what pins down the
+    // override: if extras.tix didn't win, `withSystem "x" 42` would be
+    // a type error against the opaque attrset.
     std::fs::create_dir(tmp.path().join("modules")).unwrap();
     std::fs::write(
         tmp.path().join("modules/mymod.nix"),
-        indoc! {"
-            { config, ... }:
+        indoc! {r#"
+            { config, withSystem, ... }:
             {
               g = config.greeting;
               c = config.count;
+              w = withSystem "x" 42;
             }
-        "},
+        "#},
     )
     .unwrap();
 
@@ -188,4 +208,9 @@ fn generate_module_stub_from_evalmodules_and_use_it() {
     assert_binding(&inspect_stdout, "g", "string");
     // `c` is `config.count`, which the stub types as `int`.
     assert_binding(&inspect_stdout, "c", "int");
+    // `w` is `withSystem "x" 42`. extras.tix declared withSystem as
+    // `string -> int -> int`, so the application is typed as `int` —
+    // confirming the hand-written entry overrode the generated stub's
+    // opaque attrset type for the same arg name.
+    assert_binding(&inspect_stdout, "w", "int");
 }
