@@ -89,7 +89,7 @@ pub fn generate_stubs_with_options(
 
     // Serialize custom-system definitions for cache-key hashing. The actual
     // system generation happens *after* nix build completes (see below).
-    let systems_digest = digest_systems_config(&config.systems, config_dir)?;
+    let systems_digest = digest_systems_config(&config.systems);
 
     // Check the lightweight file cache before invoking nix.
     let cache_key = compute_cache_key(
@@ -130,7 +130,7 @@ pub fn generate_stubs_with_options(
     let final_stubs_dir = if config.systems.is_empty() {
         store_path.clone()
     } else {
-        build_merged_stubs_dir(&store_path, &cache_key, &config.systems, config_dir)?
+        build_merged_stubs_dir(&store_path, &cache_key, &config.systems)?
     };
 
     // Cache the final stubs dir for next time.
@@ -161,12 +161,11 @@ fn build_merged_stubs_dir(
     built_in_dir: &Path,
     cache_key: &str,
     systems: &std::collections::HashMap<String, crate::project_config::CustomSystem>,
-    config_dir: &Path,
 ) -> Result<PathBuf, Error> {
     let merged_root = custom_stubs_dir()
         .ok_or_else(|| Error::Cache("cannot determine cache directory".into()))?;
     let merged = merged_root.join(cache_key);
-    populate_merged_stubs_dir(built_in_dir, &merged, systems, config_dir)?;
+    populate_merged_stubs_dir(built_in_dir, &merged, systems)?;
     Ok(merged)
 }
 
@@ -176,7 +175,6 @@ fn populate_merged_stubs_dir(
     built_in_dir: &Path,
     merged: &Path,
     systems: &std::collections::HashMap<String, crate::project_config::CustomSystem>,
-    config_dir: &Path,
 ) -> Result<(), Error> {
     // Replace any existing dir atomically-ish: remove then recreate.
     if merged.exists() {
@@ -206,7 +204,7 @@ fn populate_merged_stubs_dir(
     // logged but don't abort the whole generation — users see the
     // error in the LSP log and can iterate via the CLI equivalent.
     for (name, sys) in systems {
-        if let Err(e) = generate_custom_system(name, sys, merged, config_dir) {
+        if let Err(e) = generate_custom_system(name, sys, merged) {
             log::warn!("Failed to generate custom system '{name}': {e}");
         }
     }
@@ -234,7 +232,6 @@ fn generate_custom_system(
     name: &str,
     sys: &crate::project_config::CustomSystem,
     out_dir: &Path,
-    config_dir: &Path,
 ) -> Result<(), Error> {
     let tix_exe = std::env::current_exe()
         .map_err(|e| Error::NixCommand(format!("cannot locate current tix binary: {e}")))?;
@@ -248,19 +245,6 @@ fn generate_custom_system(
             tix_exe.display()
         );
     });
-
-    // `sys.modules` is reserved — it doesn't splice into options_expr
-    // today. Warn loudly if users populated it, since the doc is
-    // aspirational.
-    if !sys.modules.is_empty() {
-        log::warn!(
-            "custom system '{name}' has {} entries in `modules` — these are NOT yet spliced \
-             into options_expr; the field is currently cache-key-only. Import the modules inside \
-             options_expr directly.",
-            sys.modules.len()
-        );
-    }
-    let _ = config_dir; // reserved for future module-path resolution
 
     let out_file = out_dir.join(format!("{name}.tix"));
     let mut cmd = Command::new(&tix_exe);
@@ -528,17 +512,16 @@ fn compute_cache_key(
 /// config. Systems are emitted in sorted-name order so hash stability
 /// doesn't depend on HashMap iteration order.
 ///
-/// Module lists are resolved via [`build_module_list`] so that Path
-/// entries hash as their canonicalized absolute path (matching the
-/// `extra_nixos_modules` / `extra_hm_modules` digest shape and
-/// preventing two projects in different dirs from accidentally sharing
-/// a cache entry when they both write `./modules/foo.nix`).
+/// Only the options_expr / context_args / example_glob trio is
+/// hashed — the expression is user-owned and may `import` whatever it
+/// needs, so any files it depends on fall outside tix's visibility.
+/// Users invalidate the cache manually via `tix stubs refresh` after
+/// editing module files referenced from options_expr.
 fn digest_systems_config(
     systems: &std::collections::HashMap<String, crate::project_config::CustomSystem>,
-    config_dir: &Path,
-) -> Result<String, Error> {
+) -> String {
     if systems.is_empty() {
-        return Ok(String::new());
+        return String::new();
     }
     let mut names: Vec<&String> = systems.keys().collect();
     names.sort();
@@ -558,11 +541,9 @@ fn digest_systems_config(
         if let Some(glob) = &sys.example_glob {
             out.push_str(glob);
         }
-        out.push('\0');
-        out.push_str(&build_module_list(&sys.modules, config_dir)?);
         out.push('\n');
     }
-    Ok(out)
+    out
 }
 
 /// Check if a cached store path exists and is still valid.
@@ -915,10 +896,9 @@ mod tests {
 
         let merged_root = tempfile::tempdir().unwrap();
         let merged = merged_root.path().join("out");
-        let config_dir = tempfile::tempdir().unwrap();
         let systems = std::collections::HashMap::new();
 
-        populate_merged_stubs_dir(built_in.path(), &merged, &systems, config_dir.path()).unwrap();
+        populate_merged_stubs_dir(built_in.path(), &merged, &systems).unwrap();
 
         assert!(merged.join("nixos.tix").exists());
         assert!(merged.join("lib.tix").exists());
@@ -939,13 +919,12 @@ mod tests {
 
         let merged_root = tempfile::tempdir().unwrap();
         let merged = merged_root.path().join("out");
-        let config_dir = tempfile::tempdir().unwrap();
         let systems = std::collections::HashMap::new();
 
-        populate_merged_stubs_dir(built_in_a.path(), &merged, &systems, config_dir.path()).unwrap();
+        populate_merged_stubs_dir(built_in_a.path(), &merged, &systems).unwrap();
         assert!(merged.join("a.tix").exists());
 
-        populate_merged_stubs_dir(built_in_b.path(), &merged, &systems, config_dir.path()).unwrap();
+        populate_merged_stubs_dir(built_in_b.path(), &merged, &systems).unwrap();
         // After rebuild, a.tix should be gone and b.tix present.
         assert!(!merged.join("a.tix").exists());
         assert!(merged.join("b.tix").exists());
@@ -977,7 +956,6 @@ mod tests {
                 options_expr: "(x.y)".into(),
                 context_args: vec!["config".into(), "inputs".into()],
                 example_glob: Some("fp/**/*.nix".into()),
-                modules: vec![],
             },
         );
         systems.insert(
@@ -986,12 +964,10 @@ mod tests {
                 options_expr: "(z)".into(),
                 context_args: vec![],
                 example_glob: None,
-                modules: vec![],
             },
         );
-        let dir = tempfile::tempdir().unwrap();
-        let d1 = digest_systems_config(&systems, dir.path()).unwrap();
-        let d2 = digest_systems_config(&systems, dir.path()).unwrap();
+        let d1 = digest_systems_config(&systems);
+        let d2 = digest_systems_config(&systems);
         assert_eq!(d1, d2, "digest should be stable across calls");
         // devenv comes first alphabetically.
         let devenv_idx = d1.find("devenv").expect("devenv in digest");
@@ -1001,61 +977,28 @@ mod tests {
 
     #[test]
     fn digest_systems_config_empty_is_empty() {
-        let dir = tempfile::tempdir().unwrap();
         let systems = std::collections::HashMap::new();
-        assert_eq!(digest_systems_config(&systems, dir.path()).unwrap(), "");
+        assert_eq!(digest_systems_config(&systems), "");
     }
 
     #[test]
-    fn digest_systems_config_resolves_module_paths() {
-        // Path entries in `sys.modules` should hash as the canonicalized
-        // absolute path (via build_module_list), not as the raw relative
-        // form — so two projects in different dirs writing the same
-        // `./modules/foo.nix` produce distinct digests.
-        use crate::project_config::{CustomSystem, ModuleSource};
-        let dir = tempfile::tempdir().unwrap();
-        let module_path = dir.path().join("a.nix");
-        std::fs::write(&module_path, "{ }").unwrap();
-
-        let mut systems = std::collections::HashMap::new();
-        systems.insert(
-            "mysys".into(),
-            CustomSystem {
-                options_expr: "(x)".into(),
-                context_args: vec![],
-                example_glob: None,
-                modules: vec![ModuleSource::Path("a.nix".into())],
-            },
-        );
-
-        let digest = digest_systems_config(&systems, dir.path()).unwrap();
-        let abs = module_path.canonicalize().unwrap();
-        assert!(
-            digest.contains(&abs.display().to_string()),
-            "digest should contain canonicalized module path, got: {digest}"
-        );
-        // Raw relative form must not appear on its own (it's a substring
-        // of the absolute path only if the tempdir happens to contain
-        // 'a.nix' literally, which is fine — the check above is the
-        // positive assertion).
-    }
-
-    #[test]
-    fn digest_systems_config_missing_module_path_errors() {
-        use crate::project_config::{CustomSystem, ModuleSource};
-        let dir = tempfile::tempdir().unwrap();
-        let mut systems = std::collections::HashMap::new();
-        systems.insert(
-            "mysys".into(),
-            CustomSystem {
-                options_expr: "(x)".into(),
-                context_args: vec![],
-                example_glob: None,
-                modules: vec![ModuleSource::Path("nope.nix".into())],
-            },
-        );
-        let err = digest_systems_config(&systems, dir.path());
-        assert!(err.is_err(), "expected error for missing module path");
+    fn digest_systems_config_differs_on_options_expr_change() {
+        use crate::project_config::CustomSystem;
+        let mk = |expr: &str| {
+            let mut systems = std::collections::HashMap::new();
+            systems.insert(
+                "mysys".into(),
+                CustomSystem {
+                    options_expr: expr.into(),
+                    context_args: vec![],
+                    example_glob: None,
+                },
+            );
+            digest_systems_config(&systems)
+        };
+        assert_ne!(mk("(x)"), mk("(y)"));
+        // Whitespace-only edits get trimmed.
+        assert_eq!(mk("(x)"), mk("  (x)  "));
     }
 
     #[test]

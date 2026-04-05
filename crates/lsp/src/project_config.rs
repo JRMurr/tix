@@ -159,15 +159,6 @@ pub struct CustomSystem {
     /// `modules/**/*.nix`.
     #[serde(default)]
     pub example_glob: Option<String>,
-
-    /// Reserved: a future version will splice these modules into the
-    /// `options_expr` eval (mirroring the nixos-modules /
-    /// home-manager-modules path). Currently these entries contribute
-    /// to the cache key only — editing them invalidates the cache, but
-    /// users must import the modules directly inside `options_expr`
-    /// themselves for now.
-    #[serde(default)]
-    pub modules: Vec<ModuleSource>,
 }
 
 /// The `[diagnostics]` section of `tix.toml`.
@@ -824,30 +815,10 @@ mod tests {
         assert!(fp.options_expr.contains("evalFlakeModule"));
         assert_eq!(fp.context_args, vec!["config", "inputs", "self"]);
         assert_eq!(fp.example_glob.as_deref(), Some("flake-modules/**/*.nix"));
-        assert!(fp.modules.is_empty());
 
         let de = gen.systems.get("devenv").expect("devenv");
         assert!(de.options_expr.contains("devenv-opts"));
         assert!(de.context_args.is_empty()); // default
         assert!(de.example_glob.is_none());
-    }
-
-    #[test]
-    fn stubs_generate_custom_system_with_modules() {
-        let toml_str = r#"
-            [stubs.generate]
-            nixpkgs = "/nix/store/abc"
-
-            [stubs.generate.systems.flake-parts]
-            options_expr = "(x)"
-            modules = [
-              "./modules/a.nix",
-              { expr = "inputs.foo.flakeModules.bar" },
-            ]
-        "#;
-        let config: ProjectConfig = toml::from_str(toml_str).expect("parse error");
-        let gen = config.stubs.generate().expect("generate should be present");
-        let fp = gen.systems.get("flake-parts").expect("flake-parts");
-        assert_eq!(fp.modules.len(), 2);
     }
 }
