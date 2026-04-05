@@ -102,12 +102,36 @@ pub enum NixSource {
     Expr { expr: String },
 }
 
+/// A reference to a Nix module — either a `.nix` file on disk (path
+/// relative to the tix.toml directory) or an expression evaluating to
+/// a module value (attrset or function). Unlike `NixSource`, these do
+/// **not** resolve to store paths; they are spliced into a Nix list
+/// passed to `evalModules` directly.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum ModuleSource {
+    /// Relative path to a `.nix` file.
+    Path(String),
+    /// Nix expression evaluating to a module.
+    Expr { expr: String },
+}
+
 /// Configuration for runtime stub generation via Nix.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct StubsGenerateConfig {
     pub nixpkgs: Option<NixSource>,
     #[serde(default, rename = "home-manager")]
     pub home_manager: Option<NixSource>,
+
+    /// Extra NixOS modules appended to the options-schema eval. Their
+    /// declared `options.*` entries appear in the generated `nixos.tix`
+    /// alongside the upstream NixOS schema.
+    #[serde(default, rename = "nixos-modules")]
+    pub nixos_modules: Vec<ModuleSource>,
+
+    /// Extra Home Manager modules appended to the HM options eval.
+    #[serde(default, rename = "home-manager-modules")]
+    pub home_manager_modules: Vec<ModuleSource>,
 }
 
 /// The `[diagnostics]` section of `tix.toml`.
@@ -694,5 +718,48 @@ mod tests {
         assert!(config.stubs.paths().is_empty());
         assert!(config.stubs.generate().is_none());
         assert!(config.stubs.is_empty());
+    }
+
+    #[test]
+    fn stubs_generate_with_nixos_modules() {
+        let toml_str = r#"
+            [stubs.generate]
+            nixpkgs = "/nix/store/abc-nixpkgs-src"
+            nixos-modules = [
+              "./modules/myproj.nix",
+              { expr = "(builtins.getFlake (toString ./.)).nixosModules.default" },
+            ]
+            home-manager-modules = ["./hm/custom.nix"]
+        "#;
+        let config: ProjectConfig = toml::from_str(toml_str).expect("parse error");
+        let gen = config.stubs.generate().expect("generate should be present");
+
+        assert_eq!(gen.nixos_modules.len(), 2);
+        assert!(matches!(
+            &gen.nixos_modules[0],
+            ModuleSource::Path(p) if p == "./modules/myproj.nix"
+        ));
+        assert!(matches!(
+            &gen.nixos_modules[1],
+            ModuleSource::Expr { expr } if expr.contains("nixosModules.default")
+        ));
+
+        assert_eq!(gen.home_manager_modules.len(), 1);
+        assert!(matches!(
+            &gen.home_manager_modules[0],
+            ModuleSource::Path(p) if p == "./hm/custom.nix"
+        ));
+    }
+
+    #[test]
+    fn stubs_generate_modules_default_empty() {
+        let toml_str = r#"
+            [stubs.generate]
+            nixpkgs = "/nix/store/abc"
+        "#;
+        let config: ProjectConfig = toml::from_str(toml_str).expect("parse error");
+        let gen = config.stubs.generate().expect("generate should be present");
+        assert!(gen.nixos_modules.is_empty());
+        assert!(gen.home_manager_modules.is_empty());
     }
 }

@@ -168,6 +168,23 @@ home-manager = { expr = "(builtins.getFlake (toString ./.)).inputs.home-manager"
 
 - **nixpkgs** (required) — path to nixpkgs source, or `{ expr = "..." }` to evaluate
 - **home-manager** (optional) — path to home-manager source; omit to skip HM stubs
+- **nixos-modules** (optional) — extra NixOS modules appended to the option-tree eval. Their `options.*` declarations show up in the generated `nixos.tix`, so `config.myproj.databaseUrl` is typed, not just upstream NixOS options.
+- **home-manager-modules** (optional) — same, for Home Manager.
+
+```toml
+[stubs.generate]
+nixpkgs = { expr = "(builtins.getFlake (toString ./.)).inputs.nixpkgs" }
+nixos-modules = [
+  "./modules/myproj.nix",
+  { expr = "(builtins.getFlake (toString ./.)).nixosModules.default" },
+]
+```
+
+Entries can be plain path strings (relative to `tix.toml`) or `{ expr = "..." }` for modules sourced from a flake.
+
+**Debugging the extracted schema:** the equivalent manual CLI invocation is `tix stubs generate nixos --flake . --hostname <NAME>` — this evaluates a live NixOS configuration (including your user modules) and emits the stub to stdout or `-o <path>`, so you can inspect exactly what the schema extractor sees before letting the LSP drive it. Home Manager has an equivalent `tix stubs generate home-manager --flake . --username <NAME>`.
+
+**Module edits are not auto-detected.** After changing any file listed under `nixos-modules` / `home-manager-modules`, run `tix stubs refresh` and restart the LSP.
 
 On first run, tix invokes `nix build` to generate `.tix` stubs from the NixOS option tree, Home Manager options, and nixpkgs package set. This takes 30-60 seconds. Subsequent runs are instant thanks to a lightweight file cache (`~/.cache/tix/store-stubs/`). Changing either nixpkgs or tix version triggers regeneration.
 

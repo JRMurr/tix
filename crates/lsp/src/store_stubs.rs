@@ -16,7 +16,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::project_config::{NixSource, StubsGenerateConfig};
+use crate::project_config::{ModuleSource, NixSource, StubsGenerateConfig};
 
 /// Result of successful stub generation: the stubs directory plus the resolved
 /// source roots for `@source` annotation resolution.
@@ -81,8 +81,20 @@ pub fn generate_stubs_with_options(
         source_roots.push(("home-manager".to_string(), hm.clone()));
     }
 
+    // Assemble Nix list literals for user-supplied extra modules (if any).
+    // These get passed to `generate-stubs-runtime.nix` via `--arg` so they
+    // can be appended to the NixOS / HM modules lists.
+    let extra_nixos = build_module_list(&config.nixos_modules, config_dir)?;
+    let extra_hm = build_module_list(&config.home_manager_modules, config_dir)?;
+
     // Check the lightweight file cache before invoking nix.
-    let cache_key = compute_cache_key(&nixpkgs_path, &tix_path, hm_path.as_deref());
+    let cache_key = compute_cache_key(
+        &nixpkgs_path,
+        &tix_path,
+        hm_path.as_deref(),
+        &extra_nixos,
+        &extra_hm,
+    );
     if !skip_cache {
         if let Some(cached) = check_cache(&cache_key) {
             log::debug!("Using cached stubs: {}", cached.display());
@@ -98,7 +110,14 @@ pub fn generate_stubs_with_options(
 
     // Invoke `nix build`.
     log::info!("Generating stubs via nix build (this may take a minute)...");
-    let store_path = run_nix_build(&generate_nix, &nixpkgs_path, &tix_path, hm_path.as_deref())?;
+    let store_path = run_nix_build(
+        &generate_nix,
+        &nixpkgs_path,
+        &tix_path,
+        hm_path.as_deref(),
+        &extra_nixos,
+        &extra_hm,
+    )?;
 
     // Cache the result for next time.
     if let Err(e) = write_cache(&cache_key, &store_path) {
@@ -192,6 +211,43 @@ fn find_generate_nix(tix_store_path: &Path) -> Result<PathBuf, Error> {
 }
 
 // ==============================================================================
+// Module list assembly (for --arg extra-nixos-modules / extra-hm-modules)
+// ==============================================================================
+
+/// Translate a [`ModuleSource`] into a Nix syntax fragment suitable for
+/// splicing into a `modules` list passed to `evalModules` or
+/// `eval-config.nix`.
+///
+/// - `Path("./modules/foo.nix")` resolves against `config_dir` and emits
+///   `"(import /abs/path)"`. The file must exist (we canonicalize).
+/// - `Expr { expr }` emits `"(EXPR)"` verbatim.
+fn module_source_to_nix(src: &ModuleSource, config_dir: &Path) -> Result<String, Error> {
+    match src {
+        ModuleSource::Path(p) => {
+            let path = config_dir.join(p);
+            let abs = path
+                .canonicalize()
+                .map_err(|e| Error::PathNotFound(format!("{}: {e}", path.display())))?;
+            Ok(format!("(import {})", abs.display()))
+        }
+        ModuleSource::Expr { expr } => Ok(format!("({})", expr.trim())),
+    }
+}
+
+/// Build a Nix list literal from a slice of module sources. Empty slice
+/// returns `"[ ]"`.
+pub fn build_module_list(srcs: &[ModuleSource], config_dir: &Path) -> Result<String, Error> {
+    if srcs.is_empty() {
+        return Ok("[ ]".to_string());
+    }
+    let parts: Result<Vec<_>, Error> = srcs
+        .iter()
+        .map(|s| module_source_to_nix(s, config_dir))
+        .collect();
+    Ok(format!("[ {} ]", parts?.join(" ")))
+}
+
+// ==============================================================================
 // Lightweight file cache (~/.cache/tix/store-stubs/)
 // ==============================================================================
 
@@ -233,8 +289,17 @@ pub fn clear_all_cache() -> std::io::Result<Option<usize>> {
     }
 }
 
-/// Compute a cache key from input store paths.
-fn compute_cache_key(nixpkgs: &Path, tix: &Path, hm: Option<&Path>) -> String {
+/// Compute a cache key from input store paths and the Nix-literal
+/// strings describing extra modules to splice into the NixOS/HM evals.
+/// The extra-module strings are hashed verbatim (no content hashing of
+/// the referenced files — see `tix stubs refresh`).
+fn compute_cache_key(
+    nixpkgs: &Path,
+    tix: &Path,
+    hm: Option<&Path>,
+    extra_nixos_modules: &str,
+    extra_hm_modules: &str,
+) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
@@ -244,6 +309,8 @@ fn compute_cache_key(nixpkgs: &Path, tix: &Path, hm: Option<&Path>) -> String {
     if let Some(hm) = hm {
         hm.hash(&mut hasher);
     }
+    extra_nixos_modules.hash(&mut hasher);
+    extra_hm_modules.hash(&mut hasher);
     format!("{:016x}", hasher.finish())
 }
 
@@ -292,6 +359,8 @@ fn run_nix_build(
     nixpkgs_path: &Path,
     tix_path: &Path,
     hm_path: Option<&Path>,
+    extra_nixos_modules: &str,
+    extra_hm_modules: &str,
 ) -> Result<PathBuf, Error> {
     let mut cmd = Command::new("nix");
     cmd.args(["build", "-f"])
@@ -306,6 +375,15 @@ fn run_nix_build(
     if let Some(hm) = hm_path {
         cmd.arg("--arg").arg("home-manager-path").arg(hm);
     }
+
+    // Forward user-supplied extra modules to generate-stubs-runtime.nix.
+    // These are already Nix list literals like "[ (import /abs/foo.nix) ]".
+    cmd.arg("--arg")
+        .arg("extra-nixos-modules")
+        .arg(extra_nixos_modules);
+    cmd.arg("--arg")
+        .arg("extra-hm-modules")
+        .arg(extra_hm_modules);
 
     cmd.args(["--no-link", "--print-out-paths"]);
 
@@ -382,11 +460,15 @@ mod tests {
             Path::new("/nix/store/abc-nixpkgs"),
             Path::new("/nix/store/def-tix"),
             None,
+            "[ ]",
+            "[ ]",
         );
         let k2 = compute_cache_key(
             Path::new("/nix/store/abc-nixpkgs"),
             Path::new("/nix/store/def-tix"),
             None,
+            "[ ]",
+            "[ ]",
         );
         assert_eq!(k1, k2);
     }
@@ -397,11 +479,15 @@ mod tests {
             Path::new("/nix/store/abc-nixpkgs"),
             Path::new("/nix/store/def-tix"),
             None,
+            "[ ]",
+            "[ ]",
         );
         let with = compute_cache_key(
             Path::new("/nix/store/abc-nixpkgs"),
             Path::new("/nix/store/def-tix"),
             Some(Path::new("/nix/store/ghi-hm")),
+            "[ ]",
+            "[ ]",
         );
         assert_ne!(without, with);
     }
@@ -412,11 +498,15 @@ mod tests {
             Path::new("/nix/store/abc-nixpkgs"),
             Path::new("/nix/store/def-tix"),
             None,
+            "[ ]",
+            "[ ]",
         );
         let k2 = compute_cache_key(
             Path::new("/nix/store/xyz-nixpkgs"),
             Path::new("/nix/store/def-tix"),
             None,
+            "[ ]",
+            "[ ]",
         );
         assert_ne!(k1, k2);
     }
@@ -469,6 +559,90 @@ mod tests {
         let missing = dir.path().join("does-not-exist");
         let removed = clear_cache_in_dir(&missing).unwrap();
         assert_eq!(removed, 0);
+    }
+
+    #[test]
+    fn build_module_list_empty_returns_empty_literal() {
+        let dir = tempfile::tempdir().unwrap();
+        let got = build_module_list(&[], dir.path()).unwrap();
+        assert_eq!(got, "[ ]");
+    }
+
+    #[test]
+    fn build_module_list_path_resolves_relative_to_config_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let module_path = dir.path().join("modules/foo.nix");
+        std::fs::create_dir_all(module_path.parent().unwrap()).unwrap();
+        std::fs::write(&module_path, "{ }").unwrap();
+
+        let got = build_module_list(
+            &[crate::project_config::ModuleSource::Path(
+                "modules/foo.nix".into(),
+            )],
+            dir.path(),
+        )
+        .unwrap();
+
+        // The path should be resolved to the absolute location of foo.nix.
+        let abs = module_path.canonicalize().unwrap();
+        let expected = format!("[ (import {}) ]", abs.display());
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn build_module_list_expr_wraps_in_parens() {
+        let dir = tempfile::tempdir().unwrap();
+        let got = build_module_list(
+            &[crate::project_config::ModuleSource::Expr {
+                expr: "inputs.foo.nixosModules.bar".into(),
+            }],
+            dir.path(),
+        )
+        .unwrap();
+        assert_eq!(got, "[ (inputs.foo.nixosModules.bar) ]");
+    }
+
+    #[test]
+    fn build_module_list_mixes_paths_and_exprs() {
+        let dir = tempfile::tempdir().unwrap();
+        let module_path = dir.path().join("a.nix");
+        std::fs::write(&module_path, "{ }").unwrap();
+
+        let got = build_module_list(
+            &[
+                crate::project_config::ModuleSource::Path("a.nix".into()),
+                crate::project_config::ModuleSource::Expr { expr: "x.y".into() },
+            ],
+            dir.path(),
+        )
+        .unwrap();
+        let abs = module_path.canonicalize().unwrap();
+        let expected = format!("[ (import {}) (x.y) ]", abs.display());
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn build_module_list_missing_path_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = build_module_list(
+            &[crate::project_config::ModuleSource::Path("nope.nix".into())],
+            dir.path(),
+        );
+        assert!(err.is_err(), "expected error for missing path");
+    }
+
+    #[test]
+    fn cache_key_differs_when_modules_change() {
+        let nixpkgs = Path::new("/nix/store/abc-nixpkgs");
+        let tix = Path::new("/nix/store/def-tix");
+
+        let k_empty = compute_cache_key(nixpkgs, tix, None, "[ ]", "[ ]");
+        let k_with_nixos =
+            compute_cache_key(nixpkgs, tix, None, "[ (import /abs/foo.nix) ]", "[ ]");
+        let k_with_hm = compute_cache_key(nixpkgs, tix, None, "[ ]", "[ (import /abs/foo.nix) ]");
+        assert_ne!(k_empty, k_with_nixos);
+        assert_ne!(k_empty, k_with_hm);
+        assert_ne!(k_with_nixos, k_with_hm);
     }
 
     #[test]
