@@ -531,6 +531,18 @@ impl TypeAliasRegistry {
     /// into `self.aliases` (so they can be referenced by val declarations) and
     /// returning the val declarations as a name→ParsedTy map.
     ///
+    /// Top-level `module foo { val config :: ...; }` blocks contribute their
+    /// fields as context args as well. When a top-level `val` and a module
+    /// field share a name, the top-level `val` wins — it's the more explicit
+    /// declaration. When two top-level modules declare the same field name,
+    /// the second one wins (`HashMap::insert` semantics).
+    ///
+    /// Unlike `load_context_by_name` (the `@name` path), this function does
+    /// NOT add a lowercase self-reference for the module name. If a user
+    /// authoring a custom stub wants `foo :: Foo` in their context, they can
+    /// write `val foo :: Foo;` explicitly. The `@name` path retains its
+    /// self-reference for nixpkgs compatibility (`pkgs.pkgs`).
+    ///
     /// Unlike `load_tix_file`, val declarations are NOT added to `global_vals`
     /// — they represent lambda parameter types for a specific context, not
     /// globally available names.
@@ -540,6 +552,21 @@ impl TypeAliasRegistry {
     ) -> Result<HashMap<SmolStr, ParsedTy>, Box<dyn std::error::Error>> {
         let file = comment_parser::parse_tix_file(source)?;
         let mut context_args = HashMap::new();
+
+        // Pre-populate from top-level modules: each `module foo { val x :: ...; }`
+        // contributes its fields as context args. `load_declarations` (below) then
+        // overlays top-level `val` entries via insert(), which overwrites — giving
+        // explicit vals priority when names collide.
+        for decl in &file.declarations {
+            if let TixDeclaration::Module { declarations, .. } = decl {
+                if let ParsedTy::AttrSet(attr) = module_to_attrset(declarations) {
+                    for (field_name, field_ref) in &attr.fields {
+                        context_args.insert(field_name.clone(), (*field_ref.0).clone());
+                    }
+                }
+            }
+        }
+
         let mut target = ValTarget::ContextMap(&mut context_args);
         self.load_declarations(&file.declarations, &mut target);
         self.load_field_docs(&file.field_docs);
@@ -1109,6 +1136,76 @@ mod tests {
         assert!(context_args.contains_key("lib"));
         assert!(!registry.global_vals().contains_key("config"));
         assert!(!registry.global_vals().contains_key("lib"));
+    }
+
+    #[test]
+    fn load_context_stubs_returns_module_fields() {
+        // Regression test for issue #6: a top-level `module foo { ... }` in a
+        // custom context stub file should contribute its fields as context
+        // args, matching the `load_context_by_name` fallback behaviour.
+        let mut registry = TypeAliasRegistry::with_builtins();
+        let ctx = registry
+            .load_context_stubs("module foo { val config :: { bar: string }; val helper :: Lib; }")
+            .expect("parse error");
+
+        // Module fields become context args.
+        assert!(
+            ctx.contains_key("config"),
+            "keys: {:?}",
+            ctx.keys().collect::<Vec<_>>()
+        );
+        assert!(ctx.contains_key("helper"));
+
+        // No lowercase self-reference — users who want one write an explicit
+        // `val foo :: Foo;`. See `load_context_stubs` docs for rationale.
+        assert!(!ctx.contains_key("foo"));
+
+        // Module fields must NOT leak into global_vals.
+        assert!(!registry.global_vals().contains_key("config"));
+        assert!(!registry.global_vals().contains_key("helper"));
+
+        // The capitalized alias is still registered (existing behaviour).
+        assert!(registry.get("Foo").is_some(), "Foo alias should exist");
+    }
+
+    #[test]
+    fn load_context_stubs_val_overrides_module_field() {
+        // Explicit top-level `val`s must win over a module field of the same
+        // name — they're more explicit so the user's intent is clearer.
+        let mut registry = TypeAliasRegistry::new();
+        let ctx = registry
+            .load_context_stubs("val config :: int; module extras { val config :: string; }")
+            .expect("parse error");
+        let got = ctx.get("config").expect("config present");
+        // The top-level `val config :: int;` should win over the module field.
+        assert!(
+            format!("{got:?}").to_lowercase().contains("int"),
+            "expected int-typed config, got: {got:?}",
+        );
+    }
+
+    #[test]
+    fn load_context_stubs_explicit_self_reference() {
+        // Users who want a self-reference (e.g. `{ pkgs, ... }: pkgs.pkgs` in
+        // nixpkgs) opt in by writing a top-level `val`. Here a `module foo`
+        // registers the `Foo` alias, and an explicit `val foo :: Foo;` makes
+        // `foo` a context arg pointing at that alias.
+        let mut registry = TypeAliasRegistry::new();
+        let ctx = registry
+            .load_context_stubs("module foo { val bar :: int; } val foo :: Foo;")
+            .expect("parse error");
+
+        // Module field and explicit self-ref both present.
+        assert!(ctx.contains_key("bar"));
+        assert!(ctx.contains_key("foo"));
+
+        // The self-reference carries a `TyVar(Reference("Foo"))` so lookups
+        // resolve through the alias registry.
+        let foo = ctx.get("foo").expect("foo present");
+        assert!(
+            format!("{foo:?}").contains("Foo"),
+            "foo should reference the Foo alias, got: {foo:?}",
+        );
     }
 
     #[test]

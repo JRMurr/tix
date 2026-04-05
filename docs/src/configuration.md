@@ -64,6 +64,20 @@ stubs = ["@callpackage"]
 
 `@callpackage` derives its types from the built-in `Pkgs` module (the same one that types `pkgs.stdenv.mkDerivation`, `pkgs.fetchurl`, etc.). Parameters not covered by the built-in stubs remain untyped. For broader coverage, [generate pkgs stubs](./stubs.md#generating-pkgs-stubs) and load them via `--stubs` or the `stubs` config key — they merge into the `Pkgs` type alias automatically.
 
+### Custom context stubs
+
+For module systems other than NixOS/Home Manager (e.g. flake-parts, devenv),
+point `stubs` at a local `.tix` file:
+
+```toml
+[context.flake-parts]
+includes = ["modules/**/*.nix"]
+stubs = ["./flake-parts.tix"]
+```
+
+The file can contain top-level `val` declarations and/or `module` blocks;
+both contribute to context args. See [Custom context stubs from a file](./stubs.md#custom-context-stubs-from-a-file) for the full pattern.
+
 ### Inline context annotation
 
 You can also set context per-file with a doc comment at the top:

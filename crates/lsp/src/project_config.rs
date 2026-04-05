@@ -182,16 +182,40 @@ fn load_stub_entry(
     config_dir: &Path,
     registry: &mut TypeAliasRegistry,
 ) -> Result<Arc<HashMap<SmolStr, ParsedTy>>, Box<dyn std::error::Error>> {
-    if let Some(builtin_name) = entry.strip_prefix('@') {
+    let result = if let Some(name) = entry.strip_prefix('@') {
+        // `@name` resolves via built-in context sources (e.g. @nixos,
+        // @home-manager) first, then falls back to a registered capitalized
+        // alias (e.g. @foo → `Foo` alias from a `module foo { ... }` stub).
         registry
-            .load_context_by_name(builtin_name)
-            .ok_or_else(|| format!("Unknown built-in context: @{builtin_name}"))?
+            .load_context_by_name(name)
+            .ok_or_else(|| -> Box<dyn std::error::Error> {
+                // Inline capitalize (aliases::capitalize is file-private).
+                let mut chars = name.chars();
+                let capitalized: String = match chars.next() {
+                    None => String::new(),
+                    Some(c) => c.to_uppercase().chain(chars).collect(),
+                };
+                format!(
+                    "Context '@{name}' not found: no built-in source and no '{capitalized}' alias is registered. \
+                     Add a stub file to [stubs] paths, or declare `module {name} {{ ... }}` in a stub."
+                ).into()
+            })??
     } else {
         let path = config_dir.join(entry);
         let source = std::fs::read_to_string(&path)
             .map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
-        registry.load_context_stubs(&source).map(Arc::new)
+        registry.load_context_stubs(&source).map(Arc::new)?
+    };
+
+    // Warn on silent misconfiguration: a stub file with only type aliases
+    // (no top-level `val` or `module` blocks) produces no context args.
+    if result.is_empty() {
+        log::warn!(
+            "Context stub '{entry}' loaded 0 context args. Add top-level `val` declarations \
+             or a `module` block whose fields become context args."
+        );
     }
+    Ok(result)
 }
 
 /// Resolve context args for a file based on `tix.toml` context definitions.
