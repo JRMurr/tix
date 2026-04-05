@@ -194,7 +194,6 @@ For arbitrary module systems (flake-parts, devenv, nix-darwin, custom `evalModul
 [stubs.generate.systems.flake-parts]
 options_expr = "(inputs.flake-parts.lib.evalFlakeModule {...} {...}).options"
 context_args = ["config", "inputs", "self"]
-example_glob = "flake-modules/**/*.nix"
 ```
 
 Each custom system generates a `<name>.tix` file that you reference in contexts as `@<name>`. Start by prototyping the `options_expr` manually with `tix stubs generate module` — see [Custom module systems](./stubs.md#custom-module-systems-flake-parts-devenv-nix-darwin-) for the full CLI-first iteration workflow.

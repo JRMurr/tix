@@ -262,10 +262,6 @@ fn generate_custom_system(name: &str, sys: &CustomSystem, out_dir: &Path) -> Res
         cmd.args(["--context-arg", arg]);
     }
 
-    if let Some(glob) = &sys.example_glob {
-        cmd.args(["--example-glob", glob]);
-    }
-
     let output = cmd
         .output()
         .map_err(|e| Error::NixCommand(format!("failed to spawn tix: {e}")))?;
@@ -509,11 +505,11 @@ fn compute_cache_key(
 /// doesn't depend on HashMap iteration order. `options_expr` is
 /// trimmed so cosmetic whitespace edits don't bust the cache.
 ///
-/// Only the options_expr / context_args / example_glob trio is
-/// hashed — the expression is user-owned and may `import` whatever it
-/// needs, so any files it depends on fall outside tix's visibility.
-/// Users invalidate the cache manually via `tix stubs refresh` after
-/// editing module files referenced from options_expr.
+/// Only the options_expr / context_args pair is hashed — the
+/// expression is user-owned and may `import` whatever it needs, so any
+/// files it depends on fall outside tix's visibility. Users invalidate
+/// the cache manually via `tix stubs refresh` after editing module
+/// files referenced from options_expr.
 fn digest_systems_config(systems: &HashMap<String, CustomSystem>) -> String {
     let mut entries: Vec<_> = systems.iter().collect();
     entries.sort_by_key(|(name, _)| *name);
@@ -526,10 +522,6 @@ fn digest_systems_config(systems: &HashMap<String, CustomSystem>) -> String {
         for arg in &sys.context_args {
             out.push_str(arg);
             out.push(',');
-        }
-        out.push('\0');
-        if let Some(glob) = &sys.example_glob {
-            out.push_str(glob);
         }
         out.push('\n');
     }
@@ -930,7 +922,7 @@ mod tests {
             None,
             "[ ]",
             "[ ]",
-            "flake-parts\0(x)\0config,\0\0\0\n",
+            "flake-parts\0(x)\0config,\0\n",
         );
         assert_ne!(k_empty, k_fp);
     }
@@ -943,7 +935,6 @@ mod tests {
             CustomSystem {
                 options_expr: "(x.y)".into(),
                 context_args: vec!["config".into(), "inputs".into()],
-                example_glob: Some("fp/**/*.nix".into()),
             },
         );
         systems.insert(
@@ -951,7 +942,6 @@ mod tests {
             CustomSystem {
                 options_expr: "(z)".into(),
                 context_args: vec![],
-                example_glob: None,
             },
         );
         let d1 = digest_systems_config(&systems);
@@ -978,7 +968,6 @@ mod tests {
                 CustomSystem {
                     options_expr: expr.into(),
                     context_args: vec![],
-                    example_glob: None,
                 },
             );
             digest_systems_config(&systems)

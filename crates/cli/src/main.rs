@@ -357,11 +357,6 @@ enum GenStubsSource {
         /// others to `{ ... }`. Defaults to `config` if unspecified.
         #[arg(long = "context-arg")]
         context_args: Vec<String>,
-
-        /// Glob written into the generated file's header to guide users
-        /// wiring this stub into tix.toml.
-        #[arg(long, default_value = "modules/**/*.nix")]
-        example_glob: String,
     },
 }
 
@@ -624,13 +619,11 @@ fn run_gen_stubs(source: GenStubsSource) -> Result<(), Box<dyn Error>> {
             name,
             options_expr,
             context_args,
-            example_glob,
         } => gen_stubs::run_module(gen_stubs::ModuleOptions {
             common: common.into(),
             name,
             options_expr,
             context_args,
-            example_glob,
         }),
     }
 }

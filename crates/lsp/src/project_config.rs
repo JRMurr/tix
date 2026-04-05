@@ -154,11 +154,6 @@ pub struct CustomSystem {
     /// fall through to `{ ... }`. Defaults to `["config"]` if empty.
     #[serde(default)]
     pub context_args: Vec<String>,
-
-    /// Glob written into the generated file's header. Defaults to
-    /// `modules/**/*.nix`.
-    #[serde(default)]
-    pub example_glob: Option<String>,
 }
 
 /// The `[diagnostics]` section of `tix.toml`.
@@ -809,7 +804,6 @@ mod tests {
             [stubs.generate.systems.flake-parts]
             options_expr = "(builtins.getFlake (toString ./.)).inputs.flake-parts.lib.evalFlakeModule {} {}"
             context_args = ["config", "inputs", "self"]
-            example_glob = "flake-modules/**/*.nix"
 
             [stubs.generate.systems.devenv]
             options_expr = "(import ./devenv-opts.nix)"
@@ -822,11 +816,9 @@ mod tests {
         let fp = gen.systems.get("flake-parts").expect("flake-parts");
         assert!(fp.options_expr.contains("evalFlakeModule"));
         assert_eq!(fp.context_args, vec!["config", "inputs", "self"]);
-        assert_eq!(fp.example_glob.as_deref(), Some("flake-modules/**/*.nix"));
 
         let de = gen.systems.get("devenv").expect("devenv");
         assert!(de.options_expr.contains("devenv-opts"));
         assert!(de.context_args.is_empty()); // default
-        assert!(de.example_glob.is_none());
     }
 }

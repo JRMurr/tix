@@ -220,7 +220,6 @@ tix stubs generate module \
   --context-arg config \
   --context-arg inputs \
   --context-arg self \
-  --example-glob "flake-modules/**/*.nix" \
   -o flake-parts.tix
 ```
 
@@ -254,7 +253,6 @@ options_expr = '''
     { self = self; } { imports = [ ]; }).options
 '''
 context_args = ["config", "inputs", "self"]
-example_glob = "flake-modules/**/*.nix"
 
 [context.flake-parts]
 includes = ["flake-modules/**/*.nix"]

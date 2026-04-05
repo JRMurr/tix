@@ -461,23 +461,15 @@ pub enum StubKind {
         /// gets typed as `<Name>Config`; others get known mappings
         /// (`lib` → `Lib`, `pkgs` → `Pkgs`) or `{ ... }` as a fallback.
         context_args: Vec<String>,
-        /// Glob suggestion shown in the header. Defaults to
-        /// `modules/**/*.nix`.
-        example_glob: Option<String>,
     },
 }
 
 impl StubKind {
     /// Construct a [`StubKind::Custom`] with a kebab-case name.
-    pub fn custom(
-        name: impl Into<String>,
-        context_args: Vec<String>,
-        example_glob: Option<String>,
-    ) -> Self {
+    pub fn custom(name: impl Into<String>, context_args: Vec<String>) -> Self {
         StubKind::Custom {
             name: name.into(),
             context_args,
-            example_glob,
         }
     }
 
@@ -515,13 +507,11 @@ impl StubKind {
         }
     }
 
-    fn example_glob(&self) -> String {
+    fn example_glob(&self) -> &'static str {
         match self {
-            StubKind::Nixos => "modules/**/*.nix".into(),
-            StubKind::HomeManager => "home/**/*.nix".into(),
-            StubKind::Custom { example_glob, .. } => example_glob
-                .clone()
-                .unwrap_or_else(|| "modules/**/*.nix".into()),
+            StubKind::Nixos => "modules/**/*.nix",
+            StubKind::HomeManager => "home/**/*.nix",
+            StubKind::Custom { .. } => "modules/**/*.nix",
         }
     }
 
@@ -897,8 +887,6 @@ pub struct ModuleOptions {
     pub options_expr: Option<String>,
     /// Context-arg names to emit as `val` declarations.
     pub context_args: Vec<String>,
-    /// Glob for the doc header.
-    pub example_glob: String,
 }
 
 /// Wrap the user's options expression in the generic `extract-options.nix`
@@ -931,11 +919,7 @@ pub fn run_module(opts: ModuleOptions) -> Result<(), Box<dyn std::error::Error>>
     } else {
         opts.context_args.clone()
     };
-    let kind = StubKind::custom(
-        opts.name.clone(),
-        context_args,
-        Some(opts.example_glob.clone()),
-    );
+    let kind = StubKind::custom(opts.name.clone(), context_args);
     let tix_content = generate_tix_file_with_docs(
         &tree,
         &kind,
@@ -1404,13 +1388,13 @@ mod tests {
 
     #[test]
     fn custom_stub_kind_uses_pascal_case_type_name() {
-        let kind = StubKind::custom("flake-parts", vec!["config".into()], None);
+        let kind = StubKind::custom("flake-parts", vec!["config".into()]);
         assert_eq!(kind.type_name(), "FlakePartsConfig");
     }
 
     #[test]
     fn custom_stub_kind_single_word_name() {
-        let kind = StubKind::custom("devenv", vec!["config".into()], None);
+        let kind = StubKind::custom("devenv", vec!["config".into()]);
         assert_eq!(kind.type_name(), "DevenvConfig");
     }
 
@@ -1419,7 +1403,6 @@ mod tests {
         let kind = StubKind::custom(
             "flake-parts",
             vec!["config".into(), "inputs".into(), "self".into()],
-            None,
         );
         let vals = kind.context_vals();
         assert!(
@@ -1433,11 +1416,7 @@ mod tests {
 
     #[test]
     fn custom_stub_kind_emits_known_arg_types() {
-        let kind = StubKind::custom(
-            "mysys",
-            vec!["config".into(), "lib".into(), "pkgs".into()],
-            None,
-        );
+        let kind = StubKind::custom("mysys", vec!["config".into(), "lib".into(), "pkgs".into()]);
         let vals = kind.context_vals();
         assert!(vals.contains("val config :: MysysConfig"), "got: {vals}");
         assert!(vals.contains("val lib :: Lib"), "got: {vals}");
@@ -1447,11 +1426,7 @@ mod tests {
     #[test]
     fn custom_stub_kind_generates_valid_tix_file() {
         let tree = simple_options_tree();
-        let kind = StubKind::custom(
-            "flake-parts",
-            vec!["config".into(), "inputs".into()],
-            Some("flake-modules/**/*.nix".into()),
-        );
+        let kind = StubKind::custom("flake-parts", vec!["config".into(), "inputs".into()]);
         let content = generate_tix_file_with_docs(&tree, &kind, false, &[]);
         // Must parse as a valid .tix file.
         comment_parser::parse_tix_file(&content)
@@ -1459,13 +1434,8 @@ mod tests {
         // Should reference the custom system name in the file header and
         // the type alias.
         assert!(content.contains("FlakePartsConfig"));
-        assert!(content.contains("flake-modules/**/*.nix"));
-    }
-
-    #[test]
-    fn custom_stub_kind_default_example_glob() {
-        let kind = StubKind::custom("foo", vec!["config".into()], None);
-        assert_eq!(kind.example_glob(), "modules/**/*.nix");
+        // Custom systems always use the generic placeholder glob.
+        assert!(content.contains("modules/**/*.nix"));
     }
 
     // -------------------------------------------------------------------------

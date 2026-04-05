@@ -108,7 +108,6 @@ fn generate_module_stub_from_evalmodules_and_use_it() {
         .args(["--name", "dummy"])
         .args(["--options-expr", &options_expr])
         .args(["--context-arg", "config"])
-        .args(["--example-glob", "modules/*.nix"])
         .arg("-o")
         .arg(&stub_path)
         .output()
