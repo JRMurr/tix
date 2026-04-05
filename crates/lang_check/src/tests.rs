@@ -183,6 +183,43 @@ pub fn raw_to_root(raw: &RawTy) -> RootTy {
     RootTy::new(ty, Arc::new(arena))
 }
 
+// ==============================================================================
+// Shared primitive OutputTy constructors
+// ==============================================================================
+
+#[allow(dead_code)] // Used by collect.rs tests via crate::tests::*
+pub fn prim(p: PrimitiveTy) -> OutputTy {
+    OutputTy::Primitive(p)
+}
+#[allow(dead_code)]
+pub fn int() -> OutputTy {
+    prim(PrimitiveTy::Int)
+}
+#[allow(dead_code)]
+pub fn string() -> OutputTy {
+    prim(PrimitiveTy::String)
+}
+#[allow(dead_code)]
+pub fn bool_() -> OutputTy {
+    prim(PrimitiveTy::Bool)
+}
+#[allow(dead_code)]
+pub fn float() -> OutputTy {
+    prim(PrimitiveTy::Float)
+}
+#[allow(dead_code)]
+pub fn null() -> OutputTy {
+    prim(PrimitiveTy::Null)
+}
+#[allow(dead_code)]
+pub fn number() -> OutputTy {
+    prim(PrimitiveTy::Number)
+}
+#[allow(dead_code)]
+pub fn path() -> OutputTy {
+    prim(PrimitiveTy::Path)
+}
+
 /// Build a RootTy from arc_ty! tokens using a fresh arena.
 macro_rules! expected_ty {
     ($($tt:tt)*) => {{

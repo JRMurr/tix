@@ -1576,31 +1576,7 @@ mod tests {
     use super::*;
     use lang_ty::{arc_ty, PrimitiveTy};
 
-    /// Helper: create an OutputTy for a primitive without needing an arena.
-    fn prim(p: PrimitiveTy) -> OutputTy {
-        OutputTy::Primitive(p)
-    }
-    fn int() -> OutputTy {
-        prim(PrimitiveTy::Int)
-    }
-    fn string() -> OutputTy {
-        prim(PrimitiveTy::String)
-    }
-    fn bool_() -> OutputTy {
-        prim(PrimitiveTy::Bool)
-    }
-    fn float() -> OutputTy {
-        prim(PrimitiveTy::Float)
-    }
-    fn null() -> OutputTy {
-        prim(PrimitiveTy::Null)
-    }
-    fn number() -> OutputTy {
-        prim(PrimitiveTy::Number)
-    }
-    fn path() -> OutputTy {
-        prim(PrimitiveTy::Path)
-    }
+    use crate::tests::{bool_, float, int, null, number, path, string};
 
     /// Helper: create an OutputTy::Neg with an arena-interned inner.
     fn neg(arena: &mut TypeArena, inner: OutputTy) -> OutputTy {
