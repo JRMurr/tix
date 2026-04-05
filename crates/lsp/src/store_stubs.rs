@@ -87,6 +87,10 @@ pub fn generate_stubs_with_options(
     let extra_nixos = build_module_list(&config.nixos_modules, config_dir)?;
     let extra_hm = build_module_list(&config.home_manager_modules, config_dir)?;
 
+    // Serialize custom-system definitions for cache-key hashing. The actual
+    // system generation happens *after* nix build completes (see below).
+    let systems_digest = digest_systems_config(&config.systems);
+
     // Check the lightweight file cache before invoking nix.
     let cache_key = compute_cache_key(
         &nixpkgs_path,
@@ -94,6 +98,7 @@ pub fn generate_stubs_with_options(
         hm_path.as_deref(),
         &extra_nixos,
         &extra_hm,
+        &systems_digest,
     );
     if !skip_cache {
         if let Some(cached) = check_cache(&cache_key) {
@@ -119,16 +124,157 @@ pub fn generate_stubs_with_options(
         &extra_hm,
     )?;
 
-    // Cache the result for next time.
-    if let Err(e) = write_cache(&cache_key, &store_path) {
+    // Without custom systems, the `nix build` output IS the stubs dir.
+    // With custom systems, we copy the built-ins into a user-owned
+    // directory, then layer generated `<name>.tix` files on top.
+    let final_stubs_dir = if config.systems.is_empty() {
+        store_path.clone()
+    } else {
+        build_merged_stubs_dir(&store_path, &cache_key, &config.systems, config_dir)?
+    };
+
+    // Cache the final stubs dir for next time.
+    if let Err(e) = write_cache(&cache_key, &final_stubs_dir) {
         log::warn!("Failed to write stubs cache: {e}");
     }
 
-    log::info!("Generated stubs: {}", store_path.display());
+    log::info!("Generated stubs: {}", final_stubs_dir.display());
     Ok(GeneratedStubs {
-        stubs_dir: store_path,
+        stubs_dir: final_stubs_dir,
         source_roots,
     })
+}
+
+// ==============================================================================
+// Custom system generation (after nix build)
+// ==============================================================================
+
+/// Create a user-owned merged-stubs directory at
+/// `~/.cache/tix/custom-stubs/<cache_key>/`. The directory contains
+/// copies of every `.tix` file from `built_in_dir` plus fresh
+/// `<name>.tix` files generated from each custom system.
+///
+/// Uses regular copies rather than symlinks so the merged dir stays
+/// valid even if `nix-collect-garbage` reclaims the original store
+/// path.
+fn build_merged_stubs_dir(
+    built_in_dir: &Path,
+    cache_key: &str,
+    systems: &std::collections::HashMap<String, crate::project_config::CustomSystem>,
+    config_dir: &Path,
+) -> Result<PathBuf, Error> {
+    let merged_root = custom_stubs_dir()
+        .ok_or_else(|| Error::Cache("cannot determine cache directory".into()))?;
+    let merged = merged_root.join(cache_key);
+    populate_merged_stubs_dir(built_in_dir, &merged, systems, config_dir)?;
+    Ok(merged)
+}
+
+/// Core logic of [`build_merged_stubs_dir`] that takes the output
+/// directory explicitly. Separated for testability.
+fn populate_merged_stubs_dir(
+    built_in_dir: &Path,
+    merged: &Path,
+    systems: &std::collections::HashMap<String, crate::project_config::CustomSystem>,
+    config_dir: &Path,
+) -> Result<(), Error> {
+    // Replace any existing dir atomically-ish: remove then recreate.
+    if merged.exists() {
+        std::fs::remove_dir_all(merged)
+            .map_err(|e| Error::Cache(format!("removing old merged dir: {e}")))?;
+    }
+    std::fs::create_dir_all(merged)
+        .map_err(|e| Error::Cache(format!("creating merged dir: {e}")))?;
+
+    // Copy every built-in .tix file.
+    let entries = std::fs::read_dir(built_in_dir)
+        .map_err(|e| Error::Cache(format!("reading {}: {e}", built_in_dir.display())))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| Error::Cache(format!("reading dir entry: {e}")))?;
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("tix") {
+            continue;
+        }
+        let Some(file_name) = path.file_name() else {
+            continue;
+        };
+        std::fs::copy(&path, merged.join(file_name))
+            .map_err(|e| Error::Cache(format!("copying {}: {e}", path.display())))?;
+    }
+
+    // Generate each custom system into the merged dir. Failures are
+    // logged but don't abort the whole generation — users see the
+    // error in the LSP log and can iterate via the CLI equivalent.
+    for (name, sys) in systems {
+        if let Err(e) = generate_custom_system(name, sys, merged, config_dir) {
+            log::warn!("Failed to generate custom system '{name}': {e}");
+        }
+    }
+
+    Ok(())
+}
+
+fn custom_stubs_dir() -> Option<PathBuf> {
+    dirs::cache_dir().map(|d| d.join("tix/custom-stubs"))
+}
+
+/// Generate a single custom system by invoking the current tix binary
+/// as a subprocess with `stubs generate module`. Subprocess invocation
+/// mirrors the CLI workflow documented in the stubs guide — users can
+/// run the same command themselves to iterate.
+fn generate_custom_system(
+    name: &str,
+    sys: &crate::project_config::CustomSystem,
+    out_dir: &Path,
+    config_dir: &Path,
+) -> Result<(), Error> {
+    let tix_exe = std::env::current_exe()
+        .map_err(|e| Error::NixCommand(format!("cannot locate current tix binary: {e}")))?;
+
+    // Layer any system-level modules onto the options_expr by wrapping
+    // it in `modules` that evalModules would see. But since we only have
+    // an `options_expr` (not a direct evalModules call), we expect users
+    // to bake their modules into `options_expr` themselves. The optional
+    // `modules` list is reserved for future use; for now it's hashed
+    // into the cache key and logged.
+    if !sys.modules.is_empty() {
+        log::info!(
+            "custom system '{name}' has {} extra modules — ensure options_expr imports them",
+            sys.modules.len()
+        );
+    }
+    let _ = config_dir; // reserved for future module-path resolution
+
+    let out_file = out_dir.join(format!("{name}.tix"));
+    let mut cmd = Command::new(&tix_exe);
+    cmd.args(["stubs", "generate", "module", "--name", name])
+        .args(["--options-expr", &sys.options_expr])
+        .args(["-o"])
+        .arg(&out_file);
+
+    for arg in &sys.context_args {
+        cmd.args(["--context-arg", arg]);
+    }
+    if sys.context_args.is_empty() {
+        cmd.args(["--context-arg", "config"]);
+    }
+
+    if let Some(glob) = &sys.example_glob {
+        cmd.args(["--example-glob", glob]);
+    }
+
+    let output = cmd
+        .output()
+        .map_err(|e| Error::NixCommand(format!("failed to spawn tix: {e}")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(Error::NixCommand(format!(
+            "tix stubs generate module --name {name} failed:\n{stderr}"
+        )));
+    }
+
+    log::debug!("generated custom system stub: {}", out_file.display());
+    Ok(())
 }
 
 // ==============================================================================
@@ -299,6 +445,7 @@ fn compute_cache_key(
     hm: Option<&Path>,
     extra_nixos_modules: &str,
     extra_hm_modules: &str,
+    systems_digest: &str,
 ) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -311,7 +458,51 @@ fn compute_cache_key(
     }
     extra_nixos_modules.hash(&mut hasher);
     extra_hm_modules.hash(&mut hasher);
+    systems_digest.hash(&mut hasher);
     format!("{:016x}", hasher.finish())
+}
+
+/// Produce a deterministic string fingerprint of the custom-systems
+/// config. Systems are emitted in sorted-name order so hash stability
+/// doesn't depend on HashMap iteration order.
+fn digest_systems_config(
+    systems: &std::collections::HashMap<String, crate::project_config::CustomSystem>,
+) -> String {
+    if systems.is_empty() {
+        return String::new();
+    }
+    let mut names: Vec<&String> = systems.keys().collect();
+    names.sort();
+    let mut out = String::new();
+    for name in names {
+        let sys = &systems[name];
+        // options_expr gets trimmed to absorb cosmetic whitespace edits.
+        out.push_str(name);
+        out.push('\0');
+        out.push_str(sys.options_expr.trim());
+        out.push('\0');
+        for arg in &sys.context_args {
+            out.push_str(arg);
+            out.push(',');
+        }
+        out.push('\0');
+        if let Some(glob) = &sys.example_glob {
+            out.push_str(glob);
+        }
+        out.push('\0');
+        // Module list hashes as its Nix-literal form (but we can't call
+        // build_module_list here because we don't have the config_dir
+        // available at hash time; use the raw TOML form for now).
+        for m in &sys.modules {
+            match m {
+                crate::project_config::ModuleSource::Path(p) => out.push_str(p),
+                crate::project_config::ModuleSource::Expr { expr } => out.push_str(expr),
+            }
+            out.push(',');
+        }
+        out.push('\n');
+    }
+    out
 }
 
 /// Check if a cached store path exists and is still valid.
@@ -462,6 +653,7 @@ mod tests {
             None,
             "[ ]",
             "[ ]",
+            "",
         );
         let k2 = compute_cache_key(
             Path::new("/nix/store/abc-nixpkgs"),
@@ -469,6 +661,7 @@ mod tests {
             None,
             "[ ]",
             "[ ]",
+            "",
         );
         assert_eq!(k1, k2);
     }
@@ -481,6 +674,7 @@ mod tests {
             None,
             "[ ]",
             "[ ]",
+            "",
         );
         let with = compute_cache_key(
             Path::new("/nix/store/abc-nixpkgs"),
@@ -488,6 +682,7 @@ mod tests {
             Some(Path::new("/nix/store/ghi-hm")),
             "[ ]",
             "[ ]",
+            "",
         );
         assert_ne!(without, with);
     }
@@ -500,6 +695,7 @@ mod tests {
             None,
             "[ ]",
             "[ ]",
+            "",
         );
         let k2 = compute_cache_key(
             Path::new("/nix/store/xyz-nixpkgs"),
@@ -507,6 +703,7 @@ mod tests {
             None,
             "[ ]",
             "[ ]",
+            "",
         );
         assert_ne!(k1, k2);
     }
@@ -636,13 +833,115 @@ mod tests {
         let nixpkgs = Path::new("/nix/store/abc-nixpkgs");
         let tix = Path::new("/nix/store/def-tix");
 
-        let k_empty = compute_cache_key(nixpkgs, tix, None, "[ ]", "[ ]");
+        let k_empty = compute_cache_key(nixpkgs, tix, None, "[ ]", "[ ]", "");
         let k_with_nixos =
-            compute_cache_key(nixpkgs, tix, None, "[ (import /abs/foo.nix) ]", "[ ]");
-        let k_with_hm = compute_cache_key(nixpkgs, tix, None, "[ ]", "[ (import /abs/foo.nix) ]");
+            compute_cache_key(nixpkgs, tix, None, "[ (import /abs/foo.nix) ]", "[ ]", "");
+        let k_with_hm =
+            compute_cache_key(nixpkgs, tix, None, "[ ]", "[ (import /abs/foo.nix) ]", "");
         assert_ne!(k_empty, k_with_nixos);
         assert_ne!(k_empty, k_with_hm);
         assert_ne!(k_with_nixos, k_with_hm);
+    }
+
+    #[test]
+    fn populate_merged_stubs_dir_copies_builtins() {
+        // Given a built-in dir with some .tix files, the merged dir
+        // should contain only the .tix files (not other extensions).
+        let built_in = tempfile::tempdir().unwrap();
+        std::fs::write(built_in.path().join("nixos.tix"), "# nixos\n").unwrap();
+        std::fs::write(built_in.path().join("lib.tix"), "# lib\n").unwrap();
+        // Non-.tix files should be skipped.
+        std::fs::write(built_in.path().join("manifest.json"), "{}").unwrap();
+
+        let merged_root = tempfile::tempdir().unwrap();
+        let merged = merged_root.path().join("out");
+        let config_dir = tempfile::tempdir().unwrap();
+        let systems = std::collections::HashMap::new();
+
+        populate_merged_stubs_dir(built_in.path(), &merged, &systems, config_dir.path()).unwrap();
+
+        assert!(merged.join("nixos.tix").exists());
+        assert!(merged.join("lib.tix").exists());
+        assert!(!merged.join("manifest.json").exists());
+
+        // Contents preserved.
+        let content = std::fs::read_to_string(merged.join("nixos.tix")).unwrap();
+        assert_eq!(content, "# nixos\n");
+    }
+
+    #[test]
+    fn populate_merged_stubs_dir_overwrites_existing() {
+        // Calling twice with different builtins cleans up between runs.
+        let built_in_a = tempfile::tempdir().unwrap();
+        std::fs::write(built_in_a.path().join("a.tix"), "A\n").unwrap();
+        let built_in_b = tempfile::tempdir().unwrap();
+        std::fs::write(built_in_b.path().join("b.tix"), "B\n").unwrap();
+
+        let merged_root = tempfile::tempdir().unwrap();
+        let merged = merged_root.path().join("out");
+        let config_dir = tempfile::tempdir().unwrap();
+        let systems = std::collections::HashMap::new();
+
+        populate_merged_stubs_dir(built_in_a.path(), &merged, &systems, config_dir.path()).unwrap();
+        assert!(merged.join("a.tix").exists());
+
+        populate_merged_stubs_dir(built_in_b.path(), &merged, &systems, config_dir.path()).unwrap();
+        // After rebuild, a.tix should be gone and b.tix present.
+        assert!(!merged.join("a.tix").exists());
+        assert!(merged.join("b.tix").exists());
+    }
+
+    #[test]
+    fn cache_key_differs_when_systems_change() {
+        let nixpkgs = Path::new("/nix/store/abc-nixpkgs");
+        let tix = Path::new("/nix/store/def-tix");
+        let k_empty = compute_cache_key(nixpkgs, tix, None, "[ ]", "[ ]", "");
+        let k_fp = compute_cache_key(
+            nixpkgs,
+            tix,
+            None,
+            "[ ]",
+            "[ ]",
+            "flake-parts\0(x)\0config,\0\0\0\n",
+        );
+        assert_ne!(k_empty, k_fp);
+    }
+
+    #[test]
+    fn digest_systems_config_is_deterministic() {
+        use crate::project_config::CustomSystem;
+        let mut systems = std::collections::HashMap::new();
+        systems.insert(
+            "flake-parts".into(),
+            CustomSystem {
+                options_expr: "(x.y)".into(),
+                context_args: vec!["config".into(), "inputs".into()],
+                example_glob: Some("fp/**/*.nix".into()),
+                modules: vec![],
+            },
+        );
+        systems.insert(
+            "devenv".into(),
+            CustomSystem {
+                options_expr: "(z)".into(),
+                context_args: vec![],
+                example_glob: None,
+                modules: vec![],
+            },
+        );
+        let d1 = digest_systems_config(&systems);
+        let d2 = digest_systems_config(&systems);
+        assert_eq!(d1, d2, "digest should be stable across calls");
+        // devenv comes first alphabetically.
+        let devenv_idx = d1.find("devenv").expect("devenv in digest");
+        let fp_idx = d1.find("flake-parts").expect("flake-parts in digest");
+        assert!(devenv_idx < fp_idx, "systems digest must be sorted: {d1}");
+    }
+
+    #[test]
+    fn digest_systems_config_empty_is_empty() {
+        let systems = std::collections::HashMap::new();
+        assert_eq!(digest_systems_config(&systems), "");
     }
 
     #[test]

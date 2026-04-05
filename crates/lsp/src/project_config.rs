@@ -132,6 +132,39 @@ pub struct StubsGenerateConfig {
     /// Extra Home Manager modules appended to the HM options eval.
     #[serde(default, rename = "home-manager-modules")]
     pub home_manager_modules: Vec<ModuleSource>,
+
+    /// Arbitrary user-defined module systems, keyed by name. Each
+    /// generates a `<name>.tix` file that `@<name>` resolves to when
+    /// referenced from a `[context.*]` stubs list.
+    #[serde(default)]
+    pub systems: HashMap<String, CustomSystem>,
+}
+
+/// Configuration for a single custom module system (e.g. flake-parts,
+/// devenv). Users supply a Nix expression that evaluates to an options
+/// tree, plus the module arg names to emit as context args.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CustomSystem {
+    /// Nix expression producing an `evalModules`-style options attrset.
+    pub options_expr: String,
+
+    /// Module arg names emitted as `val` declarations in the generated
+    /// stub. The first name gets typed as `<Name>Config`; subsequent
+    /// known names (`lib`, `pkgs`) get their canonical types, others
+    /// fall through to `{ ... }`. Defaults to `["config"]` if empty.
+    #[serde(default)]
+    pub context_args: Vec<String>,
+
+    /// Glob written into the generated file's header. Defaults to
+    /// `modules/**/*.nix`.
+    #[serde(default)]
+    pub example_glob: Option<String>,
+
+    /// Optional extra modules layered onto `options_expr`'s eval. These
+    /// are spliced into the evaluation the same way
+    /// `nixos-modules` is layered onto eval-config.nix.
+    #[serde(default)]
+    pub modules: Vec<ModuleSource>,
 }
 
 /// The `[diagnostics]` section of `tix.toml`.
@@ -761,5 +794,56 @@ mod tests {
         let gen = config.stubs.generate().expect("generate should be present");
         assert!(gen.nixos_modules.is_empty());
         assert!(gen.home_manager_modules.is_empty());
+        assert!(gen.systems.is_empty());
+    }
+
+    #[test]
+    fn stubs_generate_custom_systems() {
+        let toml_str = r#"
+            [stubs.generate]
+            nixpkgs = "/nix/store/abc"
+
+            [stubs.generate.systems.flake-parts]
+            options_expr = "(builtins.getFlake (toString ./.)).inputs.flake-parts.lib.evalFlakeModule {} {}"
+            context_args = ["config", "inputs", "self"]
+            example_glob = "flake-modules/**/*.nix"
+
+            [stubs.generate.systems.devenv]
+            options_expr = "(import ./devenv-opts.nix)"
+        "#;
+        let config: ProjectConfig = toml::from_str(toml_str).expect("parse error");
+        let gen = config.stubs.generate().expect("generate should be present");
+
+        assert_eq!(gen.systems.len(), 2);
+
+        let fp = gen.systems.get("flake-parts").expect("flake-parts");
+        assert!(fp.options_expr.contains("evalFlakeModule"));
+        assert_eq!(fp.context_args, vec!["config", "inputs", "self"]);
+        assert_eq!(fp.example_glob.as_deref(), Some("flake-modules/**/*.nix"));
+        assert!(fp.modules.is_empty());
+
+        let de = gen.systems.get("devenv").expect("devenv");
+        assert!(de.options_expr.contains("devenv-opts"));
+        assert!(de.context_args.is_empty()); // default
+        assert!(de.example_glob.is_none());
+    }
+
+    #[test]
+    fn stubs_generate_custom_system_with_modules() {
+        let toml_str = r#"
+            [stubs.generate]
+            nixpkgs = "/nix/store/abc"
+
+            [stubs.generate.systems.flake-parts]
+            options_expr = "(x)"
+            modules = [
+              "./modules/a.nix",
+              { expr = "inputs.foo.flakeModules.bar" },
+            ]
+        "#;
+        let config: ProjectConfig = toml::from_str(toml_str).expect("parse error");
+        let gen = config.stubs.generate().expect("generate should be present");
+        let fp = gen.systems.get("flake-parts").expect("flake-parts");
+        assert_eq!(fp.modules.len(), 2);
     }
 }

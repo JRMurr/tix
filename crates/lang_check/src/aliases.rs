@@ -1664,6 +1664,59 @@ mod tests {
     }
 
     #[test]
+    fn custom_system_context_resolves_via_stubs_dir() {
+        // A `tix stubs generate module`-style output landing in
+        // builtin_stubs_dir should be picked up by `@flake-parts`
+        // automatically, with no changes to the resolution logic.
+        let tmp =
+            std::env::temp_dir().join(format!("tix_test_custom_system_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+
+        // Mirror what `tix stubs generate module --name flake-parts ...`
+        // would emit: a type alias plus a handful of context vals.
+        std::fs::write(
+            tmp.join("flake-parts.tix"),
+            r#"
+            type FlakePartsConfig = {
+                deploy: { hosts: { _: string } },
+                ...
+            };
+            val config :: FlakePartsConfig;
+            val inputs :: { ... };
+            val self :: { ... };
+            "#,
+        )
+        .expect("write flake-parts.tix");
+
+        let mut registry = TypeAliasRegistry::with_builtins();
+        registry.set_builtin_stubs_dir(tmp.clone());
+
+        let result = registry.load_context_by_name("flake-parts");
+        assert!(
+            result.is_some(),
+            "@flake-parts should resolve via flake-parts.tix in stubs dir"
+        );
+        let context_args = result.unwrap().expect("should parse");
+
+        assert!(
+            context_args.contains_key("config"),
+            "custom system should contribute `config` context arg"
+        );
+        assert!(context_args.contains_key("inputs"));
+        assert!(context_args.contains_key("self"));
+
+        // `config` should reference FlakePartsConfig alias.
+        match &context_args["config"] {
+            ParsedTy::TyVar(comment_parser::TypeVarValue::Reference(name)) => {
+                assert_eq!(name.as_str(), "FlakePartsConfig");
+            }
+            other => panic!("expected FlakePartsConfig reference, got: {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
     fn callpackage_context_loads_module_stub_from_builtin_stubs_dir() {
         // When builtin_stubs_dir contains pkgs.tix, @callpackage should
         // pick up packages defined there (not just the hand-curated builtins).

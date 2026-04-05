@@ -201,6 +201,72 @@ stubs = ["@callpackage"]
 
 Once generated, point your `tix.toml` at them. See [Configuration](./configuration.md).
 
+## Custom module systems (flake-parts, devenv, nix-darwin, ...)
+
+For any module system that ships its own `evalModules`-style API, you
+can generate typed stubs the same way NixOS and HM do. The flow is
+**iterate with the CLI first, promote to tix.toml once happy**.
+
+### 1. Iterate manually with the CLI
+
+`tix stubs generate module` wraps an arbitrary options expression in
+the generic extractor and emits a `.tix`. This gives immediate
+feedback with no LSP restart loop.
+
+```bash
+tix stubs generate module \
+  --name flake-parts \
+  --options-expr '(inputs.flake-parts.lib.evalFlakeModule { self = self; } { imports = [ ]; }).options' \
+  --context-arg config \
+  --context-arg inputs \
+  --context-arg self \
+  --example-glob "flake-modules/**/*.nix" \
+  -o flake-parts.tix
+```
+
+Inspect the output, tweak the expression, re-run. The generated file
+contains a `type FlakePartsConfig = { ... }` alias and `val`
+declarations for each `--context-arg` — `config` gets typed as
+`FlakePartsConfig`, `lib` → `Lib`, `pkgs` → `Pkgs`, others → `{ ... }`.
+
+Optional two-step debugging:
+
+```bash
+# Inspect the raw options tree first.
+nix eval --json --impure --expr '...' > options.json
+tix stubs generate module --from-json options.json --name flake-parts ... -o flake-parts.tix
+```
+
+### 2. Promote to tix.toml
+
+Once the CLI command produces a good stub, copy the expression into
+`[stubs.generate.systems.<name>]`. The LSP runs the same pipeline on
+startup and writes `<name>.tix` into its cache, so `@<name>` just
+works as a context stub.
+
+```toml
+[stubs.generate]
+nixpkgs = { expr = "(builtins.getFlake (toString ./.)).inputs.nixpkgs" }
+
+[stubs.generate.systems.flake-parts]
+options_expr = '''
+  (inputs.flake-parts.lib.evalFlakeModule
+    { self = self; } { imports = [ ]; }).options
+'''
+context_args = ["config", "inputs", "self"]
+example_glob = "flake-modules/**/*.nix"
+
+[context.flake-parts]
+includes = ["flake-modules/**/*.nix"]
+stubs = ["@flake-parts"]
+```
+
+### 3. After edits
+
+The LSP generates custom-system stubs once at startup. If you change
+the `options_expr`, `context_args`, or any module referenced from
+them, run `tix stubs refresh` and restart the LSP.
+
 ## Refreshing generated stubs
 
 Runtime-generated stubs (from `[stubs.generate]` in `tix.toml`) are

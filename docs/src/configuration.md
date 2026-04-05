@@ -186,6 +186,19 @@ Entries can be plain path strings (relative to `tix.toml`) or `{ expr = "..." }`
 
 **Module edits are not auto-detected.** After changing any file listed under `nixos-modules` / `home-manager-modules`, run `tix stubs refresh` and restart the LSP.
 
+#### Custom module systems
+
+For arbitrary module systems (flake-parts, devenv, nix-darwin, custom `evalModules` setups), add a `[stubs.generate.systems.<name>]` table:
+
+```toml
+[stubs.generate.systems.flake-parts]
+options_expr = "(inputs.flake-parts.lib.evalFlakeModule {...} {...}).options"
+context_args = ["config", "inputs", "self"]
+example_glob = "flake-modules/**/*.nix"
+```
+
+Each custom system generates a `<name>.tix` file that you reference in contexts as `@<name>`. Start by prototyping the `options_expr` manually with `tix stubs generate module` — see [Custom module systems](./stubs.md#custom-module-systems-flake-parts-devenv-nix-darwin-) for the full CLI-first iteration workflow.
+
 On first run, tix invokes `nix build` to generate `.tix` stubs from the NixOS option tree, Home Manager options, and nixpkgs package set. This takes 30-60 seconds. Subsequent runs are instant thanks to a lightweight file cache (`~/.cache/tix/store-stubs/`). Changing either nixpkgs or tix version triggers regeneration.
 
 `[stubs.generate]` can coexist with manual stub paths:

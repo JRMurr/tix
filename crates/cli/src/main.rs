@@ -329,6 +329,40 @@ enum GenStubsSource {
         #[arg(long = "source-root", value_parser = parse_source_root)]
         source_roots: Vec<(String, PathBuf)>,
     },
+
+    /// Generate stubs from an arbitrary module system's options tree.
+    ///
+    /// Wraps a user-supplied Nix expression (evaluating to an options
+    /// attrset) with the generic extract-options extractor, then emits
+    /// a .tix file whose context args match the supplied arg names.
+    /// Use this for flake-parts, devenv, nix-darwin, or any other
+    /// `evalModules`-based module system.
+    Module {
+        #[command(flatten)]
+        common: CommonGenStubsArgs,
+
+        /// System name (kebab-case). Becomes the output file name and
+        /// the basis of the `<Name>Config` type alias.
+        #[arg(long)]
+        name: String,
+
+        /// Nix expression producing the options tree. Required unless
+        /// `--from-json` is passed.
+        #[arg(long)]
+        options_expr: Option<String>,
+
+        /// A module-arg name to emit as a `val` declaration. Repeatable.
+        /// The first arg gets typed as `<Name>Config`; subsequent
+        /// known names (`lib`, `pkgs`) map to their standard types,
+        /// others to `{ ... }`. Defaults to `config` if unspecified.
+        #[arg(long = "context-arg")]
+        context_args: Vec<String>,
+
+        /// Glob written into the generated file's header to guide users
+        /// wiring this stub into tix.toml.
+        #[arg(long, default_value = "modules/**/*.nix")]
+        example_glob: String,
+    },
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -579,6 +613,23 @@ fn run_gen_stubs(source: GenStubsSource) -> Result<(), Box<dyn Error>> {
             output,
             max_depth,
             source_roots,
+        }),
+        GenStubsSource::Module {
+            common,
+            name,
+            options_expr,
+            context_args,
+            example_glob,
+        } => gen_stubs::run_module(gen_stubs::ModuleOptions {
+            common: common.into(),
+            name,
+            options_expr,
+            context_args: if context_args.is_empty() {
+                vec!["config".to_string()]
+            } else {
+                context_args
+            },
+            example_glob,
         }),
     }
 }
