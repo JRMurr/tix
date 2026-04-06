@@ -24,8 +24,7 @@ async fn hints_for_bindings() {
     )])
     .await;
 
-    h.open("test.nix").await;
-    let _ = h.wait_for_diagnostics("test.nix", TIMEOUT).await;
+    h.open_and_wait("test.nix").await;
 
     let hints = h
         .inlay_hints("test.nix", full_range())
@@ -51,8 +50,7 @@ async fn hints_update_after_edit() {
     )])
     .await;
 
-    h.open("test.nix").await;
-    let _ = h.wait_for_diagnostics("test.nix", TIMEOUT).await;
+    h.open_and_wait("test.nix").await;
 
     let hints_before = h
         .inlay_hints("test.nix", full_range())

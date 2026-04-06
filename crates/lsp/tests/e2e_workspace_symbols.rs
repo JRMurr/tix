@@ -1,6 +1,6 @@
 mod common;
 
-use common::{LspTestHarness, TIMEOUT};
+use common::LspTestHarness;
 use indoc::indoc;
 
 /// Workspace symbols returns symbols from both open files.
@@ -22,10 +22,8 @@ async fn symbols_across_files() {
     ])
     .await;
 
-    h.open("a.nix").await;
-    let _ = h.wait_for_diagnostics("a.nix", TIMEOUT).await;
-    h.open("b.nix").await;
-    let _ = h.wait_for_diagnostics("b.nix", TIMEOUT).await;
+    h.open_and_wait("a.nix").await;
+    h.open_and_wait("b.nix").await;
 
     let symbols = h
         .workspace_symbols("")
@@ -59,8 +57,7 @@ async fn symbols_query_filter() {
     )])
     .await;
 
-    h.open("test.nix").await;
-    let _ = h.wait_for_diagnostics("test.nix", TIMEOUT).await;
+    h.open_and_wait("test.nix").await;
 
     let symbols = h
         .workspace_symbols("foo")

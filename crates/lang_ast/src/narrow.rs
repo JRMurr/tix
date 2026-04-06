@@ -645,3 +645,698 @@ fn is_builtin_expr(
         _ => false,
     }
 }
+
+// ==============================================================================
+// Tests
+// ==============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tests::{find_if_condition, TestDatabase};
+    use indoc::indoc;
+
+    /// Parse Nix source containing an if-then-else, run analyze_condition
+    /// on the condition, and return (NarrowInfo, Module) for assertions.
+    fn analyze(src: &str) -> (NarrowInfo, crate::Module) {
+        let (db, file) = TestDatabase::single_file(src).unwrap();
+        let module = crate::module(&db, file);
+        let name_res = crate::name_resolution(&db, file);
+        let indices = crate::module_indices(&db, file);
+        let cond = find_if_condition(&module);
+        let info = analyze_condition(&module, &name_res, &indices.binding_expr, cond);
+        (info, module)
+    }
+
+    /// Assert a single NarrowBinding matches the expected name text and predicate.
+    #[track_caller]
+    fn assert_binding(
+        binding: &NarrowBinding,
+        module: &crate::Module,
+        name_text: &str,
+        pred: &NarrowPredicate,
+    ) {
+        assert_eq!(
+            module[binding.name].text, name_text,
+            "wrong variable narrowed"
+        );
+        assert_eq!(&binding.predicate, pred, "wrong predicate for {name_text}");
+    }
+
+    // ==================================================================
+    // Group 1: Null equality (singleton — both branches narrow)
+    // ==================================================================
+
+    #[test]
+    fn eq_null_narrows_both_branches() {
+        let (info, module) = analyze("x: if x == null then x else x");
+        assert_eq!(info.then_branch.len(), 1);
+        assert_binding(
+            &info.then_branch[0],
+            &module,
+            "x",
+            &NarrowPredicate::IsType(NarrowPrimitive::Null),
+        );
+        assert_eq!(info.else_branch.len(), 1);
+        assert_binding(
+            &info.else_branch[0],
+            &module,
+            "x",
+            &NarrowPredicate::IsNotType(NarrowPrimitive::Null),
+        );
+    }
+
+    #[test]
+    fn null_eq_reversed() {
+        let (info, module) = analyze("x: if null == x then x else x");
+        assert_eq!(info.then_branch.len(), 1);
+        assert_binding(
+            &info.then_branch[0],
+            &module,
+            "x",
+            &NarrowPredicate::IsType(NarrowPrimitive::Null),
+        );
+        assert_eq!(info.else_branch.len(), 1);
+        assert_binding(
+            &info.else_branch[0],
+            &module,
+            "x",
+            &NarrowPredicate::IsNotType(NarrowPrimitive::Null),
+        );
+    }
+
+    #[test]
+    fn neq_null() {
+        let (info, module) = analyze("x: if x != null then x else x");
+        assert_eq!(info.then_branch.len(), 1);
+        assert_binding(
+            &info.then_branch[0],
+            &module,
+            "x",
+            &NarrowPredicate::IsNotType(NarrowPrimitive::Null),
+        );
+        assert_eq!(info.else_branch.len(), 1);
+        assert_binding(
+            &info.else_branch[0],
+            &module,
+            "x",
+            &NarrowPredicate::IsType(NarrowPrimitive::Null),
+        );
+    }
+
+    // ==================================================================
+    // Group 2: Non-singleton literal equality (then-branch only)
+    // ==================================================================
+
+    #[test]
+    fn eq_int_literal() {
+        let (info, module) = analyze("x: if x == 42 then x else x");
+        assert_eq!(info.then_branch.len(), 1);
+        assert_binding(
+            &info.then_branch[0],
+            &module,
+            "x",
+            &NarrowPredicate::IsType(NarrowPrimitive::Int),
+        );
+        assert!(
+            info.else_branch.is_empty(),
+            "int is not a singleton — else should not narrow"
+        );
+    }
+
+    #[test]
+    fn eq_string_literal() {
+        let (info, module) = analyze(r#"x: if x == "hello" then x else x"#);
+        assert_eq!(info.then_branch.len(), 1);
+        assert_binding(
+            &info.then_branch[0],
+            &module,
+            "x",
+            &NarrowPredicate::IsType(NarrowPrimitive::String),
+        );
+        assert!(info.else_branch.is_empty());
+    }
+
+    #[test]
+    fn eq_bool_literal() {
+        let (info, module) = analyze("x: if x == true then x else x");
+        assert_eq!(info.then_branch.len(), 1);
+        assert_binding(
+            &info.then_branch[0],
+            &module,
+            "x",
+            &NarrowPredicate::IsType(NarrowPrimitive::Bool),
+        );
+        assert!(info.else_branch.is_empty());
+    }
+
+    #[test]
+    fn eq_float_literal() {
+        let (info, module) = analyze("x: if x == 1.0 then x else x");
+        assert_eq!(info.then_branch.len(), 1);
+        assert_binding(
+            &info.then_branch[0],
+            &module,
+            "x",
+            &NarrowPredicate::IsType(NarrowPrimitive::Float),
+        );
+        assert!(info.else_branch.is_empty());
+    }
+
+    // ==================================================================
+    // Group 3: HasAttr operator
+    // ==================================================================
+
+    #[test]
+    fn hasattr_narrows_both() {
+        let (info, module) = analyze("x: if x ? name then x else x");
+        assert_eq!(info.then_branch.len(), 1);
+        assert_binding(
+            &info.then_branch[0],
+            &module,
+            "x",
+            &NarrowPredicate::HasField("name".into()),
+        );
+        assert_eq!(info.else_branch.len(), 1);
+        assert_binding(
+            &info.else_branch[0],
+            &module,
+            "x",
+            &NarrowPredicate::NotHasField("name".into()),
+        );
+    }
+
+    #[test]
+    fn hasattr_dynamic_key_no_narrowing() {
+        // Dynamic keys can't be statically analyzed.
+        let (info, _module) = analyze(r#"x: y: if x ? ${y} then x else x"#);
+        assert!(info.then_branch.is_empty());
+        assert!(info.else_branch.is_empty());
+    }
+
+    // ==================================================================
+    // Group 4: Negation
+    // ==================================================================
+
+    #[test]
+    fn negation_flips_branches() {
+        let (info, module) = analyze("x: if !(x == null) then x else x");
+        // Negation swaps then/else: then gets IsNotType, else gets IsType.
+        assert_eq!(info.then_branch.len(), 1);
+        assert_binding(
+            &info.then_branch[0],
+            &module,
+            "x",
+            &NarrowPredicate::IsNotType(NarrowPrimitive::Null),
+        );
+        assert_eq!(info.else_branch.len(), 1);
+        assert_binding(
+            &info.else_branch[0],
+            &module,
+            "x",
+            &NarrowPredicate::IsType(NarrowPrimitive::Null),
+        );
+    }
+
+    #[test]
+    fn nested_negation_double_flip() {
+        // Double negation should be equivalent to no negation.
+        let (info, module) = analyze("x: if !!(x == null) then x else x");
+        assert_eq!(info.then_branch.len(), 1);
+        assert_binding(
+            &info.then_branch[0],
+            &module,
+            "x",
+            &NarrowPredicate::IsType(NarrowPrimitive::Null),
+        );
+        assert_eq!(info.else_branch.len(), 1);
+        assert_binding(
+            &info.else_branch[0],
+            &module,
+            "x",
+            &NarrowPredicate::IsNotType(NarrowPrimitive::Null),
+        );
+    }
+
+    // ==================================================================
+    // Group 5: Logical AND
+    // ==================================================================
+
+    #[test]
+    fn and_combines_then_branches() {
+        let (info, module) = analyze("x: if x != null && x ? name then x else x");
+        assert_eq!(
+            info.then_branch.len(),
+            2,
+            "AND should concatenate both then-branches"
+        );
+        assert_binding(
+            &info.then_branch[0],
+            &module,
+            "x",
+            &NarrowPredicate::IsNotType(NarrowPrimitive::Null),
+        );
+        assert_binding(
+            &info.then_branch[1],
+            &module,
+            "x",
+            &NarrowPredicate::HasField("name".into()),
+        );
+        assert!(
+            info.else_branch.is_empty(),
+            "AND can't determine which guard failed"
+        );
+    }
+
+    #[test]
+    fn and_with_unrecognized_drops_gracefully() {
+        // One recognized + one unrecognized: only the recognized one appears.
+        let (info, module) = analyze("x: y: if x != null && y > 0 then x else x");
+        assert_eq!(info.then_branch.len(), 1);
+        assert_binding(
+            &info.then_branch[0],
+            &module,
+            "x",
+            &NarrowPredicate::IsNotType(NarrowPrimitive::Null),
+        );
+    }
+
+    // ==================================================================
+    // Group 6: Logical OR
+    // ==================================================================
+
+    #[test]
+    fn or_combines_else_branches() {
+        // Both conditions produce else-branch narrowing only for null (singleton).
+        let (info, module) = analyze("x: y: if x == null || y == null then x else x");
+        assert!(
+            info.then_branch.is_empty(),
+            "OR can't determine which guard holds"
+        );
+        assert_eq!(
+            info.else_branch.len(),
+            2,
+            "OR should concatenate both else-branches"
+        );
+        assert_binding(
+            &info.else_branch[0],
+            &module,
+            "x",
+            &NarrowPredicate::IsNotType(NarrowPrimitive::Null),
+        );
+        assert_binding(
+            &info.else_branch[1],
+            &module,
+            "y",
+            &NarrowPredicate::IsNotType(NarrowPrimitive::Null),
+        );
+    }
+
+    // ==================================================================
+    // Group 7: Type predicate builtins (builtins.is*)
+    // ==================================================================
+
+    #[test]
+    fn is_null_builtin() {
+        let (info, module) = analyze("x: if builtins.isNull x then x else x");
+        assert_eq!(info.then_branch.len(), 1);
+        assert_binding(
+            &info.then_branch[0],
+            &module,
+            "x",
+            &NarrowPredicate::IsType(NarrowPrimitive::Null),
+        );
+        assert_eq!(info.else_branch.len(), 1);
+        assert_binding(
+            &info.else_branch[0],
+            &module,
+            "x",
+            &NarrowPredicate::IsNotType(NarrowPrimitive::Null),
+        );
+    }
+
+    #[test]
+    fn is_string_builtin() {
+        let (info, module) = analyze("x: if builtins.isString x then x else x");
+        assert_binding(
+            &info.then_branch[0],
+            &module,
+            "x",
+            &NarrowPredicate::IsType(NarrowPrimitive::String),
+        );
+        assert_binding(
+            &info.else_branch[0],
+            &module,
+            "x",
+            &NarrowPredicate::IsNotType(NarrowPrimitive::String),
+        );
+    }
+
+    #[test]
+    fn is_int_builtin() {
+        let (info, module) = analyze("x: if builtins.isInt x then x else x");
+        assert_binding(
+            &info.then_branch[0],
+            &module,
+            "x",
+            &NarrowPredicate::IsType(NarrowPrimitive::Int),
+        );
+        assert_binding(
+            &info.else_branch[0],
+            &module,
+            "x",
+            &NarrowPredicate::IsNotType(NarrowPrimitive::Int),
+        );
+    }
+
+    #[test]
+    fn is_float_builtin() {
+        let (info, module) = analyze("x: if builtins.isFloat x then x else x");
+        assert_binding(
+            &info.then_branch[0],
+            &module,
+            "x",
+            &NarrowPredicate::IsType(NarrowPrimitive::Float),
+        );
+        assert_binding(
+            &info.else_branch[0],
+            &module,
+            "x",
+            &NarrowPredicate::IsNotType(NarrowPrimitive::Float),
+        );
+    }
+
+    #[test]
+    fn is_bool_builtin() {
+        let (info, module) = analyze("x: if builtins.isBool x then x else x");
+        assert_binding(
+            &info.then_branch[0],
+            &module,
+            "x",
+            &NarrowPredicate::IsType(NarrowPrimitive::Bool),
+        );
+        assert_binding(
+            &info.else_branch[0],
+            &module,
+            "x",
+            &NarrowPredicate::IsNotType(NarrowPrimitive::Bool),
+        );
+    }
+
+    #[test]
+    fn is_path_builtin() {
+        let (info, module) = analyze("x: if builtins.isPath x then x else x");
+        assert_binding(
+            &info.then_branch[0],
+            &module,
+            "x",
+            &NarrowPredicate::IsType(NarrowPrimitive::Path),
+        );
+        assert_binding(
+            &info.else_branch[0],
+            &module,
+            "x",
+            &NarrowPredicate::IsNotType(NarrowPrimitive::Path),
+        );
+    }
+
+    // ==================================================================
+    // Group 8: Compound type predicates (then-only)
+    // ==================================================================
+
+    #[test]
+    fn is_attrs_then_only() {
+        let (info, module) = analyze("x: if builtins.isAttrs x then x else x");
+        assert_eq!(info.then_branch.len(), 1);
+        assert_binding(
+            &info.then_branch[0],
+            &module,
+            "x",
+            &NarrowPredicate::IsAttrSet,
+        );
+        assert!(
+            info.else_branch.is_empty(),
+            "negating compound types is not supported"
+        );
+    }
+
+    #[test]
+    fn is_list_then_only() {
+        let (info, module) = analyze("x: if builtins.isList x then x else x");
+        assert_eq!(info.then_branch.len(), 1);
+        assert_binding(&info.then_branch[0], &module, "x", &NarrowPredicate::IsList);
+        assert!(info.else_branch.is_empty());
+    }
+
+    #[test]
+    fn is_function_then_only() {
+        let (info, module) = analyze("x: if builtins.isFunction x then x else x");
+        assert_eq!(info.then_branch.len(), 1);
+        assert_binding(
+            &info.then_branch[0],
+            &module,
+            "x",
+            &NarrowPredicate::IsFunction,
+        );
+        assert!(info.else_branch.is_empty());
+    }
+
+    // ==================================================================
+    // Group 9: Bare predicate names (resolve as builtins)
+    // ==================================================================
+
+    #[test]
+    fn bare_is_null() {
+        let (info, module) = analyze("x: if isNull x then x else x");
+        assert_eq!(info.then_branch.len(), 1);
+        assert_binding(
+            &info.then_branch[0],
+            &module,
+            "x",
+            &NarrowPredicate::IsType(NarrowPrimitive::Null),
+        );
+        assert_eq!(info.else_branch.len(), 1);
+        assert_binding(
+            &info.else_branch[0],
+            &module,
+            "x",
+            &NarrowPredicate::IsNotType(NarrowPrimitive::Null),
+        );
+    }
+
+    // ==================================================================
+    // Group 10: Aliased builtins (traces through binding_exprs)
+    // ==================================================================
+
+    #[test]
+    fn aliased_builtin_traces_through() {
+        // Alias tracing only works when the alias has the same name as the
+        // builtin (e.g. `inherit (builtins) isNull` or `let isNull = ...`).
+        let src = indoc! {"
+            let isNull = builtins.isNull;
+            in x: if isNull x then x else x
+        "};
+        let (info, module) = analyze(src);
+        assert_eq!(info.then_branch.len(), 1);
+        assert_binding(
+            &info.then_branch[0],
+            &module,
+            "x",
+            &NarrowPredicate::IsType(NarrowPrimitive::Null),
+        );
+    }
+
+    #[test]
+    fn renamed_alias_no_narrowing() {
+        // Renamed aliases don't match — the reference name must equal the builtin name.
+        let src = indoc! {"
+            let myIsNull = builtins.isNull;
+            in x: if myIsNull x then x else x
+        "};
+        let (info, _module) = analyze(src);
+        assert!(
+            info.then_branch.is_empty(),
+            "renamed alias should not narrow"
+        );
+    }
+
+    // ==================================================================
+    // Group 11: Select chain predicates (fallback via leaf name)
+    // ==================================================================
+
+    #[test]
+    fn select_chain_predicate() {
+        let (info, module) = analyze("x: lib: if lib.isString x then x else x");
+        assert_eq!(info.then_branch.len(), 1);
+        assert_binding(
+            &info.then_branch[0],
+            &module,
+            "x",
+            &NarrowPredicate::IsType(NarrowPrimitive::String),
+        );
+        assert_eq!(info.else_branch.len(), 1);
+        assert_binding(
+            &info.else_branch[0],
+            &module,
+            "x",
+            &NarrowPredicate::IsNotType(NarrowPrimitive::String),
+        );
+    }
+
+    #[test]
+    fn deep_select_chain() {
+        let (info, module) = analyze("x: lib: if lib.types.isString x then x else x");
+        assert_eq!(info.then_branch.len(), 1);
+        assert_binding(
+            &info.then_branch[0],
+            &module,
+            "x",
+            &NarrowPredicate::IsType(NarrowPrimitive::String),
+        );
+    }
+
+    // ==================================================================
+    // Group 12: builtins.hasAttr curried call
+    // ==================================================================
+
+    #[test]
+    fn hasattr_builtin_curried() {
+        let src = r#"x: if builtins.hasAttr "name" x then x else x"#;
+        let (info, module) = analyze(src);
+        assert_eq!(info.then_branch.len(), 1);
+        assert_binding(
+            &info.then_branch[0],
+            &module,
+            "x",
+            &NarrowPredicate::HasField("name".into()),
+        );
+        assert_eq!(info.else_branch.len(), 1);
+        assert_binding(
+            &info.else_branch[0],
+            &module,
+            "x",
+            &NarrowPredicate::NotHasField("name".into()),
+        );
+    }
+
+    // ==================================================================
+    // Group 13: Unrecognized conditions (negative cases)
+    // ==================================================================
+
+    #[test]
+    fn unrecognized_condition_empty() {
+        let (info, _module) = analyze("x: y: if x > y then x else x");
+        assert!(info.then_branch.is_empty());
+        assert!(info.else_branch.is_empty());
+    }
+
+    // ==================================================================
+    // detect_conditional_fn tests
+    // ==================================================================
+
+    /// Find the expression to pass to detect_conditional_fn.
+    /// Navigates through Lambda wrappers to find the inner expression.
+    fn detect_fn(src: &str) -> Option<ConditionalFn> {
+        let (db, file) = TestDatabase::single_file(src).unwrap();
+        let module = crate::module(&db, file);
+        // Navigate through Lambda wrappers to get the body expression.
+        let mut expr_id = module.entry_expr;
+        loop {
+            match &module[expr_id] {
+                Expr::Lambda { body, .. } => expr_id = *body,
+                _ => break,
+            }
+        }
+        detect_conditional_fn(&module, expr_id)
+    }
+
+    #[test]
+    fn detect_select_chain_optional_string() {
+        let result = detect_fn("lib: lib.optionalString");
+        assert_eq!(result, Some(ConditionalFn::OptionalString));
+    }
+
+    #[test]
+    fn detect_select_chain_optional_attrs() {
+        let result = detect_fn("lib: lib.optionalAttrs");
+        assert_eq!(result, Some(ConditionalFn::OptionalAttrs));
+    }
+
+    #[test]
+    fn detect_bare_ref_mk_if() {
+        let result = detect_fn("mkIf");
+        assert_eq!(result, Some(ConditionalFn::MkIf));
+    }
+
+    #[test]
+    fn detect_deep_select() {
+        let result = detect_fn("lib: lib.strings.optionalString");
+        assert_eq!(result, Some(ConditionalFn::OptionalString));
+    }
+
+    #[test]
+    fn detect_unknown_select_none() {
+        let result = detect_fn("lib: lib.someOther");
+        assert_eq!(result, None);
+    }
+
+    // ==================================================================
+    // detect_conditional_apply_narrowing tests
+    // ==================================================================
+
+    /// Parse Nix source with a curried conditional call (`f cond body`)
+    /// and run detect_conditional_apply_narrowing on the inner Apply.
+    ///
+    /// In curried `f cond body`, the AST is `Apply(Apply(f, cond), body)`.
+    /// The function finds the inner `Apply(f, cond)` — the fun_expr of the
+    /// outer Apply — which is what `detect_conditional_apply_narrowing` expects.
+    fn detect_apply_narrowing(src: &str) -> (Option<NarrowInfo>, crate::Module) {
+        let (db, file) = TestDatabase::single_file(src).unwrap();
+        let module = crate::module(&db, file);
+        let name_res = crate::name_resolution(&db, file);
+        let indices = crate::module_indices(&db, file);
+
+        // Find the inner Apply of the curried call: the Apply whose fun is
+        // also an Apply (outer), then take the outer's fun field (inner).
+        let inner_apply = module
+            .exprs()
+            .find_map(|(_, e)| match e {
+                Expr::Apply { fun, .. } if matches!(&module[*fun], Expr::Apply { .. }) => {
+                    Some(*fun)
+                }
+                _ => None,
+            })
+            .expect("should find curried Apply(Apply(f, cond), body)");
+
+        let info = detect_conditional_apply_narrowing(
+            &module,
+            &name_res,
+            &indices.binding_expr,
+            inner_apply,
+        );
+        (info, module)
+    }
+
+    #[test]
+    fn conditional_apply_optional_string() {
+        let src = r#"x: lib: lib.optionalString (x != null) x.name"#;
+        let (info, module) = detect_apply_narrowing(src);
+        let info = info.expect("should detect conditional narrowing");
+        assert_eq!(info.then_branch.len(), 1);
+        assert_binding(
+            &info.then_branch[0],
+            &module,
+            "x",
+            &NarrowPredicate::IsNotType(NarrowPrimitive::Null),
+        );
+    }
+
+    #[test]
+    fn conditional_apply_no_narrowing_returns_none() {
+        let (result, _) = detect_apply_narrowing(r#"lib: lib.optionalString true "hello""#);
+        assert!(
+            result.is_none(),
+            "should return None when condition produces no narrowing"
+        );
+    }
+}

@@ -588,7 +588,40 @@ fn collect_attrset(pairs: Pairs<Rule>, ctx: &mut CollectCtx) -> Result<ParsedTy,
 #[cfg(test)]
 mod tests {
     use super::parse_source_loc;
-    use crate::{known_ty, parse_tix_file};
+    use crate::{known_ty, parse_tix_file, TixDeclaration};
+
+    // =========================================================================
+    // Declaration assertion helpers
+    // =========================================================================
+
+    /// Assert that `decls[idx]` is a `TypeAlias` and return its fields.
+    #[track_caller]
+    fn expect_type_alias(decls: &[TixDeclaration], idx: usize) -> (&str, &crate::ParsedTy) {
+        match &decls[idx] {
+            TixDeclaration::TypeAlias { name, body, .. } => (name.as_str(), body),
+            other => panic!("declarations[{idx}]: expected TypeAlias, got: {other:?}"),
+        }
+    }
+
+    /// Assert that `decls[idx]` is a `ValDecl` and return its fields.
+    #[track_caller]
+    fn expect_val_decl(decls: &[TixDeclaration], idx: usize) -> (&str, &crate::ParsedTy) {
+        match &decls[idx] {
+            TixDeclaration::ValDecl { name, ty, .. } => (name.as_str(), ty),
+            other => panic!("declarations[{idx}]: expected ValDecl, got: {other:?}"),
+        }
+    }
+
+    /// Assert that `decls[idx]` is a `Module` and return its fields.
+    #[track_caller]
+    fn expect_module(decls: &[TixDeclaration], idx: usize) -> (&str, &[TixDeclaration]) {
+        match &decls[idx] {
+            TixDeclaration::Module {
+                name, declarations, ..
+            } => (name.as_str(), declarations),
+            other => panic!("declarations[{idx}]: expected Module, got: {other:?}"),
+        }
+    }
 
     #[test]
     fn parse_source_loc_basic() {
@@ -623,16 +656,9 @@ mod tests {
             .expect("parse error");
 
         assert_eq!(file.declarations.len(), 1);
-        match &file.declarations[0] {
-            crate::TixDeclaration::TypeAlias {
-                name, body, doc, ..
-            } => {
-                assert_eq!(name.as_str(), "Derivation");
-                assert_eq!(*body, known_ty!({ "name": string, "system": string }));
-                assert_eq!(*doc, None);
-            }
-            other => panic!("expected TypeAlias, got: {other:?}"),
-        }
+        let (name, body) = expect_type_alias(&file.declarations, 0);
+        assert_eq!(name, "Derivation");
+        assert_eq!(*body, known_ty!({ "name": string, "system": string }));
     }
 
     #[test]
@@ -641,17 +667,12 @@ mod tests {
             .expect("parse error");
 
         assert_eq!(file.declarations.len(), 1);
-        match &file.declarations[0] {
-            crate::TixDeclaration::ValDecl { name, ty, doc, .. } => {
-                assert_eq!(name.as_str(), "mkDerivation");
-                assert_eq!(
-                    *ty,
-                    known_ty!(({ "name": string; ... }) -> ({ "name": string }))
-                );
-                assert_eq!(*doc, None);
-            }
-            other => panic!("expected ValDecl, got: {other:?}"),
-        }
+        let (name, ty) = expect_val_decl(&file.declarations, 0);
+        assert_eq!(name, "mkDerivation");
+        assert_eq!(
+            *ty,
+            known_ty!(({ "name": string; ... }) -> ({ "name": string }))
+        );
     }
 
     #[test]
@@ -667,39 +688,19 @@ mod tests {
         let file = parse_tix_file(src).expect("parse error");
 
         assert_eq!(file.declarations.len(), 1);
-        match &file.declarations[0] {
-            crate::TixDeclaration::Module {
-                name,
-                declarations,
-                doc,
-                ..
-            } => {
-                assert_eq!(name.as_str(), "lib");
-                assert_eq!(declarations.len(), 2);
-                assert_eq!(*doc, None);
+        let (name, decls) = expect_module(&file.declarations, 0);
+        assert_eq!(name, "lib");
+        assert_eq!(decls.len(), 2);
 
-                // First: val id
-                match &declarations[0] {
-                    crate::TixDeclaration::ValDecl { name, ty, .. } => {
-                        assert_eq!(name.as_str(), "id");
-                        assert_eq!(*ty, known_ty!((# "a") -> (# "a")));
-                    }
-                    other => panic!("expected ValDecl, got: {other:?}"),
-                }
+        // First: val id
+        let (name, ty) = expect_val_decl(decls, 0);
+        assert_eq!(name, "id");
+        assert_eq!(*ty, known_ty!((# "a") -> (# "a")));
 
-                // Second: nested module
-                match &declarations[1] {
-                    crate::TixDeclaration::Module {
-                        name, declarations, ..
-                    } => {
-                        assert_eq!(name.as_str(), "strings");
-                        assert_eq!(declarations.len(), 1);
-                    }
-                    other => panic!("expected Module, got: {other:?}"),
-                }
-            }
-            other => panic!("expected Module, got: {other:?}"),
-        }
+        // Second: nested module
+        let (name, inner_decls) = expect_module(decls, 1);
+        assert_eq!(name, "strings");
+        assert_eq!(inner_decls.len(), 1);
     }
 
     #[test]
@@ -725,13 +726,9 @@ mod tests {
         let file = parse_tix_file("val add :: number -> number -> number;").expect("parse error");
 
         assert_eq!(file.declarations.len(), 1);
-        match &file.declarations[0] {
-            crate::TixDeclaration::ValDecl { name, ty, .. } => {
-                assert_eq!(name.as_str(), "add");
-                assert_eq!(*ty, known_ty!(number -> number -> number));
-            }
-            other => panic!("expected ValDecl, got: {other:?}"),
-        }
+        let (name, ty) = expect_val_decl(&file.declarations, 0);
+        assert_eq!(name, "add");
+        assert_eq!(*ty, known_ty!(number -> number -> number));
     }
 
     #[test]
@@ -739,13 +736,9 @@ mod tests {
         let file = parse_tix_file("type Nullable = a | null;").expect("parse error");
 
         assert_eq!(file.declarations.len(), 1);
-        match &file.declarations[0] {
-            crate::TixDeclaration::TypeAlias { name, body, .. } => {
-                assert_eq!(name.as_str(), "Nullable");
-                assert_eq!(*body, known_ty!(union!((# "a"), null)));
-            }
-            other => panic!("expected TypeAlias, got: {other:?}"),
-        }
+        let (name, body) = expect_type_alias(&file.declarations, 0);
+        assert_eq!(name, "Nullable");
+        assert_eq!(*body, known_ty!(union!((# "a"), null)));
     }
 
     #[test]
@@ -753,24 +746,20 @@ mod tests {
         let src = r#"type Sysctl = { "net.core.rmem_max": int, enable: bool, ... };"#;
         let file = parse_tix_file(src).expect("parse error");
 
-        match &file.declarations[0] {
-            crate::TixDeclaration::TypeAlias { name, body, .. } => {
-                assert_eq!(name.as_str(), "Sysctl");
-                match body {
-                    crate::ParsedTy::AttrSet(attr) => {
-                        // Quoted field should have quotes stripped in the parsed representation.
-                        assert!(
-                            attr.fields.contains_key("net.core.rmem_max"),
-                            "expected 'net.core.rmem_max' field, got: {:?}",
-                            attr.fields.keys().collect::<Vec<_>>()
-                        );
-                        assert!(attr.fields.contains_key("enable"));
-                        assert!(attr.open);
-                    }
-                    other => panic!("expected AttrSet, got: {other:?}"),
-                }
+        let (name, body) = expect_type_alias(&file.declarations, 0);
+        assert_eq!(name, "Sysctl");
+        match body {
+            crate::ParsedTy::AttrSet(attr) => {
+                // Quoted field should have quotes stripped in the parsed representation.
+                assert!(
+                    attr.fields.contains_key("net.core.rmem_max"),
+                    "expected 'net.core.rmem_max' field, got: {:?}",
+                    attr.fields.keys().collect::<Vec<_>>()
+                );
+                assert!(attr.fields.contains_key("enable"));
+                assert!(attr.open);
             }
-            other => panic!("expected TypeAlias, got: {other:?}"),
+            other => panic!("expected AttrSet, got: {other:?}"),
         }
     }
 
@@ -784,7 +773,7 @@ mod tests {
         let file = parse_tix_file(src).expect("parse error");
 
         match &file.declarations[0] {
-            crate::TixDeclaration::TypeAlias { name, doc, .. } => {
+            TixDeclaration::TypeAlias { name, doc, .. } => {
                 assert_eq!(name.as_str(), "Config");
                 assert_eq!(doc.as_deref(), Some("A system configuration."));
             }
@@ -798,7 +787,7 @@ mod tests {
         let file = parse_tix_file(src).expect("parse error");
 
         match &file.declarations[0] {
-            crate::TixDeclaration::ValDecl { name, doc, .. } => {
+            TixDeclaration::ValDecl { name, doc, .. } => {
                 assert_eq!(name.as_str(), "mkDrv");
                 assert_eq!(doc.as_deref(), Some("Build a derivation."));
             }
@@ -812,7 +801,7 @@ mod tests {
         let file = parse_tix_file(src).expect("parse error");
 
         match &file.declarations[0] {
-            crate::TixDeclaration::Module { name, doc, .. } => {
+            TixDeclaration::Module { name, doc, .. } => {
                 assert_eq!(name.as_str(), "lib");
                 assert_eq!(doc.as_deref(), Some("Library functions."));
             }
@@ -826,7 +815,7 @@ mod tests {
         let file = parse_tix_file(src).expect("parse error");
 
         match &file.declarations[0] {
-            crate::TixDeclaration::ValDecl { doc, .. } => {
+            TixDeclaration::ValDecl { doc, .. } => {
                 assert_eq!(doc.as_deref(), Some("Line one.\nLine two."));
             }
             other => panic!("expected ValDecl, got: {other:?}"),
@@ -868,13 +857,13 @@ mod tests {
 
         assert_eq!(file.declarations.len(), 2);
         match &file.declarations[0] {
-            crate::TixDeclaration::ValDecl { doc, .. } => {
+            TixDeclaration::ValDecl { doc, .. } => {
                 assert_eq!(doc.as_deref(), Some("Doc comment."));
             }
             other => panic!("expected ValDecl, got: {other:?}"),
         }
         match &file.declarations[1] {
-            crate::TixDeclaration::ValDecl { doc, .. } => {
+            TixDeclaration::ValDecl { doc, .. } => {
                 assert_eq!(*doc, None);
             }
             other => panic!("expected ValDecl, got: {other:?}"),
@@ -997,62 +986,54 @@ mod tests {
     #[test]
     fn any_keyword_parses_to_top() {
         let file = parse_tix_file("val f :: any -> int;").expect("parse error");
-        match &file.declarations[0] {
-            crate::TixDeclaration::ValDecl { ty, .. } => match ty {
-                crate::ParsedTy::Lambda { param, .. } => {
-                    assert_eq!(*param.0, crate::ParsedTy::Top);
-                }
-                other => panic!("expected Lambda, got: {other:?}"),
-            },
-            other => panic!("expected ValDecl, got: {other:?}"),
+        let (_, ty) = expect_val_decl(&file.declarations, 0);
+        match ty {
+            crate::ParsedTy::Lambda { param, .. } => {
+                assert_eq!(*param.0, crate::ParsedTy::Top);
+            }
+            other => panic!("expected Lambda, got: {other:?}"),
         }
     }
 
     #[test]
     fn never_keyword_parses_to_bottom() {
         let file = parse_tix_file("val f :: int -> never;").expect("parse error");
-        match &file.declarations[0] {
-            crate::TixDeclaration::ValDecl { ty, .. } => match ty {
-                crate::ParsedTy::Lambda { body, .. } => {
-                    assert_eq!(*body.0, crate::ParsedTy::Bottom);
-                }
-                other => panic!("expected Lambda, got: {other:?}"),
-            },
-            other => panic!("expected ValDecl, got: {other:?}"),
+        let (_, ty) = expect_val_decl(&file.declarations, 0);
+        match ty {
+            crate::ParsedTy::Lambda { body, .. } => {
+                assert_eq!(*body.0, crate::ParsedTy::Bottom);
+            }
+            other => panic!("expected Lambda, got: {other:?}"),
         }
     }
 
     #[test]
     fn any_in_union_position() {
         let file = parse_tix_file("type T = int | any;").expect("parse error");
-        match &file.declarations[0] {
-            crate::TixDeclaration::TypeAlias { body, .. } => match body {
-                crate::ParsedTy::Union(members) => {
-                    assert!(
-                        members.iter().any(|m| *m.0 == crate::ParsedTy::Top),
-                        "union should contain Top (any)"
-                    );
-                }
-                other => panic!("expected Union, got: {other:?}"),
-            },
-            other => panic!("expected TypeAlias, got: {other:?}"),
+        let (_, body) = expect_type_alias(&file.declarations, 0);
+        match body {
+            crate::ParsedTy::Union(members) => {
+                assert!(
+                    members.iter().any(|m| *m.0 == crate::ParsedTy::Top),
+                    "union should contain Top (any)"
+                );
+            }
+            other => panic!("expected Union, got: {other:?}"),
         }
     }
 
     #[test]
     fn any_in_intersection_position() {
         let file = parse_tix_file("type T = int & any;").expect("parse error");
-        match &file.declarations[0] {
-            crate::TixDeclaration::TypeAlias { body, .. } => match body {
-                crate::ParsedTy::Intersection(members) => {
-                    assert!(
-                        members.iter().any(|m| *m.0 == crate::ParsedTy::Top),
-                        "intersection should contain Top (any)"
-                    );
-                }
-                other => panic!("expected Intersection, got: {other:?}"),
-            },
-            other => panic!("expected TypeAlias, got: {other:?}"),
+        let (_, body) = expect_type_alias(&file.declarations, 0);
+        match body {
+            crate::ParsedTy::Intersection(members) => {
+                assert!(
+                    members.iter().any(|m| *m.0 == crate::ParsedTy::Top),
+                    "intersection should contain Top (any)"
+                );
+            }
+            other => panic!("expected Intersection, got: {other:?}"),
         }
     }
 
@@ -1063,54 +1044,48 @@ mod tests {
     #[test]
     fn optional_field_basic() {
         let file = parse_tix_file("type T = { x?: int };").expect("parse error");
-        match &file.declarations[0] {
-            crate::TixDeclaration::TypeAlias { body, .. } => match body {
-                crate::ParsedTy::AttrSet(attr) => {
-                    assert!(attr.fields.contains_key("x"), "should have field 'x'");
-                    assert!(
-                        attr.optional_fields.contains("x"),
-                        "field 'x' should be optional"
-                    );
-                }
-                other => panic!("expected AttrSet, got: {other:?}"),
-            },
-            other => panic!("expected TypeAlias, got: {other:?}"),
+        let (_, body) = expect_type_alias(&file.declarations, 0);
+        match body {
+            crate::ParsedTy::AttrSet(attr) => {
+                assert!(attr.fields.contains_key("x"), "should have field 'x'");
+                assert!(
+                    attr.optional_fields.contains("x"),
+                    "field 'x' should be optional"
+                );
+            }
+            other => panic!("expected AttrSet, got: {other:?}"),
         }
     }
 
     #[test]
     fn mixed_optional_and_required_fields() {
         let file = parse_tix_file("type T = { x?: int, y: string };").expect("parse error");
-        match &file.declarations[0] {
-            crate::TixDeclaration::TypeAlias { body, .. } => match body {
-                crate::ParsedTy::AttrSet(attr) => {
-                    assert!(attr.fields.contains_key("x"));
-                    assert!(attr.fields.contains_key("y"));
-                    assert!(attr.optional_fields.contains("x"), "x should be optional");
-                    assert!(!attr.optional_fields.contains("y"), "y should be required");
-                }
-                other => panic!("expected AttrSet, got: {other:?}"),
-            },
-            other => panic!("expected TypeAlias, got: {other:?}"),
+        let (_, body) = expect_type_alias(&file.declarations, 0);
+        match body {
+            crate::ParsedTy::AttrSet(attr) => {
+                assert!(attr.fields.contains_key("x"));
+                assert!(attr.fields.contains_key("y"));
+                assert!(attr.optional_fields.contains("x"), "x should be optional");
+                assert!(!attr.optional_fields.contains("y"), "y should be required");
+            }
+            other => panic!("expected AttrSet, got: {other:?}"),
         }
     }
 
     #[test]
     fn optional_field_with_any_type() {
         let file = parse_tix_file("type T = { x?: any };").expect("parse error");
-        match &file.declarations[0] {
-            crate::TixDeclaration::TypeAlias { body, .. } => match body {
-                crate::ParsedTy::AttrSet(attr) => {
-                    assert!(attr.optional_fields.contains("x"));
-                    assert_eq!(
-                        *attr.fields["x"].0,
-                        crate::ParsedTy::Top,
-                        "optional field 'x' should have type any (Top)"
-                    );
-                }
-                other => panic!("expected AttrSet, got: {other:?}"),
-            },
-            other => panic!("expected TypeAlias, got: {other:?}"),
+        let (_, body) = expect_type_alias(&file.declarations, 0);
+        match body {
+            crate::ParsedTy::AttrSet(attr) => {
+                assert!(attr.optional_fields.contains("x"));
+                assert_eq!(
+                    *attr.fields["x"].0,
+                    crate::ParsedTy::Top,
+                    "optional field 'x' should have type any (Top)"
+                );
+            }
+            other => panic!("expected AttrSet, got: {other:?}"),
         }
     }
 
@@ -1123,8 +1098,9 @@ mod tests {
         let src = "type Foo = int;";
         let file = parse_tix_file(src).expect("parse error");
 
+        // Span tests need direct match to access the span field.
         match &file.declarations[0] {
-            crate::TixDeclaration::TypeAlias { span, .. } => {
+            TixDeclaration::TypeAlias { span, .. } => {
                 assert_eq!(*span, (0, src.len()));
             }
             other => panic!("expected TypeAlias, got: {other:?}"),
@@ -1137,7 +1113,7 @@ mod tests {
         let file = parse_tix_file(src).expect("parse error");
 
         match &file.declarations[0] {
-            crate::TixDeclaration::Module { span, .. } => {
+            TixDeclaration::Module { span, .. } => {
                 assert_eq!(*span, (0, src.len()));
             }
             other => panic!("expected Module, got: {other:?}"),
@@ -1152,7 +1128,7 @@ mod tests {
         assert_eq!(file.declarations.len(), 2);
 
         match &file.declarations[0] {
-            crate::TixDeclaration::TypeAlias { name, span, .. } => {
+            TixDeclaration::TypeAlias { name, span, .. } => {
                 assert_eq!(name.as_str(), "A");
                 assert_eq!(&src[span.0..span.1], "type A = int;");
             }
@@ -1160,7 +1136,7 @@ mod tests {
         }
 
         match &file.declarations[1] {
-            crate::TixDeclaration::TypeAlias { name, span, .. } => {
+            TixDeclaration::TypeAlias { name, span, .. } => {
                 assert_eq!(name.as_str(), "B");
                 assert_eq!(&src[span.0..span.1], "type B = string;");
             }
@@ -1181,7 +1157,7 @@ mod tests {
         let file = parse_tix_file(src).expect("parse error");
         assert_eq!(file.declarations.len(), 1);
         match &file.declarations[0] {
-            crate::TixDeclaration::ValDecl { name, source, .. } => {
+            TixDeclaration::ValDecl { name, source, .. } => {
                 assert_eq!(name.as_str(), "id");
                 let src_loc = source.as_ref().expect("should have source location");
                 assert_eq!(src_loc.source_id.as_str(), "nixpkgs");
@@ -1202,7 +1178,7 @@ mod tests {
         "#;
         let file = parse_tix_file(src).expect("parse error");
         match &file.declarations[0] {
-            crate::TixDeclaration::ValDecl {
+            TixDeclaration::ValDecl {
                 name, doc, source, ..
             } => {
                 assert_eq!(name.as_str(), "id");
@@ -1225,7 +1201,7 @@ mod tests {
         "#;
         let file = parse_tix_file(src).expect("parse error");
         match &file.declarations[0] {
-            crate::TixDeclaration::Module {
+            TixDeclaration::Module {
                 name,
                 source,
                 declarations,
@@ -1249,7 +1225,7 @@ mod tests {
         "#;
         let file = parse_tix_file(src).expect("parse error");
         match &file.declarations[0] {
-            crate::TixDeclaration::TypeAlias { name, source, .. } => {
+            TixDeclaration::TypeAlias { name, source, .. } => {
                 assert_eq!(name.as_str(), "Derivation");
                 let src_loc = source.as_ref().expect("should have source location");
                 assert_eq!(src_loc.source_id.as_str(), "nixpkgs");
@@ -1266,7 +1242,7 @@ mod tests {
         let src = "val id :: a -> a;";
         let file = parse_tix_file(src).expect("parse error");
         match &file.declarations[0] {
-            crate::TixDeclaration::ValDecl { source, .. } => {
+            TixDeclaration::ValDecl { source, .. } => {
                 assert!(source.is_none(), "should have no source location");
             }
             other => panic!("expected ValDecl, got: {other:?}"),
@@ -1281,7 +1257,7 @@ mod tests {
         "#;
         let file = parse_tix_file(src).expect("parse error");
         match &file.declarations[0] {
-            crate::TixDeclaration::ValDecl { source, .. } => {
+            TixDeclaration::ValDecl { source, .. } => {
                 let src_loc = source.as_ref().expect("should have source location");
                 assert_eq!(src_loc.source_id.as_str(), "home-manager");
                 assert_eq!(src_loc.relative_path.as_str(), "modules/programs/git.nix");

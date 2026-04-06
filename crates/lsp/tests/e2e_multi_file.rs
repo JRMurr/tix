@@ -21,11 +21,8 @@ async fn cross_file_hover() {
     .await;
 
     // Open both files — A.nix first so it's analyzed when B.nix resolves the import.
-    h.open("a.nix").await;
-    let _ = h.wait_for_diagnostics("a.nix", TIMEOUT).await;
-
-    h.open("b.nix").await;
-    let _ = h.wait_for_diagnostics("b.nix", TIMEOUT).await;
+    h.open_and_wait("a.nix").await;
+    h.open_and_wait("b.nix").await;
 
     let m = h.markers("b.nix");
     let hover = h
@@ -61,10 +58,8 @@ async fn cross_file_hover_updates_after_edit() {
     ])
     .await;
 
-    h.open("a.nix").await;
-    let _ = h.wait_for_diagnostics("a.nix", TIMEOUT).await;
-    h.open("b.nix").await;
-    let _ = h.wait_for_diagnostics("b.nix", TIMEOUT).await;
+    h.open_and_wait("a.nix").await;
+    h.open_and_wait("b.nix").await;
 
     let m = h.markers("b.nix");
     let hover = h
@@ -129,8 +124,7 @@ async fn demand_driven_import_hover() {
     .await;
 
     // Only open B — A.nix exists on disk but is NOT opened.
-    h.open("b.nix").await;
-    let _ = h.wait_for_diagnostics("b.nix", TIMEOUT).await;
+    h.open_and_wait("b.nix").await;
 
     // Hover on a.x should show int, not ? (demand-driven resolved A's type).
     let m = h.markers("b.nix");
@@ -169,8 +163,7 @@ async fn demand_driven_transitive_import() {
     .await;
 
     // Only open C — neither A.nix nor B.nix are opened.
-    h.open("c.nix").await;
-    let _ = h.wait_for_diagnostics("c.nix", TIMEOUT).await;
+    h.open_and_wait("c.nix").await;
 
     let m = h.markers("c.nix");
     let hover = h
@@ -264,8 +257,7 @@ async fn demand_driven_import_with_callpackage_context() {
 
     // Only open default.nix — pkg.nix exists on disk but is NOT opened.
     // Demand-driven inference should resolve pkg.nix with context_args.
-    h.open("default.nix").await;
-    let _ = h.wait_for_diagnostics("default.nix", TIMEOUT).await;
+    h.open_and_wait("default.nix").await;
 
     let m = h.markers("default.nix");
     let hover = h

@@ -1,9 +1,54 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::{db::NixFile, AstDb};
+use crate::{db::NixFile, AstDb, ExprId, NameId};
 
 const DEFAULT_IMPORT_FILE: &str = "default.nix";
+
+// ==============================================================================
+// Shared test helpers
+// ==============================================================================
+
+/// Find a NameId by its text. Panics if not found.
+pub fn find_name(module: &crate::Module, text: &str) -> NameId {
+    module
+        .names()
+        .find(|(_, n)| n.text == text)
+        .unwrap_or_else(|| panic!("name {text:?} not found"))
+        .0
+}
+
+/// Find the ExprId of the first `Expr::Reference` whose name string
+/// matches `text`.
+pub fn find_ref_expr(module: &crate::Module, text: &str) -> ExprId {
+    module
+        .exprs()
+        .find(|(_, e)| matches!(e, crate::Expr::Reference(n) if n == text))
+        .unwrap_or_else(|| panic!("reference to {text:?} not found"))
+        .0
+}
+
+/// Find the first `IfThenElse` expression and return its condition ExprId.
+pub fn find_if_condition(module: &crate::Module) -> ExprId {
+    module
+        .exprs()
+        .find_map(|(_, e)| match e {
+            crate::Expr::IfThenElse { cond, .. } => Some(*cond),
+            _ => None,
+        })
+        .expect("no if-then-else found in module")
+}
+
+/// Find the first `Apply` expression and return its ExprId.
+pub fn find_apply(module: &crate::Module) -> ExprId {
+    module
+        .exprs()
+        .find_map(|(id, e)| match e {
+            crate::Expr::Apply { .. } => Some(id),
+            _ => None,
+        })
+        .expect("no Apply found in module")
+}
 
 #[derive(Clone)]
 #[salsa::db]

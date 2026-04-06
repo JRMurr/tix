@@ -42,8 +42,7 @@ async fn diagnostics_appear_and_clear() {
 #[tokio::test]
 async fn rapid_edits_coalesce() {
     let mut h = LspTestHarness::new(&[("test.nix", "1")]).await;
-    h.open("test.nix").await;
-    let _ = h.wait_for_diagnostics("test.nix", TIMEOUT).await;
+    h.open_and_wait("test.nix").await;
 
     // Send 10 rapid edits without waiting for diagnostics between them.
     for i in 0..10 {

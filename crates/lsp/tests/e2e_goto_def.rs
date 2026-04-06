@@ -1,6 +1,6 @@
 mod common;
 
-use common::{LspTestHarness, TIMEOUT};
+use common::LspTestHarness;
 use indoc::indoc;
 use tower_lsp::lsp_types::*;
 
@@ -16,8 +16,7 @@ async fn goto_def_same_file() {
     )])
     .await;
 
-    h.open("test.nix").await;
-    let _ = h.wait_for_diagnostics("test.nix", TIMEOUT).await;
+    h.open_and_wait("test.nix").await;
 
     let m = h.markers("test.nix");
 
@@ -63,10 +62,8 @@ async fn goto_def_cross_file() {
     ])
     .await;
 
-    h.open("a.nix").await;
-    let _ = h.wait_for_diagnostics("a.nix", TIMEOUT).await;
-    h.open("b.nix").await;
-    let _ = h.wait_for_diagnostics("b.nix", TIMEOUT).await;
+    h.open_and_wait("a.nix").await;
+    h.open_and_wait("b.nix").await;
 
     let m_b = h.markers("b.nix");
 
@@ -106,10 +103,8 @@ async fn goto_def_through_barrel_reexport() {
     ])
     .await;
 
-    h.open("barrel.nix").await;
-    let _ = h.wait_for_diagnostics("barrel.nix", TIMEOUT).await;
-    h.open("main.nix").await;
-    let _ = h.wait_for_diagnostics("main.nix", TIMEOUT).await;
+    h.open_and_wait("barrel.nix").await;
+    h.open_and_wait("main.nix").await;
 
     let m = h.markers("main.nix");
     let result = h
@@ -156,12 +151,9 @@ async fn goto_def_through_passthrough_barrel() {
     ])
     .await;
 
-    h.open("default.nix").await;
-    let _ = h.wait_for_diagnostics("default.nix", TIMEOUT).await;
-    h.open("barrel.nix").await;
-    let _ = h.wait_for_diagnostics("barrel.nix", TIMEOUT).await;
-    h.open("main.nix").await;
-    let _ = h.wait_for_diagnostics("main.nix", TIMEOUT).await;
+    h.open_and_wait("default.nix").await;
+    h.open_and_wait("barrel.nix").await;
+    h.open_and_wait("main.nix").await;
 
     let m_main = h.markers("main.nix");
     let m_default = h.markers("default.nix");
@@ -212,10 +204,8 @@ async fn goto_def_barrel_non_import_stops() {
     ])
     .await;
 
-    h.open("barrel.nix").await;
-    let _ = h.wait_for_diagnostics("barrel.nix", TIMEOUT).await;
-    h.open("main.nix").await;
-    let _ = h.wait_for_diagnostics("main.nix", TIMEOUT).await;
+    h.open_and_wait("barrel.nix").await;
+    h.open_and_wait("main.nix").await;
 
     let m_main = h.markers("main.nix");
     let m_barrel = h.markers("barrel.nix");

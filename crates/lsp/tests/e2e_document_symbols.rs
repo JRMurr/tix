@@ -1,6 +1,6 @@
 mod common;
 
-use common::{LspTestHarness, TIMEOUT};
+use common::LspTestHarness;
 use indoc::indoc;
 use tower_lsp::lsp_types::*;
 
@@ -18,8 +18,7 @@ async fn symbols_let_bindings() {
     )])
     .await;
 
-    h.open("test.nix").await;
-    let _ = h.wait_for_diagnostics("test.nix", TIMEOUT).await;
+    h.open_and_wait("test.nix").await;
 
     let result = h
         .document_symbols("test.nix")
@@ -75,8 +74,7 @@ async fn symbols_nested_attrset() {
     )])
     .await;
 
-    h.open("test.nix").await;
-    let _ = h.wait_for_diagnostics("test.nix", TIMEOUT).await;
+    h.open_and_wait("test.nix").await;
 
     let result = h
         .document_symbols("test.nix")

@@ -1,6 +1,6 @@
 mod common;
 
-use common::{LspTestHarness, TIMEOUT};
+use common::LspTestHarness;
 use indoc::indoc;
 use tower_lsp::lsp_types::*;
 
@@ -16,8 +16,7 @@ async fn prepare_rename_returns_range() {
     )])
     .await;
 
-    h.open("test.nix").await;
-    let _ = h.wait_for_diagnostics("test.nix", TIMEOUT).await;
+    h.open_and_wait("test.nix").await;
 
     let m = h.markers("test.nix");
 
@@ -55,8 +54,7 @@ async fn rename_single_file() {
     )])
     .await;
 
-    h.open("test.nix").await;
-    let _ = h.wait_for_diagnostics("test.nix", TIMEOUT).await;
+    h.open_and_wait("test.nix").await;
 
     let m = h.markers("test.nix");
 
@@ -118,8 +116,7 @@ async fn rename_in_callpackage_context() {
     ])
     .await;
 
-    h.open("pkgs/test.nix").await;
-    let _ = h.wait_for_diagnostics("pkgs/test.nix", TIMEOUT).await;
+    h.open_and_wait("pkgs/test.nix").await;
 
     let m = h.markers("pkgs/test.nix");
 
@@ -201,8 +198,7 @@ async fn rename_let_binding_like_rust_nix() {
     )])
     .await;
 
-    h.open("test.nix").await;
-    let _ = h.wait_for_diagnostics("test.nix", TIMEOUT).await;
+    h.open_and_wait("test.nix").await;
 
     let m = h.markers("test.nix");
 
@@ -331,8 +327,7 @@ async fn rename_in_real_rust_nix_shape() {
     )])
     .await;
 
-    h.open("test.nix").await;
-    let _ = h.wait_for_diagnostics("test.nix", TIMEOUT).await;
+    h.open_and_wait("test.nix").await;
 
     let m = h.markers("test.nix");
 
@@ -432,8 +427,7 @@ async fn rename_pattern_param_in_callpackage_context() {
     ])
     .await;
 
-    h.open("pkgs/test.nix").await;
-    let _ = h.wait_for_diagnostics("pkgs/test.nix", TIMEOUT).await;
+    h.open_and_wait("pkgs/test.nix").await;
 
     let m = h.markers("pkgs/test.nix");
 
@@ -487,8 +481,7 @@ async fn rename_actual_rust_nix_file() {
     // We find the position dynamically instead.
     let mut h = LspTestHarness::new(&[("rust.nix", &rust_nix_src)]).await;
 
-    h.open("rust.nix").await;
-    let _ = h.wait_for_diagnostics("rust.nix", TIMEOUT).await;
+    h.open_and_wait("rust.nix").await;
 
     // Find the position of `rustPlatform` in the let-binding definition (line 11, 0-indexed).
     // "  rustPlatform = pkgs.makeRustPlatform {"
@@ -562,10 +555,8 @@ async fn rename_cross_file() {
     ])
     .await;
 
-    h.open("a.nix").await;
-    let _ = h.wait_for_diagnostics("a.nix", TIMEOUT).await;
-    h.open("b.nix").await;
-    let _ = h.wait_for_diagnostics("b.nix", TIMEOUT).await;
+    h.open_and_wait("a.nix").await;
+    h.open_and_wait("b.nix").await;
 
     let m = h.markers("b.nix");
 

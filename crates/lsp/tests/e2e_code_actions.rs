@@ -62,8 +62,7 @@ async fn remove_unused_binding() {
     )])
     .await;
 
-    h.open("test.nix").await;
-    let _ = h.wait_for_diagnostics("test.nix", TIMEOUT).await;
+    h.open_and_wait("test.nix").await;
 
     let m = h.markers("test.nix");
     let range = Range::new(m[&1], m[&1]);

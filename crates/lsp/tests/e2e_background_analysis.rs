@@ -67,8 +67,7 @@ async fn background_analysis_populates_import_cache() {
     let _ = h.wait_for_diagnostics("lib/helpers.nix", TIMEOUT).await;
 
     // Now open main.nix — the import should resolve from the cache.
-    h.open("main.nix").await;
-    let _ = h.wait_for_diagnostics("main.nix", TIMEOUT).await;
+    h.open_and_wait("main.nix").await;
 
     let m = h.markers("main.nix");
     let hover = h.hover("main.nix", m[&1].line, m[&1].character).await;

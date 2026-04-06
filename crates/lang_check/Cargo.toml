@@ -24,7 +24,6 @@ rayon = { workspace = true }
 petgraph = { workspace = true }
 parking_lot = "0.12"
 itertools = "0.14.0"
-indoc = "2.0.5"
 rustc-hash = "2.1.0"
 smallvec = { workspace = true }
 stacker = "0.1"
@@ -32,6 +31,7 @@ tracing = { workspace = true }
 
 
 [dev-dependencies]
+indoc = { workspace = true }
 proptest = { workspace = true }
 rowan = { workspace = true }
 tempfile = "3"
