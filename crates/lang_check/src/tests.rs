@@ -184,41 +184,39 @@ pub fn raw_to_root(raw: &RawTy) -> RootTy {
 }
 
 // ==============================================================================
-// Shared primitive OutputTy constructors
+// Shared primitive OutputTy constructors (used by collect.rs tests)
 // ==============================================================================
 
-#[allow(dead_code)] // Used by collect.rs tests via crate::tests::*
-pub fn prim(p: PrimitiveTy) -> OutputTy {
-    OutputTy::Primitive(p)
-}
 #[allow(dead_code)]
-pub fn int() -> OutputTy {
-    prim(PrimitiveTy::Int)
+mod output_ty_helpers {
+    use super::*;
+
+    pub fn prim(p: PrimitiveTy) -> OutputTy {
+        OutputTy::Primitive(p)
+    }
+    pub fn int() -> OutputTy {
+        prim(PrimitiveTy::Int)
+    }
+    pub fn string() -> OutputTy {
+        prim(PrimitiveTy::String)
+    }
+    pub fn bool_() -> OutputTy {
+        prim(PrimitiveTy::Bool)
+    }
+    pub fn float() -> OutputTy {
+        prim(PrimitiveTy::Float)
+    }
+    pub fn null() -> OutputTy {
+        prim(PrimitiveTy::Null)
+    }
+    pub fn number() -> OutputTy {
+        prim(PrimitiveTy::Number)
+    }
+    pub fn path() -> OutputTy {
+        prim(PrimitiveTy::Path)
+    }
 }
-#[allow(dead_code)]
-pub fn string() -> OutputTy {
-    prim(PrimitiveTy::String)
-}
-#[allow(dead_code)]
-pub fn bool_() -> OutputTy {
-    prim(PrimitiveTy::Bool)
-}
-#[allow(dead_code)]
-pub fn float() -> OutputTy {
-    prim(PrimitiveTy::Float)
-}
-#[allow(dead_code)]
-pub fn null() -> OutputTy {
-    prim(PrimitiveTy::Null)
-}
-#[allow(dead_code)]
-pub fn number() -> OutputTy {
-    prim(PrimitiveTy::Number)
-}
-#[allow(dead_code)]
-pub fn path() -> OutputTy {
-    prim(PrimitiveTy::Path)
-}
+pub use output_ty_helpers::*;
 
 /// Build a RootTy from arc_ty! tokens using a fresh arena.
 macro_rules! expected_ty {

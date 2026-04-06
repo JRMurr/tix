@@ -1284,58 +1284,43 @@ mod tests {
     // detect_conditional_apply_narrowing tests
     // ==================================================================
 
-    /// Helper for detect_conditional_apply_narrowing tests.
-    /// Source should be a let-binding where the body is the Apply expression.
-    fn detect_apply_narrowing(src: &str) -> Option<NarrowInfo> {
-        let (db, file) = TestDatabase::single_file(src).unwrap();
-        let module = crate::module(&db, file);
-        let name_res = crate::name_resolution(&db, file);
-        let indices = crate::module_indices(&db, file);
-        // The entry expr should be a lambda whose body is Apply(Apply(fn, cond), body).
-        // We want the outer Apply — find_apply returns the first Apply.
-        let apply_id = crate::tests::find_apply(&module);
-        detect_conditional_apply_narrowing(&module, &name_res, &indices.binding_expr, apply_id)
-    }
-
-    #[test]
-    fn conditional_apply_optional_string() {
-        // lib.optionalString (x != null) x.name
-        // The outer apply: Apply(Apply(optionalString, cond), body)
-        // We detect the inner Apply(optionalString, cond) as the fun_expr.
-        let src = r#"x: lib: lib.optionalString (x != null) x.name"#;
-        // The outer Apply's fun is `Apply(lib.optionalString, (x != null))`.
-        // detect_conditional_apply_narrowing looks at fun_expr:
-        //   fun_expr = Apply { fun: lib.optionalString, arg: (x != null) }
-        // It detects lib.optionalString as a conditional fn, then analyzes (x != null).
+    /// Parse Nix source with a curried conditional call (`f cond body`)
+    /// and run detect_conditional_apply_narrowing on the inner Apply.
+    ///
+    /// In curried `f cond body`, the AST is `Apply(Apply(f, cond), body)`.
+    /// The function finds the inner `Apply(f, cond)` — the fun_expr of the
+    /// outer Apply — which is what `detect_conditional_apply_narrowing` expects.
+    fn detect_apply_narrowing(src: &str) -> (Option<NarrowInfo>, crate::Module) {
         let (db, file) = TestDatabase::single_file(src).unwrap();
         let module = crate::module(&db, file);
         let name_res = crate::name_resolution(&db, file);
         let indices = crate::module_indices(&db, file);
 
-        // Find the outer Apply (the one with x.name as arg).
-        // In curried application `f a b`, the AST is Apply(Apply(f, a), b).
-        // We need the fun_expr of the outer Apply, which is Apply(f, a).
-        let outer_apply = module
+        // Find the inner Apply of the curried call: the Apply whose fun is
+        // also an Apply (outer), then take the outer's fun field (inner).
+        let inner_apply = module
             .exprs()
-            .find_map(|(id, e)| match e {
-                Expr::Apply { fun, .. } => {
-                    // We want the Apply whose fun is also an Apply (i.e. the outer one)
-                    if matches!(&module[*fun], Expr::Apply { .. }) {
-                        Some((id, *fun))
-                    } else {
-                        None
-                    }
+            .find_map(|(_, e)| match e {
+                Expr::Apply { fun, .. } if matches!(&module[*fun], Expr::Apply { .. }) => {
+                    Some(*fun)
                 }
                 _ => None,
             })
-            .expect("should find outer Apply");
+            .expect("should find curried Apply(Apply(f, cond), body)");
 
         let info = detect_conditional_apply_narrowing(
             &module,
             &name_res,
             &indices.binding_expr,
-            outer_apply.1, // The inner Apply: Apply(optionalString, cond)
+            inner_apply,
         );
+        (info, module)
+    }
+
+    #[test]
+    fn conditional_apply_optional_string() {
+        let src = r#"x: lib: lib.optionalString (x != null) x.name"#;
+        let (info, module) = detect_apply_narrowing(src);
         let info = info.expect("should detect conditional narrowing");
         assert_eq!(info.then_branch.len(), 1);
         assert_binding(
@@ -1348,8 +1333,7 @@ mod tests {
 
     #[test]
     fn conditional_apply_no_narrowing_returns_none() {
-        // `true` as condition doesn't produce any narrowing.
-        let result = detect_apply_narrowing(r#"lib: lib.optionalString true "hello""#);
+        let (result, _) = detect_apply_narrowing(r#"lib: lib.optionalString true "hello""#);
         assert!(
             result.is_none(),
             "should return None when condition produces no narrowing"
