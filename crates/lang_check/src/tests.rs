@@ -1,6 +1,5 @@
 use indoc::indoc;
-use lang_ast::tests::MultiFileTestDatabase;
-use lang_ast::{module, tests::TestDatabase, AstDb, Expr, Module};
+use lang_ast::{Expr, Module};
 use lang_ty::arbitrary::{intern_raw, RawTy};
 use lang_ty::arena::{OwnedTy, TyRef};
 use lang_ty::{arc_ty, OutputTy, PrimitiveTy, TypeArena};
@@ -11,9 +10,7 @@ use std::sync::Arc;
 use crate::aliases::TypeAliasRegistry;
 use crate::diagnostic::{TixDiagnostic, TixDiagnosticKind};
 use crate::imports::resolve_import_types_from_stubs;
-use crate::{check_file_with_aliases, InferenceResult};
-
-use super::check_file;
+use crate::InferenceResult;
 
 // ==============================================================================
 // RootTy — test helper bundling a TyRef with its owning TypeArena
@@ -228,18 +225,18 @@ macro_rules! expected_ty {
 }
 
 pub fn check_str(src: &str) -> (Module, Result<InferenceResult, Box<TixDiagnostic>>) {
-    let (db, file) = TestDatabase::single_file(src).unwrap();
-    let module = module(&db, file);
-    (module, check_file(&db, file))
+    let r = lang_ast::run_syntax_pipeline(src);
+    let result = crate::check_source(src);
+    (r.module, result)
 }
 
 pub fn check_str_with_aliases(
     src: &str,
     aliases: &TypeAliasRegistry,
 ) -> (Module, Result<InferenceResult, Box<TixDiagnostic>>) {
-    let (db, file) = TestDatabase::single_file(src).unwrap();
-    let module = module(&db, file);
-    (module, check_file_with_aliases(&db, file, aliases))
+    let r = lang_ast::run_syntax_pipeline(src);
+    let result = crate::check_source_with_aliases(src, aliases);
+    (r.module, result)
 }
 
 pub fn get_inferred_root_with_aliases(src: &str, aliases: &TypeAliasRegistry) -> RootTy {
@@ -301,22 +298,20 @@ pub fn check_multifile_with_aliases(
     files: &[(&str, &str)],
     aliases: &TypeAliasRegistry,
 ) -> (RootTy, Vec<crate::imports::ImportError>, Vec<TixDiagnostic>) {
-    let (db, entry_file) = MultiFileTestDatabase::new(files);
+    let (_entry, all_files) = lang_ast::tests::parse_multi_file(files);
 
     // Build ephemeral stubs by inferring all non-entry files first.
     // Process them in reverse order so transitive deps are available.
     let mut ephemeral_stubs: HashMap<PathBuf, OwnedTy> = HashMap::new();
     for &(path_str, _) in files.iter().skip(1).rev() {
         let dep_path = PathBuf::from(path_str);
-        if let Some(dep_file) = db.load_file(&dep_path) {
-            let dep_module = lang_ast::module(&db, dep_file);
-            let dep_name_res = lang_ast::name_resolution(&db, dep_file);
+        if let Some(dep_r) = all_files.get(&dep_path) {
             let dep_base = dep_path.parent().unwrap_or(Path::new("/"));
 
             // Use already-built ephemeral stubs for this dep's imports too.
             let dep_resolution = resolve_import_types_from_stubs(
-                &dep_module,
-                &dep_name_res,
+                &dep_r.module,
+                &dep_r.name_res,
                 dep_base,
                 &ephemeral_stubs,
                 Some(aliases),
@@ -324,33 +319,33 @@ pub fn check_multifile_with_aliases(
 
             // Use partial inference (like the real coordinator) so that dep
             // files with type errors still produce ephemeral stubs.
-            let dep_indices = lang_ast::module_indices(&db, dep_file);
-            let dep_groups = lang_ast::group_def(&db, dep_file);
-            let dep_aliases = crate::load_inline_aliases(Arc::new(aliases.clone()), &dep_module);
+            let dep_aliases = crate::load_inline_aliases(Arc::new(aliases.clone()), &dep_r.module);
             let dep_check = crate::CheckCtx::new(
-                &dep_module,
-                &dep_name_res,
-                &dep_indices.binding_expr,
+                &dep_r.module,
+                &dep_r.name_res,
+                &dep_r.module_indices.binding_expr,
                 dep_aliases,
                 dep_resolution.types,
                 Arc::default(),
             );
-            let (dep_result, _diags, _bailed_out) = dep_check.infer_prog_partial(dep_groups);
-            if let Some(&root_ty) = dep_result.expr_ty_map.get(dep_module.entry_expr) {
+            let (dep_result, _diags, _bailed_out) =
+                dep_check.infer_prog_partial(dep_r.grouped_defs.clone());
+            if let Some(&root_ty) = dep_result.expr_ty_map.get(dep_r.module.entry_expr) {
                 ephemeral_stubs.insert(dep_path, OwnedTy::new(dep_result.arena.clone(), root_ty));
             }
         }
     }
 
     // Now infer the entry file with ephemeral stubs from all deps.
-    let module = lang_ast::module(&db, entry_file);
-    let name_res = lang_ast::name_resolution(&db, entry_file);
     let entry_path = PathBuf::from(files[0].0);
+    let entry_r = all_files
+        .get(&entry_path)
+        .expect("entry file should be in map");
     let base_dir = entry_path.parent().unwrap_or(Path::new("/"));
 
     let resolution = resolve_import_types_from_stubs(
-        &module,
-        &name_res,
+        &entry_r.module,
+        &entry_r.name_res,
         base_dir,
         &ephemeral_stubs,
         Some(aliases),
@@ -359,22 +354,21 @@ pub fn check_multifile_with_aliases(
 
     // Use partial inference for the entry file too, so tests can inspect
     // the root type even when there are type errors (matches real coordinator).
-    let entry_indices = lang_ast::module_indices(&db, entry_file);
-    let entry_groups = lang_ast::group_def(&db, entry_file);
-    let entry_aliases = crate::load_inline_aliases(Arc::new(aliases.clone()), &module);
+    let entry_aliases = crate::load_inline_aliases(Arc::new(aliases.clone()), &entry_r.module);
     let entry_check = crate::CheckCtx::new(
-        &module,
-        &name_res,
-        &entry_indices.binding_expr,
+        &entry_r.module,
+        &entry_r.name_res,
+        &entry_r.module_indices.binding_expr,
         entry_aliases,
         resolution.types,
         Arc::default(),
     );
-    let (result, diagnostics, _bailed_out) = entry_check.infer_prog_partial(entry_groups);
+    let (result, diagnostics, _bailed_out) =
+        entry_check.infer_prog_partial(entry_r.grouped_defs.clone());
 
     let root_ty = *result
         .expr_ty_map
-        .get(module.entry_expr)
+        .get(entry_r.module.entry_expr)
         .expect("root expr should have a type");
 
     (
@@ -1921,10 +1915,9 @@ fn alias_with_union_in_param_skips_bidirectional_constraints() {
         f "x" "hello"
     "# };
 
-    let (db, file) = TestDatabase::single_file(nix_src).unwrap();
-    let result = crate::CheckBuilder::from_db(
-        &db,
-        file,
+    let r = lang_ast::run_syntax_pipeline(nix_src);
+    let result = crate::CheckBuilder::from_source(
+        nix_src,
         Arc::new(registry.clone()),
         HashMap::new(),
         Arc::default(),
@@ -1936,10 +1929,9 @@ fn alias_with_union_in_param_skips_bidirectional_constraints() {
         .inference
         .expect("inference should succeed with union-alias annotation");
 
-    let mod_ = module(&db, file);
     let root_ref = *inference
         .expr_ty_map
-        .get(mod_.entry_expr)
+        .get(r.module.entry_expr)
         .expect("root should have a type");
     let root_ty = RootTy::new(root_ref, inference.arena.clone());
     assert_eq!(
@@ -1984,10 +1976,9 @@ fn nested_alias_with_union_in_param_skips_bidirectional_constraints() {
         f "x" "hello"
     "# };
 
-    let (db, file) = TestDatabase::single_file(nix_src).unwrap();
-    let result = crate::CheckBuilder::from_db(
-        &db,
-        file,
+    let r = lang_ast::run_syntax_pipeline(nix_src);
+    let result = crate::CheckBuilder::from_source(
+        nix_src,
         Arc::new(registry.clone()),
         HashMap::new(),
         Arc::default(),
@@ -1998,10 +1989,9 @@ fn nested_alias_with_union_in_param_skips_bidirectional_constraints() {
         .inference
         .expect("inference should succeed with nested union-alias annotation");
 
-    let mod_ = module(&db, file);
     let root_ref = *inference
         .expr_ty_map
-        .get(mod_.entry_expr)
+        .get(r.module.entry_expr)
         .expect("root should have a type");
     let root_ty = RootTy::new(root_ref, inference.arena.clone());
     assert_eq!(
@@ -2085,7 +2075,7 @@ mod import_tests {
 
     use super::{
         check_multifile_with_aliases, get_multifile_result, get_multifile_root,
-        get_multifile_root_with_aliases, MultiFileTestDatabase, RootTy,
+        get_multifile_root_with_aliases, RootTy,
     };
     use crate::aliases::TypeAliasRegistry;
     use crate::imports::resolve_import_types_from_stubs;
@@ -2183,7 +2173,7 @@ mod import_tests {
 
     // Cyclic import: A → B → A should degrade gracefully.
     //
-    // With the stubs-based import model, cyclic imports don't trigger Salsa
+    // With the stubs-based import model, cyclic imports don't trigger
     // cycle recovery — neither file has an ephemeral stub for the other, so
     // both imports resolve to ⊤ (unconstrained type variable). This is the
     // correct behavior: the import simply gets no type information rather
@@ -2359,15 +2349,14 @@ mod import_tests {
     fn import_targets_populated() {
         use lang_ast::{Expr, Literal};
 
-        let (db, entry_file) =
-            MultiFileTestDatabase::new(&[("/main.nix", "import /lib.nix"), ("/lib.nix", "42")]);
-
-        let module = lang_ast::module(&db, entry_file);
-        let name_res = lang_ast::name_resolution(&db, entry_file);
+        let (entry, _files) = lang_ast::tests::parse_multi_file(&[
+            ("/main.nix", "import /lib.nix"),
+            ("/lib.nix", "42"),
+        ]);
 
         let resolution = resolve_import_types_from_stubs(
-            &module,
-            &name_res,
+            &entry.module,
+            &entry.name_res,
             Path::new("/"),
             &HashMap::new(),
             None,
@@ -2392,7 +2381,7 @@ mod import_tests {
         let mut has_reference = false;
         let mut has_path_literal = false;
         for expr_id in resolution.targets.keys() {
-            match &module[*expr_id] {
+            match &entry.module[*expr_id] {
                 Expr::Apply { .. } => has_apply = true,
                 Expr::Reference(name) if name == "import" => has_reference = true,
                 Expr::Literal(Literal::Path(_)) => has_path_literal = true,
@@ -2686,7 +2675,7 @@ mod import_tests {
             &registry,
         );
 
-        // The Salsa path builds its own TypeAliasRegistry from StubConfig,
+        // The coordinator builds its own TypeAliasRegistry from StubConfig,
         // so test-provided aliases aren't visible to file_root_type for
         // imported files. The imported type resolves structurally rather
         // than as Named("Foo"). In production, aliases come from StubConfig
@@ -3077,7 +3066,7 @@ mod import_tests {
         use lang_ast::{Expr, Literal};
         use std::path::PathBuf;
 
-        let (db, entry_file) = MultiFileTestDatabase::new(&[
+        let (entry, _files) = lang_ast::tests::parse_multi_file(&[
             (
                 "/main.nix",
                 r#"let callPackage = x: x {}; in callPackage /pkg.nix {}"#,
@@ -3085,12 +3074,9 @@ mod import_tests {
             ("/pkg.nix", "{ }: { name = 1; }"),
         ]);
 
-        let module = lang_ast::module(&db, entry_file);
-        let name_res = lang_ast::name_resolution(&db, entry_file);
-
         let resolution = resolve_import_types_from_stubs(
-            &module,
-            &name_res,
+            &entry.module,
+            &entry.name_res,
             Path::new("/"),
             &HashMap::new(),
             None,
@@ -3103,7 +3089,7 @@ mod import_tests {
         let mut has_apply = false;
         for (expr_id, path) in &resolution.targets {
             assert_eq!(*path, target, "all targets should resolve to /pkg.nix");
-            match &module[*expr_id] {
+            match &entry.module[*expr_id] {
                 Expr::Literal(Literal::Path(_)) => has_path_literal = true,
                 Expr::Apply { .. } => has_apply = true,
                 _ => {}
@@ -3501,17 +3487,15 @@ pub fn check_str_with_aliases_and_context(
     aliases: &TypeAliasRegistry,
     context_args: HashMap<SmolStr, ParsedTy>,
 ) -> (Module, crate::CheckResult) {
-    let (db, file) = TestDatabase::single_file(src).unwrap();
-    let module = module(&db, file);
-    let result = crate::CheckBuilder::from_db(
-        &db,
-        file,
+    let r = lang_ast::run_syntax_pipeline(src);
+    let result = crate::CheckBuilder::from_source(
+        src,
         Arc::new(aliases.clone()),
         HashMap::new(),
         Arc::new(context_args),
     )
     .run();
-    (module, result)
+    (r.module, result)
 }
 
 pub fn get_inferred_root_with_context(
@@ -3637,8 +3621,8 @@ fn doc_comment_attaches_to_lambda_expr() {
         mkModule
     "# };
 
-    let (db, file) = TestDatabase::single_file(nix_src).unwrap();
-    let mod_ = module(&db, file);
+    let r = lang_ast::run_syntax_pipeline(nix_src);
+    let mod_ = r.module;
 
     // Find the lambda expression.
     let lambda_id = mod_
@@ -3674,11 +3658,10 @@ fn doc_comment_context_on_inner_lambda() {
         mkModule
     " };
 
-    let (db, file) = TestDatabase::single_file(nix_src).unwrap();
-    let mod_ = module(&db, file);
-    let result = crate::CheckBuilder::from_db(
-        &db,
-        file,
+    let r = lang_ast::run_syntax_pipeline(nix_src);
+    let mod_ = r.module;
+    let result = crate::CheckBuilder::from_source(
+        nix_src,
         Arc::new(TypeAliasRegistry::with_builtins()),
         HashMap::new(),
         Arc::default(),
@@ -3747,16 +3730,16 @@ fn context_args_preserve_alias_provenance() {
     let nix_src = indoc! { "
         { config, ... }: config
     " };
-    let (db, file) = TestDatabase::single_file(nix_src).unwrap();
-    let module = module(&db, file);
+    let r = lang_ast::run_syntax_pipeline(nix_src);
     let result =
-        crate::CheckBuilder::from_db(&db, file, Arc::new(registry.clone()), HashMap::new(), ctx)
+        crate::CheckBuilder::from_source(nix_src, Arc::new(registry.clone()), HashMap::new(), ctx)
             .run();
     let inference = result.inference.expect("inference should succeed");
 
     // The `config` pattern field should be typed as Named("NixosConfig", ...)
     // thanks to the context arg `val config :: NixosConfig` and alias provenance.
-    let config_name_id = module
+    let config_name_id = r
+        .module
         .names()
         .find(|(_, n)| n.text == "config")
         .map(|(id, _)| id)
@@ -3817,15 +3800,15 @@ fn callpackage_context_types_pkgs_parameter_as_alias() {
     let nix_src = indoc! { "
         { pkgs, ... }: pkgs.lib.id 42
     " };
-    let (db, file) = TestDatabase::single_file(nix_src).unwrap();
-    let module = module(&db, file);
+    let r = lang_ast::run_syntax_pipeline(nix_src);
     let result =
-        crate::CheckBuilder::from_db(&db, file, Arc::new(registry.clone()), HashMap::new(), ctx)
+        crate::CheckBuilder::from_source(nix_src, Arc::new(registry.clone()), HashMap::new(), ctx)
             .run();
     let inference = result.inference.expect("inference should succeed");
 
     // `pkgs` should be typed as Named("Pkgs", ...) via alias provenance.
-    let pkgs_name_id = module
+    let pkgs_name_id = r
+        .module
         .names()
         .find(|(_, n)| n.text == "pkgs")
         .map(|(id, _)| id)
@@ -3850,7 +3833,7 @@ fn callpackage_context_types_pkgs_parameter_as_alias() {
     // The body should resolve to int: pkgs.lib is Lib, lib.id is a -> a, id 42 is int.
     let root_ref = *inference
         .expr_ty_map
-        .get(module.entry_expr)
+        .get(r.module.entry_expr)
         .expect("root expr should have a type");
     let root_ty = RootTy::new(root_ref, inference.arena.clone());
     match root_ty.output_ty() {
@@ -3901,16 +3884,15 @@ fn callpackage_context_loads_pkgs_from_builtin_stubs_dir() {
     let nix_src = indoc! { "
         { emilua, ninja, ... }: emilua
     " };
-    let (db, file) = TestDatabase::single_file(nix_src).unwrap();
-    let module = module(&db, file);
+    let r = lang_ast::run_syntax_pipeline(nix_src);
     let result =
-        crate::CheckBuilder::from_db(&db, file, Arc::new(registry.clone()), HashMap::new(), ctx)
+        crate::CheckBuilder::from_source(nix_src, Arc::new(registry.clone()), HashMap::new(), ctx)
             .run();
     let inference = result.inference.expect("inference should succeed");
 
     let root_ref = *inference
         .expr_ty_map
-        .get(module.entry_expr)
+        .get(r.module.entry_expr)
         .expect("root expr should have a type");
     let root_ty = RootTy::new(root_ref, inference.arena.clone());
     match root_ty.output_ty() {
@@ -5672,11 +5654,10 @@ fn annotation_arity_mismatch_skipped_with_warning() {
         in
         f \"hello\" \" world\"
     " };
-    let (db, file) = TestDatabase::single_file(nix_src).unwrap();
-    let mod_ = module(&db, file);
-    let result = crate::CheckBuilder::from_db(
-        &db,
-        file,
+    let r = lang_ast::run_syntax_pipeline(nix_src);
+    let mod_ = r.module;
+    let result = crate::CheckBuilder::from_source(
+        nix_src,
         Arc::new(TypeAliasRegistry::default()),
         HashMap::new(),
         Arc::default(),
@@ -5746,11 +5727,10 @@ fn annotation_with_union_skipped() {
         in
         f "x" "hello"
     "# };
-    let (db, file) = TestDatabase::single_file(nix_src).unwrap();
-    let mod_ = module(&db, file);
-    let result = crate::CheckBuilder::from_db(
-        &db,
-        file,
+    let r = lang_ast::run_syntax_pipeline(nix_src);
+    let mod_ = r.module;
+    let result = crate::CheckBuilder::from_source(
+        nix_src,
         Arc::new(TypeAliasRegistry::default()),
         HashMap::new(),
         Arc::default(),
@@ -6194,11 +6174,10 @@ fn intersection_annotation_accepted() {
         in
         dispatch 42
     " };
-    let (db, file) = TestDatabase::single_file(nix_src).unwrap();
-    let mod_ = module(&db, file);
-    let result = crate::CheckBuilder::from_db(
-        &db,
-        file,
+    let r = lang_ast::run_syntax_pipeline(nix_src);
+    let mod_ = r.module;
+    let result = crate::CheckBuilder::from_source(
+        nix_src,
         Arc::new(TypeAliasRegistry::default()),
         HashMap::new(),
         Arc::default(),
@@ -6235,11 +6214,8 @@ fn intersection_annotation_warning_emitted() {
         in
         f 1
     " };
-    let (db, file) = TestDatabase::single_file(nix_src).unwrap();
-    let _mod_ = module(&db, file);
-    let result = crate::CheckBuilder::from_db(
-        &db,
-        file,
+    let result = crate::CheckBuilder::from_source(
+        nix_src,
         Arc::new(TypeAliasRegistry::default()),
         HashMap::new(),
         Arc::default(),
@@ -6278,11 +6254,8 @@ fn non_lambda_intersection_falls_through() {
         in
         x
     " };
-    let (db, file) = TestDatabase::single_file(nix_src).unwrap();
-    let _mod_ = module(&db, file);
-    let result = crate::CheckBuilder::from_db(
-        &db,
-        file,
+    let result = crate::CheckBuilder::from_source(
+        nix_src,
         Arc::new(TypeAliasRegistry::default()),
         HashMap::new(),
         Arc::default(),
@@ -7495,10 +7468,8 @@ fn inline_alias_references_another() {
 /// Helper: type-check with CheckBuilder (which includes lowering
 /// diagnostics) and return just the diagnostics.
 fn collect_diagnostics(src: &str) -> Vec<TixDiagnostic> {
-    let (db, file) = TestDatabase::single_file(src).unwrap();
-    let result = crate::CheckBuilder::from_db(
-        &db,
-        file,
+    let result = crate::CheckBuilder::from_source(
+        src,
         Arc::new(TypeAliasRegistry::default()),
         HashMap::new(),
         Arc::default(),
@@ -7604,10 +7575,8 @@ fn duplicate_key_multiple_duplicates() {
 #[test]
 fn duplicate_key_is_warning_not_error() {
     // Duplicate keys should produce a warning but still infer successfully.
-    let (db, file) = TestDatabase::single_file("{ a = 1; a = 2; }").unwrap();
-    let result = crate::CheckBuilder::from_db(
-        &db,
-        file,
+    let result = crate::CheckBuilder::from_source(
+        "{ a = 1; a = 2; }",
         Arc::new(TypeAliasRegistry::default()),
         HashMap::new(),
         Arc::default(),
@@ -7836,10 +7805,9 @@ fn function_union_annotation_still_skips() {
         f "x" "hello"
     "# };
 
-    let (db, file) = TestDatabase::single_file(nix_src).unwrap();
-    let result = crate::CheckBuilder::from_db(
-        &db,
-        file,
+    let r = lang_ast::run_syntax_pipeline(nix_src);
+    let result = crate::CheckBuilder::from_source(
+        nix_src,
         Arc::new(registry.clone()),
         HashMap::new(),
         Arc::default(),
@@ -7851,10 +7819,9 @@ fn function_union_annotation_still_skips() {
         .inference
         .expect("inference should succeed with union-alias annotation on function");
 
-    let mod_ = module(&db, file);
     let root_ref = *inference
         .expr_ty_map
-        .get(mod_.entry_expr)
+        .get(r.module.entry_expr)
         .expect("root should have a type");
     let root_ty = RootTy::new(root_ref, inference.arena.clone());
     assert_eq!(
@@ -8197,24 +8164,20 @@ fn inter_both_vars_as_function() {
 
 /// Helper: run partial inference (tolerates errors) and look up a name's type.
 fn get_name_type_partial(src: &str, name: &str) -> Option<RootTy> {
-    let (db, file) = TestDatabase::single_file(src).unwrap();
-    let module = module(&db, file);
-    let groups = lang_ast::group_def(&db, file);
-    let name_res = lang_ast::name_resolution(&db, file);
-    let indices = lang_ast::module_indices(&db, file);
-    let aliases = crate::load_inline_aliases(Arc::new(TypeAliasRegistry::default()), &module);
+    let r = lang_ast::run_syntax_pipeline(src);
+    let aliases = crate::load_inline_aliases(Arc::new(TypeAliasRegistry::default()), &r.module);
     let check = crate::CheckCtx::new(
-        &module,
-        &name_res,
-        &indices.binding_expr,
+        &r.module,
+        &r.name_res,
+        &r.module_indices.binding_expr,
         aliases,
         HashMap::new(),
         Arc::default(),
     );
-    let (result, _diags, _bailed_out) = check.infer_prog_partial(groups);
+    let (result, _diags, _bailed_out) = check.infer_prog_partial(r.grouped_defs);
 
     let mut best: Option<TyRef> = None;
-    for (name_id, name_data) in module.names() {
+    for (name_id, name_data) in r.module.names() {
         if name_data.text == name {
             if let Some(&ty) = result.name_ty_map.get(name_id) {
                 let is_better = match best {
@@ -8567,18 +8530,16 @@ fn import_type_constrains() {
         in x
     "#};
 
-    let (db, file) = TestDatabase::single_file(nix).unwrap();
-    let module = lang_ast::module(&db, file);
-    let name_res = lang_ast::name_resolution(&db, file);
-    let indices = lang_ast::module_indices(&db, file);
-    let groups = lang_ast::group_def(&db, file);
-    let aliases =
-        crate::load_inline_aliases(Arc::new(crate::aliases::TypeAliasRegistry::new()), &module);
+    let r = lang_ast::run_syntax_pipeline(nix);
+    let aliases = crate::load_inline_aliases(
+        Arc::new(crate::aliases::TypeAliasRegistry::new()),
+        &r.module,
+    );
 
     let check = crate::CheckCtx::new(
-        &module,
-        &name_res,
-        &indices.binding_expr,
+        &r.module,
+        &r.name_res,
+        &r.module_indices.binding_expr,
         aliases,
         std::collections::HashMap::new(),
         Arc::default(),
@@ -8586,10 +8547,10 @@ fn import_type_constrains() {
     .with_imported_type_exports(imported_exports)
     .with_file_base_dir(PathBuf::from("/"));
 
-    let (result, diagnostics, _) = check.infer_prog_partial(groups);
+    let (result, diagnostics, _) = check.infer_prog_partial(r.grouped_defs);
     // Config is { x: int } but x = "hello" is string — should produce diagnostics
     assert!(
-        !diagnostics.is_empty() || result.expr_ty_map.get(module.entry_expr).is_none(),
+        !diagnostics.is_empty() || result.expr_ty_map.get(r.module.entry_expr).is_none(),
         "import type mismatch should produce error or diagnostic"
     );
 }
@@ -8615,18 +8576,16 @@ fn import_type_basic() {
         in x
     "#};
 
-    let (db, file) = TestDatabase::single_file(nix).unwrap();
-    let module = lang_ast::module(&db, file);
-    let name_res = lang_ast::name_resolution(&db, file);
-    let indices = lang_ast::module_indices(&db, file);
-    let groups = lang_ast::group_def(&db, file);
-    let aliases =
-        crate::load_inline_aliases(Arc::new(crate::aliases::TypeAliasRegistry::new()), &module);
+    let r = lang_ast::run_syntax_pipeline(nix);
+    let aliases = crate::load_inline_aliases(
+        Arc::new(crate::aliases::TypeAliasRegistry::new()),
+        &r.module,
+    );
 
     let check = crate::CheckCtx::new(
-        &module,
-        &name_res,
-        &indices.binding_expr,
+        &r.module,
+        &r.name_res,
+        &r.module_indices.binding_expr,
         aliases,
         std::collections::HashMap::new(),
         Arc::default(),
@@ -8634,14 +8593,14 @@ fn import_type_basic() {
     .with_imported_type_exports(imported_exports)
     .with_file_base_dir(PathBuf::from("/"));
 
-    let (result, diagnostics, _) = check.infer_prog_partial(groups);
+    let (result, diagnostics, _) = check.infer_prog_partial(r.grouped_defs);
     assert!(
         diagnostics.is_empty(),
         "matching types should not produce diagnostics: {diagnostics:?}"
     );
     let ty = *result
         .expr_ty_map
-        .get(module.entry_expr)
+        .get(r.module.entry_expr)
         .expect("should have root type");
     let root = RootTy::new(ty, result.arena.clone());
     assert_eq!(format!("{root}"), "int");
@@ -8673,18 +8632,16 @@ fn typeof_import_basic() {
         in x
     "#};
 
-    let (db, file) = TestDatabase::single_file(nix).unwrap();
-    let module = lang_ast::module(&db, file);
-    let name_res = lang_ast::name_resolution(&db, file);
-    let indices = lang_ast::module_indices(&db, file);
-    let groups = lang_ast::group_def(&db, file);
-    let aliases =
-        crate::load_inline_aliases(Arc::new(crate::aliases::TypeAliasRegistry::new()), &module);
+    let r = lang_ast::run_syntax_pipeline(nix);
+    let aliases = crate::load_inline_aliases(
+        Arc::new(crate::aliases::TypeAliasRegistry::new()),
+        &r.module,
+    );
 
     let check = crate::CheckCtx::new(
-        &module,
-        &name_res,
-        &indices.binding_expr,
+        &r.module,
+        &r.name_res,
+        &r.module_indices.binding_expr,
         aliases,
         std::collections::HashMap::new(),
         Arc::default(),
@@ -8692,14 +8649,14 @@ fn typeof_import_basic() {
     .with_typeof_import_types(typeof_imports)
     .with_file_base_dir(PathBuf::from("/"));
 
-    let (result, diagnostics, _) = check.infer_prog_partial(groups);
+    let (result, diagnostics, _) = check.infer_prog_partial(r.grouped_defs);
     assert!(
         diagnostics.is_empty(),
         "matching types should have no diagnostics: {diagnostics:?}"
     );
     let ty = *result
         .expr_ty_map
-        .get(module.entry_expr)
+        .get(r.module.entry_expr)
         .expect("should have root type");
     let root = RootTy::new(ty, result.arena.clone());
     assert_eq!(format!("{root}"), "int");
@@ -8726,18 +8683,16 @@ fn typeof_import_constrains() {
         in x
     "#};
 
-    let (db, file) = TestDatabase::single_file(nix).unwrap();
-    let module = lang_ast::module(&db, file);
-    let name_res = lang_ast::name_resolution(&db, file);
-    let indices = lang_ast::module_indices(&db, file);
-    let groups = lang_ast::group_def(&db, file);
-    let aliases =
-        crate::load_inline_aliases(Arc::new(crate::aliases::TypeAliasRegistry::new()), &module);
+    let r = lang_ast::run_syntax_pipeline(nix);
+    let aliases = crate::load_inline_aliases(
+        Arc::new(crate::aliases::TypeAliasRegistry::new()),
+        &r.module,
+    );
 
     let check = crate::CheckCtx::new(
-        &module,
-        &name_res,
-        &indices.binding_expr,
+        &r.module,
+        &r.name_res,
+        &r.module_indices.binding_expr,
         aliases,
         std::collections::HashMap::new(),
         Arc::default(),
@@ -8745,7 +8700,7 @@ fn typeof_import_constrains() {
     .with_typeof_import_types(typeof_imports)
     .with_file_base_dir(PathBuf::from("/"));
 
-    let (_, diagnostics, _) = check.infer_prog_partial(groups);
+    let (_, diagnostics, _) = check.infer_prog_partial(r.grouped_defs);
     assert!(
         !diagnostics.is_empty(),
         "typeof import is int, but x = \"hello\" is string — should error"
@@ -8763,8 +8718,8 @@ fn extract_type_exports_basic() {
             x = 42;
         in x
     "};
-    let (db, file) = TestDatabase::single_file(nix).unwrap();
-    let module = lang_ast::module(&db, file);
+    let r = lang_ast::run_syntax_pipeline(nix);
+    let module = r.module;
     let exports = crate::extract_type_exports(&module);
     assert!(exports.contains_key("Config"), "should export Config type");
     assert!(
@@ -8803,8 +8758,8 @@ fn find_typeof_targets_simple() {
             scope = 1;
         in scope
     "};
-    let (db, file) = TestDatabase::single_file(nix).unwrap();
-    let module = lang_ast::module(&db, file);
+    let r = lang_ast::run_syntax_pipeline(nix);
+    let module = r.module;
     let exports = crate::extract_type_exports(&module);
     let targets = crate::find_typeof_targets(&exports);
     assert_eq!(targets.len(), 1);
@@ -8822,8 +8777,8 @@ fn find_typeof_targets_nested_attrset() {
             b = 2;
         in a
     "};
-    let (db, file) = TestDatabase::single_file(nix).unwrap();
-    let module = lang_ast::module(&db, file);
+    let r = lang_ast::run_syntax_pipeline(nix);
+    let module = r.module;
     let exports = crate::extract_type_exports(&module);
     let targets = crate::find_typeof_targets(&exports);
     assert_eq!(targets.len(), 2);
@@ -8839,8 +8794,8 @@ fn find_typeof_targets_no_typeof() {
         */
         let x = 1; in x
     "};
-    let (db, file) = TestDatabase::single_file(nix).unwrap();
-    let module = lang_ast::module(&db, file);
+    let r = lang_ast::run_syntax_pipeline(nix);
+    let module = r.module;
     let exports = crate::extract_type_exports(&module);
     let targets = crate::find_typeof_targets(&exports);
     assert!(targets.is_empty());
@@ -8849,9 +8804,9 @@ fn find_typeof_targets_no_typeof() {
 #[test]
 fn find_scc_group_for_name_basic() {
     let nix = "let a = 1; b = a; in b";
-    let (db, file) = TestDatabase::single_file(nix).unwrap();
-    let module = lang_ast::module(&db, file);
-    let groups = lang_ast::group_def(&db, file);
+    let r = lang_ast::run_syntax_pipeline(nix);
+    let module = r.module;
+    let groups = r.grouped_defs;
     assert!(crate::find_scc_group_for_name(&module, &groups, "a").is_some());
     assert!(crate::find_scc_group_for_name(&module, &groups, "nonexistent").is_none());
 }
@@ -8861,9 +8816,9 @@ fn find_scc_group_for_name_ordering() {
     // Independent bindings should be in separate groups, with 'a' before 'b'
     // since 'b' depends on 'a'.
     let nix = "let a = 1; b = a + 1; in b";
-    let (db, file) = TestDatabase::single_file(nix).unwrap();
-    let module = lang_ast::module(&db, file);
-    let groups = lang_ast::group_def(&db, file);
+    let r = lang_ast::run_syntax_pipeline(nix);
+    let module = r.module;
+    let groups = r.grouped_defs;
     let group_a = crate::find_scc_group_for_name(&module, &groups, "a").unwrap();
     let group_b = crate::find_scc_group_for_name(&module, &groups, "b").unwrap();
     assert!(
@@ -9036,23 +8991,19 @@ fn resolve_export_typeof_nested() {
 
 /// Helper: run partial inference up to a given group and return a name's type.
 fn get_name_type_up_to_group(src: &str, name: &str, stop_after_group: usize) -> Option<RootTy> {
-    let (db, file) = TestDatabase::single_file(src).unwrap();
-    let module = module(&db, file);
-    let groups = lang_ast::group_def(&db, file);
-    let name_res = lang_ast::name_resolution(&db, file);
-    let indices = lang_ast::module_indices(&db, file);
-    let aliases = crate::load_inline_aliases(Arc::new(TypeAliasRegistry::default()), &module);
+    let r = lang_ast::run_syntax_pipeline(src);
+    let aliases = crate::load_inline_aliases(Arc::new(TypeAliasRegistry::default()), &r.module);
     let check = crate::CheckCtx::new(
-        &module,
-        &name_res,
-        &indices.binding_expr,
+        &r.module,
+        &r.name_res,
+        &r.module_indices.binding_expr,
         aliases,
         HashMap::new(),
         Arc::default(),
     );
-    let (result, _diags) = check.infer_prog_up_to_group(groups, stop_after_group);
+    let (result, _diags) = check.infer_prog_up_to_group(r.grouped_defs, stop_after_group);
 
-    for (name_id, name_data) in module.names() {
+    for (name_id, name_data) in r.module.names() {
         if name_data.text == name {
             if let Some(&ty) = result.name_ty_map.get(name_id) {
                 return Some(RootTy::new(ty, result.arena.clone()));
@@ -9084,9 +9035,8 @@ fn infer_prog_up_to_group_two_groups() {
 fn infer_prog_up_to_group_matches_full() {
     // Partial inference of all groups should produce the same types as full inference.
     let nix = "let a = 1; b = a + 1; c = b + 1; in c";
-    let (db, file) = TestDatabase::single_file(nix).unwrap();
-    let groups = lang_ast::group_def(&db, file);
-    let n_groups = groups.len();
+    let r = lang_ast::run_syntax_pipeline(nix);
+    let n_groups = r.grouped_defs.len();
 
     let full_a = get_name_type_partial(nix, "a").unwrap();
     let partial_a = get_name_type_up_to_group(nix, "a", n_groups - 1).unwrap();
@@ -9099,17 +9049,13 @@ fn run_partial_inference_basic() {
     use std::collections::HashSet;
 
     let nix = "let scope = { mkDeriv = x: x; }; in scope";
-    let (db, file) = TestDatabase::single_file(nix).unwrap();
-    let module = lang_ast::module(&db, file);
-    let name_res = lang_ast::name_resolution(&db, file);
-    let indices = lang_ast::module_indices(&db, file);
-    let groups = lang_ast::group_def(&db, file);
+    let r = lang_ast::run_syntax_pipeline(nix);
 
     let inputs = crate::InferenceInputs {
-        module,
-        module_indices: indices,
-        name_res,
-        grouped_defs: groups,
+        module: r.module,
+        module_indices: r.module_indices,
+        name_res: r.name_res,
+        grouped_defs: r.grouped_defs,
         registry: Arc::new(TypeAliasRegistry::default()),
         import_types: HashMap::new(),
         import_diagnostics: vec![],
@@ -9145,8 +9091,8 @@ fn scan_type_import_paths_inline_alias() {
         */
         let x = 42; in x
     "};
-    let (db, file) = TestDatabase::single_file(nix).unwrap();
-    let module = lang_ast::module(&db, file);
+    let r = lang_ast::run_syntax_pipeline(nix);
+    let module = r.module;
     let paths = crate::imports::scan_type_import_paths(&module);
     assert!(
         paths.contains("./a.nix"),
@@ -9164,8 +9110,8 @@ fn scan_type_import_paths_per_binding() {
             x = 42;
         in x
     "};
-    let (db, file) = TestDatabase::single_file(nix).unwrap();
-    let module = lang_ast::module(&db, file);
+    let r = lang_ast::run_syntax_pipeline(nix);
+    let module = r.module;
     let paths = crate::imports::scan_type_import_paths(&module);
     assert!(
         paths.contains("./b.nix"),
@@ -9176,8 +9122,8 @@ fn scan_type_import_paths_per_binding() {
 #[test]
 fn scan_type_import_paths_none() {
     let nix = "let x = 42; in x";
-    let (db, file) = TestDatabase::single_file(nix).unwrap();
-    let module = lang_ast::module(&db, file);
+    let r = lang_ast::run_syntax_pipeline(nix);
+    let module = r.module;
     let paths = crate::imports::scan_type_import_paths(&module);
     assert!(paths.is_empty());
 }
@@ -9189,24 +9135,24 @@ fn scan_type_import_paths_none() {
 #[test]
 fn nocheck_flag_set_on_module() {
     let nix = "# tix-nocheck\nlet x = 1; in x";
-    let (db, file) = TestDatabase::single_file(nix).unwrap();
-    let module = lang_ast::module(&db, file);
+    let r = lang_ast::run_syntax_pipeline(nix);
+    let module = r.module;
     assert!(module.nocheck, "module should have nocheck = true");
 }
 
 #[test]
 fn nocheck_flag_not_set_without_directive() {
     let nix = "let x = 1; in x";
-    let (db, file) = TestDatabase::single_file(nix).unwrap();
-    let module = lang_ast::module(&db, file);
+    let r = lang_ast::run_syntax_pipeline(nix);
+    let module = r.module;
     assert!(!module.nocheck, "module should have nocheck = false");
 }
 
 #[test]
 fn ignore_lines_populated() {
     let nix = "# tix-ignore\nlet x = 1; in x";
-    let (db, file) = TestDatabase::single_file(nix).unwrap();
-    let module = lang_ast::module(&db, file);
+    let r = lang_ast::run_syntax_pipeline(nix);
+    let module = r.module;
     assert!(
         module.ignore_lines.contains(&1),
         "line 1 should be in ignore_lines, got: {:?}",
@@ -9229,13 +9175,12 @@ fn filter_ignored_diagnostics_suppresses_target_line() {
           x
     "};
 
-    let (db, file) = TestDatabase::single_file(nix).unwrap();
-    let module = lang_ast::module(&db, file);
-    let (_, source_map) = lang_ast::module_and_source_maps(&db, file);
+    let r = lang_ast::run_syntax_pipeline(nix);
+    let module = r.module;
+    let source_map = r.source_map;
 
-    let result = crate::CheckBuilder::from_db(
-        &db,
-        file,
+    let result = crate::CheckBuilder::from_source(
+        nix,
         Arc::new(TypeAliasRegistry::default()),
         HashMap::new(),
         Arc::default(),

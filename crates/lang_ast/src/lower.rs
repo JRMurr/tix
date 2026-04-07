@@ -640,8 +640,7 @@ impl MergingSet {
     fn finish(self, ctx: &mut LowerCtx) -> Bindings {
         Bindings {
             // BTreeMap iteration is sorted by key (SmolStr), giving deterministic
-            // binding order regardless of insertion order. This prevents spurious
-            // Salsa cache invalidation on identical re-parses.
+            // binding order regardless of insertion order.
             statics: self
                 .statics
                 .into_values()

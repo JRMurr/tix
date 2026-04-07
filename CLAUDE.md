@@ -98,8 +98,8 @@ Six crates under `crates/`, listed in pipeline order:
 ```
 Nix source → [lang_ast::lower] Parse with rnix → Tix AST
            → [lang_ast::nameres] Name resolution + scope analysis
-           → [lang_ast::group_def] SCC grouping for mutual recursion
-           → [lang_check::check_file] Type inference (entry point)
+           → [lang_ast::compute_group_def] SCC grouping for mutual recursion
+           → [lang_check] Type inference (entry point)
                ├─ Pre-allocate TyIds for all names/expressions
                ├─ Per SCC group:
                │   ├─ [infer_expr] Single-pass AST walk, constrain() inline
@@ -117,7 +117,6 @@ Nix source → [lang_ast::lower] Parse with rnix → Tix AST
 - **Two type representations**: `Ty<R, VarType>` during inference (includes `Neg`, `Inter`, `Union` for narrowing, `Named` for alias tracking); `OutputTy` after canonicalization (has Union/Intersection/Neg/Named).
 - **Named is fully transparent**: `Named(name, inner)` is semantically identical to `inner`. Constrain unwraps it, extrude re-wraps it, canonicalize converts it to `OutputTy::Named`. Alias names flow structurally through the type system — no side-channel needed.
 - **Polarity-aware canonicalization**: positive positions expand to union of lower bounds; negative positions expand to intersection of upper bounds.
-- **Salsa** for incremental computation (query caching).
 - **Overload resolution is deferred**: operators like `+` and `*` are resolved after the SCC group is fully inferred.
 
 ### Key files for type inference

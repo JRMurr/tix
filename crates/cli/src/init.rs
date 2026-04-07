@@ -11,7 +11,6 @@ use std::error::Error;
 use std::path::{Path, PathBuf};
 
 use lang_ast::classify::{classify_nix_file, Classification, NixFileKind};
-use lang_ast::{module, name_resolution, NixFile, RootDatabase};
 
 use crate::config::{self, TixConfig};
 
@@ -42,7 +41,6 @@ pub fn run_init(path: PathBuf, yes: bool, dry_run: bool) -> Result<(), Box<dyn E
     eprintln!("Scanning {}...", project_root.display());
 
     // Step 4: Parse + classify each file.
-    let db = RootDatabase::default();
     let mut classifications: Vec<(PathBuf, Classification)> = Vec::new();
 
     for file_path in &nix_files {
@@ -51,7 +49,7 @@ pub fn run_init(path: PathBuf, yes: bool, dry_run: bool) -> Result<(), Box<dyn E
             .unwrap_or(file_path)
             .to_path_buf();
 
-        match classify_file(&db, file_path) {
+        match classify_file(file_path) {
             Some(c) => classifications.push((relative, c)),
             None => {
                 eprintln!("  warning: failed to parse {}", relative.display());
@@ -110,12 +108,10 @@ pub fn run_init(path: PathBuf, yes: bool, dry_run: bool) -> Result<(), Box<dyn E
 // ==============================================================================
 
 /// Classify a single file, returning None if parsing fails.
-fn classify_file(db: &RootDatabase, file_path: &Path) -> Option<Classification> {
+fn classify_file(file_path: &Path) -> Option<Classification> {
     let contents = std::fs::read_to_string(file_path).ok()?;
-    let nix_file = NixFile::new(db, file_path.to_path_buf(), contents);
-    let m = module(db, nix_file);
-    let nr = name_resolution(db, nix_file);
-    Some(classify_nix_file(&m, &nr))
+    let r = lang_ast::run_syntax_pipeline(&contents);
+    Some(classify_nix_file(&r.module, &r.name_res))
 }
 
 /// Find the project root by walking up from `start` looking for flake.nix or .git.

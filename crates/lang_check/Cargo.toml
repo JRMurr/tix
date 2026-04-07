@@ -18,7 +18,6 @@ log = { workspace = true }
 # TODO: replace refs to this with my own type
 rnix = { workspace = true }
 
-salsa = { workspace = true }
 dashmap = "6.1.0"
 rayon = { workspace = true }
 petgraph = { workspace = true }

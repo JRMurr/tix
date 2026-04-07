@@ -445,16 +445,10 @@ fn is_module_return_shape(module: &Module, body: ExprId) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{module, name_resolution, NixFile, RootDatabase};
-    use std::path::PathBuf;
-
     /// Helper: parse Nix source and classify it.
     fn classify(source: &str) -> Classification {
-        let db = RootDatabase::default();
-        let file = NixFile::new(&db, PathBuf::from("/test.nix"), source.into());
-        let m = module(&db, file);
-        let nr = name_resolution(&db, file);
-        classify_nix_file(&m, &nr)
+        let r = crate::run_syntax_pipeline(source);
+        classify_nix_file(&r.module, &r.name_res)
     }
 
     #[test]

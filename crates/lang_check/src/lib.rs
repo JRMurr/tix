@@ -26,7 +26,7 @@ use derive_more::Debug;
 use diagnostic::TixDiagnostic;
 use infer_expr::{PendingHasField, PendingMerge, PendingOverload, PendingWithFallback};
 use la_arena::ArenaMap;
-use lang_ast::{AstDb, Expr, ExprId, Module, NameId, NameResolution, NixFile, OverloadBinOp};
+use lang_ast::{Expr, ExprId, Module, NameId, NameResolution, OverloadBinOp};
 use lang_ty::{OutputTy, OwnedTy, PrimitiveTy, Ty, TyRef, TypeArena};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{HashMap, HashSet};
@@ -326,47 +326,29 @@ fn load_inline_aliases(
     }
 }
 
-#[instrument(level = "info", skip_all, name = "check_file", fields(file = lang_ast::display_path(&file.path(db)).as_str()))]
-#[salsa::tracked]
-pub fn check_file(db: &dyn AstDb, file: NixFile) -> Result<InferenceResult, Box<TixDiagnostic>> {
-    check_file_with_aliases(db, file, &TypeAliasRegistry::default())
+/// Type-check Nix source from scratch (parses, lowers, resolves, infers).
+/// Convenience for tests and simple callers.
+pub fn check_source(src: &str) -> Result<InferenceResult, Box<TixDiagnostic>> {
+    check_source_with_aliases(src, &TypeAliasRegistry::default())
 }
 
-/// Type-check a file with a pre-loaded type alias registry from .tix stubs.
-/// Not a Salsa tracked function because `TypeAliasRegistry` is not Salsa-managed.
-pub fn check_file_with_aliases(
-    db: &dyn AstDb,
-    file: NixFile,
+/// Type-check Nix source with a pre-loaded type alias registry.
+pub fn check_source_with_aliases(
+    src: &str,
     aliases: &TypeAliasRegistry,
 ) -> Result<InferenceResult, Box<TixDiagnostic>> {
-    // This is the boundary where the one clone happens for callers that don't
-    // already hold an Arc. All downstream functions share this Arc without cloning.
-    check_file_with_imports(db, file, Arc::new(aliases.clone()), HashMap::new())
-}
-
-/// Type-check a file with pre-loaded aliases and pre-resolved import types.
-pub fn check_file_with_imports(
-    db: &dyn AstDb,
-    file: NixFile,
-    aliases: Arc<TypeAliasRegistry>,
-    import_types: HashMap<ExprId, OwnedTy>,
-) -> Result<InferenceResult, Box<TixDiagnostic>> {
-    let module = lang_ast::module(db, file);
-    let name_res = lang_ast::name_resolution(db, file);
-    let indices = lang_ast::module_indices(db, file);
-    let grouped_defs = lang_ast::group_def(db, file);
-
-    let aliases = load_inline_aliases(aliases, &module);
+    let r = lang_ast::run_syntax_pipeline(src);
+    let aliases = load_inline_aliases(Arc::new(aliases.clone()), &r.module);
 
     let check = CheckCtx::new(
-        &module,
-        &name_res,
-        &indices.binding_expr,
+        &r.module,
+        &r.name_res,
+        &r.module_indices.binding_expr,
         aliases,
-        import_types,
+        HashMap::new(),
         Arc::default(),
     );
-    check.infer_prog(grouped_defs)
+    check.infer_prog(r.grouped_defs)
 }
 
 /// Tracks whether a type position is covariant (output/positive) or
@@ -586,12 +568,12 @@ pub struct SyntaxBundle {
 }
 
 // ==============================================================================
-// InferenceInputs: precomputed data for running inference off the Salsa DB
+// InferenceInputs: precomputed data for running inference
 // ==============================================================================
 
 /// Everything needed to run type inference after the syntax phase (parse, lower,
 /// nameres, SCC grouping). This bundle is `Send + Sync` so inference can run on
-/// a thread pool without holding the Salsa database lock.
+/// a thread pool.
 ///
 /// Shared between the CLI (parallel multi-file check) and the LSP (which wraps
 /// this in `LspInferenceInputs` with additional presentation fields).
@@ -620,7 +602,7 @@ pub struct InferenceInputs {
     pub file_base_dir: Option<std::path::PathBuf>,
 }
 
-/// Run type inference using precomputed syntax data. Does not need the Salsa
+/// Run type inference using precomputed syntax data. Does not need the
 /// database. Consolidates the bail-out diagnostic logic shared by CLI and LSP.
 #[instrument(level = "info", skip_all, name = "run_inference", fields(file = inputs.file_path.as_deref().map(lang_ast::display_path).unwrap_or_default().as_str()))]
 pub fn run_inference(inputs: &InferenceInputs) -> CheckResult {
@@ -709,19 +691,20 @@ pub struct CheckBuilder {
 }
 
 impl CheckBuilder {
-    /// Create a builder by querying Salsa for syntax-phase results.
-    pub fn from_db(
-        db: &dyn AstDb,
-        file: NixFile,
+    /// Create a builder from Nix source text. Runs the full syntax pipeline.
+    /// Convenience for tests and simple callers.
+    pub fn from_source(
+        src: &str,
         aliases: Arc<TypeAliasRegistry>,
         import_types: HashMap<ExprId, OwnedTy>,
         context_args: Arc<HashMap<smol_str::SmolStr, ParsedTy>>,
     ) -> Self {
+        let r = lang_ast::run_syntax_pipeline(src);
         Self {
-            module: lang_ast::module(db, file),
-            name_res: lang_ast::name_resolution(db, file),
-            indices: lang_ast::module_indices(db, file),
-            grouped_defs: lang_ast::group_def(db, file),
+            module: r.module,
+            name_res: r.name_res,
+            indices: r.module_indices,
+            grouped_defs: r.grouped_defs,
             aliases,
             import_types,
             context_args,
@@ -732,9 +715,7 @@ impl CheckBuilder {
         }
     }
 
-    /// Create a builder from precomputed Salsa query results. Useful when
-    /// the caller already holds owned copies (e.g. inference off the Salsa
-    /// database lock in the LSP).
+    /// Create a builder from precomputed syntax pipeline results.
     pub fn from_precomputed(
         module: Module,
         name_res: NameResolution,

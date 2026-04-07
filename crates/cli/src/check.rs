@@ -4,7 +4,7 @@
 //
 // Type-checks all .nix files in a project using tix.toml configuration.
 // The pipeline has four phases:
-//   1.   Sequential Prepare — Salsa queries, classification, context resolution,
+//   1.   Sequential Prepare — syntax pipeline, classification, context resolution,
 //        SyntaxBundle extraction, import scanning
 //   1.5  Dependency Graph   — SCC computation + topological layering
 //   2.   Layered Inference  — layer-by-layer parallel inference with cross-file
@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use lang_ast::classify::{classify_nix_file, NixFileKind};
-use lang_ast::{module_and_source_maps, name_resolution, ModuleSourceMap, RootDatabase};
+use lang_ast::ModuleSourceMap;
 use lang_check::coordinator::{InferenceCoordinator, SyntaxProvider};
 use lang_check::SyntaxBundle;
 use rayon::prelude::*;
@@ -30,21 +30,16 @@ use crate::timing;
 use crate::{build_registry, load_stubs, render_diagnostics, OutputFormat};
 
 // ==============================================================================
-// CliSyntaxProvider: pre-extracted bundles with Salsa fallback
+// CliSyntaxProvider: pre-extracted bundles
 // ==============================================================================
 
 /// Syntax provider for the CLI. Pre-extracts SyntaxBundles for all known project
-/// files during Phase 1 (sequential, single-threaded Salsa access). Files not in
-/// the pre-extracted set (transitive imports from outside the project) fall back
-/// to on-demand Salsa extraction behind a Mutex.
+/// files during Phase 1 (sequential). Files not in the pre-extracted set
+/// (transitive imports from outside the project) return None (top in the importer).
 ///
 /// Uses DashMap so bundles can be moved out (not cloned) as they're consumed.
 /// This is critical for memory: the old pipeline dropped per-file data inside
 /// the par_iter closure, and we need to match that behavior.
-///
-/// Only serves pre-extracted bundles — no on-demand Salsa fallback. Files
-/// outside the project set return None (⊤ in the importer). This avoids
-/// serialized Salsa parsing during parallel inference.
 struct CliSyntaxProvider {
     precomputed: DashMap<PathBuf, SyntaxBundle>,
 }
@@ -56,7 +51,7 @@ impl SyntaxProvider for CliSyntaxProvider {
         //
         // Files not in the precomputed set (transitive imports from outside
         // the project) return None — they get ⊤ in the importer. This avoids
-        // serialized Salsa parsing during parallel inference, which would
+        // on-demand parsing during parallel inference, which would
         // destroy throughput on large projects like nixpkgs (42K files).
         // The single-file `tixc` command has its own SyntaxProvider that does
         // on-demand parsing for transitive imports.
@@ -177,12 +172,13 @@ pub fn run_check_project(
     timer.mark("file I/O (parallel)");
 
     // =========================================================================
-    // Phase 1b — Sequential Salsa Queries
+    // Phase 1b — Sequential Syntax Processing
     // =========================================================================
     //
-    // Salsa queries (parse, lower, nameres, SCC grouping), classification,
-    // config validation, and context resolution run sequentially because
-    // the Salsa database is single-threaded. All file I/O was done above.
+    // Parse, lower, name resolution, SCC grouping, classification, config
+    // validation, and context resolution. Classification and context
+    // resolution must be sequential (context resolution mutates the
+    // registry). The syntax pipeline itself is pure per-file computation.
 
     struct PrePreparedFile {
         canonical_path: PathBuf,
@@ -196,42 +192,20 @@ pub fn run_check_project(
         import_targets: Vec<PathBuf>,
     }
 
-    let db = RootDatabase::default();
-
-    // Pre-populate Salsa DB with file contents (no disk I/O). Consumes
-    // preread to move strings into Salsa without cloning.
-    struct PreloadedFile {
-        original_path: PathBuf,
-        canonical_path: PathBuf,
-        nix_file: lang_ast::NixFile,
-    }
-
-    let preloaded: Vec<PreloadedFile> = preread
-        .into_iter()
-        .map(|pf| PreloadedFile {
-            nix_file: db.preload_file(pf.canonical_path.clone(), pf.contents),
-            original_path: pf.original_path,
-            canonical_path: pf.canonical_path,
-        })
-        .collect();
-
-    let mut pre_prepared: Vec<PrePreparedFile> = Vec::with_capacity(preloaded.len());
+    let mut pre_prepared: Vec<PrePreparedFile> = Vec::with_capacity(preread.len());
     let mut config_warnings: Vec<String> = Vec::new();
 
-    for pf in &preloaded {
+    for pf in preread {
         let relative = pf
             .original_path
             .strip_prefix(&config_dir)
             .unwrap_or(&pf.original_path)
             .to_path_buf();
 
-        let nix_file = pf.nix_file;
-
-        let (module, source_map) = module_and_source_maps(&db, nix_file);
-        let name_res = name_resolution(&db, nix_file);
+        let r = lang_ast::run_syntax_pipeline(&pf.contents);
 
         // Classify (AST-only, fast).
-        let classification = classify_nix_file(&module, &name_res);
+        let classification = classify_nix_file(&r.module, &r.name_res);
 
         if verbose {
             eprintln!(
@@ -274,27 +248,21 @@ pub fn run_check_project(
             .parent()
             .unwrap_or(std::path::Path::new("/"));
         let import_targets =
-            lang_check::imports::scan_all_import_paths(&module, &name_res, base_dir);
-
-        // Remaining Salsa queries for inference.
-        let module_indices = lang_ast::module_indices(&db, nix_file);
-        let grouped_defs = lang_ast::group_def(&db, nix_file);
-
-        // Get source text from Salsa (already stored during preload).
-        let source_text = nix_file.contents(&db).clone();
+            lang_check::imports::scan_all_import_paths(&r.module, &r.name_res, base_dir);
 
         pre_prepared.push(PrePreparedFile {
-            canonical_path: pf.canonical_path.clone(),
-            source_text,
-            source_map,
-            module,
-            module_indices,
-            name_res,
-            grouped_defs,
+            canonical_path: pf.canonical_path,
+            source_text: pf.contents,
+            source_map: r.source_map,
+            module: r.module,
+            module_indices: r.module_indices,
+            name_res: r.name_res,
+            grouped_defs: r.grouped_defs,
             context_args,
             import_targets,
         });
     }
+    timer.mark("syntax pipeline (sequential)");
 
     // Wrap registry in Arc now that all mutations (context resolution) are done.
     // Each file shares a single ref-counted registry instead of deep-cloning it.
@@ -334,7 +302,6 @@ pub fn run_check_project(
             },
         );
     }
-    timer.mark("salsa queries (sequential)");
 
     // =========================================================================
     // Phase 1.5 — Build file-level dependency graph and layers
