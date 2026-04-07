@@ -1,11 +1,10 @@
 // ==============================================================================
-// AnalysisState: Salsa database + open file tracking
+// AnalysisState: open file tracking + type alias registry
 // ==============================================================================
 //
-// Wraps the Salsa RootDatabase and TypeAliasRegistry together with per-file
-// cached analysis results. The LSP server holds this behind a Mutex because
-// rnix::Root is !Send + !Sync and all analysis must run on a single thread
-// (via spawn_blocking).
+// Wraps the TypeAliasRegistry together with per-file cached analysis results.
+// The LSP server holds this behind a Mutex because rnix::Root is !Send + !Sync
+// and all analysis must run on a single thread (via spawn_blocking).
 
 use std::collections::HashMap;
 use std::fmt;
@@ -14,8 +13,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use lang_ast::{
-    module_and_source_maps, Expr, ExprId, GroupedDefs, Literal, Module, ModuleIndices,
-    ModuleScopes, ModuleSourceMap, NameId, NameResolution, NixFile, RootDatabase,
+    Expr, ExprId, GroupedDefs, Literal, Module, ModuleIndices, ModuleScopes, ModuleSourceMap,
+    NameId, NameResolution,
 };
 use lang_check::aliases::TypeAliasRegistry;
 use lang_check::coordinator::{InferenceCoordinator, SyntaxProvider};
@@ -89,8 +88,8 @@ impl FileSnapshot {
 /// Intermediate data from Phase A (syntax) needed by Phase B (imports).
 /// All fields are owned values — safe to hold across mutex releases.
 pub struct SyntaxIntermediate {
-    pub nix_file: NixFile,
     pub path: PathBuf,
+    pub source_text: String,
     pub module: Module,
     pub module_indices: ModuleIndices,
     pub name_res: NameResolution,
@@ -111,7 +110,7 @@ pub struct SyntaxIntermediate {
 pub struct LspInferenceInputs {
     pub core: lang_check::InferenceInputs,
     // LSP-specific fields for FileAnalysis/FileSnapshot:
-    pub nix_file: NixFile,
+    pub source_text: String,
     pub line_index: LineIndex,
     pub parsed: rnix::Parse<rnix::Root>,
     pub source_map: ModuleSourceMap,
@@ -122,8 +121,8 @@ pub struct LspInferenceInputs {
     pub context_arg_arena: Arc<lang_ty::TypeArena>,
 }
 
-/// Run type inference using precomputed syntax data. Does not need the Salsa
-/// database or the analysis mutex. Returns the check result and timing.
+/// Run type inference using precomputed syntax data. Does not need the
+/// analysis mutex. Returns the check result and timing.
 ///
 /// Delegates to `lang_check::run_inference()` for the actual work.
 pub fn run_inference(inputs: &LspInferenceInputs) -> (CheckResult, Duration) {
@@ -138,7 +137,7 @@ pub fn run_inference(inputs: &LspInferenceInputs) -> (CheckResult, Duration) {
 /// `FileSnapshot` instead.
 pub fn build_file_analysis(inputs: LspInferenceInputs, check_result: CheckResult) -> FileAnalysis {
     FileAnalysis {
-        nix_file: inputs.nix_file,
+        source_text: inputs.source_text,
         line_index: inputs.line_index,
         parsed: inputs.parsed,
         module: inputs.core.module,
@@ -159,12 +158,11 @@ pub fn build_file_analysis(inputs: LspInferenceInputs, check_result: CheckResult
 // ==============================================================================
 //
 // When the LSP needs to infer a file that isn't open (e.g. an import target),
-// this provider reads the file from disk, parses it via its own RootDatabase
-// (separate from the main LSP DB — no deadlock risk), and returns the syntax
-// bundle needed by `InferenceCoordinator::demand_file()`.
+// this provider reads the file from disk, runs the syntax pipeline, and returns
+// the syntax bundle needed by `InferenceCoordinator::demand_file()`.
 
 /// Syntax provider for the LSP's demand-driven import resolution.
-/// Reads .nix files from disk using an independent Salsa database.
+/// Reads .nix files from disk and runs the syntax pipeline directly.
 ///
 /// Includes optional project config so that demand-inferred files get their
 /// context_args resolved from tix.toml (e.g. `@callpackage` context for
@@ -175,7 +173,6 @@ pub fn build_file_analysis(inputs: LspInferenceInputs, check_result: CheckResult
 /// (before `initialize()` sets the project config). Call `update_config()`
 /// when the project config becomes available or changes.
 pub struct LspSyntaxProvider {
-    db: parking_lot::Mutex<RootDatabase>,
     /// Behind a Mutex so we can call `Arc::make_mut` for lazy context loading.
     registry: parking_lot::Mutex<Arc<TypeAliasRegistry>>,
     /// Project config + config dir, updated via `update_config()` after
@@ -189,7 +186,6 @@ pub struct LspSyntaxProvider {
 impl LspSyntaxProvider {
     pub fn new(registry: Arc<TypeAliasRegistry>) -> Self {
         Self {
-            db: parking_lot::Mutex::new(RootDatabase::default()),
             registry: parking_lot::Mutex::new(registry),
             config: parking_lot::Mutex::new((None, None)),
         }
@@ -207,12 +203,8 @@ impl LspSyntaxProvider {
 
 impl SyntaxProvider for LspSyntaxProvider {
     fn syntax_for_file(&self, path: &Path) -> Option<SyntaxBundle> {
-        let db = self.db.lock();
-        let nix_file = db.read_file(path.to_path_buf()).ok()?;
-        let (module, _source_map) = lang_ast::module_and_source_maps(&*db, nix_file);
-        let module_indices = lang_ast::module_indices(&*db, nix_file);
-        let name_res = lang_ast::name_resolution(&*db, nix_file);
-        let grouped_defs = lang_ast::group_def(&*db, nix_file);
+        let contents = std::fs::read_to_string(path).ok()?;
+        let r = lang_ast::run_syntax_pipeline(&contents);
 
         // Resolve context_args from tix.toml so demand-inferred files
         // get the same parameter typing as files opened in the editor.
@@ -235,10 +227,10 @@ impl SyntaxProvider for LspSyntaxProvider {
 
         Some(SyntaxBundle {
             path: path.to_path_buf(),
-            module,
-            module_indices,
-            name_res,
-            grouped_defs,
+            module: r.module,
+            module_indices: r.module_indices,
+            name_res: r.name_res,
+            grouped_defs: r.grouped_defs,
             registry,
             context_args,
         })
@@ -341,7 +333,7 @@ pub fn resolve_imports_phase_b(
             typeof_import_types,
             file_base_dir: file_dir.clone(),
         },
-        nix_file: intermediate.nix_file,
+        source_text: intermediate.source_text.clone(),
         line_index: intermediate.line_index.clone(),
         parsed: intermediate.parsed.clone(),
         source_map: intermediate.source_map.clone(),
@@ -387,7 +379,10 @@ impl FileAnalysis {
 
 /// Cached analysis output for a single open file.
 pub struct FileAnalysis {
-    pub nix_file: NixFile,
+    /// Source text used for this analysis pass. Stored so that
+    /// `reload_registry` and `ReanalyzeFile` can re-run analysis without
+    /// reading from disk (which might miss unsaved editor changes).
+    pub source_text: String,
     pub line_index: LineIndex,
     /// Cached parse result. Call `.tree()` to get an rnix::Root.
     /// We store the Parse (which contains the Send-safe green tree) rather
@@ -449,9 +444,8 @@ impl fmt::Display for AnalysisTiming {
 
 /// All mutable state for the LSP's analysis pipeline.
 pub struct AnalysisState {
-    pub db: RootDatabase,
     pub registry: Arc<TypeAliasRegistry>,
-    /// Cached per-file analysis, keyed by the canonical path we give to Salsa.
+    /// Cached per-file analysis, keyed by canonical path.
     pub files: HashMap<PathBuf, FileAnalysis>,
     /// Project-level tix.toml configuration (if discovered).
     pub project_config: Option<ProjectConfig>,
@@ -474,7 +468,6 @@ pub struct AnalysisState {
 impl AnalysisState {
     pub fn new(registry: TypeAliasRegistry) -> Self {
         Self {
-            db: RootDatabase::default(),
             registry: Arc::new(registry),
             files: HashMap::new(),
             project_config: None,
@@ -533,32 +526,34 @@ impl AnalysisState {
         let t0 = Instant::now();
         let line_index = LineIndex::new(&contents);
         let parsed = rnix::Root::parse(&contents);
-        let nix_file = self.db.set_file_contents(path.clone(), contents);
         let t_parse = t0.elapsed();
 
         // -- Phase 2: Lower to Tix AST + name resolution --
         let t0 = Instant::now();
-        let (module, source_map) = module_and_source_maps(&self.db, nix_file);
-        let module_indices = lang_ast::module_indices(&self.db, nix_file);
-        let name_res = lang_ast::name_resolution(&self.db, nix_file);
-        let scopes = lang_ast::scopes(&self.db, nix_file);
-        let grouped = lang_ast::group_def(&self.db, nix_file);
+        let r = lang_ast::run_syntax_pipeline(&contents);
         let t_lower = t0.elapsed();
 
         // -- Phase 3: Import resolution (stubs-based, O(1) lookup) --
         let t0 = Instant::now();
         let base_dir = path.parent().unwrap_or(std::path::Path::new("/"));
-        let import_resolution =
-            self.coordinator
-                .resolve_imports(&module, &name_res, base_dir, Some(&self.registry));
+        let import_resolution = self.coordinator.resolve_imports(
+            &r.module,
+            &r.name_res,
+            base_dir,
+            Some(&self.registry),
+        );
 
         let import_diagnostics = import_errors_to_diagnostics(&import_resolution.errors);
 
         let import_targets = import_resolution.targets;
 
         let file_dir = path.parent().map(|p| p.to_path_buf());
-        let name_to_import =
-            build_name_to_import(&module, &import_targets, &grouped, file_dir.as_deref());
+        let name_to_import = build_name_to_import(
+            &r.module,
+            &import_targets,
+            &r.grouped_defs,
+            file_dir.as_deref(),
+        );
 
         let context_args = self.resolve_context_args(&path);
         let (context_arg_types, context_arg_arena) =
@@ -567,9 +562,11 @@ impl AnalysisState {
 
         // -- Phase 4: Type inference --
         let t0 = Instant::now();
-        let mut check_result = lang_check::CheckBuilder::from_db(
-            &self.db,
-            nix_file,
+        let mut check_result = lang_check::CheckBuilder::from_precomputed(
+            r.module.clone(),
+            r.name_res.clone(),
+            r.module_indices.clone(),
+            r.grouped_defs.clone(),
             Arc::clone(&self.registry),
             import_resolution.types,
             context_args,
@@ -585,7 +582,8 @@ impl AnalysisState {
         // If inference timed out, identify which bindings are incomplete
         // and include them in the diagnostic for actionable feedback.
         if check_result.bailed_out {
-            let missing_bindings: Vec<SmolStr> = module
+            let missing_bindings: Vec<SmolStr> = r
+                .module
                 .names()
                 .filter(|(_, name)| {
                     matches!(
@@ -604,7 +602,7 @@ impl AnalysisState {
                 .map(|(_, name)| name.text.clone())
                 .collect();
             check_result.diagnostics.push(TixDiagnostic {
-                at_expr: module.entry_expr,
+                at_expr: r.module.entry_expr,
                 kind: TixDiagnosticKind::InferenceAborted { missing_bindings },
             });
         }
@@ -614,14 +612,14 @@ impl AnalysisState {
         self.files.insert(
             path.clone(),
             FileAnalysis {
-                nix_file,
+                source_text: contents,
                 line_index,
                 parsed,
-                module,
-                module_indices,
-                source_map,
-                name_res,
-                scopes,
+                module: r.module,
+                module_indices: r.module_indices,
+                source_map: r.source_map,
+                name_res: r.name_res,
+                scopes: r.scopes,
                 check_result,
                 import_targets,
                 name_to_import,
@@ -663,14 +661,9 @@ impl AnalysisState {
         // -- Parse --
         let line_index = LineIndex::new(&contents);
         let parsed = rnix::Root::parse(&contents);
-        let nix_file = self.db.set_file_contents(path.clone(), contents);
 
         // -- Lower to Tix AST + name resolution --
-        let (module, source_map) = module_and_source_maps(&self.db, nix_file);
-        let module_indices = lang_ast::module_indices(&self.db, nix_file);
-        let name_res = lang_ast::name_resolution(&self.db, nix_file);
-        let scopes = lang_ast::scopes(&self.db, nix_file);
-        let grouped = lang_ast::group_def(&self.db, nix_file);
+        let r = lang_ast::run_syntax_pipeline(&contents);
 
         let context_args = self.resolve_context_args(&path);
         let (context_arg_types, context_arg_arena) =
@@ -682,14 +675,14 @@ impl AnalysisState {
         // then clone from it for syntax_data — avoids two extra clones
         // that the previous order required.
         let intermediate = SyntaxIntermediate {
-            nix_file,
             path,
-            module,
-            module_indices,
-            name_res,
-            scopes,
-            grouped_defs: grouped,
-            source_map,
+            source_text: contents,
+            module: r.module,
+            module_indices: r.module_indices,
+            name_res: r.name_res,
+            scopes: r.scopes,
+            grouped_defs: r.grouped_defs,
+            source_map: r.source_map,
             parsed,
             line_index,
             registry: Arc::clone(&self.registry),
@@ -777,7 +770,7 @@ impl AnalysisState {
                 typeof_import_types: HashMap::new(),
                 file_base_dir: file_dir.clone(),
             },
-            nix_file: intermediate.nix_file,
+            source_text: intermediate.source_text.clone(),
             line_index: intermediate.line_index.clone(),
             parsed: intermediate.parsed.clone(),
             source_map: intermediate.source_map.clone(),
@@ -829,12 +822,7 @@ impl AnalysisState {
         // Re-analyze every open file with the new registry.
         let paths: Vec<PathBuf> = self.files.keys().cloned().collect();
         for path in paths {
-            // Retrieve the current source text from the Salsa database so we
-            // can re-run update_file without needing the original String.
-            let contents = {
-                let analysis = self.files.get(&path).unwrap();
-                analysis.nix_file.contents(&self.db).to_owned()
-            };
+            let contents = self.files.get(&path).unwrap().source_text.clone();
             let (_analysis, timing) = self.update_file(path.clone(), contents);
             log::info!("re-analyzed {}: {timing}", path.display());
         }
@@ -1102,8 +1090,7 @@ mod tests {
         // Create two files that import each other. With the stubs-based
         // import model, neither file has an ephemeral stub for the other,
         // so both imports resolve to ⊤ (unconstrained type variable).
-        // No Salsa cycle recovery is involved — the stubs-based model
-        // doesn't use Salsa for cross-file inference.
+        // The stubs-based model doesn't do cross-file inference cycles.
         let project = crate::test_util::TempProject::new(&[
             ("a.nix", "import ./b.nix"),
             ("b.nix", "import ./a.nix"),

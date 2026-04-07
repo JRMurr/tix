@@ -5,9 +5,8 @@
 // Replaces the one-at-a-time background queue with a batch parallel warmup
 // that reuses the same layered approach as `tix check`. The pipeline:
 //
-//   Phase 1 (Sequential)  — Parse/lower/nameres all files via an independent
-//                           Salsa database. Scan imports for the dependency
-//                           graph. Build SyntaxBundles.
+//   Phase 1 (Sequential)  — Parse/lower/nameres all files via run_syntax_pipeline.
+//                           Scan imports for the dependency graph.
 //   Phase 1.5             — build_file_layers() for topological ordering.
 //   Phase 2 (Parallel)    — Layer-by-layer parallel inference via rayon.
 //                           Each layer's dependencies are guaranteed cached.
@@ -21,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use lang_ast::{module_and_source_maps, RootDatabase};
+use lang_ast::SyntaxResult;
 use lang_check::aliases::TypeAliasRegistry;
 use lang_check::coordinator::InferenceCoordinator;
 use lang_check::diagnostic::TixDiagnostic;
@@ -46,7 +45,7 @@ pub struct WarmupFileResult {
 
 /// Run batch warmup for a set of files using layered parallel inference.
 ///
-/// Uses an independent Salsa database (no contention with the main LSP DB).
+/// Results are returned for the caller to merge into LSP state.
 /// Results are returned for the caller to merge into LSP state.
 ///
 /// `coordinator` is the shared LSP coordinator — signatures are cached directly
@@ -71,21 +70,13 @@ pub fn run_batch_warmup(
     // Phase 1 — Sequential Prepare
     // =========================================================================
     //
-    // Uses its own RootDatabase (no contention with the main LSP Salsa DB).
-    // Parses, lowers, does nameres, scans imports, builds SyntaxBundles.
-
-    let db = RootDatabase::default();
+    // Parses, lowers, does nameres, scans imports for each file.
 
     struct PreparedFile {
         path: PathBuf,
+        source_text: String,
         parsed: rnix::Parse<rnix::Root>,
-        nix_file: lang_ast::NixFile,
-        module: lang_ast::Module,
-        module_indices: lang_ast::ModuleIndices,
-        source_map: lang_ast::ModuleSourceMap,
-        name_res: lang_ast::NameResolution,
-        scopes: lang_ast::ModuleScopes,
-        grouped_defs: lang_ast::GroupedDefs,
+        syntax: SyntaxResult,
         line_index: LineIndex,
         context_args: Arc<HashMap<SmolStr, comment_parser::ParsedTy>>,
         context_arg_types: HashMap<SmolStr, lang_ty::OutputTy>,
@@ -106,26 +97,14 @@ pub fn run_batch_warmup(
         // import edges to not match file map keys.
         let file_path = &std::fs::canonicalize(file_path).unwrap_or_else(|_| file_path.clone());
 
-        let nix_file = match db.read_file(file_path.clone()) {
-            Ok(f) => f,
-            Err(e) => {
-                log::warn!("warmup: could not load {}: {e}", file_path.display());
-                continue;
-            }
-        };
-
         let parsed = rnix::Root::parse(source_text);
-        let (module, source_map) = module_and_source_maps(&db, nix_file);
-        let module_indices = lang_ast::module_indices(&db, nix_file);
-        let name_res = lang_ast::name_resolution(&db, nix_file);
-        let scopes = lang_ast::scopes(&db, nix_file);
-        let grouped_defs = lang_ast::group_def(&db, nix_file);
+        let syntax = lang_ast::run_syntax_pipeline(source_text);
         let line_index = LineIndex::new(source_text);
 
         // Scan imports for dependency graph.
         let base_dir = file_path.parent().unwrap_or(Path::new("/"));
         let import_targets_raw =
-            lang_check::imports::scan_all_import_paths(&module, &name_res, base_dir);
+            lang_check::imports::scan_all_import_paths(&syntax.module, &syntax.name_res, base_dir);
 
         // Resolve context args from tix.toml.
         let context_args: Arc<HashMap<SmolStr, comment_parser::ParsedTy>> =
@@ -152,14 +131,9 @@ pub fn run_batch_warmup(
 
         prepared.push(PreparedFile {
             path: file_path.clone(),
+            source_text: source_text.clone(),
             parsed,
-            nix_file,
-            module,
-            module_indices,
-            source_map,
-            name_res,
-            scopes,
-            grouped_defs,
+            syntax,
             line_index,
             context_args,
             context_arg_types,
@@ -219,26 +193,30 @@ pub fn run_batch_warmup(
         // Resolve imports from coordinator cache. Prior layers' signatures
         // are available; intra-SCC imports within the same layer get ⊤.
         let base_dir = pp.path.parent().unwrap_or(Path::new("/"));
-        let import_resolution =
-            coordinator.resolve_imports(&pp.module, &pp.name_res, base_dir, Some(&registry));
+        let import_resolution = coordinator.resolve_imports(
+            &pp.syntax.module,
+            &pp.syntax.name_res,
+            base_dir,
+            Some(&registry),
+        );
         let import_diagnostics = import_errors_to_diagnostics(&import_resolution.errors);
 
         let import_targets = import_resolution.targets;
 
         let file_dir = pp.path.parent().map(|p| p.to_path_buf());
         let name_to_import = crate::state::build_name_to_import(
-            &pp.module,
+            &pp.syntax.module,
             &import_targets,
-            &pp.grouped_defs,
+            &pp.syntax.grouped_defs,
             file_dir.as_deref(),
         );
 
         // Build InferenceInputs and run inference.
         let inputs = lang_check::InferenceInputs {
-            module: pp.module.clone(),
-            module_indices: pp.module_indices.clone(),
-            name_res: pp.name_res.clone(),
-            grouped_defs: pp.grouped_defs.clone(),
+            module: pp.syntax.module.clone(),
+            module_indices: pp.syntax.module_indices.clone(),
+            name_res: pp.syntax.name_res.clone(),
+            grouped_defs: pp.syntax.grouped_defs.clone(),
             registry: Arc::clone(&registry),
             import_types: import_resolution.types,
             import_diagnostics,
@@ -253,7 +231,9 @@ pub fn run_batch_warmup(
         let check_result = lang_check::run_inference(&inputs);
 
         // Cache this file's signature for subsequent layers.
-        if let Some(sig) = lang_check::extract_file_signature(&check_result, pp.module.entry_expr) {
+        if let Some(sig) =
+            lang_check::extract_file_signature(&check_result, pp.syntax.module.entry_expr)
+        {
             coordinator.set_signature(&pp.path, sig);
         }
 
@@ -267,11 +247,11 @@ pub fn run_batch_warmup(
         let syntax_data = SyntaxData {
             parsed: pp.parsed,
             line_index: pp.line_index,
-            module: pp.module,
-            module_indices: pp.module_indices,
-            source_map: pp.source_map,
-            name_res: pp.name_res,
-            scopes: pp.scopes,
+            module: pp.syntax.module,
+            module_indices: pp.syntax.module_indices,
+            source_map: pp.syntax.source_map,
+            name_res: pp.syntax.name_res,
+            scopes: pp.syntax.scopes,
             import_targets,
             name_to_import,
             context_arg_types: pp.context_arg_types,
@@ -283,7 +263,7 @@ pub fn run_batch_warmup(
         };
 
         let file_analysis = crate::state::FileAnalysis {
-            nix_file: pp.nix_file,
+            source_text: pp.source_text,
             line_index: syntax_data.line_index.clone(),
             parsed: syntax_data.parsed.clone(),
             module: syntax_data.module.clone(),
@@ -486,12 +466,10 @@ mod tests {
         );
     }
 
-    /// Regression test: warmup uses its own RootDatabase, so NixFile IDs in
-    /// warmup results are invalid for the main LSP database. After merging,
-    /// we must re-register files in the main DB. This test verifies that the
-    /// re-registration pattern works (nix_file.contents() on the main DB).
+    /// Verify that warmup results carry the source text so re-analysis
+    /// does not need to read from disk (which might miss unsaved edits).
     #[test]
-    fn warmup_nix_file_reregistered_in_main_db() {
+    fn warmup_results_carry_source_text() {
         let dir = TempDir::new().unwrap();
         let files = write_nix_files(
             dir.path(),
@@ -504,18 +482,14 @@ mod tests {
         let results = run_batch_warmup(files, registry, &coordinator, None, None, None);
         assert_eq!(results.len(), 3);
 
-        // Simulate the server.rs merge path: create a fresh main DB and
-        // re-register each warmup file. This mirrors what the analysis loop
-        // does after receiving WarmupComplete.
-        let mut main_db = lang_ast::RootDatabase::default();
         for result in &results {
             let text = std::fs::read_to_string(&result.path).unwrap();
-            let nix_file = main_db.set_file_contents(result.path.clone(), text.clone());
-
-            // This would panic before the fix — warmup's nix_file ID (e.g. 2)
-            // doesn't exist in the fresh main_db.
-            let contents = nix_file.contents(&main_db);
-            assert_eq!(*contents, text);
+            assert_eq!(
+                result.file_analysis.source_text,
+                text,
+                "warmup should store source text in FileAnalysis for {}",
+                result.path.display()
+            );
         }
     }
 }

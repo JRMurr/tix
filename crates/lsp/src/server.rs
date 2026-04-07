@@ -354,14 +354,15 @@ fn spawn_analysis_loop(
                     AnalysisEvent::ReanalyzeFile { path } => {
                         let text = {
                             let st = state.lock();
-                            st.files
-                                .get(&path)
-                                .map(|a| a.nix_file.contents(&st.db).to_owned())
+                            st.files.get(&path).map(|a| a.source_text.clone())
                         };
                         if let Some(text) = text {
                             changes.insert(path, text);
                         } else {
-                            log::debug!("ReanalyzeFile for {:?}: file not in DB, skipping", path);
+                            log::debug!(
+                                "ReanalyzeFile for {:?}: file not in state, skipping",
+                                path
+                            );
                         }
                     }
                     AnalysisEvent::WarmupComplete { results } => {
@@ -447,19 +448,8 @@ fn spawn_analysis_loop(
                         let mut st = state.lock();
                         st.record_import_deps(&result.path, &result.import_paths);
 
-                        // The warmup used its own independent RootDatabase, so
-                        // result.file_analysis.nix_file is a salsa ID valid only
-                        // in that temporary DB. Re-register the file in the main
-                        // DB so later code (ReanalyzeFile, reload_registry) can
-                        // call nix_file.contents(&self.db) without panicking.
-                        let mut file_analysis = result.file_analysis;
-                        if let Ok(text) = std::fs::read_to_string(&result.path) {
-                            file_analysis.nix_file =
-                                st.db.set_file_contents(result.path.clone(), text);
-                        }
-
                         // Signature is already in the coordinator (set during warmup).
-                        st.files.insert(result.path.clone(), file_analysis);
+                        st.files.insert(result.path.clone(), result.file_analysis);
                     }
 
                     // Buffer diagnostics for quiescence publication.
@@ -1179,10 +1169,9 @@ impl LanguageServer for TixLanguageServer {
     ) -> Result<Option<GotoDefinitionResponse>> {
         let uri = params.text_document_position_params.text_document.uri;
         let pos = params.text_document_position_params.position;
-        // goto_definition needs &AnalysisState for cross-file resolution
-        // (loading target files from the Salsa DB). Lock state alongside
-        // the DashMap snapshot — no deadlock risk since the analysis loop
-        // never holds both simultaneously.
+        // goto_definition needs &AnalysisState for cross-file resolution.
+        // Lock state alongside the DashMap snapshot — no deadlock risk
+        // since the analysis loop never holds both simultaneously.
         let path = match uri_to_path(&uri) {
             Some(p) => p,
             None => return Ok(None),
@@ -1316,7 +1305,7 @@ impl LanguageServer for TixLanguageServer {
 
     async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
         self.with_snapshot(&params.text_document.uri, |snapshot, root| {
-            // Get file text from the green tree (Send-safe) instead of the Salsa DB.
+            // Get file text from the green tree (Send-safe).
             let contents = root.syntax().text().to_string();
             crate::formatting::format_document(&contents, &snapshot.syntax.line_index)
         })
@@ -1490,8 +1479,8 @@ fn content_modified_error() -> tower_lsp::jsonrpc::Error {
 
 /// Convert a file:// URI to a PathBuf, canonicalizing to resolve symlinks and
 /// `..` components. This ensures all downstream caches (snapshots, pending_text,
-/// state.files, Salsa DB) use consistent keys. Falls back to the raw path for
-/// files that don't exist on disk yet (e.g. unsaved buffers).
+/// state.files) use consistent keys. Falls back to the raw path for files that
+/// don't exist on disk yet (e.g. unsaved buffers).
 fn uri_to_path(uri: &Url) -> Option<PathBuf> {
     if uri.scheme() != "file" {
         return None;
