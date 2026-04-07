@@ -182,7 +182,7 @@ pub fn run_check_project(
     let syntax_results: Vec<(PrereadFile, lang_ast::SyntaxResult)> = preread
         .into_par_iter()
         .map(|pf| {
-            let r = lang_ast::run_syntax_pipeline(&pf.contents);
+            let r = lang_ast::run_syntax_pipeline_for_file(&pf.canonical_path, &pf.contents);
             (pf, r)
         })
         .collect();

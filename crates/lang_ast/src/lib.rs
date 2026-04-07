@@ -150,6 +150,14 @@ pub fn run_syntax_pipeline(contents: &str) -> SyntaxResult {
     }
 }
 
+/// Like [`run_syntax_pipeline`], but wraps all work in a tracing span tagged
+/// with the file path so sub-spans (`parse+lower`, `module_indices`, etc.)
+/// appear nested under the file.
+pub fn run_syntax_pipeline_for_file(path: &Path, contents: &str) -> SyntaxResult {
+    let _span = tracing::info_span!("syntax_pipeline", file = %display_path(path)).entered();
+    run_syntax_pipeline(contents)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Name {
     pub text: SmolStr,

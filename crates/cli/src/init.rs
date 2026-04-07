@@ -110,7 +110,7 @@ pub fn run_init(path: PathBuf, yes: bool, dry_run: bool) -> Result<(), Box<dyn E
 /// Classify a single file, returning None if parsing fails.
 fn classify_file(file_path: &Path) -> Option<Classification> {
     let contents = std::fs::read_to_string(file_path).ok()?;
-    let r = lang_ast::run_syntax_pipeline(&contents);
+    let r = lang_ast::run_syntax_pipeline_for_file(file_path, &contents);
     Some(classify_nix_file(&r.module, &r.name_res))
 }
 

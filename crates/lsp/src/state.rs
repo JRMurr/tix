@@ -204,7 +204,7 @@ impl LspSyntaxProvider {
 impl SyntaxProvider for LspSyntaxProvider {
     fn syntax_for_file(&self, path: &Path) -> Option<SyntaxBundle> {
         let contents = std::fs::read_to_string(path).ok()?;
-        let r = lang_ast::run_syntax_pipeline(&contents);
+        let r = lang_ast::run_syntax_pipeline_for_file(path, &contents);
 
         // Resolve context_args from tix.toml so demand-inferred files
         // get the same parameter typing as files opened in the editor.
@@ -530,7 +530,7 @@ impl AnalysisState {
 
         // -- Phase 2: Lower to Tix AST + name resolution --
         let t0 = Instant::now();
-        let r = lang_ast::run_syntax_pipeline(&contents);
+        let r = lang_ast::run_syntax_pipeline_for_file(&path, &contents);
         let t_lower = t0.elapsed();
 
         // -- Phase 3: Import resolution (stubs-based, O(1) lookup) --
@@ -663,7 +663,7 @@ impl AnalysisState {
         let parsed = rnix::Root::parse(&contents);
 
         // -- Lower to Tix AST + name resolution --
-        let r = lang_ast::run_syntax_pipeline(&contents);
+        let r = lang_ast::run_syntax_pipeline_for_file(&path, &contents);
 
         let context_args = self.resolve_context_args(&path);
         let (context_arg_types, context_arg_arena) =

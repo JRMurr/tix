@@ -98,7 +98,7 @@ pub fn run_batch_warmup(
         let file_path = &std::fs::canonicalize(file_path).unwrap_or_else(|_| file_path.clone());
 
         let parsed = rnix::Root::parse(source_text);
-        let syntax = lang_ast::run_syntax_pipeline(source_text);
+        let syntax = lang_ast::run_syntax_pipeline_for_file(file_path, source_text);
         let line_index = LineIndex::new(source_text);
 
         // Scan imports for dependency graph.

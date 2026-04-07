@@ -672,7 +672,7 @@ mod tests {
     impl SyntaxProvider for TestSyntaxProvider {
         fn syntax_for_file(&self, path: &Path) -> Option<SyntaxBundle> {
             let contents = std::fs::read_to_string(path).ok()?;
-            let r = lang_ast::run_syntax_pipeline(&contents);
+            let r = lang_ast::run_syntax_pipeline_for_file(path, &contents);
             Some(SyntaxBundle {
                 path: path.to_path_buf(),
                 module: r.module,

@@ -646,7 +646,7 @@ fn run_gen_stub(
         module_indices,
         grouped_defs,
         ..
-    } = lang_ast::run_syntax_pipeline(&contents);
+    } = lang_ast::run_syntax_pipeline_for_file(&file_path, &contents);
     let base_dir = file_path.parent().unwrap_or(std::path::Path::new("/"));
 
     // Infer with stubs-only (no ephemeral stubs for gen-stub).
@@ -790,7 +790,7 @@ fn run_verify_stubs(
         path: file_path.clone(),
         source: e,
     })?;
-    let syntax = lang_ast::run_syntax_pipeline(&contents);
+    let syntax = lang_ast::run_syntax_pipeline_for_file(&file_path, &contents);
     let base_dir = file_path.parent().unwrap_or(std::path::Path::new("/"));
 
     let import_resolution = resolve_import_types_from_stubs(
@@ -1158,7 +1158,7 @@ fn run_check(
         name_res,
         grouped_defs,
         ..
-    } = lang_ast::run_syntax_pipeline(&source_text);
+    } = lang_ast::run_syntax_pipeline_for_file(&file_path, &source_text);
     timer.mark("parse+lower+nameres");
 
     let base_dir = file_path.parent().unwrap_or(std::path::Path::new("/"));
@@ -1180,7 +1180,7 @@ fn run_check(
     impl lang_check::coordinator::SyntaxProvider for SingleFileSyntaxProvider {
         fn syntax_for_file(&self, path: &std::path::Path) -> Option<lang_check::SyntaxBundle> {
             let contents = std::fs::read_to_string(path).ok()?;
-            let r = lang_ast::run_syntax_pipeline(&contents);
+            let r = lang_ast::run_syntax_pipeline_for_file(path, &contents);
 
             // Resolve context_args from tix.toml for this specific file,
             // so transitive imports get their own context (not the root's).

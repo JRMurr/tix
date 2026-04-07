@@ -48,7 +48,7 @@ pub fn resolve_field_transitively(
             current_path.display()
         );
         let target_contents = std::fs::read_to_string(&current_path).ok()?;
-        let r = lang_ast::run_syntax_pipeline(&target_contents);
+        let r = lang_ast::run_syntax_pipeline_for_file(&current_path, &target_contents);
         let target_root = rnix::Root::parse(&target_contents).tree();
 
         // Find a name in the target module matching the field name.
