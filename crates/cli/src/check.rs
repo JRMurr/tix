@@ -4,8 +4,9 @@
 //
 // Type-checks all .nix files in a project using tix.toml configuration.
 // The pipeline has four phases:
-//   1.   Sequential Prepare — syntax pipeline, classification, context resolution,
-//        SyntaxBundle extraction, import scanning
+//   1a.  Parallel File I/O  — canonicalize + read all .nix files
+//   1b.  Parallel Syntax    — parse, lower, name resolution, SCC grouping (rayon)
+//   1b'. Sequential Metadata — classification, context resolution, import scanning
 //   1.5  Dependency Graph   — SCC computation + topological layering
 //   2.   Layered Inference  — layer-by-layer parallel inference with cross-file
 //        type flow and reference-counted signature eviction
@@ -172,13 +173,28 @@ pub fn run_check_project(
     timer.mark("file I/O (parallel)");
 
     // =========================================================================
-    // Phase 1b — Sequential Syntax Processing
+    // Phase 1b — Parallel Syntax Processing
     // =========================================================================
     //
-    // Parse, lower, name resolution, SCC grouping, classification, config
-    // validation, and context resolution. Classification and context
-    // resolution must be sequential (context resolution mutates the
-    // registry). The syntax pipeline itself is pure per-file computation.
+    // Parse, lower, name resolution, SCC grouping — pure per-file computation
+    // parallelized via rayon. This is the expensive step (~ms per file).
+
+    let syntax_results: Vec<(PrereadFile, lang_ast::SyntaxResult)> = preread
+        .into_par_iter()
+        .map(|pf| {
+            let r = lang_ast::run_syntax_pipeline(&pf.contents);
+            (pf, r)
+        })
+        .collect();
+
+    timer.mark("syntax pipeline (parallel)");
+
+    // =========================================================================
+    // Phase 1b-seq — Sequential Metadata Collection
+    // =========================================================================
+    //
+    // Classification, config validation, context resolution (mutates registry),
+    // and import scanning. All lightweight (~μs per file).
 
     struct PrePreparedFile {
         canonical_path: PathBuf,
@@ -192,17 +208,15 @@ pub fn run_check_project(
         import_targets: Vec<PathBuf>,
     }
 
-    let mut pre_prepared: Vec<PrePreparedFile> = Vec::with_capacity(preread.len());
+    let mut pre_prepared: Vec<PrePreparedFile> = Vec::with_capacity(syntax_results.len());
     let mut config_warnings: Vec<String> = Vec::new();
 
-    for pf in preread {
+    for (pf, r) in syntax_results {
         let relative = pf
             .original_path
             .strip_prefix(&config_dir)
             .unwrap_or(&pf.original_path)
             .to_path_buf();
-
-        let r = lang_ast::run_syntax_pipeline(&pf.contents);
 
         // Classify (AST-only, fast).
         let classification = classify_nix_file(&r.module, &r.name_res);
@@ -262,7 +276,7 @@ pub fn run_check_project(
             import_targets,
         });
     }
-    timer.mark("syntax pipeline (sequential)");
+    timer.mark("metadata (sequential)");
 
     // Wrap registry in Arc now that all mutations (context resolution) are done.
     // Each file shares a single ref-counted registry instead of deep-cloning it.
