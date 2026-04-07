@@ -32,7 +32,6 @@ pub enum OutputFormat {
     /// Machine-readable JSON
     Json,
 }
-use lang_ast::{module_and_source_maps, name_resolution, RootDatabase};
 use lang_check::aliases::TypeAliasRegistry;
 use lang_check::diagnostic::{TixDiagnostic, TixDiagnosticKind};
 use lang_check::imports::{import_errors_to_diagnostics, resolve_import_types_from_stubs};
@@ -640,11 +639,14 @@ fn run_gen_stub(
 ) -> Result<(), Box<dyn Error>> {
     let registry = build_registry(no_default_stubs, &stub_paths)?;
 
-    let db: RootDatabase = Default::default();
-    let file = db.read_file(file_path.clone())?;
-
-    let (module, _source_map) = lang_ast::module_and_source_maps(&db, file);
-    let name_res = lang_ast::name_resolution(&db, file);
+    let contents = std::fs::read_to_string(&file_path)?;
+    let lang_ast::SyntaxResult {
+        module,
+        name_res,
+        module_indices,
+        grouped_defs,
+        ..
+    } = lang_ast::run_syntax_pipeline_for_file(&file_path, &contents);
     let base_dir = file_path.parent().unwrap_or(std::path::Path::new("/"));
 
     // Infer with stubs-only (no ephemeral stubs for gen-stub).
@@ -656,9 +658,12 @@ fn run_gen_stub(
         Some(&registry),
     );
 
-    let result = lang_check::CheckBuilder::from_db(
-        &db,
-        file,
+    let entry_expr = module.entry_expr;
+    let result = lang_check::CheckBuilder::from_precomputed(
+        module,
+        name_res,
+        module_indices,
+        grouped_defs,
         Arc::new(registry),
         import_resolution.types,
         Arc::default(),
@@ -670,7 +675,7 @@ fn run_gen_stub(
         .as_ref()
         .and_then(|inf| {
             inf.expr_ty_map
-                .get(module.entry_expr)
+                .get(entry_expr)
                 .copied()
                 .map(|ty| (inf.arena.clone(), ty))
         })
@@ -781,30 +786,27 @@ fn run_verify_stubs(
     }
 
     // Infer the Nix file.
-    let db: RootDatabase = Default::default();
-    let file = db
-        .read_file(file_path.clone())
-        .map_err(|e| VerifyStubsError::Io {
-            path: file_path.clone(),
-            source: e,
-        })?;
-
-    let (module, _source_map) = lang_ast::module_and_source_maps(&db, file);
-    let name_res = lang_ast::name_resolution(&db, file);
+    let contents = std::fs::read_to_string(&file_path).map_err(|e| VerifyStubsError::Io {
+        path: file_path.clone(),
+        source: e,
+    })?;
+    let syntax = lang_ast::run_syntax_pipeline_for_file(&file_path, &contents);
     let base_dir = file_path.parent().unwrap_or(std::path::Path::new("/"));
 
     let import_resolution = resolve_import_types_from_stubs(
-        &module,
-        &name_res,
+        &syntax.module,
+        &syntax.name_res,
         base_dir,
         &HashMap::new(),
         Some(&registry),
     );
 
     let registry = Arc::new(registry);
-    let result = lang_check::CheckBuilder::from_db(
-        &db,
-        file,
+    let result = lang_check::CheckBuilder::from_precomputed(
+        syntax.module.clone(),
+        syntax.name_res,
+        syntax.module_indices,
+        syntax.grouped_defs,
         Arc::clone(&registry),
         import_resolution.types,
         Arc::default(),
@@ -816,7 +818,7 @@ fn run_verify_stubs(
         .as_ref()
         .and_then(|inf| {
             inf.expr_ty_map
-                .get(module.entry_expr)
+                .get(syntax.module.entry_expr)
                 .copied()
                 .map(|ty| (inf.arena.clone(), ty))
         })
@@ -1148,14 +1150,15 @@ fn run_check(
         Arc::default()
     };
 
-    let db: RootDatabase = Default::default();
-
-    let file = db.read_file(file_path.clone())?;
-
-    let (module, source_map) = module_and_source_maps(&db, file);
-    let name_res = name_resolution(&db, file);
-    let module_indices = lang_ast::module_indices(&db, file);
-    let grouped_defs = lang_ast::group_def(&db, file);
+    let source_text = std::fs::read_to_string(&file_path)?;
+    let lang_ast::SyntaxResult {
+        module,
+        source_map,
+        module_indices,
+        name_res,
+        grouped_defs,
+        ..
+    } = lang_ast::run_syntax_pipeline_for_file(&file_path, &source_text);
     timer.mark("parse+lower+nameres");
 
     let base_dir = file_path.parent().unwrap_or(std::path::Path::new("/"));
@@ -1165,24 +1168,19 @@ fn run_check(
     let registry = Arc::new(registry);
     let coordinator = lang_check::coordinator::InferenceCoordinator::new();
 
-    // Build a syntax provider that wraps the DB for transitive imports.
-    // Unlike the root file (whose context_args are resolved above), transitive
-    // imports need per-file context resolution from tix.toml so each file gets
-    // the correct parameter typing (e.g. NixOS modules vs home-manager files).
+    // Build a syntax provider for transitive imports. Unlike the root file
+    // (whose context_args are resolved above), transitive imports need
+    // per-file context resolution from tix.toml so each file gets the
+    // correct parameter typing (e.g. NixOS modules vs home-manager files).
     struct SingleFileSyntaxProvider {
-        db: parking_lot::Mutex<RootDatabase>,
         registry: parking_lot::Mutex<Arc<lang_check::aliases::TypeAliasRegistry>>,
         /// tix.toml config + directory, used to resolve per-file context_args.
         config: Option<(config::TixConfig, std::path::PathBuf)>,
     }
     impl lang_check::coordinator::SyntaxProvider for SingleFileSyntaxProvider {
         fn syntax_for_file(&self, path: &std::path::Path) -> Option<lang_check::SyntaxBundle> {
-            let db = self.db.lock();
-            let nix_file = db.read_file(path.to_path_buf()).ok()?;
-            let (module, _) = module_and_source_maps(&*db, nix_file);
-            let module_indices = lang_ast::module_indices(&*db, nix_file);
-            let name_res = name_resolution(&*db, nix_file);
-            let grouped_defs = lang_ast::group_def(&*db, nix_file);
+            let contents = std::fs::read_to_string(path).ok()?;
+            let r = lang_ast::run_syntax_pipeline_for_file(path, &contents);
 
             // Resolve context_args from tix.toml for this specific file,
             // so transitive imports get their own context (not the root's).
@@ -1199,10 +1197,10 @@ fn run_check(
 
             Some(lang_check::SyntaxBundle {
                 path: path.to_path_buf(),
-                module,
-                module_indices,
-                name_res,
-                grouped_defs,
+                module: r.module,
+                module_indices: r.module_indices,
+                name_res: r.name_res,
+                grouped_defs: r.grouped_defs,
                 registry,
                 context_args,
             })
@@ -1210,7 +1208,6 @@ fn run_check(
     }
 
     let syntax_provider = SingleFileSyntaxProvider {
-        db: parking_lot::Mutex::new(db),
         registry: parking_lot::Mutex::new(Arc::clone(&registry)),
         config: toml_config
             .as_ref()
@@ -1275,8 +1272,6 @@ fn run_check(
             kind: TixDiagnosticKind::InferenceAborted { missing_bindings },
         });
     }
-
-    let source_text = std::fs::read_to_string(&file_path)?;
 
     // Apply suppression directives: `# tix-nocheck` clears all diagnostics,
     // `# tix-ignore` filters diagnostics on the next line.

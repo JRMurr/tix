@@ -88,6 +88,9 @@ fn walk_nix_files(root: &Path, exclude_set: &Option<globset::GlobSet>) -> Vec<Pa
     use ignore::WalkBuilder;
 
     let mut builder = WalkBuilder::new(root);
+    // Follow symlinks so that nixpkgs-test's symlinked work directory
+    // (temp dir with symlinks into the nix store) is walked correctly.
+    builder.follow_links(true);
     // Respect .gitignore (enabled by default, but be explicit).
     builder.git_ignore(true);
     builder.git_global(true);
@@ -400,6 +403,49 @@ mod tests {
         assert!(
             !names.contains(&"deep.nix"),
             "should NOT find gitignored cache-dir/nested/deep.nix, got: {names:?}"
+        );
+    }
+
+    /// Regression: `walk_nix_files` must follow symlinks so that nixpkgs-test's
+    /// symlinked work directory (temp dir with symlinks into the nix store) is
+    /// walked correctly. Without `follow_links(true)`, only top-level file
+    /// symlinks are found and directory symlinks are skipped entirely.
+    #[test]
+    fn discover_follows_symlinks_into_dirs() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let root = dir.path();
+
+        // Create a "real" directory with .nix files (simulates nix store).
+        let real_dir = root.join("real");
+        std::fs::create_dir_all(real_dir.join("sub")).unwrap();
+        std::fs::write(real_dir.join("top.nix"), "42").unwrap();
+        std::fs::write(real_dir.join("sub/nested.nix"), "42").unwrap();
+
+        // Create a "work" directory with symlinks (simulates nixpkgs-test).
+        let work_dir = root.join("work");
+        std::fs::create_dir(&work_dir).unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(real_dir.join("top.nix"), work_dir.join("top.nix")).unwrap();
+            std::os::unix::fs::symlink(real_dir.join("sub"), work_dir.join("sub")).unwrap();
+        }
+        #[cfg(not(unix))]
+        {
+            eprintln!("skipping: symlink test requires unix");
+            return;
+        }
+
+        let config = TixConfig::default();
+        let files = discover_all_nix_files(&work_dir, &config);
+        let names: Vec<_> = files
+            .iter()
+            .map(|p| p.file_name().unwrap().to_str().unwrap())
+            .collect();
+
+        assert!(names.contains(&"top.nix"), "should find symlinked file");
+        assert!(
+            names.contains(&"nested.nix"),
+            "should follow symlinked dir and find nested.nix, got: {names:?}"
         );
     }
 

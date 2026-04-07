@@ -5,8 +5,8 @@ use petgraph::graph::DiGraph;
 use smol_str::SmolStr;
 use tracing::instrument;
 
-use super::{BindingValue, Expr, ExprId, Module, NameId};
-use crate::{db::NixFile, module, Bindings};
+use super::{BindingValue, Expr, ExprId, Module, ModuleIndices, NameId};
+use crate::Bindings;
 
 pub type ScopeId = Id<ScopeData>;
 
@@ -118,10 +118,9 @@ pub fn lookup_global_builtin(name: &str) -> Option<&'static str> {
     }
 }
 
-#[salsa::tracked]
-pub fn scopes(db: &dyn crate::AstDb, file: NixFile) -> ModuleScopes {
-    let module = crate::module(db, file);
-    ModuleScopes::new(module)
+/// Build scopes for a module.
+pub fn compute_scopes(module: &Module) -> ModuleScopes {
+    ModuleScopes::new(module.clone())
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
@@ -292,11 +291,8 @@ pub struct NameResolution {
     refs_by_name: HashMap<NameId, Vec<ExprId>>,
 }
 
-#[instrument(level = "info", skip_all, name = "name_resolution", fields(file = crate::display_path(&file.path(db)).as_str()))]
-#[salsa::tracked]
-pub fn name_resolution(db: &dyn crate::AstDb, file: NixFile) -> NameResolution {
-    let module = module(db, file);
-    let scopes = scopes(db, file);
+#[instrument(level = "info", skip_all, name = "name_resolution")]
+pub fn compute_name_resolution(module: &Module, scopes: &ModuleScopes) -> NameResolution {
     let resolve_map: ArenaMap<_, _> = module
         .exprs()
         .filter_map(|(e, kind)| {
@@ -580,14 +576,13 @@ pub type DependentGroup = Vec<TypeDef>;
 pub type GroupedDefs = Vec<DependentGroup>;
 type DepGraph = DiGraph<NameId, ()>;
 
-#[instrument(level = "info", skip_all, name = "group_def", fields(file = crate::display_path(&file.path(db)).as_str()))]
-#[salsa::tracked]
-pub fn group_def(db: &dyn crate::AstDb, file: NixFile) -> GroupedDefs {
-    let module = module(db, file);
-    let name_res = name_resolution(db, file);
-    let indices = crate::module_indices(db, file);
-
-    let name_deps = NameDependencies::new(&module, &name_res, &indices.binding_expr);
+#[instrument(level = "info", skip_all, name = "group_def")]
+pub fn compute_group_def(
+    module: &Module,
+    name_res: &NameResolution,
+    indices: &ModuleIndices,
+) -> GroupedDefs {
+    let name_deps = NameDependencies::new(module, name_res, &indices.binding_expr);
 
     let num_names = name_deps.name_to_expr.len();
     let num_refs = name_deps.edges.len();
@@ -657,15 +652,12 @@ pub fn group_def(db: &dyn crate::AstDb, file: NixFile) -> GroupedDefs {
 mod tests {
     use super::*;
 
-    /// Helper: parse Nix source and return (db, file, module).
-    fn setup(src: &str) -> (crate::RootDatabase, NixFile, crate::Module) {
-        let mut db = crate::RootDatabase::default();
-        let file = db.set_file_contents(std::path::PathBuf::from("/test.nix"), src.to_string());
-        let module = crate::module(&db, file);
-        (db, file, module)
-    }
-
     use crate::tests::{find_name, find_ref_expr};
+
+    /// Helper: parse Nix source and return the syntax pipeline results.
+    fn setup(src: &str) -> crate::SyntaxResult {
+        crate::run_syntax_pipeline(src)
+    }
 
     // ==================================================================
     // Existing tests
@@ -674,11 +666,10 @@ mod tests {
     #[test]
     fn refs_to_returns_all_reference_sites() {
         // `let x = 1; in x + x` — x has two references after `in`.
-        let (db, file, module) = setup("let x = 1; in x + x");
-        let name_res = name_resolution(&db, file);
+        let r = setup("let x = 1; in x + x");
 
-        let x_name = find_name(&module, "x");
-        let refs = name_res.refs_to(x_name);
+        let x_name = find_name(&r.module, "x");
+        let refs = r.name_res.refs_to(x_name);
         assert_eq!(
             refs.len(),
             2,
@@ -688,35 +679,33 @@ mod tests {
 
     #[test]
     fn module_indices_binding_expr() {
-        let (db, file, module) = setup("let x = 1 + 2; in x");
-        let indices = crate::module_indices(&db, file);
+        let r = setup("let x = 1 + 2; in x");
 
-        let x_name = find_name(&module, "x");
+        let x_name = find_name(&r.module, "x");
         assert!(
-            indices.binding_expr.contains_key(&x_name),
+            r.module_indices.binding_expr.contains_key(&x_name),
             "x should have a binding expression in the index"
         );
         // Verify the value is an actual expression (not just key presence).
-        let expr_id = indices.binding_expr[&x_name];
+        let expr_id = r.module_indices.binding_expr[&x_name];
         assert!(
-            matches!(module[expr_id], crate::Expr::BinOp { .. }),
+            matches!(r.module[expr_id], crate::Expr::BinOp { .. }),
             "binding expression for x should be the `1 + 2` BinOp"
         );
     }
 
     #[test]
     fn module_indices_param_to_lambda() {
-        let (db, file, module) = setup("x: x + 1");
-        let indices = crate::module_indices(&db, file);
+        let r = setup("x: x + 1");
 
-        let x_name = find_name(&module, "x");
-        let lambda_id = indices.param_to_lambda.get(&x_name);
+        let x_name = find_name(&r.module, "x");
+        let lambda_id = r.module_indices.param_to_lambda.get(&x_name);
         assert!(
             lambda_id.is_some(),
             "lambda param x should map to its owning Lambda"
         );
         assert!(
-            matches!(module[*lambda_id.unwrap()], crate::Expr::Lambda { .. }),
+            matches!(r.module[*lambda_id.unwrap()], crate::Expr::Lambda { .. }),
             "param_to_lambda should point to a Lambda expression"
         );
     }
@@ -737,24 +726,18 @@ mod tests {
 
     #[test]
     fn shadow_inner_let_wins() {
-        // Inner `x` shadows outer `x`. The reference after `in` resolves
-        // to the inner binding.
-        let (db, file, module) = setup("let x = 1; in let x = 2; in x");
-        let name_res = name_resolution(&db, file);
+        let r = setup("let x = 1; in let x = 2; in x");
 
-        // There are two NameIds for "x" — find the inner one (it has LetIn
-        // kind and is the second in iteration order).
-        let x_names: Vec<NameId> = module
+        let x_names: Vec<NameId> = r
+            .module
             .names()
             .filter(|(_, n)| n.text == "x")
             .map(|(id, _)| id)
             .collect();
         assert_eq!(x_names.len(), 2, "should have two 'x' names");
 
-        let ref_expr = find_ref_expr(&module, "x");
-        let resolved = name_res.get(ref_expr).expect("reference should resolve");
-        // The reference should resolve to one of the two x's.
-        // The inner (shadowing) one is the second NameId allocated.
+        let ref_expr = find_ref_expr(&r.module, "x");
+        let resolved = r.name_res.get(ref_expr).expect("reference should resolve");
         let inner_x = x_names[1];
         assert_eq!(
             *resolved,
@@ -765,13 +748,10 @@ mod tests {
 
     #[test]
     fn with_expr_resolution() {
-        // `with` makes attrset fields available; unresolved names resolve
-        // as WithExprs pointing at the with-expression.
-        let (db, file, module) = setup("with { x = 1; }; x");
-        let name_res = name_resolution(&db, file);
+        let r = setup("with { x = 1; }; x");
 
-        let ref_expr = find_ref_expr(&module, "x");
-        let resolved = name_res.get(ref_expr).expect("reference should resolve");
+        let ref_expr = find_ref_expr(&r.module, "x");
+        let resolved = r.name_res.get(ref_expr).expect("reference should resolve");
         assert!(
             matches!(resolved, ResolveResult::WithExprs(..)),
             "x should resolve as WithExprs, got: {resolved:?}"
@@ -780,12 +760,10 @@ mod tests {
 
     #[test]
     fn local_shadows_with() {
-        // A local let binding takes priority over `with`.
-        let (db, file, module) = setup("let x = 1; in with { x = 2; }; x");
-        let name_res = name_resolution(&db, file);
+        let r = setup("let x = 1; in with { x = 2; }; x");
 
-        let ref_expr = find_ref_expr(&module, "x");
-        let resolved = name_res.get(ref_expr).expect("reference should resolve");
+        let ref_expr = find_ref_expr(&r.module, "x");
+        let resolved = r.name_res.get(ref_expr).expect("reference should resolve");
         assert!(
             matches!(resolved, ResolveResult::Definition(_)),
             "x should resolve as Definition (local shadows with), got: {resolved:?}"
@@ -794,16 +772,12 @@ mod tests {
 
     #[test]
     fn nested_with_fallback() {
-        // Two nested `with` scopes. `x` is only in the outer one, so
-        // both with-exprs are recorded (inner first, outer as fallback).
-        let (db, file, module) = setup("with { x = 1; }; with { y = 2; }; x");
-        let name_res = name_resolution(&db, file);
+        let r = setup("with { x = 1; }; with { y = 2; }; x");
 
-        let ref_expr = find_ref_expr(&module, "x");
-        let resolved = name_res.get(ref_expr).expect("reference should resolve");
+        let ref_expr = find_ref_expr(&r.module, "x");
+        let resolved = r.name_res.get(ref_expr).expect("reference should resolve");
         match resolved {
             ResolveResult::WithExprs(inner, fallbacks) => {
-                // Inner with is listed first, outer in fallbacks.
                 assert!(
                     !fallbacks.is_empty(),
                     "should have fallback with-exprs, inner={inner:?}"
@@ -815,12 +789,10 @@ mod tests {
 
     #[test]
     fn builtin_resolution() {
-        // Builtin names resolve as Builtin, not Definition or WithExprs.
-        let (db, file, module) = setup("toString 42");
-        let name_res = name_resolution(&db, file);
+        let r = setup("toString 42");
 
-        let ref_expr = find_ref_expr(&module, "toString");
-        let resolved = name_res.get(ref_expr).expect("reference should resolve");
+        let ref_expr = find_ref_expr(&r.module, "toString");
+        let resolved = r.name_res.get(ref_expr).expect("reference should resolve");
         assert_eq!(
             *resolved,
             ResolveResult::Builtin("toString"),
@@ -830,13 +802,11 @@ mod tests {
 
     #[test]
     fn builtins_resolves_as_builtin() {
-        // Bare `builtins` reference should resolve as a builtin so LSP
-        // hover/goto-def works. See code review issue #14.
-        let (db, file, module) = setup("builtins.isNull null");
-        let name_res = name_resolution(&db, file);
+        let r = setup("builtins.isNull null");
 
-        let ref_expr = find_ref_expr(&module, "builtins");
-        let resolved = name_res
+        let ref_expr = find_ref_expr(&r.module, "builtins");
+        let resolved = r
+            .name_res
             .get(ref_expr)
             .expect("builtins reference should resolve");
         assert_eq!(
@@ -848,28 +818,22 @@ mod tests {
 
     #[test]
     fn unresolved_name_is_none() {
-        // A bare name with no binding, no `with`, and not a builtin
-        // resolves as None.
-        let (db, file, module) = setup("nonexistent_var");
-        let name_res = name_resolution(&db, file);
+        let r = setup("nonexistent_var");
 
-        let ref_expr = find_ref_expr(&module, "nonexistent_var");
+        let ref_expr = find_ref_expr(&r.module, "nonexistent_var");
         assert!(
-            name_res.get(ref_expr).is_none(),
+            r.name_res.get(ref_expr).is_none(),
             "unresolved name should return None"
         );
     }
 
     #[test]
     fn lambda_params_in_scope() {
-        // Both lambda parameters are visible in the body and resolve
-        // to their respective NameIds.
-        let (db, file, module) = setup("x: y: x");
-        let name_res = name_resolution(&db, file);
+        let r = setup("x: y: x");
 
-        let x_name = find_name(&module, "x");
-        let ref_expr = find_ref_expr(&module, "x");
-        let resolved = name_res.get(ref_expr).expect("reference should resolve");
+        let x_name = find_name(&r.module, "x");
+        let ref_expr = find_ref_expr(&r.module, "x");
+        let resolved = r.name_res.get(ref_expr).expect("reference should resolve");
         assert_eq!(
             *resolved,
             ResolveResult::Definition(x_name),
@@ -879,15 +843,11 @@ mod tests {
 
     #[test]
     fn inherit_resolves_in_parent_scope() {
-        // `inherit x` inside an attrset creates a reference that resolves
-        // to the outer let-binding's `x`.
-        let (db, file, module) = setup("let x = 1; in { inherit x; }");
-        let name_res = name_resolution(&db, file);
+        let r = setup("let x = 1; in { inherit x; }");
 
-        let x_name = find_name(&module, "x");
-        // The inherit creates a Reference expression for `x` — find it.
-        // There should be exactly one reference expression.
-        let ref_exprs: Vec<ExprId> = module
+        let x_name = find_name(&r.module, "x");
+        let ref_exprs: Vec<ExprId> = r
+            .module
             .exprs()
             .filter(|(_, e)| matches!(e, crate::Expr::Reference(n) if n == "x"))
             .map(|(id, _)| id)
@@ -896,7 +856,8 @@ mod tests {
             !ref_exprs.is_empty(),
             "inherit should produce a Reference expr"
         );
-        let resolved = name_res
+        let resolved = r
+            .name_res
             .get(ref_exprs[0])
             .expect("inherit reference should resolve");
         assert_eq!(
@@ -912,20 +873,17 @@ mod tests {
 
     #[test]
     fn scc_mutual_recursion() {
-        // f and g reference each other — they should be in the same SCC.
-        let (db, file, module) = setup("let f = x: g x; g = x: f x; in f");
-        let groups = group_def(&db, file);
+        let r = setup("let f = x: g x; g = x: f x; in f");
 
-        let f_name = find_name(&module, "f");
-        let g_name = find_name(&module, "g");
+        let f_name = find_name(&r.module, "f");
+        let g_name = find_name(&r.module, "g");
 
-        // Find the group containing f.
-        let fg_group = groups
+        let fg_group = r
+            .grouped_defs
             .iter()
             .find(|g| g.iter().any(|td| td.name() == f_name))
             .expect("f should appear in some SCC group");
 
-        // g should be in the same group.
         assert!(
             fg_group.iter().any(|td| td.name() == g_name),
             "f and g should be in the same SCC group"
@@ -935,36 +893,34 @@ mod tests {
 
     #[test]
     fn scc_independent_bindings() {
-        // a and b don't reference each other — separate SCCs.
-        let (db, file, module) = setup("let a = 1; b = 2; in a + b");
-        let groups = group_def(&db, file);
+        let r = setup("let a = 1; b = 2; in a + b");
 
-        let a_name = find_name(&module, "a");
-        let b_name = find_name(&module, "b");
+        let a_name = find_name(&r.module, "a");
+        let b_name = find_name(&r.module, "b");
 
-        let a_group = groups
+        let a_group = r
+            .grouped_defs
             .iter()
             .find(|g| g.iter().any(|td| td.name() == a_name))
             .expect("a should appear in some SCC group");
-        let b_group = groups
+        let b_group = r
+            .grouped_defs
             .iter()
             .find(|g| g.iter().any(|td| td.name() == b_name))
             .expect("b should appear in some SCC group");
 
         assert_eq!(a_group.len(), 1, "a should be in its own group");
         assert_eq!(b_group.len(), 1, "b should be in its own group");
-        // Verify they're different groups by checking names don't overlap.
         assert_ne!(a_group[0].name(), b_group[0].name());
     }
 
     #[test]
     fn scc_self_recursive() {
-        // f references itself — it should be in a group by itself.
-        let (db, file, module) = setup("let f = x: f (x + 1); in f");
-        let groups = group_def(&db, file);
+        let r = setup("let f = x: f (x + 1); in f");
 
-        let f_name = find_name(&module, "f");
-        let f_group = groups
+        let f_name = find_name(&r.module, "f");
+        let f_group = r
+            .grouped_defs
             .iter()
             .find(|g| g.iter().any(|td| td.name() == f_name))
             .expect("f should appear in some SCC group");
@@ -974,11 +930,11 @@ mod tests {
             1,
             "self-recursive f should be alone in its group"
         );
-        // Lambda param `x` should NOT appear in any group.
-        let x_in_groups = groups
+        let x_in_groups = r
+            .grouped_defs
             .iter()
             .flat_map(|g| g.iter())
-            .any(|td| module[td.name()].text == "x");
+            .any(|td| r.module[td.name()].text == "x");
         assert!(
             !x_in_groups,
             "lambda param x should not appear in SCC groups"
@@ -987,24 +943,19 @@ mod tests {
 
     #[test]
     fn scc_chain_dependency() {
-        // a = 1; b = a; c = b; — linear chain, each in its own SCC,
-        // topologically ordered so a comes before b comes before c.
-        let (db, file, module) = setup("let a = 1; b = a; c = b; in c");
-        let groups = group_def(&db, file);
+        let r = setup("let a = 1; b = a; c = b; in c");
 
-        let a_name = find_name(&module, "a");
-        let b_name = find_name(&module, "b");
-        let c_name = find_name(&module, "c");
+        let a_name = find_name(&r.module, "a");
+        let b_name = find_name(&r.module, "b");
+        let c_name = find_name(&r.module, "c");
 
-        // Each should be in its own group.
         assert!(
-            groups.iter().all(|g| g.len() == 1),
+            r.grouped_defs.iter().all(|g| g.len() == 1),
             "all groups should have exactly 1 member for a linear chain"
         );
 
-        // Find the position of each name in the group ordering.
         let pos_of = |name: NameId| -> usize {
-            groups
+            r.grouped_defs
                 .iter()
                 .position(|g| g[0].name() == name)
                 .unwrap_or_else(|| panic!("name not found in groups"))

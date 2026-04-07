@@ -60,12 +60,8 @@ proptest! {
         };
 
         // Partial inference
-        let (db, file) = lang_ast::tests::TestDatabase::single_file(&src).unwrap();
-        let module = lang_ast::module(&db, file);
-        let name_res = lang_ast::name_resolution(&db, file);
-        let indices = lang_ast::module_indices(&db, file);
-        let groups = lang_ast::group_def(&db, file);
-        let n_groups = groups.len();
+        let r = lang_ast::run_syntax_pipeline(&src);
+        let n_groups = r.grouped_defs.len();
 
         if n_groups == 0 {
             return Ok(());
@@ -73,24 +69,24 @@ proptest! {
 
         let aliases = crate::load_inline_aliases(
             std::sync::Arc::new(crate::aliases::TypeAliasRegistry::default()),
-            &module,
+            &r.module,
         );
         let check = crate::CheckCtx::new(
-            &module,
-            &name_res,
-            &indices.binding_expr,
+            &r.module,
+            &r.name_res,
+            &r.module_indices.binding_expr,
             aliases,
             std::collections::HashMap::new(),
             std::sync::Arc::default(),
         );
-        let (partial_result, _diags) = check.infer_prog_up_to_group(groups, n_groups - 1);
+        let (partial_result, _diags) = check.infer_prog_up_to_group(r.grouped_defs, n_groups - 1);
 
         // Only compare top-level let-in bindings (which get early-canonical
         // snapshots). Skip inner names that degrade under bailed_out.
         let binding_names: std::collections::HashSet<String> =
             (0..n).map(|i| binding_name(i)).collect();
 
-        for (name_id, name_data) in module.names() {
+        for (name_id, name_data) in r.module.names() {
             if !binding_names.contains(name_data.text.as_str()) {
                 continue;
             }

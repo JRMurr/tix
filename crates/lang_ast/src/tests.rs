@@ -1,9 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::{db::NixFile, AstDb, ExprId, NameId};
-
-const DEFAULT_IMPORT_FILE: &str = "default.nix";
+use crate::{ExprId, NameId, SyntaxResult};
 
 // ==============================================================================
 // Shared test helpers
@@ -50,101 +48,24 @@ pub fn find_apply(module: &crate::Module) -> ExprId {
         .expect("no Apply found in module")
 }
 
-#[derive(Clone)]
-#[salsa::db]
-pub struct TestDatabase {
-    storage: salsa::Storage<Self>,
+/// Parse a single Nix source string through the full syntax pipeline.
+pub fn parse_fixture(src: &str) -> SyntaxResult {
+    crate::run_syntax_pipeline(src)
 }
 
-impl Default for TestDatabase {
-    fn default() -> Self {
-        Self {
-            storage: Default::default(),
+/// Parse multiple files and return a map of path → SyntaxResult.
+/// The first file is treated as the entry point and also returned separately.
+pub fn parse_multi_file(
+    sources: &[(&str, &str)],
+) -> (SyntaxResult, HashMap<PathBuf, SyntaxResult>) {
+    let mut map = HashMap::new();
+    let mut entry = None;
+    for (i, &(path_str, contents)) in sources.iter().enumerate() {
+        let result = crate::run_syntax_pipeline(contents);
+        if i == 0 {
+            entry = Some(result.clone());
         }
+        map.insert(PathBuf::from(path_str), result);
     }
-}
-
-#[salsa::db]
-impl salsa::Database for TestDatabase {}
-
-#[salsa::db]
-impl AstDb for TestDatabase {
-    fn parse_file(&self, file: NixFile) -> rnix::Parse<rnix::Root> {
-        let src = file.contents(self);
-        rnix::Root::parse(src)
-    }
-
-    fn load_file(&self, _path: &std::path::Path) -> Option<NixFile> {
-        // Single-file test database doesn't support imports.
-        None
-    }
-}
-
-#[salsa::tracked]
-impl TestDatabase {
-    pub fn single_file(fixture: &str) -> miette::Result<(Self, NixFile)> {
-        let db = Self::default();
-
-        let path: PathBuf = format!("/{DEFAULT_IMPORT_FILE}").into();
-
-        let file = NixFile::new(&db, path, fixture.into());
-
-        Ok((db, file))
-    }
-}
-
-// ==============================================================================
-// Multi-file test database
-// ==============================================================================
-
-/// A test database that supports loading multiple files, enabling multi-file
-/// import tests. Files are provided as (path, contents) pairs; `load_file`
-/// looks up the path in the pre-loaded map.
-#[derive(Clone)]
-#[salsa::db]
-pub struct MultiFileTestDatabase {
-    storage: salsa::Storage<Self>,
-    files: HashMap<PathBuf, NixFile>,
-}
-
-#[salsa::db]
-impl salsa::Database for MultiFileTestDatabase {}
-
-#[salsa::db]
-impl AstDb for MultiFileTestDatabase {
-    fn parse_file(&self, file: NixFile) -> rnix::Parse<rnix::Root> {
-        let src = file.contents(self);
-        rnix::Root::parse(src)
-    }
-
-    fn load_file(&self, path: &std::path::Path) -> Option<NixFile> {
-        self.files.get(path).copied()
-    }
-}
-
-impl MultiFileTestDatabase {
-    /// Create a multi-file test database from a list of (path, source) pairs.
-    /// The first file is treated as the entry point.
-    ///
-    /// Paths should be absolute (e.g. "/main.nix", "/lib.nix") so that
-    /// import resolution works correctly.
-    pub fn new(sources: &[(&str, &str)]) -> (Self, NixFile) {
-        let mut db = Self {
-            storage: Default::default(),
-            files: HashMap::new(),
-        };
-
-        let mut entry_file = None;
-
-        for (i, &(path_str, contents)) in sources.iter().enumerate() {
-            let path: PathBuf = path_str.into();
-            let file = NixFile::new(&db, path.clone(), contents.into());
-            db.files.insert(path, file);
-            if i == 0 {
-                entry_file = Some(file);
-            }
-        }
-
-        (db, entry_file.expect("at least one file required"))
-    }
+    (entry.expect("at least one file required"), map)
 }

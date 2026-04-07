@@ -653,19 +653,16 @@ fn is_builtin_expr(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tests::{find_if_condition, TestDatabase};
+    use crate::tests::find_if_condition;
     use indoc::indoc;
 
     /// Parse Nix source containing an if-then-else, run analyze_condition
     /// on the condition, and return (NarrowInfo, Module) for assertions.
     fn analyze(src: &str) -> (NarrowInfo, crate::Module) {
-        let (db, file) = TestDatabase::single_file(src).unwrap();
-        let module = crate::module(&db, file);
-        let name_res = crate::name_resolution(&db, file);
-        let indices = crate::module_indices(&db, file);
-        let cond = find_if_condition(&module);
-        let info = analyze_condition(&module, &name_res, &indices.binding_expr, cond);
-        (info, module)
+        let r = crate::run_syntax_pipeline(src);
+        let cond = find_if_condition(&r.module);
+        let info = analyze_condition(&r.module, &r.name_res, &r.module_indices.binding_expr, cond);
+        (info, r.module)
     }
 
     /// Assert a single NarrowBinding matches the expected name text and predicate.
@@ -1237,17 +1234,16 @@ mod tests {
     /// Find the expression to pass to detect_conditional_fn.
     /// Navigates through Lambda wrappers to find the inner expression.
     fn detect_fn(src: &str) -> Option<ConditionalFn> {
-        let (db, file) = TestDatabase::single_file(src).unwrap();
-        let module = crate::module(&db, file);
+        let r = crate::run_syntax_pipeline(src);
         // Navigate through Lambda wrappers to get the body expression.
-        let mut expr_id = module.entry_expr;
+        let mut expr_id = r.module.entry_expr;
         loop {
-            match &module[expr_id] {
+            match &r.module[expr_id] {
                 Expr::Lambda { body, .. } => expr_id = *body,
                 _ => break,
             }
         }
-        detect_conditional_fn(&module, expr_id)
+        detect_conditional_fn(&r.module, expr_id)
     }
 
     #[test]
@@ -1291,17 +1287,15 @@ mod tests {
     /// The function finds the inner `Apply(f, cond)` — the fun_expr of the
     /// outer Apply — which is what `detect_conditional_apply_narrowing` expects.
     fn detect_apply_narrowing(src: &str) -> (Option<NarrowInfo>, crate::Module) {
-        let (db, file) = TestDatabase::single_file(src).unwrap();
-        let module = crate::module(&db, file);
-        let name_res = crate::name_resolution(&db, file);
-        let indices = crate::module_indices(&db, file);
+        let r = crate::run_syntax_pipeline(src);
 
         // Find the inner Apply of the curried call: the Apply whose fun is
         // also an Apply (outer), then take the outer's fun field (inner).
-        let inner_apply = module
+        let inner_apply = r
+            .module
             .exprs()
             .find_map(|(_, e)| match e {
-                Expr::Apply { fun, .. } if matches!(&module[*fun], Expr::Apply { .. }) => {
+                Expr::Apply { fun, .. } if matches!(&r.module[*fun], Expr::Apply { .. }) => {
                     Some(*fun)
                 }
                 _ => None,
@@ -1309,12 +1303,12 @@ mod tests {
             .expect("should find curried Apply(Apply(f, cond), body)");
 
         let info = detect_conditional_apply_narrowing(
-            &module,
-            &name_res,
-            &indices.binding_expr,
+            &r.module,
+            &r.name_res,
+            &r.module_indices.binding_expr,
             inner_apply,
         );
-        (info, module)
+        (info, r.module)
     }
 
     #[test]

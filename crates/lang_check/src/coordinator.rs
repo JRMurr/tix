@@ -13,9 +13,9 @@
 //   - Passive: `set_signature()` / `get_signature()` for the LSP's event-driven
 //     analysis loop, where files are analyzed one at a time and results cached.
 //
-// The coordinator does NOT own the Salsa database. Syntax extraction is
+// The coordinator does NOT own syntax data. Syntax extraction is
 // delegated to a `SyntaxProvider` trait, which the CLI and LSP implement
-// differently (pre-extracted HashMap vs Salsa-behind-Mutex).
+// differently (pre-extracted HashMap vs on-demand parsing).
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -35,7 +35,7 @@ use lang_ty::OwnedTy;
 // ==============================================================================
 
 /// Provides syntax-phase data for a file. The coordinator calls this to get
-/// the prerequisites for inference. Implementations handle Salsa access,
+/// the prerequisites for inference. Implementations handle file I/O,
 /// file I/O, and context resolution.
 ///
 /// Must be `Send + Sync` because demand-driven inference may run on rayon
@@ -656,17 +656,14 @@ mod tests {
         }
     }
 
-    /// A test syntax provider that reads .nix files from disk and parses them
-    /// via a shared RootDatabase.
+    /// A test syntax provider that reads .nix files from disk and parses them.
     struct TestSyntaxProvider {
-        db: Mutex<lang_ast::RootDatabase>,
         registry: Arc<TypeAliasRegistry>,
     }
 
     impl TestSyntaxProvider {
         fn new() -> Self {
             Self {
-                db: Mutex::new(lang_ast::RootDatabase::default()),
                 registry: Arc::new(TypeAliasRegistry::default()),
             }
         }
@@ -674,18 +671,14 @@ mod tests {
 
     impl SyntaxProvider for TestSyntaxProvider {
         fn syntax_for_file(&self, path: &Path) -> Option<SyntaxBundle> {
-            let db = self.db.lock();
-            let nix_file = db.read_file(path.to_path_buf()).ok()?;
-            let (module, _source_map) = lang_ast::module_and_source_maps(&*db, nix_file);
-            let module_indices = lang_ast::module_indices(&*db, nix_file);
-            let name_res = lang_ast::name_resolution(&*db, nix_file);
-            let grouped_defs = lang_ast::group_def(&*db, nix_file);
+            let contents = std::fs::read_to_string(path).ok()?;
+            let r = lang_ast::run_syntax_pipeline_for_file(path, &contents);
             Some(SyntaxBundle {
                 path: path.to_path_buf(),
-                module,
-                module_indices,
-                name_res,
-                grouped_defs,
+                module: r.module,
+                module_indices: r.module_indices,
+                name_res: r.name_res,
+                grouped_defs: r.grouped_defs,
                 registry: Arc::clone(&self.registry),
                 context_args: Arc::default(),
             })

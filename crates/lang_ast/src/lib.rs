@@ -4,7 +4,6 @@
 mod ast_utils;
 pub mod classify;
 mod comment;
-mod db;
 mod lower;
 pub mod nameres;
 pub mod narrow;
@@ -18,11 +17,13 @@ use std::{collections::HashMap, collections::HashSet, fmt, ops, path::Path, sync
 
 pub use comment::line_of_offset;
 use comment::{gather_doc_comments, gather_ignore_lines, has_nocheck_directive};
-pub use db::{AstDb, NixFile, RootDatabase};
 use derive_more::From;
 use la_arena::{Arena, ArenaMap, Idx as Id};
 use lower::lower;
-pub use nameres::{group_def, name_resolution, scopes, GroupedDefs, ModuleScopes, NameResolution};
+pub use nameres::{
+    compute_group_def, compute_name_resolution, compute_scopes, GroupedDefs, ModuleScopes,
+    NameResolution,
+};
 use rnix::NixLanguage;
 use rowan::ast::AstNode;
 use smol_str::SmolStr;
@@ -42,10 +43,14 @@ pub fn display_path(p: &Path) -> String {
     p.display().to_string()
 }
 
-#[instrument(level = "info", skip_all, name = "parse+lower", fields(file = display_path(&file.path(db)).as_str()))]
-#[salsa::tracked(no_eq)]
-pub fn module_and_source_maps(db: &dyn crate::AstDb, file: NixFile) -> (Module, ModuleSourceMap) {
-    let parsed = db.parse_file(file);
+// ==============================================================================
+// Syntax pipeline: parse → lower → nameres → SCC grouping
+// ==============================================================================
+
+/// Parse Nix source and lower to the Tix AST with source maps.
+#[instrument(level = "info", skip_all, name = "parse+lower")]
+pub fn parse_and_lower(contents: &str) -> (Module, ModuleSourceMap) {
+    let parsed = rnix::Root::parse(contents);
     let root = parsed.tree();
 
     let nocheck = has_nocheck_directive(&root);
@@ -61,12 +66,7 @@ pub fn module_and_source_maps(db: &dyn crate::AstDb, file: NixFile) -> (Module, 
     (module, source_map)
 }
 
-#[salsa::tracked]
-pub fn module(db: &dyn crate::AstDb, file: NixFile) -> Module {
-    module_and_source_maps(db, file).0
-}
-
-/// Pre-built indices over a Module's structure, cached by Salsa.
+/// Pre-built indices over a Module's structure.
 ///
 /// These avoid repeated O(all_exprs) linear scans in LSP handlers that need
 /// to map names to their binding expressions or owning lambdas.
@@ -78,10 +78,9 @@ pub struct ModuleIndices {
     pub param_to_lambda: HashMap<NameId, ExprId>,
 }
 
-#[instrument(level = "info", skip_all, name = "module_indices", fields(file = display_path(&file.path(db)).as_str()))]
-#[salsa::tracked]
-pub fn module_indices(db: &dyn crate::AstDb, file: NixFile) -> ModuleIndices {
-    let module = module(db, file);
+/// Build pre-computed indices for a Module (binding expressions, param-to-lambda mappings).
+#[instrument(level = "info", skip_all, name = "module_indices")]
+pub fn compute_module_indices(module: &Module) -> ModuleIndices {
     let mut binding_expr = HashMap::new();
     let mut param_to_lambda = HashMap::new();
 
@@ -121,6 +120,44 @@ pub fn module_indices(db: &dyn crate::AstDb, file: NixFile) -> ModuleIndices {
     }
 }
 
+/// All results from the syntax pipeline for a single file.
+/// Produced by [`run_syntax_pipeline`].
+#[derive(Debug, Clone)]
+pub struct SyntaxResult {
+    pub module: Module,
+    pub source_map: ModuleSourceMap,
+    pub module_indices: ModuleIndices,
+    pub scopes: ModuleScopes,
+    pub name_res: NameResolution,
+    pub grouped_defs: GroupedDefs,
+}
+
+/// Run the full syntax pipeline: parse → lower → module indices → scopes →
+/// name resolution → SCC grouping.
+pub fn run_syntax_pipeline(contents: &str) -> SyntaxResult {
+    let (module, source_map) = parse_and_lower(contents);
+    let module_indices = compute_module_indices(&module);
+    let scopes = compute_scopes(&module);
+    let name_res = compute_name_resolution(&module, &scopes);
+    let grouped_defs = compute_group_def(&module, &name_res, &module_indices);
+    SyntaxResult {
+        module,
+        source_map,
+        module_indices,
+        scopes,
+        name_res,
+        grouped_defs,
+    }
+}
+
+/// Like [`run_syntax_pipeline`], but wraps all work in a tracing span tagged
+/// with the file path so sub-spans (`parse+lower`, `module_indices`, etc.)
+/// appear nested under the file.
+pub fn run_syntax_pipeline_for_file(path: &Path, contents: &str) -> SyntaxResult {
+    let _span = tracing::info_span!("syntax_pipeline", file = %display_path(path)).entered();
+    run_syntax_pipeline(contents)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Name {
     pub text: SmolStr,
@@ -142,8 +179,7 @@ impl NameKind {
     }
 }
 
-// TODO: @OPTIMIZATION look into using a custom Id type. Since the default Id from id-arena has the arena id in
-// salsa will basically always have a cache miss since every parse will cause a new arena to spawn
+// TODO: @OPTIMIZATION look into using a custom Id type.
 pub type ExprId = Id<Expr>;
 pub type NameId = Id<Name>;
 

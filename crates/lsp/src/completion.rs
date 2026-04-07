@@ -1109,8 +1109,7 @@ fn resolve_import_type_annotation(
     let target_src = std::fs::read_to_string(&target).ok()?;
 
     // Scan doc comment blocks (/** ... */) for type alias declarations.
-    // This avoids depending on the full lower pipeline, which is private
-    // to lang_ast and requires a Salsa database.
+    // This avoids depending on the full lower pipeline.
     extract_type_alias_from_source(&target_src, type_name)
 }
 

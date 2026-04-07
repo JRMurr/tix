@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use lang_ast::nameres::ResolveResult;
-use lang_ast::{AstDb, Expr, ExprId, Literal, Module, NameId};
+use lang_ast::{Expr, ExprId, Literal, Module, NameId};
 use lang_check::imports::resolve_import_types;
 use rowan::ast::AstNode;
 use tower_lsp::lsp_types::{Location, Position, Range, Url};
@@ -32,7 +32,7 @@ const MAX_DEPTH: usize = 8;
 /// - The target file has no matching name → returns Location at file start
 /// - Depth limit reached → returns Location of last found name
 pub fn resolve_field_transitively(
-    state: &AnalysisState,
+    _state: &AnalysisState,
     target_path: &Path,
     field_name: &str,
 ) -> Option<Location> {
@@ -47,19 +47,13 @@ pub fn resolve_field_transitively(
             "resolve_field_transitively: depth={depth}, path={}, field={field_name}",
             current_path.display()
         );
-        let target_file = state.db.load_file(&current_path)?;
-        let (target_module, target_source_map) =
-            lang_ast::module_and_source_maps(&state.db, target_file);
-        let target_contents = target_file.contents(&state.db);
-        let target_root = rnix::Root::parse(target_contents).tree();
+        let target_contents = std::fs::read_to_string(&current_path).ok()?;
+        let r = lang_ast::run_syntax_pipeline_for_file(&current_path, &target_contents);
+        let target_root = rnix::Root::parse(&target_contents).tree();
 
         // Find a name in the target module matching the field name.
-        let found = target_module
-            .names()
-            .find(|(_, name)| name.text == field_name);
+        let found = r.module.names().find(|(_, name)| name.text == field_name);
 
-        let name_res = lang_ast::name_resolution(&state.db, target_file);
-        let indices = lang_ast::module_indices(&state.db, target_file);
         let base_dir = current_path.parent().unwrap_or(Path::new("/"));
 
         let (target_name_id, _) = match found {
@@ -69,11 +63,11 @@ pub fn resolve_field_transitively(
                 // is a pass-through reference to an import (e.g. `let res = import ./x.nix; in res`).
                 // If so, follow through to the imported file and look for the field there.
                 let import_resolution =
-                    resolve_import_types(&target_module, &name_res, base_dir, |_| None, None);
+                    resolve_import_types(&r.module, &r.name_res, base_dir, |_| None, None);
                 if let Some(next_path) = resolve_return_value_import(
-                    &target_module,
-                    &name_res,
-                    &indices,
+                    &r.module,
+                    &r.name_res,
+                    &r.module_indices,
                     &import_resolution.targets,
                 ) {
                     log::debug!(
@@ -99,12 +93,12 @@ pub fn resolve_field_transitively(
 
         // Cheap import resolution — only resolves paths, no type inference.
         let import_resolution =
-            resolve_import_types(&target_module, &name_res, base_dir, |_| None, None);
+            resolve_import_types(&r.module, &r.name_res, base_dir, |_| None, None);
 
         // Check if the binding expression for this name is an import.
-        if let Some(&binding_expr) = indices.binding_expr.get(&target_name_id) {
+        if let Some(&binding_expr) = r.module_indices.binding_expr.get(&target_name_id) {
             if let Some(next_path) =
-                chase_import_target(&target_module, &import_resolution.targets, binding_expr)
+                chase_import_target(&r.module, &import_resolution.targets, binding_expr)
             {
                 log::debug!(
                     "resolve_field_transitively: field {field_name} is re-export -> {}",
@@ -121,9 +115,9 @@ pub fn resolve_field_transitively(
         }
 
         // Not an import — this is the actual definition. Return its location.
-        let target_ptr = target_source_map.nodes_for_name(target_name_id).next()?;
+        let target_ptr = r.source_map.nodes_for_name(target_name_id).next()?;
         let target_node = target_ptr.to_node(target_root.syntax());
-        let target_line_index = crate::convert::LineIndex::new(target_contents);
+        let target_line_index = crate::convert::LineIndex::new(&target_contents);
         let target_range = target_line_index.range(target_node.text_range());
         let target_uri = Url::from_file_path(&current_path).ok()?;
         return Some(Location::new(target_uri, target_range));
