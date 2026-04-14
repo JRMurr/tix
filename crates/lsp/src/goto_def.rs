@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use lang_ast::nameres::ResolveResult;
-use lang_ast::{AstPtr, Expr, Literal};
+use lang_ast::{AstPtr, Expr, ExprId, Literal};
 use lang_check::aliases::DeclLocation;
 use rowan::ast::AstNode;
 use smol_str::SmolStr;
@@ -111,7 +111,6 @@ pub fn goto_definition(
                 if let Some(res) = analysis.syntax.name_res.get(expr_id) {
                     match res {
                         ResolveResult::Definition(name_id) => {
-                            // Find the source location of the definition.
                             if let Some(def_ptr) =
                                 analysis.syntax.source_map.nodes_for_name(*name_id).next()
                             {
@@ -120,11 +119,21 @@ pub fn goto_definition(
                                 return Some(Location::new(uri.clone(), range));
                             }
                         }
-                        // Builtins and `with` expressions don't have a source
-                        // definition we can jump to within this file.
-                        ResolveResult::Builtin(_) | ResolveResult::WithExprs(..) => {}
+                        ResolveResult::Builtin(_) => {}
+                        ResolveResult::WithExprs(innermost, rest) => {
+                            if let Some(def_ptr) =
+                                find_with_field(&analysis.syntax, ref_name, *innermost, rest)
+                            {
+                                let def_node = def_ptr.to_node(root.syntax());
+                                let range = analysis.syntax.line_index.range(def_node.text_range());
+                                return Some(Location::new(uri.clone(), range));
+                            }
+                        }
                     }
-                } else if let Some(location) = decl_location_to_lsp(
+                }
+                // No same-file definition found — fall back to stub val
+                // declarations (e.g. `mkDerivation` or `vim` from .tix stubs).
+                if let Some(location) = decl_location_to_lsp(
                     state.registry.decl_locations(ref_name.as_str()).first(),
                     state.registry.source_roots(),
                 ) {
@@ -291,6 +300,76 @@ fn try_resolve_attrpath_field_source(
 }
 
 // ==============================================================================
+// with-resolved names: field lookup in `with` environments
+// ==============================================================================
+
+/// Walk the `with` chain (innermost first) and return the `AstPtr` for the
+/// first environment that statically contains `field_name` as a binding key.
+fn find_with_field(
+    syntax: &crate::state::SyntaxData,
+    field_name: &str,
+    innermost: ExprId,
+    rest: &[ExprId],
+) -> Option<AstPtr> {
+    for &with_expr_id in std::iter::once(&innermost).chain(rest.iter()) {
+        let env_id = match &syntax.module[with_expr_id] {
+            Expr::With { env, .. } => *env,
+            _ => continue,
+        };
+        if let Some(ptr) = find_field_in_expr(syntax, env_id, field_name) {
+            return Some(ptr);
+        }
+    }
+    None
+}
+
+/// Try to find a static binding named `field_name` in the expression `expr_id`.
+///
+/// Handles two cases:
+/// - Direct attrset literal: `{ field_name = ...; }`
+/// - One level of reference indirection: `ref` where `ref` is bound to an attrset
+fn find_field_in_expr(
+    syntax: &crate::state::SyntaxData,
+    expr_id: ExprId,
+    field_name: &str,
+) -> Option<AstPtr> {
+    match &syntax.module[expr_id] {
+        Expr::AttrSet { bindings, .. } => find_field_in_bindings(syntax, bindings, field_name),
+        Expr::Reference(_) => {
+            // Follow one level of let-binding indirection.
+            let res = syntax.name_res.get(expr_id)?;
+            let name_id = match res {
+                ResolveResult::Definition(nid) => *nid,
+                _ => return None,
+            };
+            let &bound_expr = syntax.module_indices.binding_expr.get(&name_id)?;
+            match &syntax.module[bound_expr] {
+                Expr::AttrSet { bindings, .. } => {
+                    find_field_in_bindings(syntax, bindings, field_name)
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Scan static bindings for a field matching `field_name` and return its source
+/// location as an `AstPtr`.
+fn find_field_in_bindings(
+    syntax: &crate::state::SyntaxData,
+    bindings: &lang_ast::Bindings,
+    field_name: &str,
+) -> Option<AstPtr> {
+    for &(name_id, _) in bindings.statics.iter() {
+        if syntax.module[name_id].text == field_name {
+            return syntax.source_map.nodes_for_name(name_id).next();
+        }
+    }
+    None
+}
+
+// ==============================================================================
 // Tests
 // ==============================================================================
 
@@ -298,7 +377,7 @@ fn try_resolve_attrpath_field_source(
 mod tests {
     use super::*;
     use crate::state::AnalysisState;
-    use crate::test_util::{find_offset, parse_markers, TempProject};
+    use crate::test_util::{find_offset, parse_markers, TempProject, TestAnalysis};
     use indoc::indoc;
     use lang_check::aliases::TypeAliasRegistry;
     use std::path::PathBuf;
@@ -1072,5 +1151,142 @@ mod tests {
         assert_eq!(loc.range.start.line, 49);
 
         let _ = std::fs::remove_dir_all(&source_dir);
+    }
+
+    // ------------------------------------------------------------------
+    // with-resolved names: go-to-definition
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn with_literal_goto_def() {
+        let src = indoc! {"
+            with { x = 1; }; x
+            #      ^1        ^2
+        "};
+        let markers = parse_markers(src);
+        let t = TestAnalysis::new(src);
+        let analysis = t.snapshot();
+        let uri = t.uri();
+
+        let pos = analysis.syntax.line_index.position(markers[&2]);
+        let loc = goto_definition(&t.state, &analysis, pos, &uri, &t.root);
+        let loc = loc.expect("should resolve with-field to attrset key");
+
+        assert_eq!(loc.uri, uri);
+        let expected_pos = analysis.syntax.line_index.position(markers[&1]);
+        assert_eq!(loc.range.start, expected_pos);
+    }
+
+    #[test]
+    fn with_let_binding_goto_def() {
+        let src = indoc! {"
+            let
+              s = { x = 1; };
+            #       ^1
+            in with s; x
+            #          ^2
+        "};
+        let markers = parse_markers(src);
+        let t = TestAnalysis::new(src);
+        let analysis = t.snapshot();
+        let uri = t.uri();
+
+        let pos = analysis.syntax.line_index.position(markers[&2]);
+        let loc = goto_definition(&t.state, &analysis, pos, &uri, &t.root);
+        let loc = loc.expect("should follow let binding to attrset field");
+
+        assert_eq!(loc.uri, uri);
+        let expected_pos = analysis.syntax.line_index.position(markers[&1]);
+        assert_eq!(loc.range.start, expected_pos);
+    }
+
+    #[test]
+    fn nested_with_inner_wins_goto_def() {
+        // `b` resolves from the inner `with` (which defines `b`), not the outer.
+        let src = indoc! {"
+            with { a = 1; };
+            with { b = 2; };
+            #      ^1
+              b
+            # ^2
+        "};
+        let markers = parse_markers(src);
+        let t = TestAnalysis::new(src);
+        let analysis = t.snapshot();
+        let uri = t.uri();
+
+        let pos = analysis.syntax.line_index.position(markers[&2]);
+        let loc = goto_definition(&t.state, &analysis, pos, &uri, &t.root);
+        let loc = loc.expect("should resolve to inner with's field");
+
+        assert_eq!(loc.uri, uri);
+        let expected_pos = analysis.syntax.line_index.position(markers[&1]);
+        assert_eq!(loc.range.start, expected_pos);
+    }
+
+    #[test]
+    fn nested_with_fallback_to_outer_goto_def() {
+        // `a` is not in the inner `with`, falls through to the outer `with`.
+        let src = indoc! {"
+            with { a = 1; };
+            #      ^1
+            with { b = 2; };
+              a
+            # ^2
+        "};
+        let markers = parse_markers(src);
+        let t = TestAnalysis::new(src);
+        let analysis = t.snapshot();
+        let uri = t.uri();
+
+        let pos = analysis.syntax.line_index.position(markers[&2]);
+        let loc = goto_definition(&t.state, &analysis, pos, &uri, &t.root);
+        let loc = loc.expect("should fall through inner and resolve from outer with");
+
+        assert_eq!(loc.uri, uri);
+        let expected_pos = analysis.syntax.line_index.position(markers[&1]);
+        assert_eq!(loc.range.start, expected_pos);
+    }
+
+    #[test]
+    fn with_unresolvable_env_goto_def() {
+        let src = indoc! {"
+            let f = x: x; in
+            with (f 1); x
+            #           ^1
+        "};
+        let markers = parse_markers(src);
+        let t = TestAnalysis::new(src);
+        let analysis = t.snapshot();
+
+        let pos = analysis.syntax.line_index.position(markers[&1]);
+        let loc = goto_definition(&t.state, &analysis, pos, &t.uri(), &t.root);
+        assert!(loc.is_none(), "unresolvable with env should return None");
+    }
+
+    #[test]
+    fn with_unresolvable_env_falls_back_to_stub() {
+        // When `with` env can't be statically resolved but the field name
+        // matches a stub val declaration, go-to-def should fall back to the
+        // stub location — same as it does for fully unresolved names.
+        let stub = "val vim :: string;";
+        let (registry, stub_path) = registry_with_stub(stub);
+
+        let src = indoc! {"
+            pkgs: with pkgs; vim
+            #                ^1
+        "};
+        let markers = parse_markers(src);
+        let t = TestAnalysis::with_registry(src, registry);
+        let analysis = t.snapshot();
+
+        let pos = analysis.syntax.line_index.position(markers[&1]);
+        let loc = goto_definition(&t.state, &analysis, pos, &t.uri(), &t.root);
+        let loc = loc.expect("with-resolved name should fall back to stub val");
+
+        let stub_uri = Url::from_file_path(&stub_path).unwrap();
+        assert_eq!(loc.uri, stub_uri, "should jump to stub file");
+
+        let _ = std::fs::remove_file(&stub_path);
     }
 }

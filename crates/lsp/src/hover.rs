@@ -1196,4 +1196,54 @@ mod tests {
             "inherit-site pkgs should show Pkgs after extrusion, got: {ty3}"
         );
     }
+
+    // ==================================================================
+    // with-resolved names
+    // ==================================================================
+
+    #[test]
+    fn hover_on_with_resolved_name_known_env() {
+        // When the `with` environment has a known type, hovering on a
+        // name resolved through `with` should show the field's type.
+        let src = indoc! {"
+            let pkgs = { vim = \"vim-pkg\"; git = 1; }; in
+            with pkgs; [ vim ]
+            #            ^1
+        "};
+        let markers = parse_markers(src);
+        let t = TestAnalysis::new(src);
+        let h =
+            hover_at(&t, markers[&1]).expect("hover on with-resolved name should return a result");
+        let (type_text, _doc) = hover_parts(&h);
+
+        assert!(
+            type_text.contains("string"),
+            "with-resolved `vim` should show string type, got: {type_text}"
+        );
+    }
+
+    #[test]
+    fn hover_on_with_resolved_name_unresolved_env() {
+        // When the `with` environment is an unresolved external name (e.g.
+        // `pkgs` from a function arg not visible in this file), hover on a
+        // name resolved through `with` should still return *something* (the
+        // inferred type variable).
+        let src = indoc! {"
+            pkgs: with pkgs; [ vim ]
+            #                  ^1
+        "};
+        let markers = parse_markers(src);
+        let t = TestAnalysis::new(src);
+        let h = hover_at(&t, markers[&1]);
+
+        // Hover does return a result — the type is a type variable
+        // (`?` / unknown), but it's still present in expr_ty_map.
+        let h =
+            h.expect("hover on with-resolved name should return a result even with unresolved env");
+        let (type_text, _doc) = hover_parts(&h);
+        assert_eq!(
+            type_text, "?",
+            "unresolved env should yield unknown type variable"
+        );
+    }
 }
