@@ -496,12 +496,15 @@ impl InferenceCoordinator {
     /// Store a file's signature in the cache (passive mode).
     /// Returns `true` if the signature changed (callers use this to decide
     /// whether to trigger dependent re-analysis).
+    ///
+    /// Uses structural equality (not identity) so that re-inferring a file
+    /// with the same result doesn't trigger cascading re-analysis.
     pub fn set_signature(&self, path: &Path, sig: FileSignature) -> bool {
         let changed = self
             .cache
             .get(path)
             .map(|entry| match &*entry {
-                FileSlot::Ready(Some(existing)) => *existing != sig,
+                FileSlot::Ready(Some(existing)) => !existing.root_ty.structurally_eq(&sig.root_ty),
                 _ => true,
             })
             .unwrap_or(true);
