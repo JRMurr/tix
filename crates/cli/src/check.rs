@@ -471,142 +471,154 @@ pub fn run_check_project(
             "starting layer"
         );
 
-        for scc in &layer.sccs {
-            if !scc.is_cyclic {
-                // =============================================================
-                // Non-cyclic SCC: single-pass inference (unchanged behavior)
-                // =============================================================
-                let (heavy, light): (Vec<_>, Vec<_>) = scc.files.iter().partition(|p| {
+        // =================================================================
+        // Non-cyclic files: batch all singletons across SCCs for parallel
+        // inference, preserving the original par_iter parallelism.
+        // =================================================================
+        let non_cyclic_files: Vec<&PathBuf> = layer
+            .sccs
+            .iter()
+            .filter(|scc| !scc.is_cyclic)
+            .flat_map(|scc| scc.files.iter())
+            .collect();
+
+        if !non_cyclic_files.is_empty() {
+            let (heavy, light): (Vec<&PathBuf>, Vec<&PathBuf>) =
+                non_cyclic_files.into_iter().partition(|p| {
                     expr_counts.get(*p).copied().unwrap_or(0) > HEAVY_FILE_EXPR_THRESHOLD
                 });
 
-                if !heavy.is_empty() {
-                    tracing::info!(
-                        "layer {} has {} heavy file(s) (>{} exprs), running sequentially: {}",
-                        layer_idx,
-                        heavy.len(),
-                        HEAVY_FILE_EXPR_THRESHOLD,
-                        heavy
-                            .iter()
-                            .map(|p| format!(
-                                "{} ({})",
-                                p.file_name().unwrap_or_default().to_string_lossy(),
-                                expr_counts.get(*p).unwrap_or(&0)
-                            ))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    );
-                }
-
-                let heavy_results: Vec<RenderableResult> =
-                    heavy.iter().filter_map(|p| infer_one(p)).collect();
-                let light_results: Vec<RenderableResult> =
-                    light.par_iter().filter_map(|p| infer_one(p)).collect();
-
-                all_results.extend(heavy_results);
-                all_results.extend(light_results);
-            } else {
-                // =============================================================
-                // Cyclic SCC: fixpoint iteration
-                // =============================================================
-                //
-                // Clone bundles for reuse across rounds. Metadata is extracted
-                // once and held aside — only the final round's diagnostics are
-                // kept.
+            if !heavy.is_empty() {
                 tracing::info!(
-                    "layer {}: cyclic SCC with {} files, up to {} fixpoint rounds",
+                    "layer {} has {} heavy file(s) (>{} exprs), running sequentially: {}",
                     layer_idx,
-                    scc.files.len(),
-                    MAX_FIXPOINT_ROUNDS,
-                );
-
-                // Pre-extract bundles (clone for reuse) and metadata.
-                let scc_bundles: HashMap<PathBuf, SyntaxBundle> = scc
-                    .files
-                    .iter()
-                    .filter_map(|p| {
-                        syntax_provider
-                            .precomputed
-                            .get(p)
-                            .map(|entry| (p.clone(), entry.value().clone()))
-                    })
-                    .collect();
-
-                let scc_metadata: HashMap<PathBuf, FileMetadata> = scc
-                    .files
-                    .iter()
-                    .filter_map(|p| metadata_map.remove(p))
-                    .collect();
-
-                let mut last_results: Vec<RenderableResult> = Vec::new();
-
-                for round in 0..MAX_FIXPOINT_ROUNDS {
-                    // Snapshot signatures before this round for convergence check.
-                    let prev_sigs: HashMap<PathBuf, Option<lang_ty::OwnedTy>> = scc
-                        .files
+                    heavy.len(),
+                    HEAVY_FILE_EXPR_THRESHOLD,
+                    heavy
                         .iter()
-                        .map(|p| (p.clone(), coordinator.get_signature(p)))
-                        .collect();
-
-                    last_results.clear();
-
-                    // Infer all files in the SCC sequentially within each round.
-                    // Sequential ensures deterministic convergence: each file in
-                    // round N sees all of round N-1's signatures (Jacobi-style
-                    // within a round, since we snapshot above).
-                    for path in &scc.files {
-                        let Some(bundle) = scc_bundles.get(path).cloned() else {
-                            continue;
-                        };
-
-                        let file_path = path.clone();
-                        let result = infer_bundle(&coordinator, &file_path, bundle);
-
-                        if let Some(fm) = scc_metadata.get(path) {
-                            last_results.push(RenderableResult {
-                                file_path,
-                                source_text: fm.source_text.clone(),
-                                source_map: fm.source_map.clone(),
-                                diagnostics: result.diagnostics,
-                                nocheck: result.nocheck,
-                                ignore_lines: result.ignore_lines,
-                            });
-                        }
-                    }
-
-                    // Skip convergence check on the first round — there are no
-                    // previous signatures to compare against.
-                    if round == 0 {
-                        continue;
-                    }
-
-                    // Check convergence: all signatures structurally unchanged.
-                    let converged = scc.files.iter().all(|p| {
-                        let new_sig = coordinator.get_signature(p);
-                        match (&prev_sigs[p], &new_sig) {
-                            (Some(old), Some(new)) => old.structurally_eq(new),
-                            (None, None) => true,
-                            _ => false,
-                        }
-                    });
-
-                    if converged {
-                        tracing::info!(
-                            "cyclic SCC ({} files) converged after {} round(s)",
-                            scc.files.len(),
-                            round + 1,
-                        );
-                        break;
-                    }
-                }
-
-                // Remove consumed bundles from the syntax provider.
-                for path in &scc.files {
-                    syntax_provider.precomputed.remove(path);
-                }
-
-                all_results.extend(last_results);
+                        .map(|p| format!(
+                            "{} ({})",
+                            p.file_name().unwrap_or_default().to_string_lossy(),
+                            expr_counts.get(*p).unwrap_or(&0)
+                        ))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
             }
+
+            let heavy_results: Vec<RenderableResult> =
+                heavy.iter().filter_map(|p| infer_one(p)).collect();
+            let light_results: Vec<RenderableResult> =
+                light.par_iter().filter_map(|p| infer_one(p)).collect();
+
+            all_results.extend(heavy_results);
+            all_results.extend(light_results);
+        }
+
+        // =================================================================
+        // Cyclic SCCs: fixpoint iteration (sequential within each SCC)
+        // =================================================================
+        for scc in layer.sccs.iter().filter(|scc| scc.is_cyclic) {
+            // =============================================================
+            // Cyclic SCC: fixpoint iteration
+            // =============================================================
+            //
+            // Clone bundles for reuse across rounds. Metadata is extracted
+            // once and held aside — only the final round's diagnostics are
+            // kept.
+            tracing::info!(
+                "layer {}: cyclic SCC with {} files, up to {} fixpoint rounds",
+                layer_idx,
+                scc.files.len(),
+                MAX_FIXPOINT_ROUNDS,
+            );
+
+            // Pre-extract bundles (clone for reuse) and metadata.
+            let scc_bundles: HashMap<PathBuf, SyntaxBundle> = scc
+                .files
+                .iter()
+                .filter_map(|p| {
+                    syntax_provider
+                        .precomputed
+                        .get(p)
+                        .map(|entry| (p.clone(), entry.value().clone()))
+                })
+                .collect();
+
+            let scc_metadata: HashMap<PathBuf, FileMetadata> = scc
+                .files
+                .iter()
+                .filter_map(|p| metadata_map.remove(p))
+                .collect();
+
+            let mut last_results: Vec<RenderableResult> = Vec::new();
+
+            for round in 0..MAX_FIXPOINT_ROUNDS {
+                // Snapshot signatures before this round for convergence check.
+                let prev_sigs: HashMap<PathBuf, Option<lang_ty::OwnedTy>> = scc
+                    .files
+                    .iter()
+                    .map(|p| (p.clone(), coordinator.get_signature(p)))
+                    .collect();
+
+                last_results.clear();
+
+                // Infer all files in the SCC sequentially within each round.
+                // Sequential ensures deterministic convergence: each file in
+                // round N sees all of round N-1's signatures (Jacobi-style
+                // within a round, since we snapshot above).
+                for path in &scc.files {
+                    let Some(bundle) = scc_bundles.get(path).cloned() else {
+                        continue;
+                    };
+
+                    let file_path = path.clone();
+                    let result = infer_bundle(&coordinator, &file_path, bundle);
+
+                    if let Some(fm) = scc_metadata.get(path) {
+                        last_results.push(RenderableResult {
+                            file_path,
+                            source_text: fm.source_text.clone(),
+                            source_map: fm.source_map.clone(),
+                            diagnostics: result.diagnostics,
+                            nocheck: result.nocheck,
+                            ignore_lines: result.ignore_lines,
+                        });
+                    }
+                }
+
+                // Skip convergence check on the first round — there are no
+                // previous signatures to compare against.
+                if round == 0 {
+                    continue;
+                }
+
+                // Check convergence: all signatures structurally unchanged.
+                let converged = scc.files.iter().all(|p| {
+                    let new_sig = coordinator.get_signature(p);
+                    match (&prev_sigs[p], &new_sig) {
+                        (Some(old), Some(new)) => old.structurally_eq(new),
+                        (None, None) => true,
+                        _ => false,
+                    }
+                });
+
+                if converged {
+                    tracing::info!(
+                        "cyclic SCC ({} files) converged after {} round(s)",
+                        scc.files.len(),
+                        round + 1,
+                    );
+                    break;
+                }
+            }
+
+            // Remove consumed bundles from the syntax provider.
+            for path in &scc.files {
+                syntax_provider.precomputed.remove(path);
+            }
+
+            all_results.extend(last_results);
         }
 
         // Reference-counted eviction: decrement importer counts for each
