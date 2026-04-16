@@ -85,6 +85,62 @@ struct RenderableResult {
     ignore_lines: std::collections::HashSet<u32>,
 }
 
+/// Intermediate result from inference (before combining with metadata for rendering).
+struct InferBundleResult {
+    diagnostics: Vec<lang_check::diagnostic::TixDiagnostic>,
+    nocheck: bool,
+    ignore_lines: std::collections::HashSet<u32>,
+    bailed_out: bool,
+}
+
+/// Infer a file from a pre-extracted SyntaxBundle and cache its signature.
+/// Shared by both the single-pass path and fixpoint iteration.
+fn infer_bundle(
+    coordinator: &InferenceCoordinator,
+    file_path: &Path,
+    bundle: SyntaxBundle,
+) -> InferBundleResult {
+    let base_dir = file_path.parent().unwrap_or(Path::new("/"));
+
+    let import_resolution = coordinator.resolve_imports(
+        &bundle.module,
+        &bundle.name_res,
+        base_dir,
+        Some(&bundle.registry),
+    );
+    let import_diagnostics =
+        lang_check::imports::import_errors_to_diagnostics(&import_resolution.errors);
+
+    let inputs = lang_check::InferenceInputs {
+        module: bundle.module,
+        module_indices: bundle.module_indices,
+        name_res: bundle.name_res,
+        grouped_defs: bundle.grouped_defs,
+        registry: bundle.registry,
+        import_types: import_resolution.types,
+        import_diagnostics,
+        context_args: bundle.context_args,
+        rss_limit_mb: None,
+        file_path: Some(file_path.to_path_buf()),
+        imported_type_exports: std::collections::HashMap::new(),
+        typeof_import_types: std::collections::HashMap::new(),
+        file_base_dir: None,
+    };
+
+    let check_result = lang_check::run_inference(&inputs);
+
+    if let Some(sig) = lang_check::extract_file_signature(&check_result, inputs.module.entry_expr) {
+        coordinator.set_signature(file_path, sig);
+    }
+
+    InferBundleResult {
+        diagnostics: check_result.diagnostics,
+        nocheck: inputs.module.nocheck,
+        ignore_lines: inputs.module.ignore_lines.clone(),
+        bailed_out: check_result.bailed_out,
+    }
+}
+
 /// Entry point for `tix check`.
 pub fn run_check_project(
     config_path: Option<PathBuf>,
@@ -326,7 +382,7 @@ pub fn run_check_project(
     // Each subsequent layer's dependencies are guaranteed to be cached from
     // prior layers.
 
-    let layers = lang_check::file_graph::build_file_layers(&import_edges);
+    let layers = lang_check::file_graph::build_file_layers_with_sccs(&import_edges);
     let mut importer_counts = lang_check::file_graph::compute_importer_counts(&import_edges);
     timer.mark("dependency graph");
 
@@ -336,31 +392,30 @@ pub fn run_check_project(
     // Phase 2 — Layered Parallel Inference with cross-file type flow
     // =========================================================================
     //
-    // Files are inferred layer-by-layer. Within each layer, files run in
-    // parallel via rayon. Dependencies from prior layers have their signatures
-    // cached in the coordinator, so import resolution gets real types instead
-    // of ⊤.
+    // Files are inferred layer-by-layer, SCC-by-SCC within each layer.
+    // Dependencies from prior layers have their signatures cached in the
+    // coordinator, so import resolution gets real types instead of ⊤.
+    //
+    // Non-cyclic SCCs (single files) are inferred once. Cyclic SCCs (mutual
+    // imports) are iterated until signatures stabilize or the iteration cap
+    // is reached, giving real types across cycle edges.
     //
     // Memory optimization: reference-counted eviction drops signatures whose
     // importers have all been processed, keeping the live set bounded to the
     // "frontier" rather than the entire project.
-    //
-    // Files within the same SCC layer get ⊤ for intra-SCC imports (their
-    // signatures aren't cached yet when peers run in parallel). All acyclic
-    // imports get real types.
 
     // Files with more than this many expressions run sequentially within their
     // layer to avoid concurrent memory spikes that cause OOM on large projects.
-    // 20K catches all known problematic files (hackage-packages.nix at 657K,
-    // perl-packages.nix at 154K, r-modules/default.nix at 47K) while staying
-    // well above typical file sizes (~100-1K exprs).
     const HEAVY_FILE_EXPR_THRESHOLD: usize = 20_000;
+    /// Maximum fixpoint iterations for cyclic SCCs. Most cycles converge in
+    /// 2-3 rounds; 4 is a conservative cap.
+    const MAX_FIXPOINT_ROUNDS: usize = 4;
 
     let coordinator = InferenceCoordinator::new();
     let mut all_results: Vec<RenderableResult> = Vec::with_capacity(files_count);
 
-    // Shared inference logic for a single file. Used by both the sequential
-    // (heavy) and parallel (light) paths.
+    // Shared inference logic for a single file. Consumes the bundle from the
+    // syntax provider and metadata from the metadata map.
     let infer_one = |path: &PathBuf| -> Option<RenderableResult> {
         let (file_path, fm) = metadata_map.remove(path)?;
 
@@ -372,7 +427,6 @@ pub fn run_check_project(
             "starting file"
         );
 
-        // Consume the pre-extracted SyntaxBundle from the DashMap.
         let bundle = match syntax_provider.syntax_for_file(&file_path) {
             Some(b) => b,
             None => {
@@ -387,114 +441,191 @@ pub fn run_check_project(
             }
         };
 
-        let base_dir = file_path.parent().unwrap_or(std::path::Path::new("/"));
-
-        // Resolve imports from the coordinator cache. Prior layers'
-        // signatures are available; intra-SCC imports get ⊤.
-        let import_resolution = coordinator.resolve_imports(
-            &bundle.module,
-            &bundle.name_res,
-            base_dir,
-            Some(&bundle.registry),
-        );
-        let import_diagnostics =
-            lang_check::imports::import_errors_to_diagnostics(&import_resolution.errors);
-
-        // Build InferenceInputs and run inference.
-        let inputs = lang_check::InferenceInputs {
-            module: bundle.module,
-            module_indices: bundle.module_indices,
-            name_res: bundle.name_res,
-            grouped_defs: bundle.grouped_defs,
-            registry: bundle.registry,
-            import_types: import_resolution.types,
-            import_diagnostics,
-            context_args: bundle.context_args,
-            rss_limit_mb: None,
-            file_path: Some(file_path.clone()),
-            imported_type_exports: std::collections::HashMap::new(),
-            typeof_import_types: std::collections::HashMap::new(),
-            file_base_dir: None,
-        };
-
-        let check_result = lang_check::run_inference(&inputs);
-
-        // Cache this file's signature for subsequent layers.
-        if let Some(sig) =
-            lang_check::extract_file_signature(&check_result, inputs.module.entry_expr)
-        {
-            coordinator.set_signature(&file_path, sig);
-        }
+        let result = infer_bundle(&coordinator, &file_path, bundle);
 
         tracing::debug!(
             file = %lang_ast::display_path(&file_path),
             rss_mb = format_args!("{:.0}", lang_check::rss_mb()),
-            diags = check_result.diagnostics.len(),
-            bailed_out = check_result.bailed_out,
+            diags = result.diagnostics.len(),
+            bailed_out = result.bailed_out,
             "finished file"
         );
 
-        let nocheck = inputs.module.nocheck;
-        let ignore_lines = inputs.module.ignore_lines.clone();
-
-        // Extract only diagnostics. The heavy InferenceResult is dropped
-        // here, keeping memory bounded.
         Some(RenderableResult {
             file_path,
             source_text: fm.source_text,
             source_map: fm.source_map,
-            diagnostics: check_result.diagnostics,
-            nocheck,
-            ignore_lines,
+            diagnostics: result.diagnostics,
+            nocheck: result.nocheck,
+            ignore_lines: result.ignore_lines,
         })
     };
 
     for (layer_idx, layer) in layers.iter().enumerate() {
+        let layer_file_count: usize = layer.sccs.iter().map(|s| s.files.len()).sum();
         tracing::debug!(
             layer = layer_idx,
-            files = layer.len(),
+            files = layer_file_count,
+            sccs = layer.sccs.len(),
             rss_mb = format_args!("{:.0}", lang_check::rss_mb()),
             "starting layer"
         );
 
-        // Partition into heavy files (run sequentially to bound memory) and
-        // light files (run in parallel as before).
-        let (heavy, light): (Vec<_>, Vec<_>) = layer
+        // =================================================================
+        // Non-cyclic files: batch all singletons across SCCs for parallel
+        // inference, preserving the original par_iter parallelism.
+        // =================================================================
+        let non_cyclic_files: Vec<&PathBuf> = layer
+            .sccs
             .iter()
-            .partition(|p| expr_counts.get(*p).copied().unwrap_or(0) > HEAVY_FILE_EXPR_THRESHOLD);
+            .filter(|scc| !scc.is_cyclic)
+            .flat_map(|scc| scc.files.iter())
+            .collect();
 
-        if !heavy.is_empty() {
-            tracing::info!(
-                "layer has {} heavy file(s) (>{} exprs), running sequentially: {}",
-                heavy.len(),
-                HEAVY_FILE_EXPR_THRESHOLD,
-                heavy
-                    .iter()
-                    .map(|p| format!(
-                        "{} ({})",
-                        p.file_name().unwrap_or_default().to_string_lossy(),
-                        expr_counts.get(*p).unwrap_or(&0)
-                    ))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
+        if !non_cyclic_files.is_empty() {
+            let (heavy, light): (Vec<&PathBuf>, Vec<&PathBuf>) =
+                non_cyclic_files.into_iter().partition(|p| {
+                    expr_counts.get(*p).copied().unwrap_or(0) > HEAVY_FILE_EXPR_THRESHOLD
+                });
+
+            if !heavy.is_empty() {
+                tracing::info!(
+                    "layer {} has {} heavy file(s) (>{} exprs), running sequentially: {}",
+                    layer_idx,
+                    heavy.len(),
+                    HEAVY_FILE_EXPR_THRESHOLD,
+                    heavy
+                        .iter()
+                        .map(|p| format!(
+                            "{} ({})",
+                            p.file_name().unwrap_or_default().to_string_lossy(),
+                            expr_counts.get(*p).unwrap_or(&0)
+                        ))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+
+            let heavy_results: Vec<RenderableResult> =
+                heavy.iter().filter_map(|p| infer_one(p)).collect();
+            let light_results: Vec<RenderableResult> =
+                light.par_iter().filter_map(|p| infer_one(p)).collect();
+
+            all_results.extend(heavy_results);
+            all_results.extend(light_results);
         }
 
-        // Heavy files first (sequential) — frees their memory before light files start.
-        let heavy_results: Vec<RenderableResult> =
-            heavy.iter().filter_map(|p| infer_one(p)).collect();
-        // Light files (parallel).
-        let light_results: Vec<RenderableResult> =
-            light.par_iter().filter_map(|p| infer_one(p)).collect();
+        // =================================================================
+        // Cyclic SCCs: fixpoint iteration (sequential within each SCC)
+        // =================================================================
+        for scc in layer.sccs.iter().filter(|scc| scc.is_cyclic) {
+            // =============================================================
+            // Cyclic SCC: fixpoint iteration
+            // =============================================================
+            //
+            // Clone bundles for reuse across rounds. Metadata is extracted
+            // once and held aside — only the final round's diagnostics are
+            // kept.
+            tracing::debug!(
+                "layer {}: cyclic SCC with {} files, up to {} fixpoint rounds",
+                layer_idx,
+                scc.files.len(),
+                MAX_FIXPOINT_ROUNDS,
+            );
 
-        all_results.extend(heavy_results);
-        all_results.extend(light_results);
+            // Pre-extract bundles (clone for reuse) and metadata.
+            let scc_bundles: HashMap<PathBuf, SyntaxBundle> = scc
+                .files
+                .iter()
+                .filter_map(|p| {
+                    syntax_provider
+                        .precomputed
+                        .get(p)
+                        .map(|entry| (p.clone(), entry.value().clone()))
+                })
+                .collect();
+
+            let scc_metadata: HashMap<PathBuf, FileMetadata> = scc
+                .files
+                .iter()
+                .filter_map(|p| metadata_map.remove(p))
+                .collect();
+
+            let mut last_results: Vec<RenderableResult> = Vec::new();
+
+            for round in 0..MAX_FIXPOINT_ROUNDS {
+                // Snapshot signatures before this round for convergence check.
+                let prev_sigs: HashMap<PathBuf, Option<lang_ty::OwnedTy>> = scc
+                    .files
+                    .iter()
+                    .map(|p| (p.clone(), coordinator.get_signature(p)))
+                    .collect();
+
+                last_results.clear();
+
+                // Infer all files in the SCC sequentially within each round.
+                // Sequential ensures deterministic convergence: each file in
+                // round N sees all of round N-1's signatures (Jacobi-style
+                // within a round, since we snapshot above).
+                for path in &scc.files {
+                    let Some(bundle) = scc_bundles.get(path).cloned() else {
+                        continue;
+                    };
+
+                    let file_path = path.clone();
+                    let result = infer_bundle(&coordinator, &file_path, bundle);
+
+                    if let Some(fm) = scc_metadata.get(path) {
+                        last_results.push(RenderableResult {
+                            file_path,
+                            source_text: fm.source_text.clone(),
+                            source_map: fm.source_map.clone(),
+                            diagnostics: result.diagnostics,
+                            nocheck: result.nocheck,
+                            ignore_lines: result.ignore_lines,
+                        });
+                    }
+                }
+
+                // Skip convergence check on the first round — there are no
+                // previous signatures to compare against.
+                if round == 0 {
+                    continue;
+                }
+
+                // Check convergence: all signatures structurally unchanged.
+                let converged = scc.files.iter().all(|p| {
+                    let new_sig = coordinator.get_signature(p);
+                    match (&prev_sigs[p], &new_sig) {
+                        (Some(old), Some(new)) => old.structurally_eq(new),
+                        (None, None) => true,
+                        _ => false,
+                    }
+                });
+
+                if converged {
+                    tracing::debug!(
+                        "cyclic SCC ({} files) converged after {} round(s)",
+                        scc.files.len(),
+                        round + 1,
+                    );
+                    break;
+                }
+            }
+
+            // Remove consumed bundles from the syntax provider.
+            for path in &scc.files {
+                syntax_provider.precomputed.remove(path);
+            }
+
+            all_results.extend(last_results);
+        }
 
         // Reference-counted eviction: decrement importer counts for each
         // dependency of files in this layer. Evict signatures whose count
         // reaches 0 (all importers have been processed).
         let mut to_evict = Vec::new();
-        for file in layer {
+        for file in layer.all_files() {
             if let Some(deps) = import_edges.get(file) {
                 for dep in deps {
                     if let Some(count) = importer_counts.get_mut(dep) {

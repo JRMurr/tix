@@ -89,7 +89,7 @@ Reference the inferred root type of another file:
 data: data.x + 1
 ```
 
-This **does** require inference of the target file. The same cycle detection as regular `import` applies — if A typeof-imports B and B imports A, it's an error.
+This **does** require inference of the target file. The same cycle detection as regular `import` applies — if A typeof-imports B and B imports A, the cycle is detected and the back-edge gets `⊤`. In batch mode (`tix check`), fixpoint iteration resolves many such cycles by re-inferring until types stabilize.
 
 ## Composition
 

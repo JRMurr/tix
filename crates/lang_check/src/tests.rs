@@ -90,86 +90,11 @@ impl std::fmt::Debug for RootTy {
     }
 }
 
-/// Structural cross-arena equality: compares two types from potentially
-/// different arenas by recursively comparing their OutputTy nodes.
-fn ty_eq(a_arena: &TypeArena, a: TyRef, b_arena: &TypeArena, b: TyRef) -> bool {
-    use rustc_hash::FxHashSet;
-    fn inner(
-        a_arena: &TypeArena,
-        a: TyRef,
-        b_arena: &TypeArena,
-        b: TyRef,
-        visited: &mut FxHashSet<(TyRef, TyRef)>,
-    ) -> bool {
-        if !visited.insert((a, b)) {
-            return true; // cycle — assume equal
-        }
-        let a_node = &a_arena[a];
-        let b_node = &b_arena[b];
-        match (a_node, b_node) {
-            (OutputTy::TyVar(x), OutputTy::TyVar(y)) => x == y,
-            (OutputTy::Primitive(x), OutputTy::Primitive(y)) => x == y,
-            (OutputTy::Bottom, OutputTy::Bottom) | (OutputTy::Top, OutputTy::Top) => true,
-            (OutputTy::List(a_inner), OutputTy::List(b_inner)) => {
-                inner(a_arena, *a_inner, b_arena, *b_inner, visited)
-            }
-            (
-                OutputTy::Lambda {
-                    param: ap,
-                    body: ab,
-                },
-                OutputTy::Lambda {
-                    param: bp,
-                    body: bb,
-                },
-            ) => {
-                inner(a_arena, *ap, b_arena, *bp, visited)
-                    && inner(a_arena, *ab, b_arena, *bb, visited)
-            }
-            (OutputTy::AttrSet(a_attr), OutputTy::AttrSet(b_attr)) => {
-                a_attr.open == b_attr.open
-                    && a_attr.optional_fields == b_attr.optional_fields
-                    && a_attr.fields.len() == b_attr.fields.len()
-                    && a_attr.fields.keys().eq(b_attr.fields.keys())
-                    && a_attr
-                        .fields
-                        .values()
-                        .zip(b_attr.fields.values())
-                        .all(|(av, bv)| inner(a_arena, *av, b_arena, *bv, visited))
-                    && match (a_attr.dyn_ty, b_attr.dyn_ty) {
-                        (Some(ad), Some(bd)) => inner(a_arena, ad, b_arena, bd, visited),
-                        (None, None) => true,
-                        _ => false,
-                    }
-            }
-            (OutputTy::Union(am), OutputTy::Union(bm))
-            | (OutputTy::Intersection(am), OutputTy::Intersection(bm)) => {
-                am.len() == bm.len()
-                    && am
-                        .iter()
-                        .zip(bm.iter())
-                        .all(|(a, b)| inner(a_arena, *a, b_arena, *b, visited))
-            }
-            (OutputTy::Named(an, ai), OutputTy::Named(bn, bi)) => {
-                an == bn && inner(a_arena, *ai, b_arena, *bi, visited)
-            }
-            (OutputTy::Neg(ai), OutputTy::Neg(bi)) => inner(a_arena, *ai, b_arena, *bi, visited),
-            // Extern: follow through to the external arena
-            (OutputTy::Extern(a_owned), _) => {
-                inner(&a_owned.arena, a_owned.root, b_arena, b, visited)
-            }
-            (_, OutputTy::Extern(b_owned)) => {
-                inner(a_arena, a, &b_owned.arena, b_owned.root, visited)
-            }
-            _ => false,
-        }
-    }
-    inner(a_arena, a, b_arena, b, &mut FxHashSet::default())
-}
-
 impl PartialEq for RootTy {
     fn eq(&self, other: &Self) -> bool {
-        ty_eq(&self.arena, self.ty, &other.arena, other.ty)
+        let a = OwnedTy::new(self.arena.clone(), self.ty);
+        let b = OwnedTy::new(other.arena.clone(), other.ty);
+        a.structurally_eq(&b)
     }
 }
 
@@ -389,6 +314,80 @@ pub fn get_multifile_root(files: &[(&str, &str)]) -> RootTy {
 
 pub fn get_multifile_result(files: &[(&str, &str)]) -> (RootTy, Vec<crate::imports::ImportError>) {
     check_multifile(files)
+}
+
+/// Multi-file inference with fixpoint iteration for cyclic imports.
+///
+/// Unlike `check_multifile` which processes deps in a single pass,
+/// this iterates all files until their ephemeral stubs stabilize (or
+/// `max_rounds` is reached). Returns per-file root types and the number
+/// of rounds taken.
+pub fn check_multifile_fixpoint(
+    files: &[(&str, &str)],
+    max_rounds: usize,
+) -> (HashMap<PathBuf, RootTy>, usize) {
+    let (_entry, all_files) = lang_ast::tests::parse_multi_file(files);
+    let aliases = TypeAliasRegistry::default();
+
+    let mut ephemeral_stubs: HashMap<PathBuf, OwnedTy> = HashMap::new();
+    let mut rounds_taken = 0;
+
+    for round in 0..max_rounds {
+        rounds_taken = round + 1;
+        let mut new_stubs: HashMap<PathBuf, OwnedTy> = HashMap::new();
+
+        for &(path_str, _) in files {
+            let file_path = PathBuf::from(path_str);
+            let Some(r) = all_files.get(&file_path) else {
+                continue;
+            };
+            let base_dir = file_path.parent().unwrap_or(Path::new("/"));
+
+            let resolution = resolve_import_types_from_stubs(
+                &r.module,
+                &r.name_res,
+                base_dir,
+                &ephemeral_stubs,
+                Some(&aliases),
+            );
+
+            let file_aliases = crate::load_inline_aliases(Arc::new(aliases.clone()), &r.module);
+            let check = crate::CheckCtx::new(
+                &r.module,
+                &r.name_res,
+                &r.module_indices.binding_expr,
+                file_aliases,
+                resolution.types,
+                Arc::default(),
+            );
+            let (result, _diags, _bailed_out) = check.infer_prog_partial(r.grouped_defs.clone());
+            if let Some(&root_ty) = result.expr_ty_map.get(r.module.entry_expr) {
+                new_stubs.insert(file_path, OwnedTy::new(result.arena.clone(), root_ty));
+            }
+        }
+
+        // Check convergence: all stubs structurally unchanged.
+        if round > 0 {
+            let converged = new_stubs.iter().all(|(path, new_ty)| {
+                ephemeral_stubs
+                    .get(path)
+                    .is_some_and(|old_ty| old_ty.structurally_eq(new_ty))
+            });
+            if converged {
+                ephemeral_stubs = new_stubs;
+                break;
+            }
+        }
+
+        ephemeral_stubs = new_stubs;
+    }
+
+    let result: HashMap<PathBuf, RootTy> = ephemeral_stubs
+        .into_iter()
+        .map(|(path, owned)| (path, RootTy::new(owned.root, Arc::clone(&owned.arena))))
+        .collect();
+
+    (result, rounds_taken)
 }
 
 pub fn get_multifile_root_with_aliases(
@@ -2074,8 +2073,8 @@ mod import_tests {
     use std::sync::Arc;
 
     use super::{
-        check_multifile_with_aliases, get_multifile_result, get_multifile_root,
-        get_multifile_root_with_aliases, RootTy,
+        check_multifile_fixpoint, check_multifile_with_aliases, get_multifile_result,
+        get_multifile_root, get_multifile_root_with_aliases, RootTy,
     };
     use crate::aliases::TypeAliasRegistry;
     use crate::imports::resolve_import_types_from_stubs;
@@ -2190,6 +2189,98 @@ mod import_tests {
             matches!(ty.output_ty(), OutputTy::TyVar(_)),
             "cyclic import should degrade to TyVar, got: {ty}"
         );
+    }
+
+    // Fixpoint iteration gives real types across cyclic imports.
+    //
+    // A exports { x = <from B>, z = 42 }, B exports { y = "hello", w = <from A> }.
+    // Single-pass: A.x = ⊤, B.w = ⊤ (no stubs available for the back-edge).
+    // After fixpoint: A.x = string (from B.y), B.w = int (from A.z).
+    #[test]
+    fn import_cyclic_fixpoint_improves_types() {
+        let (types, rounds) = check_multifile_fixpoint(
+            &[
+                ("/a.nix", "{ x = (import /b.nix).y; z = 42; }"),
+                ("/b.nix", "{ y = \"hello\"; w = (import /a.nix).z; }"),
+            ],
+            4,
+        );
+
+        // Should converge in 2-3 rounds.
+        assert!(
+            rounds <= 4,
+            "expected convergence within 4 rounds, took {rounds}"
+        );
+
+        // Check A's type: { x: string, z: int }
+        let a_ty = types
+            .get(&PathBuf::from("/a.nix"))
+            .expect("a.nix should have a type");
+        match a_ty.output_ty() {
+            OutputTy::AttrSet(attr) => {
+                let x_ty = attr.fields.get("x").expect("field x");
+                let z_ty = attr.fields.get("z").expect("field z");
+                assert_eq!(a_ty.child(*x_ty), expected_ty!(String));
+                assert_eq!(a_ty.child(*z_ty), expected_ty!(Int));
+            }
+            _ => panic!("expected attrset for a.nix, got: {a_ty}"),
+        }
+
+        // Check B's type: { y: string, w: int }
+        let b_ty = types
+            .get(&PathBuf::from("/b.nix"))
+            .expect("b.nix should have a type");
+        match b_ty.output_ty() {
+            OutputTy::AttrSet(attr) => {
+                let y_ty = attr.fields.get("y").expect("field y");
+                let w_ty = attr.fields.get("w").expect("field w");
+                assert_eq!(b_ty.child(*y_ty), expected_ty!(String));
+                assert_eq!(b_ty.child(*w_ty), expected_ty!(Int));
+            }
+            _ => panic!("expected attrset for b.nix, got: {b_ty}"),
+        }
+    }
+
+    // Three-file ring: A → B → C → A. Fixpoint resolves all cross-cycle fields.
+    #[test]
+    fn import_cyclic_fixpoint_three_file_ring() {
+        let (types, rounds) = check_multifile_fixpoint(
+            &[
+                ("/a.nix", "{ fromC = (import /c.nix).val; val = 1; }"),
+                ("/b.nix", "{ fromA = (import /a.nix).val; val = \"two\"; }"),
+                ("/c.nix", "{ fromB = (import /b.nix).val; val = true; }"),
+            ],
+            4,
+        );
+
+        assert!(rounds <= 4, "expected convergence, took {rounds}");
+
+        let a_ty = types.get(&PathBuf::from("/a.nix")).unwrap();
+        match a_ty.output_ty() {
+            OutputTy::AttrSet(attr) => {
+                let from_c = attr.fields.get("fromC").expect("field fromC");
+                assert_eq!(a_ty.child(*from_c), expected_ty!(Bool));
+            }
+            _ => panic!("expected attrset for a.nix, got: {a_ty}"),
+        }
+
+        let b_ty = types.get(&PathBuf::from("/b.nix")).unwrap();
+        match b_ty.output_ty() {
+            OutputTy::AttrSet(attr) => {
+                let from_a = attr.fields.get("fromA").expect("field fromA");
+                assert_eq!(b_ty.child(*from_a), expected_ty!(Int));
+            }
+            _ => panic!("expected attrset for b.nix, got: {b_ty}"),
+        }
+
+        let c_ty = types.get(&PathBuf::from("/c.nix")).unwrap();
+        match c_ty.output_ty() {
+            OutputTy::AttrSet(attr) => {
+                let from_b = attr.fields.get("fromB").expect("field fromB");
+                assert_eq!(c_ty.child(*from_b), expected_ty!(String));
+            }
+            _ => panic!("expected attrset for c.nix, got: {c_ty}"),
+        }
     }
 
     // Non-literal import argument (variable) — should stay unconstrained.

@@ -116,8 +116,9 @@ In batch mode (`tix check`), files are inferred in topological layers based on t
 
 1. **Import scanning** — during Phase 1 (sequential prepare), each file's import targets are scanned to build a file-level dependency graph.
 2. **SCC computation + layering** — Tarjan's algorithm computes strongly-connected components (SCCs), then a condensation DAG is topologically sorted into layers. Layer 0 contains leaf files (no in-project dependencies); each subsequent layer depends only on prior layers.
-3. **Layer-by-layer inference** — files within each layer run in parallel via rayon. Dependencies from prior layers have their signatures cached in the `InferenceCoordinator`, so imports resolve to real types instead of `⊤`. Files within the same SCC (mutual imports) get `⊤` for intra-SCC imports.
-4. **Reference-counted eviction** — after each layer, signatures whose importers have all been processed are evicted from the cache, keeping memory bounded to the dependency "frontier" rather than the entire project.
+3. **Layer-by-layer inference** — files within each layer run in parallel via rayon. Dependencies from prior layers have their signatures cached in the `InferenceCoordinator`, so imports resolve to real types instead of `⊤`.
+4. **Fixpoint iteration for cyclic SCCs** — files in non-trivial SCCs (mutual imports) are re-inferred until their signatures stabilize (up to 4 rounds). In round 1, intra-SCC imports get `⊤`; in subsequent rounds, they get the prior round's inferred types. This gives real types across cycle edges. Convergence is checked via structural equality of `OwnedTy` signatures.
+5. **Reference-counted eviction** — after each layer, signatures whose importers have all been processed are evicted from the cache, keeping memory bounded to the dependency "frontier" rather than the entire project.
 
 ## Stub integration
 

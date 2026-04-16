@@ -24,6 +24,7 @@
 //   from the arb_prim strategy. Path literals require valid filesystem syntax
 //   and Uri is rarely used.
 
+mod cyclic;
 mod frozen;
 mod partial;
 mod stub_compose;
