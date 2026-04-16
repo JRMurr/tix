@@ -837,6 +837,112 @@ impl Ord for OwnedTy {
     }
 }
 
+impl OwnedTy {
+    /// Structural cross-arena equality: compares two types from potentially
+    /// different arenas by recursively comparing their OutputTy nodes.
+    ///
+    /// Unlike `PartialEq` (which is identity-based via `Arc::ptr_eq`), this
+    /// compares the actual type structure. Two independently-constructed types
+    /// with the same shape compare as equal.
+    ///
+    /// Used for convergence checks in fixpoint iteration and LSP signature
+    /// change detection.
+    pub fn structurally_eq(&self, other: &Self) -> bool {
+        // Fast path: same arena and same root → identical.
+        if Arc::ptr_eq(&self.arena, &other.arena) && self.root == other.root {
+            return true;
+        }
+        structurally_eq_inner(
+            &self.arena,
+            self.root,
+            &other.arena,
+            other.root,
+            &mut FxHashSet::default(),
+        )
+    }
+}
+
+/// Recursive structural equality with cycle detection.
+///
+/// The `visited` set tracks `(TyRef, TyRef)` pairs already compared to break
+/// cycles (e.g. recursive types via Extern). If we encounter a pair we've
+/// already seen, we assume equality — any structural difference would have
+/// been caught on a different path through the type.
+fn structurally_eq_inner(
+    a_arena: &TypeArena,
+    a: TyRef,
+    b_arena: &TypeArena,
+    b: TyRef,
+    visited: &mut FxHashSet<(TyRef, TyRef)>,
+) -> bool {
+    if !visited.insert((a, b)) {
+        return true; // cycle — assume equal
+    }
+    let a_node = &a_arena[a];
+    let b_node = &b_arena[b];
+    match (a_node, b_node) {
+        (OutputTy::TyVar(x), OutputTy::TyVar(y)) => x == y,
+        (OutputTy::Primitive(x), OutputTy::Primitive(y)) => x == y,
+        (OutputTy::Bottom, OutputTy::Bottom) | (OutputTy::Top, OutputTy::Top) => true,
+        (OutputTy::List(a_inner), OutputTy::List(b_inner)) => {
+            structurally_eq_inner(a_arena, *a_inner, b_arena, *b_inner, visited)
+        }
+        (
+            OutputTy::Lambda {
+                param: ap,
+                body: ab,
+            },
+            OutputTy::Lambda {
+                param: bp,
+                body: bb,
+            },
+        ) => {
+            structurally_eq_inner(a_arena, *ap, b_arena, *bp, visited)
+                && structurally_eq_inner(a_arena, *ab, b_arena, *bb, visited)
+        }
+        (OutputTy::AttrSet(a_attr), OutputTy::AttrSet(b_attr)) => {
+            a_attr.open == b_attr.open
+                && a_attr.optional_fields == b_attr.optional_fields
+                && a_attr.fields.len() == b_attr.fields.len()
+                && a_attr.fields.keys().eq(b_attr.fields.keys())
+                && a_attr
+                    .fields
+                    .values()
+                    .zip(b_attr.fields.values())
+                    .all(|(av, bv)| structurally_eq_inner(a_arena, *av, b_arena, *bv, visited))
+                && match (a_attr.dyn_ty, b_attr.dyn_ty) {
+                    (Some(ad), Some(bd)) => {
+                        structurally_eq_inner(a_arena, ad, b_arena, bd, visited)
+                    }
+                    (None, None) => true,
+                    _ => false,
+                }
+        }
+        (OutputTy::Union(am), OutputTy::Union(bm))
+        | (OutputTy::Intersection(am), OutputTy::Intersection(bm)) => {
+            am.len() == bm.len()
+                && am
+                    .iter()
+                    .zip(bm.iter())
+                    .all(|(a, b)| structurally_eq_inner(a_arena, *a, b_arena, *b, visited))
+        }
+        (OutputTy::Named(an, ai), OutputTy::Named(bn, bi)) => {
+            an == bn && structurally_eq_inner(a_arena, *ai, b_arena, *bi, visited)
+        }
+        (OutputTy::Neg(ai), OutputTy::Neg(bi)) => {
+            structurally_eq_inner(a_arena, *ai, b_arena, *bi, visited)
+        }
+        // Extern: follow through to the external arena.
+        (OutputTy::Extern(a_owned), _) => {
+            structurally_eq_inner(&a_owned.arena, a_owned.root, b_arena, b, visited)
+        }
+        (_, OutputTy::Extern(b_owned)) => {
+            structurally_eq_inner(a_arena, a, &b_owned.arena, b_owned.root, visited)
+        }
+        _ => false,
+    }
+}
+
 impl fmt::Display for OwnedTy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.arena.display(self.root))
@@ -981,5 +1087,182 @@ impl TruncState<'_> {
         buf.push_str(s);
         self.bytes_written += s.len();
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{arc_ty, PrimitiveTy};
+
+    /// Build a simple OwnedTy from a closure that populates an arena.
+    fn make_owned(f: impl FnOnce(&mut TypeArena) -> TyRef) -> OwnedTy {
+        let mut arena = TypeArena::new();
+        let root = f(&mut arena);
+        OwnedTy::new(Arc::new(arena), root)
+    }
+
+    #[test]
+    fn same_primitive_different_arenas() {
+        let a = make_owned(|arena| arena.intern(OutputTy::Primitive(PrimitiveTy::Int)));
+        let b = make_owned(|arena| arena.intern(OutputTy::Primitive(PrimitiveTy::Int)));
+        assert!(!Arc::ptr_eq(&a.arena, &b.arena), "sanity: different arenas");
+        assert!(a.structurally_eq(&b));
+    }
+
+    #[test]
+    fn different_primitives() {
+        let a = make_owned(|arena| arena.intern(OutputTy::Primitive(PrimitiveTy::Int)));
+        let b = make_owned(|arena| arena.intern(OutputTy::Primitive(PrimitiveTy::String)));
+        assert!(!a.structurally_eq(&b));
+    }
+
+    #[test]
+    fn same_arena_fast_path() {
+        let a = make_owned(|arena| arena.intern(OutputTy::Primitive(PrimitiveTy::Int)));
+        // Same arena and root — identity fast path.
+        assert!(a.structurally_eq(&a));
+    }
+
+    #[test]
+    fn lambda_structural_eq() {
+        let a = make_owned(|arena| {
+            let p = arena.intern(OutputTy::Primitive(PrimitiveTy::Int));
+            let b = arena.intern(OutputTy::Primitive(PrimitiveTy::String));
+            arena.intern(OutputTy::Lambda { param: p, body: b })
+        });
+        let b = make_owned(|arena| {
+            let p = arena.intern(OutputTy::Primitive(PrimitiveTy::Int));
+            let b = arena.intern(OutputTy::Primitive(PrimitiveTy::String));
+            arena.intern(OutputTy::Lambda { param: p, body: b })
+        });
+        assert!(a.structurally_eq(&b));
+    }
+
+    #[test]
+    fn lambda_different_body() {
+        let a = make_owned(|arena| {
+            let p = arena.intern(OutputTy::Primitive(PrimitiveTy::Int));
+            let b = arena.intern(OutputTy::Primitive(PrimitiveTy::String));
+            arena.intern(OutputTy::Lambda { param: p, body: b })
+        });
+        let b = make_owned(|arena| {
+            let p = arena.intern(OutputTy::Primitive(PrimitiveTy::Int));
+            let b = arena.intern(OutputTy::Primitive(PrimitiveTy::Int));
+            arena.intern(OutputTy::Lambda { param: p, body: b })
+        });
+        assert!(!a.structurally_eq(&b));
+    }
+
+    #[test]
+    fn attrset_structural_eq() {
+        let a = make_owned(|arena| arc_ty!(arena, { "x" : Int, "y" : String }));
+        let b = make_owned(|arena| arc_ty!(arena, { "x" : Int, "y" : String }));
+        assert!(a.structurally_eq(&b));
+    }
+
+    #[test]
+    fn attrset_different_fields() {
+        let a = make_owned(|arena| arc_ty!(arena, { "x" : Int }));
+        let b = make_owned(|arena| arc_ty!(arena, { "y" : Int }));
+        assert!(!a.structurally_eq(&b));
+    }
+
+    #[test]
+    fn union_structural_eq() {
+        let a = make_owned(|arena| {
+            let members = vec![arc_ty!(arena, Int), arc_ty!(arena, String)];
+            arena.intern(OutputTy::Union(members))
+        });
+        let b = make_owned(|arena| {
+            let members = vec![arc_ty!(arena, Int), arc_ty!(arena, String)];
+            arena.intern(OutputTy::Union(members))
+        });
+        assert!(a.structurally_eq(&b));
+    }
+
+    #[test]
+    fn top_bottom_eq() {
+        let a = make_owned(|arena| arena.intern(OutputTy::Top));
+        let b = make_owned(|arena| arena.intern(OutputTy::Top));
+        assert!(a.structurally_eq(&b));
+
+        let c = make_owned(|arena| arena.intern(OutputTy::Bottom));
+        let d = make_owned(|arena| arena.intern(OutputTy::Bottom));
+        assert!(c.structurally_eq(&d));
+        assert!(!a.structurally_eq(&c));
+    }
+
+    #[test]
+    fn named_structural_eq() {
+        let a = make_owned(|arena| {
+            let inner = arena.intern(OutputTy::Primitive(PrimitiveTy::Int));
+            arena.intern(OutputTy::Named("Foo".into(), inner))
+        });
+        let b = make_owned(|arena| {
+            let inner = arena.intern(OutputTy::Primitive(PrimitiveTy::Int));
+            arena.intern(OutputTy::Named("Foo".into(), inner))
+        });
+        assert!(a.structurally_eq(&b));
+    }
+
+    #[test]
+    fn named_different_name() {
+        let a = make_owned(|arena| {
+            let inner = arena.intern(OutputTy::Primitive(PrimitiveTy::Int));
+            arena.intern(OutputTy::Named("Foo".into(), inner))
+        });
+        let b = make_owned(|arena| {
+            let inner = arena.intern(OutputTy::Primitive(PrimitiveTy::Int));
+            arena.intern(OutputTy::Named("Bar".into(), inner))
+        });
+        assert!(!a.structurally_eq(&b));
+    }
+
+    #[test]
+    fn neg_structural_eq() {
+        let a = make_owned(|arena| {
+            let inner = arena.intern(OutputTy::Primitive(PrimitiveTy::Null));
+            arena.intern(OutputTy::Neg(inner))
+        });
+        let b = make_owned(|arena| {
+            let inner = arena.intern(OutputTy::Primitive(PrimitiveTy::Null));
+            arena.intern(OutputTy::Neg(inner))
+        });
+        assert!(a.structurally_eq(&b));
+    }
+
+    #[test]
+    fn list_structural_eq() {
+        let a = make_owned(|arena| {
+            let inner = arena.intern(OutputTy::Primitive(PrimitiveTy::Int));
+            arena.intern(OutputTy::List(inner))
+        });
+        let b = make_owned(|arena| {
+            let inner = arena.intern(OutputTy::Primitive(PrimitiveTy::Int));
+            arena.intern(OutputTy::List(inner))
+        });
+        assert!(a.structurally_eq(&b));
+    }
+
+    #[test]
+    fn tyvar_structural_eq() {
+        let a = make_owned(|arena| arena.intern(OutputTy::TyVar(0)));
+        let b = make_owned(|arena| arena.intern(OutputTy::TyVar(0)));
+        assert!(a.structurally_eq(&b));
+
+        let c = make_owned(|arena| arena.intern(OutputTy::TyVar(1)));
+        assert!(!a.structurally_eq(&c));
+    }
+
+    #[test]
+    fn extern_unwraps_transparently() {
+        // Build an inner OwnedTy, then wrap it in Extern in another arena.
+        // Structural eq should see through the Extern wrapper.
+        let inner = make_owned(|arena| arena.intern(OutputTy::Primitive(PrimitiveTy::Int)));
+        let wrapped = make_owned(|arena| arena.intern(OutputTy::Extern(inner.clone())));
+        let plain = make_owned(|arena| arena.intern(OutputTy::Primitive(PrimitiveTy::Int)));
+        assert!(wrapped.structurally_eq(&plain));
+        assert!(plain.structurally_eq(&wrapped));
     }
 }

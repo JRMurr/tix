@@ -90,86 +90,11 @@ impl std::fmt::Debug for RootTy {
     }
 }
 
-/// Structural cross-arena equality: compares two types from potentially
-/// different arenas by recursively comparing their OutputTy nodes.
-fn ty_eq(a_arena: &TypeArena, a: TyRef, b_arena: &TypeArena, b: TyRef) -> bool {
-    use rustc_hash::FxHashSet;
-    fn inner(
-        a_arena: &TypeArena,
-        a: TyRef,
-        b_arena: &TypeArena,
-        b: TyRef,
-        visited: &mut FxHashSet<(TyRef, TyRef)>,
-    ) -> bool {
-        if !visited.insert((a, b)) {
-            return true; // cycle — assume equal
-        }
-        let a_node = &a_arena[a];
-        let b_node = &b_arena[b];
-        match (a_node, b_node) {
-            (OutputTy::TyVar(x), OutputTy::TyVar(y)) => x == y,
-            (OutputTy::Primitive(x), OutputTy::Primitive(y)) => x == y,
-            (OutputTy::Bottom, OutputTy::Bottom) | (OutputTy::Top, OutputTy::Top) => true,
-            (OutputTy::List(a_inner), OutputTy::List(b_inner)) => {
-                inner(a_arena, *a_inner, b_arena, *b_inner, visited)
-            }
-            (
-                OutputTy::Lambda {
-                    param: ap,
-                    body: ab,
-                },
-                OutputTy::Lambda {
-                    param: bp,
-                    body: bb,
-                },
-            ) => {
-                inner(a_arena, *ap, b_arena, *bp, visited)
-                    && inner(a_arena, *ab, b_arena, *bb, visited)
-            }
-            (OutputTy::AttrSet(a_attr), OutputTy::AttrSet(b_attr)) => {
-                a_attr.open == b_attr.open
-                    && a_attr.optional_fields == b_attr.optional_fields
-                    && a_attr.fields.len() == b_attr.fields.len()
-                    && a_attr.fields.keys().eq(b_attr.fields.keys())
-                    && a_attr
-                        .fields
-                        .values()
-                        .zip(b_attr.fields.values())
-                        .all(|(av, bv)| inner(a_arena, *av, b_arena, *bv, visited))
-                    && match (a_attr.dyn_ty, b_attr.dyn_ty) {
-                        (Some(ad), Some(bd)) => inner(a_arena, ad, b_arena, bd, visited),
-                        (None, None) => true,
-                        _ => false,
-                    }
-            }
-            (OutputTy::Union(am), OutputTy::Union(bm))
-            | (OutputTy::Intersection(am), OutputTy::Intersection(bm)) => {
-                am.len() == bm.len()
-                    && am
-                        .iter()
-                        .zip(bm.iter())
-                        .all(|(a, b)| inner(a_arena, *a, b_arena, *b, visited))
-            }
-            (OutputTy::Named(an, ai), OutputTy::Named(bn, bi)) => {
-                an == bn && inner(a_arena, *ai, b_arena, *bi, visited)
-            }
-            (OutputTy::Neg(ai), OutputTy::Neg(bi)) => inner(a_arena, *ai, b_arena, *bi, visited),
-            // Extern: follow through to the external arena
-            (OutputTy::Extern(a_owned), _) => {
-                inner(&a_owned.arena, a_owned.root, b_arena, b, visited)
-            }
-            (_, OutputTy::Extern(b_owned)) => {
-                inner(a_arena, a, &b_owned.arena, b_owned.root, visited)
-            }
-            _ => false,
-        }
-    }
-    inner(a_arena, a, b_arena, b, &mut FxHashSet::default())
-}
-
 impl PartialEq for RootTy {
     fn eq(&self, other: &Self) -> bool {
-        ty_eq(&self.arena, self.ty, &other.arena, other.ty)
+        let a = OwnedTy::new(self.arena.clone(), self.ty);
+        let b = OwnedTy::new(other.arena.clone(), other.ty);
+        a.structurally_eq(&b)
     }
 }
 
