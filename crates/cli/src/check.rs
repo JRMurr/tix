@@ -526,7 +526,7 @@ pub fn run_check_project(
             // Clone bundles for reuse across rounds. Metadata is extracted
             // once and held aside — only the final round's diagnostics are
             // kept.
-            tracing::info!(
+            tracing::debug!(
                 "layer {}: cyclic SCC with {} files, up to {} fixpoint rounds",
                 layer_idx,
                 scc.files.len(),
@@ -604,7 +604,7 @@ pub fn run_check_project(
                 });
 
                 if converged {
-                    tracing::info!(
+                    tracing::debug!(
                         "cyclic SCC ({} files) converged after {} round(s)",
                         scc.files.len(),
                         round + 1,
