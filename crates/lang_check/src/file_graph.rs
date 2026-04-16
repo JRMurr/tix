@@ -18,6 +18,142 @@ use std::path::{Path, PathBuf};
 use petgraph::algo::{condensation, toposort};
 use petgraph::graph::{DiGraph, NodeIndex};
 
+/// A group of files forming a strongly connected component.
+pub struct SccGroup {
+    pub files: Vec<PathBuf>,
+    /// True if this SCC has >1 file (mutual imports) or a single file that
+    /// imports itself. Cyclic SCCs benefit from fixpoint iteration.
+    pub is_cyclic: bool,
+}
+
+/// A layer of SCCs at the same topological depth. All dependencies from
+/// prior layers are guaranteed to have cached signatures before this layer
+/// runs.
+pub struct InferenceLayer {
+    pub sccs: Vec<SccGroup>,
+}
+
+impl InferenceLayer {
+    /// Flat list of all files in this layer (convenience for eviction logic).
+    pub fn all_files(&self) -> impl Iterator<Item = &PathBuf> {
+        self.sccs.iter().flat_map(|scc| scc.files.iter())
+    }
+}
+
+/// Build inference layers preserving SCC grouping.
+///
+/// Like `build_file_layers`, but each layer contains a list of `SccGroup`s
+/// rather than a flat file list. This allows callers to identify which files
+/// are in non-trivial (cyclic) SCCs and apply fixpoint iteration to them.
+///
+/// O(V+E) overall — trivial for even 40K files.
+pub fn build_file_layers_with_sccs(
+    file_imports: &HashMap<PathBuf, Vec<PathBuf>>,
+) -> Vec<InferenceLayer> {
+    if file_imports.is_empty() {
+        return vec![];
+    }
+
+    // =========================================================================
+    // Step A: Build the raw file graph and condensation DAG
+    // =========================================================================
+
+    let mut graph: DiGraph<PathBuf, ()> = DiGraph::new();
+    let mut node_map: HashMap<&Path, NodeIndex> = HashMap::new();
+
+    for path in file_imports.keys() {
+        let idx = graph.add_node(path.clone());
+        node_map.insert(path.as_path(), idx);
+    }
+
+    // Track self-edges before condensation (condensation strips them).
+    let mut has_self_edge: std::collections::HashSet<NodeIndex> = std::collections::HashSet::new();
+
+    for (importer, deps) in file_imports {
+        let from = node_map[importer.as_path()];
+        for dep in deps {
+            if let Some(&to) = node_map.get(dep.as_path()) {
+                if from == to {
+                    has_self_edge.insert(from);
+                }
+                graph.add_edge(from, to, ());
+            }
+        }
+    }
+
+    // Map from original graph NodeIndex → condensed SCC NodeIndex so we can
+    // check self-edges on singleton SCCs.
+    let mut original_to_condensed: HashMap<NodeIndex, NodeIndex> = HashMap::new();
+
+    let condensed = condensation(graph, true);
+
+    // Build reverse mapping: for each condensed node, record which original
+    // nodes are members.
+    for cnode in condensed.node_indices() {
+        for original_path in &condensed[cnode] {
+            if let Some(&orig_idx) = node_map.get(original_path.as_path()) {
+                original_to_condensed.insert(orig_idx, cnode);
+            }
+        }
+    }
+
+    // =========================================================================
+    // Step B: Compute depth and group into layers (preserving SCC structure)
+    // =========================================================================
+
+    let topo_order = match toposort(&condensed, None) {
+        Ok(order) => order,
+        Err(_) => {
+            // Should never happen on a condensation DAG, but handle gracefully.
+            let all_files: Vec<PathBuf> = file_imports.keys().cloned().collect();
+            return vec![InferenceLayer {
+                sccs: vec![SccGroup {
+                    files: all_files,
+                    is_cyclic: true,
+                }],
+            }];
+        }
+    };
+
+    let mut depth: HashMap<NodeIndex, usize> = HashMap::with_capacity(topo_order.len());
+
+    for &node in topo_order.iter().rev() {
+        let max_dep_depth = condensed
+            .neighbors(node)
+            .filter_map(|succ| depth.get(&succ))
+            .max()
+            .copied();
+
+        let node_depth = match max_dep_depth {
+            Some(d) => d + 1,
+            None => 0,
+        };
+        depth.insert(node, node_depth);
+    }
+
+    let max_depth = depth.values().copied().max().unwrap_or(0);
+    let mut layers: Vec<InferenceLayer> = (0..=max_depth)
+        .map(|_| InferenceLayer { sccs: Vec::new() })
+        .collect();
+
+    for (&cnode, &d) in &depth {
+        let files: Vec<PathBuf> = condensed[cnode].to_vec();
+        let is_cyclic = if files.len() > 1 {
+            true
+        } else {
+            // Single-file SCC: cyclic only if it imports itself.
+            files
+                .first()
+                .and_then(|p| node_map.get(p.as_path()))
+                .is_some_and(|orig_idx| has_self_edge.contains(orig_idx))
+        };
+        layers[d].sccs.push(SccGroup { files, is_cyclic });
+    }
+
+    layers.retain(|l| !l.sccs.is_empty());
+    layers
+}
+
 /// Build inference layers from a file-level import graph.
 ///
 /// Input: map from canonical file path → list of its canonical import targets
@@ -30,92 +166,10 @@ use petgraph::graph::{DiGraph, NodeIndex};
 ///
 /// O(V+E) overall — trivial for even 40K files.
 pub fn build_file_layers(file_imports: &HashMap<PathBuf, Vec<PathBuf>>) -> Vec<Vec<PathBuf>> {
-    if file_imports.is_empty() {
-        return vec![];
-    }
-
-    // =========================================================================
-    // Step A: Build the raw file graph and condensation DAG
-    // =========================================================================
-
-    // Assign a graph node to every file that appears as a key in the import map.
-    let mut graph: DiGraph<PathBuf, ()> = DiGraph::new();
-    let mut node_map: HashMap<&Path, NodeIndex> = HashMap::new();
-
-    for path in file_imports.keys() {
-        let idx = graph.add_node(path.clone());
-        node_map.insert(path.as_path(), idx);
-    }
-
-    // Add edges: importer → dependency (only for in-project targets).
-    for (importer, deps) in file_imports {
-        let from = node_map[importer.as_path()];
-        for dep in deps {
-            if let Some(&to) = node_map.get(dep.as_path()) {
-                graph.add_edge(from, to, ());
-            }
-            // Imports to files outside the project set are silently dropped.
-        }
-    }
-
-    // Condensation: compute SCCs and build a DAG where each node is a
-    // Vec<PathBuf> containing the SCC's member files. `make_acyclic=true`
-    // strips self-loops and duplicate edges within the condensed graph.
-    let condensed = condensation(graph, true);
-
-    // =========================================================================
-    // Step B: Compute depth and group into layers
-    // =========================================================================
-    //
-    // Walk in topological order (leaves first). Each condensed node's depth is
-    // max(depth of successors) + 1 for nodes with outgoing edges, or 0 for
-    // leaf nodes. We then group by depth.
-    //
-    // Note: petgraph's condensation reverses the node order relative to the
-    // original graph, and edges point from SCCs to their dependencies. We
-    // compute depth based on successors (dependencies) so that leaves get
-    // depth 0 and roots get the highest depth.
-
-    let topo_order = match toposort(&condensed, None) {
-        Ok(order) => order,
-        Err(_) => {
-            // Should never happen on a condensation DAG, but handle gracefully:
-            // return all files in a single layer.
-            let all_files: Vec<PathBuf> = file_imports.keys().cloned().collect();
-            return vec![all_files];
-        }
-    };
-
-    let mut depth: HashMap<NodeIndex, usize> = HashMap::with_capacity(topo_order.len());
-
-    // Process in reverse topological order so that when we process a node,
-    // all its successors (dependencies) already have their depth computed.
-    for &node in topo_order.iter().rev() {
-        let max_dep_depth = condensed
-            .neighbors(node)
-            .filter_map(|succ| depth.get(&succ))
-            .max()
-            .copied();
-
-        let node_depth = match max_dep_depth {
-            Some(d) => d + 1,
-            None => 0, // Leaf node: no in-project dependencies.
-        };
-        depth.insert(node, node_depth);
-    }
-
-    // Group condensed nodes by depth, then expand each to its member files.
-    let max_depth = depth.values().copied().max().unwrap_or(0);
-    let mut layers: Vec<Vec<PathBuf>> = vec![Vec::new(); max_depth + 1];
-
-    for (&node, &d) in &depth {
-        layers[d].extend(condensed[node].iter().cloned());
-    }
-
-    // Remove any empty layers (shouldn't happen, but defensive).
-    layers.retain(|l| !l.is_empty());
-
-    layers
+    build_file_layers_with_sccs(file_imports)
+        .into_iter()
+        .map(|layer| layer.sccs.into_iter().flat_map(|scc| scc.files).collect())
+        .collect()
 }
 
 /// Compute importer counts for reference-counted eviction.
@@ -310,5 +364,117 @@ mod tests {
         assert_eq!(counts.get(&PathBuf::from("B")), Some(&1));
         // /external not counted (not in project set).
         assert_eq!(counts.get(&PathBuf::from("/external")), None);
+    }
+
+    // =========================================================================
+    // build_file_layers_with_sccs tests
+    // =========================================================================
+
+    /// Helper: get sorted file names from an SccGroup.
+    fn scc_names(scc: &super::SccGroup) -> Vec<String> {
+        let mut names: Vec<String> = scc
+            .files
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn scc_cycle_is_marked_cyclic() {
+        // A ↔ B
+        let imports = edges(&[("A", &["B"]), ("B", &["A"])]);
+        let layers = build_file_layers_with_sccs(&imports);
+
+        assert_eq!(layers.len(), 1);
+        assert_eq!(layers[0].sccs.len(), 1);
+        assert!(layers[0].sccs[0].is_cyclic);
+        assert_eq!(scc_names(&layers[0].sccs[0]), vec!["A", "B"]);
+    }
+
+    #[test]
+    fn scc_independent_files_are_separate_groups() {
+        // A, B, C independent — same depth, separate non-cyclic SCCs.
+        let imports = edges(&[("A", &[]), ("B", &[]), ("C", &[])]);
+        let layers = build_file_layers_with_sccs(&imports);
+
+        assert_eq!(layers.len(), 1);
+        // Each file is its own SCC.
+        assert_eq!(layers[0].sccs.len(), 3);
+        for scc in &layers[0].sccs {
+            assert!(!scc.is_cyclic);
+            assert_eq!(scc.files.len(), 1);
+        }
+    }
+
+    #[test]
+    fn scc_mixed_layer_cycle_plus_singleton() {
+        // A ↔ B, both → C. Also D → C (independent of the cycle).
+        // Layer 0: C (singleton). Layer 1: {A,B} (cycle) + D (singleton).
+        let imports = edges(&[
+            ("A", &["B", "C"]),
+            ("B", &["A", "C"]),
+            ("C", &[]),
+            ("D", &["C"]),
+        ]);
+        let layers = build_file_layers_with_sccs(&imports);
+
+        assert_eq!(layers.len(), 2);
+        // Layer 0: just C
+        assert_eq!(layers[0].sccs.len(), 1);
+        assert!(!layers[0].sccs[0].is_cyclic);
+
+        // Layer 1: one cyclic SCC {A,B} and one singleton D
+        assert_eq!(layers[1].sccs.len(), 2);
+        let cyclic_scc = layers[1].sccs.iter().find(|s| s.is_cyclic).unwrap();
+        let singleton = layers[1].sccs.iter().find(|s| !s.is_cyclic).unwrap();
+        assert_eq!(scc_names(cyclic_scc), vec!["A", "B"]);
+        assert_eq!(scc_names(singleton), vec!["D"]);
+    }
+
+    #[test]
+    fn scc_self_import_is_cyclic() {
+        // A imports itself.
+        let imports = edges(&[("A", &["A"])]);
+        let layers = build_file_layers_with_sccs(&imports);
+
+        assert_eq!(layers.len(), 1);
+        assert_eq!(layers[0].sccs.len(), 1);
+        assert!(layers[0].sccs[0].is_cyclic);
+        assert_eq!(scc_names(&layers[0].sccs[0]), vec!["A"]);
+    }
+
+    #[test]
+    fn scc_three_file_ring() {
+        // A → B → C → A
+        let imports = edges(&[("A", &["B"]), ("B", &["C"]), ("C", &["A"])]);
+        let layers = build_file_layers_with_sccs(&imports);
+
+        assert_eq!(layers.len(), 1);
+        assert_eq!(layers[0].sccs.len(), 1);
+        assert!(layers[0].sccs[0].is_cyclic);
+        assert_eq!(scc_names(&layers[0].sccs[0]), vec!["A", "B", "C"]);
+    }
+
+    #[test]
+    fn scc_wrapper_matches_flat_output() {
+        // Verify build_file_layers produces the same flat output as before.
+        let imports = edges(&[
+            ("A", &["B", "C"]),
+            ("B", &["A", "C"]),
+            ("C", &[]),
+            ("D", &["C"]),
+        ]);
+        let flat_layers = build_file_layers(&imports);
+        let scc_layers = build_file_layers_with_sccs(&imports);
+
+        assert_eq!(flat_layers.len(), scc_layers.len());
+        for (flat, scc_layer) in flat_layers.iter().zip(scc_layers.iter()) {
+            let flat_sorted = sorted_names(flat);
+            let scc_flat: Vec<PathBuf> = scc_layer.all_files().cloned().collect();
+            let scc_sorted = sorted_names(&scc_flat);
+            assert_eq!(flat_sorted, scc_sorted);
+        }
     }
 }
