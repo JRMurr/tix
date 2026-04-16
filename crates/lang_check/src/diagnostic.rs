@@ -302,7 +302,7 @@ impl fmt::Display for TixDiagnosticKind {
             TixDiagnosticKind::ImportUnresolved { path } => {
                 write!(
                     f,
-                    "imported file `{path}` has not been analyzed — add it to [project] analyze in tix.toml or open it in the editor"
+                    "imported file `{path}` has not been analyzed — add it to [project] includes in tix.toml or open it in the editor"
                 )
             }
             TixDiagnosticKind::InvalidInterpolation { actual } => {
