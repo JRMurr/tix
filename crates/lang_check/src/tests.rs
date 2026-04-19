@@ -255,7 +255,14 @@ pub fn check_multifile_with_aliases(
             );
             let (dep_result, _diags, _bailed_out) =
                 dep_check.infer_prog_partial(dep_r.grouped_defs.clone());
-            if let Some(&root_ty) = dep_result.expr_ty_map.get(dep_r.module.entry_expr) {
+            // Prefer the co-occurring-aware file signature when present (matches
+            // what `extract_file_signature` does in the real coordinator). Only
+            // fall back to the per-expression type when canonicalization bailed
+            // out (e.g. deadline exceeded).
+            if let Some(root_ty) = dep_result
+                .file_sig_ty
+                .or_else(|| dep_result.expr_ty_map.get(dep_r.module.entry_expr).copied())
+            {
                 ephemeral_stubs.insert(dep_path, OwnedTy::new(dep_result.arena.clone(), root_ty));
             }
         }
@@ -2131,17 +2138,12 @@ mod import_tests {
     // polymorphism bug. A lambda whose body is a let-bound reference to
     // the parameter used to export as monomorphic (`{ x?: null } -> null`)
     // because the Canonicalizer filter dropped the parameter TyVar from
-    // the expanded bound union.
-    //
-    // Currently ignored: the filter fix (`should_drop_filler`) handles the
-    // body-side TyVar preservation, but the cross-file caller path also
-    // needs the param-side null to be cleared from the exported signature.
-    // That requires collapsing `constrain_equal` equivalence classes during
-    // canonicalization (see SESSION.md). Without it, the exported sig is
-    // `{ modules?: null & a } -> a | null` and callers still error on
-    // `f { modules = ["x"]; }` with `expected null, got [string]`.
+    // the expanded bound union, and the param/body slots emitted as
+    // distinct free vars on the caller side. Fixed by preserving
+    // cooccurring TyVars in `should_drop_filler` and by collapsing
+    // `constrain_equal` equivalence classes through an `EquivDsu` in the
+    // Canonicalizer.
     #[test]
-    #[ignore = "requires constrain_equal equivalence-class collapse in canonicalization; see SESSION.md"]
     fn import_polymorphic_function_with_let_wrapped_body() {
         let (_ty, errors, diagnostics) = check_multifile_with_aliases(
             &[
@@ -2762,16 +2764,21 @@ mod import_tests {
                 "#,
             ),
         ]);
-        // The function returns a union, so .val is `string | ~null` (both
-        // branches contribute). The key assertion is no spurious TypeMismatch.
+        // The key assertion is no spurious TypeMismatch. The result is
+        // `string` (narrowing eliminates the else branch when x is `null`)
+        // or a Union containing string (if cross-file polymorphism didn't
+        // fully share the param tyvar). Either shape is fine — what mattered
+        // in the original regression was that interning shared tyvars didn't
+        // inject false-positive constraints.
         match ty.output_ty() {
+            OutputTy::Primitive(PrimitiveTy::String) => {}
             OutputTy::Union(members) => {
                 let has_string = members
                     .iter()
                     .any(|m| matches!(&ty.arena[*m], OutputTy::Primitive(PrimitiveTy::String)));
                 assert!(has_string, "union should contain string, got: {ty}");
             }
-            _ => panic!("expected union, got: {ty}"),
+            _ => panic!("expected string or union containing string, got: {ty}"),
         }
     }
 
@@ -4346,14 +4353,9 @@ fn null_default_polymorphic_through_nested_let() {
 }
 
 /// Narrowing + let-binding: the body must still reference the parameter
-/// variable, not collapse to only the narrowed concrete type.
-///
-/// KNOWN LIMITATION: the parameter position still carries `null` from the
-/// default (displays as `modules?: null & a`). Fixing that requires
-/// collapsing `constrain_equal` equivalence classes during canonicalization
-/// so intermediate let/expr slots share the param's TyVar id — tracked in
-/// SESSION.md. The current fix ensures the body side at least references
-/// the param variable so downstream collectors aren't completely broken.
+/// variable, not collapse to only the narrowed concrete type. The param
+/// position should also avoid leaking `null` from the default into a Neg
+/// intersection with the polymorphic var.
 #[test]
 fn null_default_polymorphic_through_narrowing_let() {
     let nix_src = indoc! {r#"
@@ -4373,6 +4375,12 @@ fn null_default_polymorphic_through_narrowing_let() {
     assert!(
         !display.ends_with("-> ~null | [string]"),
         "body should reference the param variable, got: {display}"
+    );
+    // Param position should not carry `null & <var>` — that would reject
+    // valid caller arguments like `{ modules = ["x"]; }` at import sites.
+    assert!(
+        !display.contains("null &"),
+        "param should not intersect with null, got: {display}"
     );
 }
 

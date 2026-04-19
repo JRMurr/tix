@@ -53,7 +53,14 @@ impl CheckCtx<'_> {
 
     /// Constrain a ≡ b (bidirectional: a <: b and b <: a), locating any error
     /// at the current expression.
+    ///
+    /// Also records the equivalence in storage so that later canonicalization
+    /// can collapse `a` and `b` to a single representative in exported
+    /// `OutputTy::TyVar` emissions — otherwise let-bound bridges like
+    /// `let r = x; in r` export the param and body slot as distinct free
+    /// vars and callers lose cross-file polymorphism.
     pub(crate) fn constrain_equal(&mut self, a: TyId, b: TyId) -> Result<(), LocatedError> {
+        self.types.storage.record_equiv(a, b);
         self.constrain_at(a, b)?;
         self.constrain_at(b, a)
     }
