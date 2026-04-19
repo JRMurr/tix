@@ -2127,6 +2127,48 @@ mod import_tests {
         }
     }
 
+    // Regression check for the cross-file side of the let-wrapped
+    // polymorphism bug. A lambda whose body is a let-bound reference to
+    // the parameter used to export as monomorphic (`{ x?: null } -> null`)
+    // because the Canonicalizer filter dropped the parameter TyVar from
+    // the expanded bound union.
+    //
+    // Currently ignored: the filter fix (`should_drop_filler`) handles the
+    // body-side TyVar preservation, but the cross-file caller path also
+    // needs the param-side null to be cleared from the exported signature.
+    // That requires collapsing `constrain_equal` equivalence classes during
+    // canonicalization (see SESSION.md). Without it, the exported sig is
+    // `{ modules?: null & a } -> a | null` and callers still error on
+    // `f { modules = ["x"]; }` with `expected null, got [string]`.
+    #[test]
+    #[ignore = "requires constrain_equal equivalence-class collapse in canonicalization; see SESSION.md"]
+    fn import_polymorphic_function_with_let_wrapped_body() {
+        let (_ty, errors, diagnostics) = check_multifile_with_aliases(
+            &[
+                (
+                    "/main.nix",
+                    r#"let f = import /lib.nix; in f { modules = [ "x" ]; }"#,
+                ),
+                ("/lib.nix", r#"{ modules ? null }: let r = modules; in r"#),
+            ],
+            &TypeAliasRegistry::default(),
+        );
+        assert!(errors.is_empty(), "import errors: {errors:?}");
+        let type_errors: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| {
+                matches!(
+                    d.kind,
+                    crate::diagnostic::TixDiagnosticKind::TypeMismatch { .. }
+                )
+            })
+            .collect();
+        assert!(
+            type_errors.is_empty(),
+            "caller should not get type mismatch, got: {type_errors:?}"
+        );
+    }
+
     // Transitive imports: A → B → C.
     #[test]
     fn import_transitive() {
@@ -4253,6 +4295,84 @@ fn null_default_function_is_polymorphic() {
     assert!(
         !display.contains("& null"),
         "config param should not have '& null' constraint, got: {display}"
+    );
+}
+
+/// Regression: a let-bound intermediate variable in the body dropped the
+/// parameter's polymorphism from the exported file signature. The fix
+/// keeps bare `TyVar`s in the `cooccurring` set when filtering union/
+/// intersection members during canonicalization.
+#[test]
+fn null_default_polymorphic_through_let() {
+    let nix_src = indoc! {"
+        let
+          f = { config ? null }: let r = config; in r;
+        in f
+    "};
+    let ty = get_name_type(nix_src, "f");
+    let display = format!("{ty}");
+    assert!(
+        !display.ends_with("-> null"),
+        "let-wrapped body should not collapse to -> null, got: {display}"
+    );
+    assert!(
+        display.contains("| null"),
+        "let-wrapped body should retain '| null', got: {display}"
+    );
+    assert!(
+        !display.contains("& null"),
+        "config param should not have '& null' constraint, got: {display}"
+    );
+}
+
+/// Chained let-bindings should preserve polymorphism transitively.
+#[test]
+fn null_default_polymorphic_through_nested_let() {
+    let nix_src = indoc! {"
+        let
+          f = { config ? null }: let r1 = config; r2 = r1; in r2;
+        in f
+    "};
+    let ty = get_name_type(nix_src, "f");
+    let display = format!("{ty}");
+    assert!(
+        !display.ends_with("-> null"),
+        "nested let should not collapse to -> null, got: {display}"
+    );
+    assert!(
+        display.contains("| null"),
+        "nested let should retain '| null', got: {display}"
+    );
+}
+
+/// Narrowing + let-binding: the body must still reference the parameter
+/// variable, not collapse to only the narrowed concrete type.
+///
+/// KNOWN LIMITATION: the parameter position still carries `null` from the
+/// default (displays as `modules?: null & a`). Fixing that requires
+/// collapsing `constrain_equal` equivalence classes during canonicalization
+/// so intermediate let/expr slots share the param's TyVar id — tracked in
+/// SESSION.md. The current fix ensures the body side at least references
+/// the param variable so downstream collectors aren't completely broken.
+#[test]
+fn null_default_polymorphic_through_narrowing_let() {
+    let nix_src = indoc! {r#"
+        let
+          f = { modules ? null }:
+            let r = if modules != null then modules else [ "fallback" ];
+            in r;
+        in f
+    "#};
+    let ty = get_name_type(nix_src, "f");
+    let display = format!("{ty}");
+    // Body must not collapse to just `[string]` (lose the param link).
+    assert!(
+        !display.ends_with("-> [string]"),
+        "body should retain param variable, got: {display}"
+    );
+    assert!(
+        !display.ends_with("-> ~null | [string]"),
+        "body should reference the param variable, got: {display}"
     );
 }
 

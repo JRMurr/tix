@@ -334,9 +334,10 @@ impl<'a> Canonicalizer<'a> {
 
         // 3. Filter bare TyVar (uninformative in either position), Bottom
         //    (identity for union), and Top (identity for intersection).
+        //    Cooccurring TyVars survive — see `should_drop_filler`.
         let concrete: Vec<OutputTy> = flattened
             .into_iter()
-            .filter(|m| !matches!(m, OutputTy::TyVar(_) | OutputTy::Bottom | OutputTy::Top))
+            .filter(|m| !should_drop_filler(m, &self.cooccurring))
             .collect();
 
         // 4. Polarity-specific normalization.
@@ -500,10 +501,11 @@ impl<'a> Canonicalizer<'a> {
                 let members = flatten_intersection(&self.arena, vec![ca, cb]);
                 // Filter bare TyVar, Bottom, and Top. Keep all members
                 // around for fallback if every concrete member is filtered out.
+                // Cooccurring TyVars survive — see `should_drop_filler`.
                 let all_members = members.clone();
                 let concrete: Vec<OutputTy> = members
                     .into_iter()
-                    .filter(|m| !matches!(m, OutputTy::TyVar(_) | OutputTy::Bottom | OutputTy::Top))
+                    .filter(|m| !should_drop_filler(m, &self.cooccurring))
                     .collect();
                 // Check for contradictions in all polarities for Inter types.
                 // Unlike variable-bound intersections (negative polarity only),
@@ -538,9 +540,7 @@ impl<'a> Canonicalizer<'a> {
                             flatten_intersection(&self.arena, vec![ca_retry, cb_retry]);
                         let retry_concrete: Vec<OutputTy> = retry_members
                             .into_iter()
-                            .filter(|m| {
-                                !matches!(m, OutputTy::TyVar(_) | OutputTy::Bottom | OutputTy::Top)
-                            })
+                            .filter(|m| !should_drop_filler(m, &self.cooccurring))
                             .collect();
                         // Distribute negations into unions before re-checking.
                         let retry_concrete =
@@ -598,7 +598,7 @@ impl<'a> Canonicalizer<'a> {
                 let all_members = members.clone();
                 let concrete: Vec<OutputTy> = members
                     .into_iter()
-                    .filter(|m| !matches!(m, OutputTy::TyVar(_) | OutputTy::Bottom | OutputTy::Top))
+                    .filter(|m| !should_drop_filler(m, &self.cooccurring))
                     .collect();
                 let had_concrete = !concrete.is_empty();
                 let concrete = match polarity {
@@ -1295,6 +1295,27 @@ fn flatten_composite(
         }
     }
     result.into_vec()
+}
+
+/// Drop predicate for bare `TyVar` / `Bottom` / `Top` inside flattened
+/// union/intersection members.
+///
+/// Bare `TyVar`s are uninformative as members of a composite — a free
+/// variable in `A | α` contributes nothing the reader can act on — EXCEPT
+/// when `α` is in `cooccurring`. Those variables are the bridge that
+/// carries polymorphism through exported file signatures (SimpleSub §4):
+/// the param side and body side of a function must share the same variable
+/// id, so the body-side bare `TyVar` has to survive filtering. Dropping
+/// them causes `let r = x; in r` to export as monomorphic.
+///
+/// In the single-pass `Collector` path, `cooccurring` is always empty, so
+/// this behaves as an unconditional drop.
+fn should_drop_filler(m: &OutputTy, cooccurring: &FxHashSet<TyId>) -> bool {
+    match m {
+        OutputTy::TyVar(n) => !cooccurring.contains(&TyId::from(*n)),
+        OutputTy::Bottom | OutputTy::Top => true,
+        _ => false,
+    }
 }
 
 fn flatten_union(arena: &TypeArena, members: Vec<OutputTy>) -> Vec<OutputTy> {
