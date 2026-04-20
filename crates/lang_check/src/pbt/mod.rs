@@ -26,6 +26,7 @@
 
 mod cyclic;
 mod frozen;
+mod let_bridged_export;
 mod partial;
 mod stub_compose;
 mod type_ops;

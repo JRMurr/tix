@@ -60,6 +60,60 @@ impl PolarityBits {
 /// tradeoff between responsiveness and overhead.
 const CANON_DEADLINE_CHECK_INTERVAL: u32 = 512;
 
+/// Union-find over TyIds built from `TypeStorage::equiv_pairs` at
+/// canonicalization time. Collapses variables linked by `constrain_equal`
+/// to a single representative id, which in turn collapses their exported
+/// `OutputTy::TyVar` emissions. Without this, let-bridged param/body slots
+/// (`{ x ? null }: let r = x; in r`) export as distinct free vars and
+/// cross-file callers lose the polymorphic link.
+struct EquivDsu {
+    parent: Vec<u32>,
+}
+
+impl EquivDsu {
+    fn from_storage(table: &TypeStorage) -> Self {
+        let n = table.len();
+        let mut dsu = Self {
+            parent: (0..n as u32).collect(),
+        };
+        for &(a, b) in &table.equiv_pairs {
+            dsu.union(a, b);
+        }
+        dsu
+    }
+
+    fn find(&mut self, id: TyId) -> TyId {
+        // `Ty::TyVar(x)` in a concrete entry may carry an external var id
+        // (from a frozen stub) that isn't a storage TyId at all. Those IDs
+        // land outside the parent array — return them unchanged so emission
+        // paths don't crash.
+        let mut cur = id.0 as usize;
+        if cur >= self.parent.len() {
+            return id;
+        }
+        while self.parent[cur] as usize != cur {
+            let p = self.parent[cur] as usize;
+            self.parent[cur] = self.parent[p];
+            cur = self.parent[cur] as usize;
+        }
+        TyId(cur as u32)
+    }
+
+    fn union(&mut self, a: TyId, b: TyId) {
+        // Defensive: if either id is out of range, skip. Storage-local
+        // `record_equiv` only records in-range ids, but this keeps the
+        // API total.
+        if a.0 as usize >= self.parent.len() || b.0 as usize >= self.parent.len() {
+            return;
+        }
+        let ra = self.find(a);
+        let rb = self.find(b);
+        if ra != rb {
+            self.parent[ra.0 as usize] = rb.0;
+        }
+    }
+}
+
 struct Canonicalizer<'a> {
     table: &'a TypeStorage,
     /// Owned arena for interning all canonicalized OutputTy nodes.
@@ -89,10 +143,19 @@ struct Canonicalizer<'a> {
     /// during canonicalization. Used to detect co-occurring variables for the
     /// two-pass strategy.
     var_polarities: FxHashMap<TyId, PolarityBits>,
+    /// Equivalence classes over TyIds from `constrain_equal`. All polarity
+    /// tracking and `OutputTy::TyVar` emissions are keyed on the
+    /// representative of each class so equivalent slots collapse to a single
+    /// free variable.
+    equiv: EquivDsu,
 }
 
 impl<'a> Canonicalizer<'a> {
     fn new(table: &'a TypeStorage) -> Self {
+        Self::new_with_equiv(table, EquivDsu::from_storage(table))
+    }
+
+    fn new_with_equiv(table: &'a TypeStorage, equiv: EquivDsu) -> Self {
         Self {
             table,
             arena: TypeArena::new(),
@@ -103,7 +166,14 @@ impl<'a> Canonicalizer<'a> {
             bailed_out: false,
             cooccurring: FxHashSet::default(),
             var_polarities: FxHashMap::default(),
+            equiv,
         }
+    }
+
+    /// DSU representative for a TyId. Used at every `OutputTy::TyVar` emission
+    /// site and when tracking polarity / cooccurrence membership.
+    fn rep(&mut self, id: TyId) -> TyId {
+        self.equiv.find(id)
     }
 
     fn with_deadline(mut self, deadline: Instant) -> Self {
@@ -136,7 +206,8 @@ impl<'a> Canonicalizer<'a> {
     fn canonicalize_child(&mut self, ty_id: TyId, polarity: Polarity) -> TyRef {
         // Fast path: if deadline already exceeded, return degraded type.
         if self.bailed_out {
-            return self.arena.intern(OutputTy::TyVar(ty_id.0));
+            let rep = self.rep(ty_id);
+            return self.arena.intern(OutputTy::TyVar(rep.0));
         }
 
         // Periodic deadline check.
@@ -149,7 +220,8 @@ impl<'a> Canonicalizer<'a> {
             {
                 log::warn!("canonicalization deadline exceeded, degrading remaining types");
                 self.bailed_out = true;
-                return self.arena.intern(OutputTy::TyVar(ty_id.0));
+                let rep = self.rep(ty_id);
+                return self.arena.intern(OutputTy::TyVar(rep.0));
             }
         }
 
@@ -160,7 +232,8 @@ impl<'a> Canonicalizer<'a> {
         }
 
         if self.in_progress.contains(&key) {
-            return self.arena.intern(OutputTy::TyVar(ty_id.0));
+            let rep = self.rep(ty_id);
+            return self.arena.intern(OutputTy::TyVar(rep.0));
         }
 
         // Guard against stack overflow on deeply nested type graphs.
@@ -210,13 +283,18 @@ impl<'a> Canonicalizer<'a> {
                 return self.canonicalize(named_id, polarity);
             }
 
-            // Track which polarities this variable is visited at.
+            // Track which polarities this variable is visited at, keyed on
+            // the DSU representative so variables linked by `constrain_equal`
+            // share their polarity information. Without this folding, a
+            // let-bound param slot visited Neg and its body slot visited Pos
+            // would each look polar-only and miss cooccurrence detection.
+            let rep_id = self.rep(ty_id);
             self.var_polarities
-                .entry(ty_id)
+                .entry(rep_id)
                 .and_modify(|bits| *bits = bits.add(polarity))
                 .or_insert_with(|| PolarityBits::default().add(polarity));
 
-            let is_cooccurring = self.cooccurring.contains(&ty_id);
+            let is_cooccurring = self.cooccurring.contains(&rep_id);
 
             let bounds = match polarity {
                 Positive => v.lower_bounds.clone(),
@@ -249,14 +327,14 @@ impl<'a> Canonicalizer<'a> {
                 // final OutputTy.
                 if concrete_bounds.is_empty() {
                     // No concrete bounds in this polarity — just the variable.
-                    return OutputTy::TyVar(ty_id.0);
+                    return OutputTy::TyVar(rep_id.0);
                 }
                 let expanded = self.expand_bounds(&concrete_bounds, ty_id, polarity);
                 match &expanded {
                     // Bounds expanded to nothing informative — just the variable.
-                    OutputTy::TyVar(_) | OutputTy::Bottom => OutputTy::TyVar(ty_id.0),
+                    OutputTy::TyVar(_) | OutputTy::Bottom => OutputTy::TyVar(rep_id.0),
                     _ => {
-                        let var_ref = self.arena.intern(OutputTy::TyVar(ty_id.0));
+                        let var_ref = self.arena.intern(OutputTy::TyVar(rep_id.0));
                         let bounds_ref = self.arena.intern(expanded);
                         match polarity {
                             Positive => OutputTy::Union(vec![var_ref, bounds_ref]),
@@ -265,12 +343,23 @@ impl<'a> Canonicalizer<'a> {
                     }
                 }
             } else if concrete_bounds.is_empty() {
-                // No concrete bounds — use the full bounds list for the
-                // empty-fallback heuristic (which may inspect opposite-polarity
-                // bounds for display purposes). The variable bounds don't
-                // cause harm here because expand_bounds_empty_fallback only
-                // reads the original variable from storage.
-                self.expand_bounds(&bounds, ty_id, polarity)
+                // No concrete bounds — fall back to expanding all bounds, but
+                // first drop self-edges (bounds whose DSU representative matches
+                // the current variable's). Self-edges arise from the
+                // `constrain_equal` bidirectional linking between name slots,
+                // expr slots, and let-binding intermediates; expanding them
+                // recursively falls to the empty-bounds fallback on the inner
+                // variable, which leaks the outer variable's opposite-polarity
+                // lower bound (`null` from `? null`) into the outer Neg
+                // position as `null & a`. Dropping same-rep bounds keeps only
+                // genuinely-different classes (e.g. extruded polymorphic
+                // instances) in the expansion.
+                let non_self_bounds: SmallVec<[TyId; 4]> = bounds
+                    .iter()
+                    .copied()
+                    .filter(|&b| self.rep(b) != rep_id)
+                    .collect();
+                self.expand_bounds(&non_self_bounds, ty_id, polarity)
             } else {
                 // Has concrete bounds — use only those to avoid the
                 // opposite-polarity leakage from expr-slot variables.
@@ -334,9 +423,10 @@ impl<'a> Canonicalizer<'a> {
 
         // 3. Filter bare TyVar (uninformative in either position), Bottom
         //    (identity for union), and Top (identity for intersection).
+        //    Cooccurring TyVars survive — see `should_drop_filler`.
         let concrete: Vec<OutputTy> = flattened
             .into_iter()
-            .filter(|m| !matches!(m, OutputTy::TyVar(_) | OutputTy::Bottom | OutputTy::Top))
+            .filter(|m| !should_drop_filler(m, &self.cooccurring))
             .collect();
 
         // 4. Polarity-specific normalization.
@@ -421,7 +511,7 @@ impl<'a> Canonicalizer<'a> {
                     return self.expand_bounds(&lower, var_id, Positive);
                 }
             }
-            return OutputTy::TyVar(var_id.0);
+            return OutputTy::TyVar(self.rep(var_id).0);
         }
 
         // Positive position: look for atom-only upper bounds.
@@ -445,13 +535,13 @@ impl<'a> Canonicalizer<'a> {
                 return self.expand_bounds(&atom_uppers, var_id, Negative);
             }
         }
-        OutputTy::TyVar(var_id.0)
+        OutputTy::TyVar(self.rep(var_id).0)
     }
 
     fn canonicalize_concrete(&mut self, ty: &Ty<TyId>, polarity: Polarity) -> OutputTy {
         match ty {
             Ty::Primitive(p) => OutputTy::Primitive(*p),
-            Ty::TyVar(x) => OutputTy::TyVar(*x),
+            Ty::TyVar(x) => OutputTy::TyVar(self.rep(TyId(*x)).0),
             // Structural children use canonicalize_child to get shared TyRefs.
             Ty::List(elem) => OutputTy::List(self.canonicalize_child(*elem, polarity)),
             Ty::Lambda { param, body } => {
@@ -500,10 +590,11 @@ impl<'a> Canonicalizer<'a> {
                 let members = flatten_intersection(&self.arena, vec![ca, cb]);
                 // Filter bare TyVar, Bottom, and Top. Keep all members
                 // around for fallback if every concrete member is filtered out.
+                // Cooccurring TyVars survive — see `should_drop_filler`.
                 let all_members = members.clone();
                 let concrete: Vec<OutputTy> = members
                     .into_iter()
-                    .filter(|m| !matches!(m, OutputTy::TyVar(_) | OutputTy::Bottom | OutputTy::Top))
+                    .filter(|m| !should_drop_filler(m, &self.cooccurring))
                     .collect();
                 // Check for contradictions in all polarities for Inter types.
                 // Unlike variable-bound intersections (negative polarity only),
@@ -538,9 +629,7 @@ impl<'a> Canonicalizer<'a> {
                             flatten_intersection(&self.arena, vec![ca_retry, cb_retry]);
                         let retry_concrete: Vec<OutputTy> = retry_members
                             .into_iter()
-                            .filter(|m| {
-                                !matches!(m, OutputTy::TyVar(_) | OutputTy::Bottom | OutputTy::Top)
-                            })
+                            .filter(|m| !should_drop_filler(m, &self.cooccurring))
                             .collect();
                         // Distribute negations into unions before re-checking.
                         let retry_concrete =
@@ -598,7 +687,7 @@ impl<'a> Canonicalizer<'a> {
                 let all_members = members.clone();
                 let concrete: Vec<OutputTy> = members
                     .into_iter()
-                    .filter(|m| !matches!(m, OutputTy::TyVar(_) | OutputTy::Bottom | OutputTy::Top))
+                    .filter(|m| !should_drop_filler(m, &self.cooccurring))
                     .collect();
                 let had_concrete = !concrete.is_empty();
                 let concrete = match polarity {
@@ -645,7 +734,10 @@ pub fn canonicalize_standalone_with_deadline(
 ) -> (TypeArena, TyRef) {
     // Two-pass strategy for co-occurring variable detection:
     // Pass 1: canonicalize normally, tracking variable polarities.
-    let mut canon = Canonicalizer::new(table);
+    // Build the DSU once and move it between passes — `equiv_pairs` is
+    // stable within this call and Pass 2 benefits from Pass 1's path
+    // compression.
+    let mut canon = Canonicalizer::new_with_equiv(table, EquivDsu::from_storage(table));
     if let Some(d) = deadline {
         canon = canon.with_deadline(d);
     }
@@ -653,11 +745,11 @@ pub fn canonicalize_standalone_with_deadline(
     let cooccurring = canon.detected_cooccurring();
 
     if cooccurring.is_empty() {
-        // No co-occurring vars — pass 1 result is correct.
         (canon.arena, ty)
     } else {
         // Pass 2: re-canonicalize preserving co-occurring variables.
-        let mut canon2 = Canonicalizer::new(table).with_cooccurring(cooccurring);
+        let mut canon2 =
+            Canonicalizer::new_with_equiv(table, canon.equiv).with_cooccurring(cooccurring);
         if let Some(d) = deadline {
             canon2 = canon2.with_deadline(d);
         }
@@ -1295,6 +1387,27 @@ fn flatten_composite(
         }
     }
     result.into_vec()
+}
+
+/// Drop predicate for bare `TyVar` / `Bottom` / `Top` inside flattened
+/// union/intersection members.
+///
+/// Bare `TyVar`s are uninformative as members of a composite — a free
+/// variable in `A | α` contributes nothing the reader can act on — EXCEPT
+/// when `α` is in `cooccurring`. Those variables are the bridge that
+/// carries polymorphism through exported file signatures (SimpleSub §4):
+/// the param side and body side of a function must share the same variable
+/// id, so the body-side bare `TyVar` has to survive filtering. Dropping
+/// them causes `let r = x; in r` to export as monomorphic.
+///
+/// In the single-pass `Collector` path, `cooccurring` is always empty, so
+/// this behaves as an unconditional drop.
+fn should_drop_filler(m: &OutputTy, cooccurring: &FxHashSet<TyId>) -> bool {
+    match m {
+        OutputTy::TyVar(n) => !cooccurring.contains(&TyId::from(*n)),
+        OutputTy::Bottom | OutputTy::Top => true,
+        _ => false,
+    }
 }
 
 fn flatten_union(arena: &TypeArena, members: Vec<OutputTy>) -> Vec<OutputTy> {

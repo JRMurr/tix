@@ -34,6 +34,13 @@ pub enum TypeEntry {
 pub struct TypeStorage {
     entries: Vec<TypeEntry>,
     pub(crate) current_level: u32,
+    /// Pairs recorded by `constrain_equal`. Used at canonicalization time to
+    /// build a DSU so equivalent TyIds emit the same `OutputTy::TyVar(id)`
+    /// and thus collapse to a single free variable under `normalize_vars`.
+    /// Without this, `{ x ? null }: let r = x; in r` exports with the param
+    /// slot and body slot as distinct free vars, severing caller-side
+    /// polymorphism across file boundaries.
+    pub(crate) equiv_pairs: Vec<(TyId, TyId)>,
 }
 
 impl TypeStorage {
@@ -41,6 +48,7 @@ impl TypeStorage {
         Self {
             entries: Vec::new(),
             current_level: 0,
+            equiv_pairs: Vec::new(),
         }
     }
 
@@ -48,6 +56,15 @@ impl TypeStorage {
         Self {
             entries: Vec::with_capacity(cap),
             current_level: 0,
+            equiv_pairs: Vec::new(),
+        }
+    }
+
+    /// Record that `a` and `b` are considered equal by `constrain_equal`.
+    /// Self-pairs are dropped (no-op for the DSU).
+    pub fn record_equiv(&mut self, a: TyId, b: TyId) {
+        if a != b {
+            self.equiv_pairs.push((a, b));
         }
     }
 
