@@ -152,6 +152,10 @@ struct Canonicalizer<'a> {
 
 impl<'a> Canonicalizer<'a> {
     fn new(table: &'a TypeStorage) -> Self {
+        Self::new_with_equiv(table, EquivDsu::from_storage(table))
+    }
+
+    fn new_with_equiv(table: &'a TypeStorage, equiv: EquivDsu) -> Self {
         Self {
             table,
             arena: TypeArena::new(),
@@ -162,7 +166,7 @@ impl<'a> Canonicalizer<'a> {
             bailed_out: false,
             cooccurring: FxHashSet::default(),
             var_polarities: FxHashMap::default(),
-            equiv: EquivDsu::from_storage(table),
+            equiv,
         }
     }
 
@@ -730,7 +734,10 @@ pub fn canonicalize_standalone_with_deadline(
 ) -> (TypeArena, TyRef) {
     // Two-pass strategy for co-occurring variable detection:
     // Pass 1: canonicalize normally, tracking variable polarities.
-    let mut canon = Canonicalizer::new(table);
+    // Build the DSU once and move it between passes — `equiv_pairs` is
+    // stable within this call and Pass 2 benefits from Pass 1's path
+    // compression.
+    let mut canon = Canonicalizer::new_with_equiv(table, EquivDsu::from_storage(table));
     if let Some(d) = deadline {
         canon = canon.with_deadline(d);
     }
@@ -738,11 +745,11 @@ pub fn canonicalize_standalone_with_deadline(
     let cooccurring = canon.detected_cooccurring();
 
     if cooccurring.is_empty() {
-        // No co-occurring vars — pass 1 result is correct.
         (canon.arena, ty)
     } else {
         // Pass 2: re-canonicalize preserving co-occurring variables.
-        let mut canon2 = Canonicalizer::new(table).with_cooccurring(cooccurring);
+        let mut canon2 =
+            Canonicalizer::new_with_equiv(table, canon.equiv).with_cooccurring(cooccurring);
         if let Some(d) = deadline {
             canon2 = canon2.with_deadline(d);
         }
