@@ -118,6 +118,15 @@ impl CheckCtx<'_> {
                         self.current_expr = expr;
                     }
                     self.types.storage.add_upper_bound(sub, sup);
+                    // Propagate the default-param marker: if sub is a marked
+                    // pattern-field param (`? default`), its lower bounds carry
+                    // the default's null which will propagate to sup below.
+                    // Mark sup so canonicalization's empty-fallback recognizes
+                    // sup's inherited null as default-derived rather than as
+                    // a stub-declared lower bound.
+                    if sup_is_var && self.types.storage.is_default_marked_param(sub) {
+                        self.types.storage.mark_default_param(sup);
+                    }
                     // Clone just the bounds Vec (Vec<TyId> ~ Vec<u32>, cheap)
                     // to release the borrow on storage before recursive calls.
                     let lower_bounds = self

@@ -1217,6 +1217,161 @@ in
         );
     }
 
+    /// Regression: `{ modules ? null }: builtins.toString modules` exported
+    /// across files must accept `modules = ["x"]` from callers. `toString` is
+    /// fully polymorphic (`a -> string`), so it gives the param no concrete
+    /// upper bound — without the default-marker fix the Negative empty-fallback
+    /// expanded the `null` lower bound and collapsed the param to `null`.
+    #[test]
+    fn optional_null_default_polymorphic_body_cross_file() {
+        use crate::file_graph;
+
+        let dir = tempfile::tempdir().unwrap();
+
+        let lib_path = write_nix(
+            dir.path(),
+            "lib.nix",
+            "{ modules ? null }: builtins.toString modules",
+        );
+
+        let call_contents = format!(
+            r#"let
+  bake = import {};
+  result = bake {{ modules = ["x"]; }};
+  result_default = bake {{}};
+in {{ inherit result result_default; }}"#,
+            lib_path.display()
+        );
+        let call_path = write_nix(dir.path(), "call.nix", &call_contents);
+
+        let mut import_edges = HashMap::new();
+        import_edges.insert(call_path.clone(), vec![lib_path.clone()]);
+        import_edges.insert(lib_path.clone(), vec![]);
+
+        let layers = file_graph::build_file_layers(&import_edges);
+        let provider = TestSyntaxProvider::new();
+        let coord = InferenceCoordinator::new();
+
+        for layer in &layers {
+            for path in layer {
+                let result = coord
+                    .demand_file(path, &provider)
+                    .expect("inference should succeed");
+                if let Some(sig) = result.signature {
+                    coord.set_signature(path, sig);
+                }
+            }
+        }
+
+        let lib_sig = coord
+            .get_signature(&lib_path)
+            .expect("lib.nix should have a signature");
+        let sig_str = format!("{lib_sig}");
+        assert!(
+            !sig_str.contains("modules?: null") && !sig_str.contains("modules: null"),
+            "lib.nix sig must keep `modules` polymorphic, got: {sig_str}"
+        );
+
+        let call_result = coord
+            .demand_file(&call_path, &provider)
+            .expect("call.nix inference should succeed");
+        let errors: Vec<_> = call_result
+            .check_result
+            .diagnostics
+            .iter()
+            .filter(|d| {
+                matches!(
+                    d.kind,
+                    crate::diagnostic::TixDiagnosticKind::TypeMismatch { .. }
+                )
+            })
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "caller should not produce type errors, got {} error(s): {:?}",
+            errors.len(),
+            errors,
+        );
+    }
+
+    /// Regression: same shape but with string interpolation `${modules}` in
+    /// the body. Interpolation desugars to a polymorphic toString call, so
+    /// the bug surface is identical. Caller passes a string (interp requires
+    /// stringable input, so `["x"]` would surface as a separate type error).
+    #[test]
+    fn optional_null_default_interp_body_cross_file() {
+        use crate::file_graph;
+
+        let dir = tempfile::tempdir().unwrap();
+
+        let lib_path = write_nix(
+            dir.path(),
+            "lib.nix",
+            r#"{ account_fallback ? null }:
+if account_fallback == null then "" else "bucket-${account_fallback}""#,
+        );
+
+        let call_contents = format!(
+            r#"let
+  bake = import {};
+  result = bake {{ account_fallback = "stage"; }};
+  result_default = bake {{}};
+in {{ inherit result result_default; }}"#,
+            lib_path.display()
+        );
+        let call_path = write_nix(dir.path(), "call.nix", &call_contents);
+
+        let mut import_edges = HashMap::new();
+        import_edges.insert(call_path.clone(), vec![lib_path.clone()]);
+        import_edges.insert(lib_path.clone(), vec![]);
+
+        let layers = file_graph::build_file_layers(&import_edges);
+        let provider = TestSyntaxProvider::new();
+        let coord = InferenceCoordinator::new();
+
+        for layer in &layers {
+            for path in layer {
+                let result = coord
+                    .demand_file(path, &provider)
+                    .expect("inference should succeed");
+                if let Some(sig) = result.signature {
+                    coord.set_signature(path, sig);
+                }
+            }
+        }
+
+        let lib_sig = coord
+            .get_signature(&lib_path)
+            .expect("lib.nix should have a signature");
+        let sig_str = format!("{lib_sig}");
+        assert!(
+            !sig_str.contains("account_fallback?: null")
+                && !sig_str.contains("account_fallback: null"),
+            "lib.nix sig must keep `account_fallback` polymorphic, got: {sig_str}"
+        );
+
+        let call_result = coord
+            .demand_file(&call_path, &provider)
+            .expect("call.nix inference should succeed");
+        let errors: Vec<_> = call_result
+            .check_result
+            .diagnostics
+            .iter()
+            .filter(|d| {
+                matches!(
+                    d.kind,
+                    crate::diagnostic::TixDiagnosticKind::TypeMismatch { .. }
+                )
+            })
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "caller should not produce type errors, got {} error(s): {:?}",
+            errors.len(),
+            errors,
+        );
+    }
+
     #[test]
     fn cross_file_typeof_export_motivating_case() {
         let dir = tempfile::tempdir().unwrap();

@@ -505,8 +505,20 @@ impl<'a> Canonicalizer<'a> {
             // This only fires when upper bounds are empty (no body usage constraints),
             // so genuinely generic params (like `x` in `x -> x`) still return TyVar
             // since both bounds are empty.
+            //
+            // Exception: pattern-field params with `? default` defaults
+            // (marked by `mark_default_param` in infer_expr) — their lower
+            // bound is the default *value*, not a declared parameter *type*.
+            // Expanding it would collapse cross-file callers (e.g.
+            // `{ x ? null }: toString x` rejecting `bake { x = ["v"]; }`).
+            // Check both the original id and the DSU rep in case
+            // `constrain_equal` linked the slot to another (e.g. via a
+            // doc-comment annotation on the same param).
             if let Some(v) = self.table.get_var(var_id) {
-                if !v.lower_bounds.is_empty() {
+                let rep = self.rep(var_id);
+                let is_default_marked = self.table.is_default_marked_param(var_id)
+                    || self.table.is_default_marked_param(rep);
+                if !is_default_marked && !v.lower_bounds.is_empty() {
                     let lower = v.lower_bounds.clone();
                     return self.expand_bounds(&lower, var_id, Positive);
                 }

@@ -207,6 +207,16 @@ impl CheckCtx<'_> {
                             .storage
                             .set_var_level(name_ty, self.types.storage.current_level);
                         if let Some(default_ty) = default_ty {
+                            // Mark this param slot so canonicalization's
+                            // Negative empty-fallback skips default-derived
+                            // lower bounds. Without this, a body like
+                            // `toString x` (which leaves no concrete upper
+                            // bound on `x`) would collapse the exported
+                            // param type to the default's type instead of
+                            // staying polymorphic. Mark before `constrain_at`
+                            // so deferred-error paths still preserve
+                            // polymorphism.
+                            self.types.storage.mark_default_param(name_ty);
                             if let Err(err) = self.constrain_at(default_ty, name_ty) {
                                 if lambda_error.is_none() {
                                     lambda_error = Some(err);
