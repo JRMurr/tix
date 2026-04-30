@@ -638,6 +638,7 @@ impl Default for InferenceCoordinator {
 mod tests {
     use super::*;
     use crate::aliases::TypeAliasRegistry;
+    use indoc::indoc;
     use lang_ty::{OutputTy, TypeArena};
     use std::io::Write;
 
@@ -1235,11 +1236,13 @@ in
         );
 
         let call_contents = format!(
-            r#"let
-  bake = import {};
-  result = bake {{ modules = ["x"]; }};
-  result_default = bake {{}};
-in {{ inherit result result_default; }}"#,
+            indoc! {r#"
+                let
+                  bake = import {};
+                  result = bake {{ modules = ["x"]; }};
+                  result_default = bake {{}};
+                in {{ inherit result result_default; }}
+            "#},
             lib_path.display()
         );
         let call_path = write_nix(dir.path(), "call.nix", &call_contents);
@@ -1307,16 +1310,20 @@ in {{ inherit result result_default; }}"#,
         let lib_path = write_nix(
             dir.path(),
             "lib.nix",
-            r#"{ account_fallback ? null }:
-if account_fallback == null then "" else "bucket-${account_fallback}""#,
+            indoc! {r#"
+                { account_fallback ? null }:
+                if account_fallback == null then "" else "bucket-${account_fallback}"
+            "#},
         );
 
         let call_contents = format!(
-            r#"let
-  bake = import {};
-  result = bake {{ account_fallback = "stage"; }};
-  result_default = bake {{}};
-in {{ inherit result result_default; }}"#,
+            indoc! {r#"
+                let
+                  bake = import {};
+                  result = bake {{ account_fallback = "stage"; }};
+                  result_default = bake {{}};
+                in {{ inherit result result_default; }}
+            "#},
             lib_path.display()
         );
         let call_path = write_nix(dir.path(), "call.nix", &call_contents);
