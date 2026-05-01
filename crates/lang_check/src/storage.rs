@@ -6,6 +6,7 @@
 // Each type variable tracks lower bounds (types that flow into it) and
 // upper bounds (types it flows into). Concrete types are stored directly.
 
+use rustc_hash::FxHashSet;
 use smallvec::SmallVec;
 
 use super::TyId;
@@ -41,6 +42,18 @@ pub struct TypeStorage {
     /// slot and body slot as distinct free vars, severing caller-side
     /// polymorphism across file boundaries.
     pub(crate) equiv_pairs: Vec<(TyId, TyId)>,
+    /// Pattern-field name slots that received a `? default` lower bound (e.g.
+    /// `{ x ? null }: ...`). The Negative-polarity empty-fallback in
+    /// canonicalization skips these slots' lower bounds — defaults represent
+    /// the parameter accepting `null` *as input*, not a declared parameter
+    /// type. Without this filter, a body like `toString x` (no concrete upper
+    /// bound on `x`) would collapse the exported param type to the default's
+    /// type instead of staying polymorphic across file boundaries.
+    ///
+    /// Distinct from the stub-declared union case (`val f :: (int|string) -> bool`),
+    /// which adds lower bounds via `apply_type_annotation` and is *not* marked
+    /// here — the empty-fallback continues to expand those.
+    pub(crate) default_marked_params: FxHashSet<TyId>,
 }
 
 impl TypeStorage {
@@ -49,6 +62,7 @@ impl TypeStorage {
             entries: Vec::new(),
             current_level: 0,
             equiv_pairs: Vec::new(),
+            default_marked_params: FxHashSet::default(),
         }
     }
 
@@ -57,6 +71,7 @@ impl TypeStorage {
             entries: Vec::with_capacity(cap),
             current_level: 0,
             equiv_pairs: Vec::new(),
+            default_marked_params: FxHashSet::default(),
         }
     }
 
@@ -66,6 +81,18 @@ impl TypeStorage {
         if a != b {
             self.equiv_pairs.push((a, b));
         }
+    }
+
+    /// Mark a pattern-field name slot as having received a `? default`
+    /// lower bound. Idempotent. Consulted by canonicalization's Negative
+    /// empty-fallback to skip default-derived bounds.
+    pub fn mark_default_param(&mut self, id: TyId) {
+        self.default_marked_params.insert(id);
+    }
+
+    /// True iff `id` was marked by `mark_default_param`.
+    pub fn is_default_marked_param(&self, id: TyId) -> bool {
+        self.default_marked_params.contains(&id)
     }
 
     /// Allocate a fresh type variable at the current level.

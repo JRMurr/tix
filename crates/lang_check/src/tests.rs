@@ -9435,3 +9435,53 @@ fn filter_ignored_diagnostics_suppresses_target_line() {
         "remaining diagnostic should be TypeMismatch"
     );
 }
+
+// ==============================================================================
+// Default-marker regression: `? null` defaults must not collapse the param type
+// to `null` in the exported file signature when the body uses a fully
+// polymorphic builtin (toString, string interpolation).
+// ==============================================================================
+
+/// Inspect the formatted exported `file_sig_ty` for a source. Mirrors what
+/// `extract_file_signature` does for cross-file callers, falling back to the
+/// per-expression type only when canonicalization bailed out.
+fn formatted_file_sig(src: &str) -> String {
+    let registry = TypeAliasRegistry::default();
+    let (module, inference) = check_str_with_aliases(src, &registry);
+    let inference = inference.expect("no type error");
+    let sig_ref = inference
+        .file_sig_ty
+        .or_else(|| inference.expr_ty_map.get(module.entry_expr).copied())
+        .expect("file_sig_ty or root expr type should be present");
+    format!("{}", OwnedTy::new(inference.arena.clone(), sig_ref))
+}
+
+/// `{ x ? null }: builtins.toString x` — `toString` is `a -> string`, so the
+/// param has no concrete upper bound. Without the default-marker fix the
+/// Negative empty-fallback expanded the `null` lower bound and the exported
+/// sig became `{ x?: null } -> string`, which rejected non-null callers.
+#[test]
+fn null_default_with_tostring_body_stays_polymorphic() {
+    let formatted = formatted_file_sig("{ x ? null }: builtins.toString x");
+    assert!(
+        !formatted.contains("x?: null") && !formatted.contains("x: null"),
+        "param should stay polymorphic, got: {formatted}"
+    );
+    assert!(
+        formatted.contains("string"),
+        "body should still infer as string, got: {formatted}"
+    );
+}
+
+/// String interpolation `${x}` desugars to a polymorphic toString call, so
+/// the bug surface is identical. The body needs a null guard — interpolating
+/// the unguarded default would correctly trigger an `InvalidInterpolation`
+/// diagnostic before we can inspect the signature.
+#[test]
+fn null_default_with_interp_body_stays_polymorphic() {
+    let formatted = formatted_file_sig(r#"{ x ? null }: if x == null then "" else "v: ${x}""#);
+    assert!(
+        !formatted.contains("x?: null") && !formatted.contains("x: null"),
+        "param should stay polymorphic, got: {formatted}"
+    );
+}

@@ -794,6 +794,15 @@ impl CheckCtx<'_> {
                     };
                     let fresh = self.new_var();
                     cache.insert(ty_id, fresh);
+                    // Propagate the default-param marker so canonicalization
+                    // continues to recognize the fresh extruded slot as a
+                    // `? default` param. Without this, importers see the
+                    // extruded slot's `null` lower bound (copied via
+                    // link_extruded_var) and the Negative empty-fallback
+                    // collapses the param type to `null`.
+                    if self.types.storage.is_default_marked_param(ty_id) {
+                        self.types.storage.mark_default_param(fresh);
+                    }
                     self.link_extruded_var(ty_id, fresh, polarity, bounds_to_copy, cache);
                     // Named lower bounds flow to the fresh var through
                     // link_extruded_var — no manual provenance propagation.
