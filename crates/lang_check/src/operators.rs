@@ -52,8 +52,10 @@ fn resolve_add(lhs: &PrimitiveTy, rhs: &PrimitiveTy) -> Option<PrimitiveTy> {
     if lhs.is_number() && rhs.is_number() {
         return Some(resolve_numeric_result(lhs, rhs));
     }
-    // Addable case (strings/paths): lhs type wins.
-    if lhs.is_addable() && rhs.is_addable() {
+    // Concat case (strings/paths): lhs type wins. Mixing a number with a
+    // string/path is an error in Nix (`1 + "a"` cannot coerce).
+    let is_concat = |p: &PrimitiveTy| matches!(p, PrimitiveTy::String | PrimitiveTy::Path);
+    if is_concat(lhs) && is_concat(rhs) {
         Some(*lhs)
     } else {
         None
@@ -93,4 +95,65 @@ fn early_ret_add(lhs: &PrimitiveTy) -> Option<PrimitiveTy> {
 /// No early return — used by -, *, /.
 fn no_early_ret(_lhs: &PrimitiveTy) -> Option<PrimitiveTy> {
     None
+}
+
+#[cfg(test)]
+mod hegel_tests {
+    use super::*;
+    use hegel::generators;
+    use hegel::TestCase;
+    use lang_ty::hegel_gen::{all_prims, ALL_PRIMS};
+
+    const OPS: [OverloadBinOp; 4] = [
+        OverloadBinOp::Add,
+        OverloadBinOp::Sub,
+        OverloadBinOp::Mul,
+        OverloadBinOp::Div,
+    ];
+
+    /// Whether an operand pair is valid never depends on order. The result
+    /// type is symmetric too, except string/path concat where lhs wins
+    /// (`"a" + ./b` is a string, `./b + "a"` is a path).
+    #[hegel::test]
+    fn full_resolve_commutative(tc: TestCase) {
+        let op = tc.draw(generators::sampled_from(OPS.to_vec()));
+        let a = tc.draw(all_prims());
+        let b = tc.draw(all_prims());
+        let spec = overload_spec(op);
+        let ab = (spec.full_resolve)(&a, &b);
+        let ba = (spec.full_resolve)(&b, &a);
+        assert_eq!(ab.is_some(), ba.is_some(), "{a:?} {op:?} {b:?}");
+        if a.is_number() || b.is_number() {
+            assert_eq!(ab, ba, "{a:?} {op:?} {b:?}");
+        }
+    }
+
+    #[hegel::test]
+    fn numeric_result_is_supertype_of_operands(tc: TestCase) {
+        let op = tc.draw(generators::sampled_from(OPS.to_vec()));
+        let numeric: Vec<PrimitiveTy> = ALL_PRIMS.into_iter().filter(|p| p.is_number()).collect();
+        let a = tc.draw(generators::sampled_from(numeric.clone()));
+        let b = tc.draw(generators::sampled_from(numeric));
+        let result = (overload_spec(op).full_resolve)(&a, &b).expect("numeric operands resolve");
+        for operand in [a, b] {
+            assert!(
+                operand == result || operand.is_subtype_of(&result) || result == PrimitiveTy::Float,
+                "{a:?} {op:?} {b:?} = {result:?}"
+            );
+        }
+    }
+
+    #[hegel::test]
+    fn early_ret_agrees_with_full_resolve(tc: TestCase) {
+        let op = tc.draw(generators::sampled_from(OPS.to_vec()));
+        let a = tc.draw(all_prims());
+        let b = tc.draw(all_prims());
+        let spec = overload_spec(op);
+        let Some(early) = (spec.early_ret_from_lhs)(&a) else {
+            return;
+        };
+        if let Some(full) = (spec.full_resolve)(&a, &b) {
+            assert_eq!(early, full);
+        }
+    }
 }
