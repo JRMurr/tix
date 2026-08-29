@@ -427,7 +427,7 @@ fn nix_with_stubs(tc: &TestCase, accept: fn(&NixTestCase) -> bool) -> (SplitStub
     let stubs = split_stubs(tc);
     let candidates: Vec<NixTestCase> = (0..NUM_PATTERNS)
         .map(|pat| build_test_case(&stubs, pat))
-        .filter(|case| accept(case))
+        .filter(accept)
         .collect();
     assert!(!candidates.is_empty(), "no pattern satisfies the filter");
     let idx = tc.draw(generators::integers::<usize>().max_value(candidates.len() - 1));

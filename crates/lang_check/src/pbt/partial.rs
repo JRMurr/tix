@@ -85,8 +85,7 @@ fn partial_matches_full_for_independent_bindings(tc: hegel::TestCase) {
 
     // Only compare top-level let-in bindings (which get early-canonical
     // snapshots). Skip inner names that degrade under bailed_out.
-    let binding_names: std::collections::HashSet<String> =
-        (0..n).map(|i| binding_name(i)).collect();
+    let binding_names: std::collections::HashSet<String> = (0..n).map(binding_name).collect();
 
     for (name_id, name_data) in r.module.names() {
         if !binding_names.contains(name_data.text.as_str()) {
