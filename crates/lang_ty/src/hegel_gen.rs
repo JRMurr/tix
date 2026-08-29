@@ -1,4 +1,4 @@
-//! Hegel generators shared across crates (mirrors `arbitrary.rs` for proptest).
+//! Hegel generators shared across crates (see `raw_ty` for the `RawTy` tree).
 //!
 //! Enabled under `cfg(test)` or the `hegel_support` feature so downstream
 //! crates' tests can reuse them.

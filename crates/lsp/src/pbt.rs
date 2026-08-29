@@ -7,7 +7,8 @@
 // and asserts it doesn't panic. No type-correctness assertions — just crash
 // freedom.
 
-use proptest::prelude::*;
+use hegel::generators;
+use hegel::TestCase;
 use rowan::ast::AstNode;
 use tower_lsp::lsp_types::{Position, Range};
 
@@ -35,346 +36,365 @@ use lang_check::aliases::DocIndex;
 // all syntax forms. Intentionally simpler than lang_check's generators — no
 // type tracking, just syntax coverage.
 
-fn arb_ident() -> impl Strategy<Value = String> {
-    "_pbt_[a-z]{1,6}".prop_map(|s| s)
+const MAX_LITERAL_INT: i64 = 999;
+const MAX_ATTR_FIELDS: usize = 4;
+const MAX_LIST_ELEMS: usize = 4;
+const CASES: u64 = 128;
+
+fn ident(tc: &TestCase) -> String {
+    tc.draw(generators::from_regex("_pbt_[a-z]{1,6}"))
 }
 
-fn arb_int() -> impl Strategy<Value = String> {
-    (1..1000i64).prop_map(|n| n.to_string())
+fn int(tc: &TestCase) -> String {
+    tc.draw(
+        generators::integers::<i64>()
+            .min_value(1)
+            .max_value(MAX_LITERAL_INT),
+    )
+    .to_string()
 }
 
-fn arb_float() -> impl Strategy<Value = String> {
-    (1..1000i64).prop_map(|n| format!("{n}.0"))
+fn float(tc: &TestCase) -> String {
+    format!("{}.0", int(tc))
 }
 
-fn arb_bool() -> impl Strategy<Value = String> {
-    prop_oneof![Just("true".to_string()), Just("false".to_string()),]
+fn bool_lit(tc: &TestCase) -> String {
+    tc.draw(generators::sampled_from(vec!["true", "false"]))
+        .to_string()
 }
 
-fn arb_string_lit() -> impl Strategy<Value = String> {
-    "[a-z]{0,10}".prop_map(|s| format!("\"{s}\""))
+fn string_lit(tc: &TestCase) -> String {
+    let s: String = tc.draw(generators::from_regex("[a-z]{0,10}"));
+    format!("\"{s}\"")
 }
 
-fn arb_null() -> impl Strategy<Value = String> {
-    Just("null".to_string())
-}
-
-fn arb_literal() -> impl Strategy<Value = String> {
-    prop_oneof![
-        arb_int(),
-        arb_float(),
-        arb_bool(),
-        arb_string_lit(),
-        arb_null(),
-    ]
+fn literal(tc: &TestCase) -> String {
+    match tc.draw(generators::integers::<u8>().max_value(4)) {
+        0 => int(tc),
+        1 => float(tc),
+        2 => bool_lit(tc),
+        3 => string_lit(tc),
+        _ => "null".to_string(),
+    }
 }
 
 /// `let <id> = <val>; in <id>`
-fn arb_let_expr() -> impl Strategy<Value = String> {
-    (arb_ident(), arb_literal()).prop_map(|(id, val)| format!("let {id} = {val}; in {id}"))
+fn let_expr(tc: &TestCase) -> String {
+    let (id, val) = (ident(tc), literal(tc));
+    format!("let {id} = {val}; in {id}")
 }
 
-/// `<id>: <body>` — simple lambda
-fn arb_lambda_simple() -> impl Strategy<Value = String> {
-    (arb_ident(), arb_literal()).prop_map(|(param, body)| format!("{param}: {body}"))
-}
-
-/// `{ <id>, ... }: <body>` — pattern lambda
-fn arb_lambda_pattern() -> impl Strategy<Value = String> {
-    (arb_ident(), arb_ident()).prop_map(|(p1, p2)| format!("{{ {p1}, {p2} ? 0, ... }}: {p1}"))
-}
-
-fn arb_lambda_expr() -> impl Strategy<Value = String> {
-    prop_oneof![arb_lambda_simple(), arb_lambda_pattern(),]
+/// `<id>: <body>` — simple lambda, or `{ <id>, ... }: <body>` — pattern lambda
+fn lambda_expr(tc: &TestCase) -> String {
+    if tc.draw(generators::booleans()) {
+        let (param, body) = (ident(tc), literal(tc));
+        format!("{param}: {body}")
+    } else {
+        let (p1, p2) = (ident(tc), ident(tc));
+        format!("{{ {p1}, {p2} ? 0, ... }}: {p1}")
+    }
 }
 
 /// `{ <id> = <val>; ... }`
-fn arb_attrset_expr() -> impl Strategy<Value = String> {
-    proptest::collection::vec((arb_ident(), arb_literal()), 1..=4).prop_map(|fields| {
-        let body: String = fields.iter().map(|(k, v)| format!("{k} = {v}; ")).collect();
-        format!("{{ {body}}}")
-    })
+fn attrset_expr(tc: &TestCase) -> String {
+    let n = tc.draw(
+        generators::integers::<usize>()
+            .min_value(1)
+            .max_value(MAX_ATTR_FIELDS),
+    );
+    let body: String = (0..n)
+        .map(|_| format!("{} = {}; ", ident(tc), literal(tc)))
+        .collect();
+    format!("{{ {body}}}")
 }
 
 /// `if <cond> then <then> else <else>`
-fn arb_if_expr() -> impl Strategy<Value = String> {
-    (arb_literal(), arb_literal())
-        .prop_map(|(then_val, else_val)| format!("if true then {then_val} else {else_val}"))
+fn if_expr(tc: &TestCase) -> String {
+    let (then_val, else_val) = (literal(tc), literal(tc));
+    format!("if true then {then_val} else {else_val}")
 }
 
 /// `if true then <a> else <b>` with different-typed branches — produces a union type.
-/// Tests LSP crash freedom on union-typed expressions.
-fn arb_if_union_expr() -> impl Strategy<Value = String> {
-    prop_oneof![
-        Just(r#"if true then 1 else "hello""#.to_string()),
-        Just(r#"if true then null else 42"#.to_string()),
-        Just(r#"if true then true else 1.5"#.to_string()),
-        (arb_int(), arb_string_lit()).prop_map(|(i, s)| format!("if true then {i} else {s}")),
-        (arb_null(), arb_bool()).prop_map(|(n, b)| format!("if true then {n} else {b}")),
+fn if_union_expr(tc: &TestCase) -> String {
+    match tc.draw(generators::integers::<u8>().max_value(5)) {
+        0 => r#"if true then 1 else "hello""#.to_string(),
+        1 => "if true then null else 42".to_string(),
+        2 => "if true then true else 1.5".to_string(),
+        3 => format!("if true then {} else {}", int(tc), string_lit(tc)),
+        4 => format!("if true then null else {}", bool_lit(tc)),
         // Nested: 3-way union
-        (arb_int(), arb_string_lit(), arb_float())
-            .prop_map(|(i, s, f)| { format!("if true then {i} else if true then {s} else {f}") }),
-    ]
+        _ => format!(
+            "if true then {} else if true then {} else {}",
+            int(tc),
+            string_lit(tc),
+            float(tc)
+        ),
+    }
 }
 
 /// `(<attrset>).<key>` — select expression
-fn arb_select_expr() -> impl Strategy<Value = String> {
-    (arb_ident(), arb_literal()).prop_map(|(key, val)| format!("({{ {key} = {val}; }}).{key}"))
+fn select_expr(tc: &TestCase) -> String {
+    let (key, val) = (ident(tc), literal(tc));
+    format!("({{ {key} = {val}; }}).{key}")
 }
 
 /// `[ <vals> ]` — list expression
-fn arb_list_expr() -> impl Strategy<Value = String> {
-    proptest::collection::vec(arb_literal(), 0..=4)
-        .prop_map(|elems| format!("[ {} ]", elems.join(" ")))
+fn list_expr(tc: &TestCase) -> String {
+    let n = tc.draw(generators::integers::<usize>().max_value(MAX_LIST_ELEMS));
+    let elems: Vec<String> = (0..n).map(|_| literal(tc)).collect();
+    format!("[ {} ]", elems.join(" "))
 }
 
 /// `with <attrset>; <body>`
-fn arb_with_expr() -> impl Strategy<Value = String> {
-    (arb_ident(), arb_literal())
-        .prop_map(|(name, val)| format!("with {{ {name} = {val}; }}; {name}"))
+fn with_expr(tc: &TestCase) -> String {
+    let (name, val) = (ident(tc), literal(tc));
+    format!("with {{ {name} = {val}; }}; {name}")
 }
 
 /// `let <id> = <val>; in if <cond> then <id> else <id>` — tests narrowing paths
-fn arb_narrowing_expr() -> impl Strategy<Value = String> {
-    (arb_ident(), arb_literal()).prop_map(|(id, val)| {
-        format!("let {id} = {val}; in if builtins.isString {id} then {id} else {id}")
-    })
+fn narrowing_expr(tc: &TestCase) -> String {
+    let (id, val) = (ident(tc), literal(tc));
+    format!("let {id} = {val}; in if builtins.isString {id} then {id} else {id}")
 }
 
 /// `rec { <id> = <val>; <id2> = <id>; }` — recursive attrset
-fn arb_rec_attrset_expr() -> impl Strategy<Value = String> {
-    (arb_ident(), arb_ident(), arb_literal())
-        .prop_map(|(id1, id2, val)| format!("rec {{ {id1} = {val}; {id2} = {id1}; }}"))
+fn rec_attrset_expr(tc: &TestCase) -> String {
+    let (id1, id2, val) = (ident(tc), ident(tc), literal(tc));
+    format!("rec {{ {id1} = {val}; {id2} = {id1}; }}")
 }
 
 /// `assert <cond>; <body>`
-fn arb_assert_expr() -> impl Strategy<Value = String> {
-    arb_literal().prop_map(|val| format!("assert true; {val}"))
+fn assert_expr(tc: &TestCase) -> String {
+    format!("assert true; {}", literal(tc))
 }
 
-/// String interpolation: `"hello ${{<expr>}}"`
-fn arb_interpolation_expr() -> impl Strategy<Value = String> {
-    arb_int().prop_map(|n| format!("\"result: ${{{n}}}\""))
+/// String interpolation: `"hello ${<expr>}"`
+fn interpolation_expr(tc: &TestCase) -> String {
+    format!("\"result: ${{{}}}\"", int(tc))
 }
 
 /// `let <id> = <val>; in <id> + <val>` — binary operations
-fn arb_binop_expr() -> impl Strategy<Value = String> {
-    (arb_ident(), arb_int(), arb_int())
-        .prop_map(|(id, v1, v2)| format!("let {id} = {v1}; in {id} + {v2}"))
+fn binop_expr(tc: &TestCase) -> String {
+    let (id, v1, v2) = (ident(tc), int(tc), int(tc));
+    format!("let {id} = {v1}; in {id} + {v2}")
 }
 
-/// Combine all generators with optional nesting. Each leaf form gets
-/// roughly equal weight; a small fraction produces two-level nesting
-/// via `let x = <inner>; in x`.
-fn arb_nix_source() -> impl Strategy<Value = String> {
-    let leaf = prop_oneof![
-        2 => arb_let_expr(),
-        2 => arb_lambda_expr(),
-        2 => arb_attrset_expr(),
-        1 => arb_if_expr(),
-        1 => arb_if_union_expr(),
-        1 => arb_select_expr(),
-        1 => arb_list_expr(),
-        1 => arb_with_expr(),
-        1 => arb_narrowing_expr(),
-        1 => arb_rec_attrset_expr(),
-        1 => arb_assert_expr(),
-        1 => arb_interpolation_expr(),
-        1 => arb_binop_expr(),
-        2 => arb_literal(),
-    ];
+/// One leaf form. Weights: 2 let / 2 lambda / 2 attrset / 1 each of the
+/// rest / 2 literal.
+fn leaf(tc: &TestCase) -> String {
+    match tc.draw(generators::integers::<u8>().max_value(17)) {
+        0..=1 => let_expr(tc),
+        2..=3 => lambda_expr(tc),
+        4..=5 => attrset_expr(tc),
+        6 => if_expr(tc),
+        7 => if_union_expr(tc),
+        8 => select_expr(tc),
+        9 => list_expr(tc),
+        10 => with_expr(tc),
+        11 => narrowing_expr(tc),
+        12 => rec_attrset_expr(tc),
+        13 => assert_expr(tc),
+        14 => interpolation_expr(tc),
+        15 => binop_expr(tc),
+        _ => literal(tc),
+    }
+}
 
-    // Wrap ~30% of leaves in a let-binding for one level of nesting.
-    prop_oneof![
-        7 => leaf.clone(),
-        3 => (arb_ident(), leaf).prop_map(|(id, inner)| {
-            format!("let {id} = {inner}; in {id}")
-        }),
-    ]
+/// All leaf forms, with ~30% wrapped in a let-binding for one level of nesting.
+#[hegel::composite]
+fn nix_source(tc: &TestCase) -> String {
+    let inner = leaf(tc);
+    if tc.draw(generators::weighted_booleans(0.3)) {
+        let id = ident(tc);
+        format!("let {id} = {inner}; in {id}")
+    } else {
+        inner
+    }
 }
 
 // ==============================================================================
 // Crash-freedom properties
 // ==============================================================================
+//
+// Position-probing tests: for each generated source, enumerate all
+// interesting positions and call each LSP feature at every position.
+// Whole-file tests need no cursor position, just source diversity.
+// Case count: `CASES`, overridable with `HEGEL_TEST_CASES=N`.
 
-/// Default case count for LSP PBT. Override with `PROPTEST_CASES=N`.
-fn pbt_config() -> ProptestConfig {
-    ProptestConfig {
-        cases: std::env::var("PROPTEST_CASES")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(128),
-        ..ProptestConfig::default()
+#[hegel::test(test_cases = CASES)]
+fn pbt_hover_no_crash(tc: TestCase) {
+    let src = tc.draw(nix_source());
+    let t = TestAnalysis::new(&src);
+    let analysis = t.analysis();
+    let snapshot = t.snapshot();
+    let positions = interesting_positions(analysis, &t.root);
+    let docs = DocIndex::default();
+    for ip in &positions {
+        let pos = snapshot.syntax.line_index.position(ip.byte_offset());
+        let _ = hover(&snapshot, pos, &t.root, &docs);
     }
 }
 
-proptest! {
-    #![proptest_config(pbt_config())]
-
-    // -------------------------------------------------------------------------
-    // Position-probing tests: for each generated source, enumerate all
-    // interesting positions and call each LSP feature at every position.
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn pbt_hover_no_crash(src in arb_nix_source()) {
-        let t = TestAnalysis::new(&src);
-        let analysis = t.analysis();
-        let snapshot = t.snapshot();
-        let positions = interesting_positions(analysis, &t.root);
-        let docs = DocIndex::default();
-        for ip in &positions {
-            let pos = snapshot.syntax.line_index.position(ip.byte_offset());
-            let _ = hover(&snapshot, pos, &t.root, &docs);
-        }
+#[hegel::test(test_cases = CASES)]
+fn pbt_goto_definition_no_crash(tc: TestCase) {
+    let src = tc.draw(nix_source());
+    let t = TestAnalysis::new(&src);
+    let analysis = t.analysis();
+    let snapshot = t.snapshot();
+    let uri = t.uri();
+    let positions = interesting_positions(analysis, &t.root);
+    for ip in &positions {
+        let pos = snapshot.syntax.line_index.position(ip.byte_offset());
+        let _ = goto_definition(&t.state, &snapshot, pos, &uri, &t.root);
     }
+}
 
-    #[test]
-    fn pbt_goto_definition_no_crash(src in arb_nix_source()) {
-        let t = TestAnalysis::new(&src);
-        let analysis = t.analysis();
-        let snapshot = t.snapshot();
-        let uri = t.uri();
-        let positions = interesting_positions(analysis, &t.root);
-        for ip in &positions {
-            let pos = snapshot.syntax.line_index.position(ip.byte_offset());
-            let _ = goto_definition(&t.state, &snapshot, pos, &uri, &t.root);
-        }
+#[hegel::test(test_cases = CASES)]
+fn pbt_completion_no_crash(tc: TestCase) {
+    let src = tc.draw(nix_source());
+    let t = TestAnalysis::new(&src);
+    let analysis = t.analysis();
+    let snapshot = t.snapshot();
+    let docs = DocIndex::default();
+    let positions = interesting_positions(analysis, &t.root);
+    for ip in &positions {
+        let pos = snapshot.syntax.line_index.position(ip.byte_offset());
+        let _ = completion(
+            &snapshot,
+            pos,
+            &t.root,
+            &docs,
+            &snapshot.syntax.line_index,
+            None,
+        );
     }
+}
 
-    #[test]
-    fn pbt_completion_no_crash(src in arb_nix_source()) {
-        let t = TestAnalysis::new(&src);
-        let analysis = t.analysis();
-        let snapshot = t.snapshot();
-        let docs = DocIndex::default();
-        let positions = interesting_positions(analysis, &t.root);
-        for ip in &positions {
-            let pos = snapshot.syntax.line_index.position(ip.byte_offset());
-            let _ = completion(&snapshot, pos, &t.root, &docs, &snapshot.syntax.line_index, None);
-        }
+#[hegel::test(test_cases = CASES)]
+fn pbt_references_no_crash(tc: TestCase) {
+    let src = tc.draw(nix_source());
+    let t = TestAnalysis::new(&src);
+    let analysis = t.analysis();
+    let snapshot = t.snapshot();
+    let uri = t.uri();
+    let positions = interesting_positions(analysis, &t.root);
+    for ip in &positions {
+        let pos = snapshot.syntax.line_index.position(ip.byte_offset());
+        let _ = find_references(&snapshot, pos, &uri, &t.root, true);
     }
+}
 
-    #[test]
-    fn pbt_references_no_crash(src in arb_nix_source()) {
-        let t = TestAnalysis::new(&src);
-        let analysis = t.analysis();
-        let snapshot = t.snapshot();
-        let uri = t.uri();
-        let positions = interesting_positions(analysis, &t.root);
-        for ip in &positions {
-            let pos = snapshot.syntax.line_index.position(ip.byte_offset());
-            let _ = find_references(&snapshot, pos, &uri, &t.root, true);
-        }
+#[hegel::test(test_cases = CASES)]
+fn pbt_document_highlight_no_crash(tc: TestCase) {
+    let src = tc.draw(nix_source());
+    let t = TestAnalysis::new(&src);
+    let analysis = t.analysis();
+    let snapshot = t.snapshot();
+    let positions = interesting_positions(analysis, &t.root);
+    for ip in &positions {
+        let pos = snapshot.syntax.line_index.position(ip.byte_offset());
+        let _ = document_highlight(&snapshot, pos, &t.root);
     }
+}
 
-    #[test]
-    fn pbt_document_highlight_no_crash(src in arb_nix_source()) {
-        let t = TestAnalysis::new(&src);
-        let analysis = t.analysis();
-        let snapshot = t.snapshot();
-        let positions = interesting_positions(analysis, &t.root);
-        for ip in &positions {
-            let pos = snapshot.syntax.line_index.position(ip.byte_offset());
-            let _ = document_highlight(&snapshot, pos, &t.root);
-        }
+#[hegel::test(test_cases = CASES)]
+fn pbt_prepare_rename_no_crash(tc: TestCase) {
+    let src = tc.draw(nix_source());
+    let t = TestAnalysis::new(&src);
+    let analysis = t.analysis();
+    let snapshot = t.snapshot();
+    let positions = interesting_positions(analysis, &t.root);
+    for ip in &positions {
+        let pos = snapshot.syntax.line_index.position(ip.byte_offset());
+        let _ = prepare_rename(&snapshot, pos, &t.root);
     }
+}
 
-    #[test]
-    fn pbt_prepare_rename_no_crash(src in arb_nix_source()) {
-        let t = TestAnalysis::new(&src);
-        let analysis = t.analysis();
-        let snapshot = t.snapshot();
-        let positions = interesting_positions(analysis, &t.root);
-        for ip in &positions {
-            let pos = snapshot.syntax.line_index.position(ip.byte_offset());
-            let _ = prepare_rename(&snapshot, pos, &t.root);
-        }
+#[hegel::test(test_cases = CASES)]
+fn pbt_signature_help_no_crash(tc: TestCase) {
+    let src = tc.draw(nix_source());
+    let t = TestAnalysis::new(&src);
+    let analysis = t.analysis();
+    let snapshot = t.snapshot();
+    let positions = interesting_positions(analysis, &t.root);
+    for ip in &positions {
+        let pos = snapshot.syntax.line_index.position(ip.byte_offset());
+        let _ = signature_help(&snapshot, pos, &t.root);
     }
+}
 
-    #[test]
-    fn pbt_signature_help_no_crash(src in arb_nix_source()) {
-        let t = TestAnalysis::new(&src);
-        let analysis = t.analysis();
-        let snapshot = t.snapshot();
-        let positions = interesting_positions(analysis, &t.root);
-        for ip in &positions {
-            let pos = snapshot.syntax.line_index.position(ip.byte_offset());
-            let _ = signature_help(&snapshot, pos, &t.root);
-        }
+#[hegel::test(test_cases = CASES)]
+fn pbt_selection_range_no_crash(tc: TestCase) {
+    let src = tc.draw(nix_source());
+    let t = TestAnalysis::new(&src);
+    let analysis = t.analysis();
+    let snapshot = t.snapshot();
+    let positions = interesting_positions(analysis, &t.root);
+    for ip in &positions {
+        let pos = snapshot.syntax.line_index.position(ip.byte_offset());
+        let _ = selection_ranges(&snapshot, vec![pos], &t.root);
     }
+}
 
-    #[test]
-    fn pbt_selection_range_no_crash(src in arb_nix_source()) {
-        let t = TestAnalysis::new(&src);
-        let analysis = t.analysis();
-        let snapshot = t.snapshot();
-        let positions = interesting_positions(analysis, &t.root);
-        for ip in &positions {
-            let pos = snapshot.syntax.line_index.position(ip.byte_offset());
-            let _ = selection_ranges(&snapshot, vec![pos], &t.root);
-        }
-    }
+#[hegel::test(test_cases = CASES)]
+fn pbt_semantic_tokens_no_crash(tc: TestCase) {
+    let src = tc.draw(nix_source());
+    let t = TestAnalysis::new(&src);
+    let snapshot = t.snapshot();
+    let _ = semantic_tokens(&snapshot, &t.root);
+}
 
-    // -------------------------------------------------------------------------
-    // Whole-file tests: no cursor position needed, just source diversity.
-    // -------------------------------------------------------------------------
+#[hegel::test(test_cases = CASES)]
+fn pbt_inlay_hints_no_crash(tc: TestCase) {
+    let src = tc.draw(nix_source());
+    let t = TestAnalysis::new(&src);
+    let snapshot = t.snapshot();
+    let root_syntax = t.root.syntax();
+    let text = root_syntax.to_string();
+    // Full file range: line 0 col 0 to a generous end.
+    let end_line = text.lines().count().saturating_sub(1) as u32;
+    let end_col = text.lines().last().map_or(0, |l: &str| l.len()) as u32;
+    let full_range = Range::new(Position::new(0, 0), Position::new(end_line, end_col));
+    let _ = inlay_hints(&snapshot, full_range, &t.root);
+}
 
-    #[test]
-    fn pbt_semantic_tokens_no_crash(src in arb_nix_source()) {
-        let t = TestAnalysis::new(&src);
-        let snapshot = t.snapshot();
-        let _ = semantic_tokens(&snapshot, &t.root);
-    }
+#[hegel::test(test_cases = CASES)]
+fn pbt_document_symbols_no_crash(tc: TestCase) {
+    let src = tc.draw(nix_source());
+    let t = TestAnalysis::new(&src);
+    let snapshot = t.snapshot();
+    let _ = document_symbols(&snapshot, &t.root);
+}
 
-    #[test]
-    fn pbt_inlay_hints_no_crash(src in arb_nix_source()) {
-        let t = TestAnalysis::new(&src);
-        let snapshot = t.snapshot();
-        let root_syntax = t.root.syntax();
-        let text = root_syntax.to_string();
-        // Full file range: line 0 col 0 to a generous end.
-        let end_line = text.lines().count().saturating_sub(1) as u32;
-        let end_col = text.lines().last().map_or(0, |l: &str| l.len()) as u32;
-        let full_range = Range::new(Position::new(0, 0), Position::new(end_line, end_col));
-        let _ = inlay_hints(&snapshot, full_range, &t.root);
-    }
+#[hegel::test(test_cases = CASES)]
+fn pbt_document_links_no_crash(tc: TestCase) {
+    let src = tc.draw(nix_source());
+    let t = TestAnalysis::new(&src);
+    let snapshot = t.snapshot();
+    let _ = document_links(&snapshot, &t.root);
+}
 
-    #[test]
-    fn pbt_document_symbols_no_crash(src in arb_nix_source()) {
-        let t = TestAnalysis::new(&src);
-        let snapshot = t.snapshot();
-        let _ = document_symbols(&snapshot, &t.root);
-    }
-
-    #[test]
-    fn pbt_document_links_no_crash(src in arb_nix_source()) {
-        let t = TestAnalysis::new(&src);
-        let snapshot = t.snapshot();
-        let _ = document_links(&snapshot, &t.root);
-    }
-
-    #[test]
-    fn pbt_code_actions_no_crash(src in arb_nix_source()) {
-        let t = TestAnalysis::new(&src);
-        let analysis = t.analysis();
-        let snapshot = t.snapshot();
-        let positions = interesting_positions(analysis, &t.root);
-        for ip in &positions {
-            let pos = snapshot.syntax.line_index.position(ip.byte_offset());
-            let range = Range::new(pos, pos);
-            let params = tower_lsp::lsp_types::CodeActionParams {
-                text_document: tower_lsp::lsp_types::TextDocumentIdentifier { uri: t.uri() },
-                range,
-                context: tower_lsp::lsp_types::CodeActionContext {
-                    diagnostics: vec![],
-                    only: None,
-                    trigger_kind: None,
-                },
-                work_done_progress_params: Default::default(),
-                partial_result_params: Default::default(),
-            };
-            let _ = code_actions(&snapshot, &params, &t.root);
-        }
+#[hegel::test(test_cases = CASES)]
+fn pbt_code_actions_no_crash(tc: TestCase) {
+    let src = tc.draw(nix_source());
+    let t = TestAnalysis::new(&src);
+    let analysis = t.analysis();
+    let snapshot = t.snapshot();
+    let positions = interesting_positions(analysis, &t.root);
+    for ip in &positions {
+        let pos = snapshot.syntax.line_index.position(ip.byte_offset());
+        let range = Range::new(pos, pos);
+        let params = tower_lsp::lsp_types::CodeActionParams {
+            text_document: tower_lsp::lsp_types::TextDocumentIdentifier { uri: t.uri() },
+            range,
+            context: tower_lsp::lsp_types::CodeActionContext {
+                diagnostics: vec![],
+                only: None,
+                trigger_kind: None,
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+        let _ = code_actions(&snapshot, &params, &t.root);
     }
 }

@@ -8,9 +8,7 @@ mod lower;
 pub mod nameres;
 pub mod narrow;
 
-#[cfg(any(test, feature = "proptest_support"))]
-pub mod arbitrary;
-#[cfg(any(test, feature = "proptest_support"))]
+#[cfg(any(test, feature = "test_support"))]
 pub mod tests;
 
 use std::{collections::HashMap, collections::HashSet, fmt, ops, path::Path, sync::LazyLock};

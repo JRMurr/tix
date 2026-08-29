@@ -239,7 +239,7 @@ mkDerivation { name = "my-package"; src = ./.; }
 ## Testing
 
 - **Unit tests**: inline in each crate (`tests.rs`, `#[cfg(test)]` modules)
-- **Property-based tests**: use [hegel](https://github.com/hegeltest) (`#[hegel::test]`, package `hegeltest`, crate name `hegel`). Put them in a `hegel_tests` module next to the code under test. Shared generators: `lang_ty/src/hegel_gen.rs` (`raw_tys`, `prims`, `idents`, `shuffle`) and `lang_check/src/pbt/gen.rs` (Nix source text paired with its expected `RawTy`). `HEGEL_TEST_CASES=N` overrides every test's case count; `./scripts/pbt.sh N` runs both frameworks at N cases. The proptest suites under `lang_check/src/pbt/` and `lsp/src/pbt*.rs` are legacy — port to hegel when touching them rather than extending them.
+- **Property-based tests**: use [hegel](https://github.com/hegeltest) (`#[hegel::test]`, package `hegeltest`, crate name `hegel`). Put them in a `hegel_tests` module next to the code under test. Shared generators: `lang_ty/src/hegel_gen.rs` (`raw_tys`, `prims`, `idents`, `shuffle`) and `lang_check/src/pbt/gen.rs` (Nix source text paired with its expected `RawTy`). Inference-level suites live in `lang_check/src/pbt/`, LSP crash-freedom suites in `lsp/src/pbt*.rs`. `HEGEL_TEST_CASES=N` overrides every test's case count; `./scripts/pbt.sh N` runs all of them at N cases.
 - **LSP e2e tests**: `lsp/tests/e2e_*.rs` — protocol-level tests using in-process duplex transport via `LspTestHarness` (in `lsp/tests/common/mod.rs`). Tests cover diagnostics, hover, completion, config reload, multi-file, and lifecycle.
 - **Test fixtures**: Nix files in `test/` directory (e.g., `test/basic.nix`)
 

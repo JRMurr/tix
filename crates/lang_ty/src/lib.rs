@@ -4,8 +4,6 @@ mod attrset;
 pub mod disjoint;
 pub mod simplify;
 
-#[cfg(feature = "proptest_support")]
-pub mod arbitrary;
 #[cfg(any(test, feature = "hegel_support"))]
 pub mod hegel_gen;
 #[cfg(any(test, feature = "hegel_support"))]

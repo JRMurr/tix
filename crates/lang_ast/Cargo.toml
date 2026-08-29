@@ -16,12 +16,10 @@ tracing = { workspace = true }
 ordered-float = "4.6.0"
 
 
-proptest = { workspace = true, optional = true }
 
 
 [dev-dependencies]
 indoc = { workspace = true }
-proptest = { workspace = true }
 
 [features]
-proptest_support = ["dep:proptest"]
+test_support = []

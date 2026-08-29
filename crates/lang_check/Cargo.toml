@@ -31,12 +31,11 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 indoc = { workspace = true }
-proptest = { workspace = true }
 hegeltest = { workspace = true }
 rowan = { workspace = true }
 tempfile = "3"
-lang_ast = { path = "../lang_ast", features = ["proptest_support"] }
-lang_ty = { path = "../lang_ty", features = ["proptest_support", "hegel_support"] }
+lang_ast = { path = "../lang_ast", features = ["test_support"] }
+lang_ty = { path = "../lang_ty", features = ["hegel_support"] }
 
 
 [lib]

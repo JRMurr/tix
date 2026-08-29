@@ -92,7 +92,7 @@ cargo test --package lang_check   # Just the inference engine
 ./scripts/cov.sh                  # Coverage report (cargo-tarpaulin)
 ```
 
-Property-based tests live in `lang_check/src/pbt/mod.rs` and generate arbitrary ASTs/types via proptest.
+Property-based tests (hegel) live in `lang_check/src/pbt/` and generate Nix source paired with its expected type via `pbt/gen.rs` and `lang_ty/src/hegel_gen.rs`.
 
 ## Building
 

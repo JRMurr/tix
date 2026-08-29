@@ -83,16 +83,13 @@ let
     cargoNextestExtraArgs = "-E 'not kind(test)' --failure-output immediate --success-output never";
   });
 
-  # Property-based tests at an elevated case count: legacy proptest suites
-  # under lang_check/src/pbt and hegel tests (`hegel_tests` modules) across
-  # crates. PROPTEST_CASES is currently ignored by lang_check's explicit
-  # configs (see SESSION.md); HEGEL_TEST_CASES overrides per-test settings.
+  # Property-based (hegel) tests at an elevated case count: lang_check/src/pbt,
+  # lsp/src/pbt*.rs, and the `hegel_tests` modules across crates.
   rustPbt = craneLib.cargoNextest (commonArgs // {
     inherit cargoArtifacts;
     nativeBuildInputs = [ pkgs.cargo-nextest ];
     pname = "tix-pbt";
     cargoNextestExtraArgs = "--workspace -E 'test(pbt) or test(hegel_tests)' --failure-output immediate --success-output never";
-    PROPTEST_CASES = "10000";
     HEGEL_TEST_CASES = "10000";
   });
 in
