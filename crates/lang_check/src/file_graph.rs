@@ -206,7 +206,7 @@ mod tests {
             .map(|(file, deps)| {
                 (
                     PathBuf::from(file),
-                    deps.iter().map(|d| PathBuf::from(d)).collect(),
+                    deps.iter().map(PathBuf::from).collect(),
                 )
             })
             .collect()

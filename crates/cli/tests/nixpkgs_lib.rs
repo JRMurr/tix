@@ -64,7 +64,7 @@ fn collect_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
                 continue;
             }
             collect_recursive(&path, out);
-        } else if path.extension().map_or(false, |ext| ext == "nix") {
+        } else if path.extension().is_some_and(|ext| ext == "nix") {
             out.push(path);
         }
     }
