@@ -416,14 +416,6 @@ fn arb_nix_text_from_ty() -> impl Strategy<Value = (RawTy, NixTextStr)> {
 // Focused strategy builders for split property tests
 // ==============================================================================
 
-/// Primitives with arithmetic/boolean operations, optionally wrapped in
-/// let-bindings or attrset field selection.
-fn arb_primitive() -> impl Strategy<Value = (RawTy, NixTextStr)> {
-    any::<PrimitiveTy>()
-        .prop_flat_map(|prim| (Just(RawTy::Primitive(prim)), prim_ty_to_string(prim)))
-        .prop_flat_map(|(ty, text)| (Just(ty), non_type_modifying_transform(text)))
-}
-
 /// Combined strategy: full recursive generation + type-directed generation +
 /// focused union generators. arb_nix_text and arb_nix_text_from_ty now both
 /// include union types via if-then-else generation.
