@@ -2,20 +2,16 @@
 // Hegel generators for Nix source text paired with its expected type
 // ==============================================================================
 //
-// Hegel port of the core proptest strategies in `mod.rs` (`arb_nix_text` and
-// friends). Generation is imperative: every helper takes `&TestCase` and
-// draws as it goes, so recursion is a plain depth parameter and dependent
-// choices are ordinary control flow.
-//
-// The proptest versions remain in `mod.rs` while the other pbt modules still
-// depend on them; port those and delete the proptest copies as you go.
+// Generation is imperative: every helper takes `&TestCase` and draws as it
+// goes, so recursion is a plain depth parameter and dependent choices are
+// ordinary control flow.
 
 use std::collections::BTreeMap;
 
 use hegel::generators;
 use hegel::TestCase;
 use lang_ast::{BoolBinOp, OverloadBinOp};
-use lang_ty::hegel_gen::{idents, prims};
+use lang_ty::hegel_gen::{idents, prims, shuffle, LITERAL_PRIMS};
 use lang_ty::raw_ty::{raw_spread_free_vars, RawTy};
 use lang_ty::PrimitiveTy;
 use smol_str::SmolStr;
@@ -24,8 +20,14 @@ use super::NixTextStr;
 
 /// Nesting depth of operator chains inside a primitive literal.
 const OP_DEPTH: u32 = 3;
-/// Probability of stopping recursion early (before `depth` hits zero).
+/// Default probability of stopping recursion early (before `depth` hits zero).
 const STOP_EARLY: f64 = 0.5;
+/// Early-stop probability for the deep combined generator, so depth-8 trees
+/// actually occur.
+const STOP_EARLY_DEEP: f64 = 0.25;
+const COMBINED_DEPTH: u32 = 8;
+const FROM_TY_DEPTH: u32 = 4;
+const MAX_UNION_MEMBERS: usize = 4;
 const MAX_ATTR_FIELDS: usize = 4;
 const MAX_MERGED_ATTRS: usize = 2;
 const MAX_WRAP_EXTRA_FIELDS: usize = 4;
@@ -39,7 +41,11 @@ const OVERLOAD_OPS: [OverloadBinOp; 4] = [
 ];
 
 fn stop(tc: &TestCase, depth: u32) -> bool {
-    depth == 0 || tc.draw(generators::weighted_booleans(STOP_EARLY))
+    stop_with(tc, depth, STOP_EARLY)
+}
+
+fn stop_with(tc: &TestCase, depth: u32, stop_prob: f64) -> bool {
+    depth == 0 || tc.draw(generators::weighted_booleans(stop_prob))
 }
 
 fn overload_op(tc: &TestCase) -> String {
@@ -232,10 +238,14 @@ fn list(tc: &TestCase, inner: impl Fn(&TestCase) -> (RawTy, NixTextStr)) -> (Raw
 /// Recursive generator over every construct the checker infers precisely:
 /// primitives, wrappers, lists, lambdas, attrsets, and if-then-else unions.
 pub(super) fn nix_text(tc: &TestCase, depth: u32) -> (RawTy, NixTextStr) {
-    if stop(tc, depth) {
+    nix_text_with(tc, depth, STOP_EARLY)
+}
+
+fn nix_text_with(tc: &TestCase, depth: u32, stop_prob: f64) -> (RawTy, NixTextStr) {
+    if stop_with(tc, depth, stop_prob) {
         return prim_leaf(tc);
     }
-    let inner = |tc: &TestCase| nix_text(tc, depth - 1);
+    let inner = |tc: &TestCase| nix_text_with(tc, depth - 1, stop_prob);
     // Weights: 3 wrapped / 3 list / 3 func / 3 attr / 2 union.
     match tc.draw(generators::integers::<u8>().max_value(13)) {
         0..=2 => {
@@ -296,4 +306,148 @@ pub(super) fn lambda_expr(tc: &TestCase) -> (RawTy, NixTextStr) {
 #[hegel::composite]
 pub(super) fn nix_texts(tc: &TestCase, depth: u32) -> (RawTy, NixTextStr) {
     nix_text(tc, depth)
+}
+
+// ------------------------------------------------------------------------------
+// Type-directed generation
+// ------------------------------------------------------------------------------
+
+/// A `RawTy` that `text_from_raw_ty` can express precisely as Nix code:
+/// primitives, lists, attrsets, unions, and lambdas whose param is a
+/// primitive or a fresh type variable (unique per lambda, never shared).
+/// `next_var` numbers the lambda params.
+fn expressible_raw_ty(tc: &TestCase, depth: u32, next_var: &mut u32) -> RawTy {
+    if stop(tc, depth) {
+        return RawTy::Primitive(tc.draw(prims()));
+    }
+    // Weights: 3 list / 3 lambda / 3 attrset / 2 union.
+    match tc.draw(generators::integers::<u8>().max_value(10)) {
+        0..=2 => RawTy::List(Box::new(expressible_raw_ty(tc, depth - 1, next_var))),
+        3..=5 => {
+            let param = if tc.draw(generators::booleans()) {
+                RawTy::Primitive(tc.draw(prims()))
+            } else {
+                *next_var += 1;
+                RawTy::TyVar(*next_var)
+            };
+            let body = expressible_raw_ty(tc, depth - 1, next_var);
+            lambda(param, body)
+        }
+        6..=8 => {
+            let names: Vec<SmolStr> = tc.draw(
+                generators::vecs(idents())
+                    .max_size(MAX_ATTR_FIELDS)
+                    .unique(true),
+            );
+            let fields = names
+                .into_iter()
+                .map(|n| (n, expressible_raw_ty(tc, depth - 1, next_var)))
+                .collect();
+            RawTy::AttrSet(fields)
+        }
+        _ => {
+            let n = tc.draw(
+                generators::integers::<usize>()
+                    .min_value(2)
+                    .max_value(MAX_UNION_MEMBERS),
+            );
+            RawTy::Union(
+                (0..n)
+                    .map(|_| expressible_raw_ty(tc, depth - 1, next_var))
+                    .collect(),
+            )
+        }
+    }
+}
+
+/// Nix source whose inferred type is `ty` (for expressible types only).
+pub(super) fn text_from_raw_ty(tc: &TestCase, ty: &RawTy) -> NixTextStr {
+    let inner = match ty {
+        RawTy::Primitive(prim) => prim_src(tc, *prim),
+        RawTy::List(inner) => format!("[({})]", text_from_raw_ty(tc, inner)),
+        RawTy::Lambda { param, body } => {
+            let body = text_from_raw_ty(tc, body);
+            match param.as_ref() {
+                RawTy::Primitive(prim) => {
+                    let builtin = prim_assert_builtin(*prim);
+                    format!("(__pbt_p: let __pbt_chk = {builtin} __pbt_p; in ({body}))")
+                }
+                RawTy::TyVar(_) => format!("(__pbt_p: {body})"),
+                other => unreachable!("inexpressible lambda param {other:?}"),
+            }
+        }
+        RawTy::AttrSet(fields) => {
+            let mut fields: Vec<String> = fields
+                .iter()
+                .map(|(key, val)| format!("\"{key}\"=({});", text_from_raw_ty(tc, val)))
+                .collect();
+            shuffle(tc, &mut fields);
+            format!("({{{}}})", fields.join(" "))
+        }
+        RawTy::Union(members) => members
+            .iter()
+            .map(|m| text_from_raw_ty(tc, m))
+            .rev()
+            .reduce(|else_branch, then_branch| {
+                format!("(if true then ({then_branch}) else ({else_branch}))")
+            })
+            .expect("union has at least 2 members"),
+        RawTy::Named(_, inner) => text_from_raw_ty(tc, inner),
+        other => unreachable!("inexpressible type {other:?}"),
+    };
+    wrap(tc, inner)
+}
+
+/// Type-directed generation: draw an expressible type, then source for it.
+pub(super) fn nix_text_from_ty(tc: &TestCase) -> (RawTy, NixTextStr) {
+    let ty = expressible_raw_ty(tc, FROM_TY_DEPTH, &mut 0);
+    let text = text_from_raw_ty(tc, &ty);
+    (ty, text)
+}
+
+// ------------------------------------------------------------------------------
+// Unions of distinct primitives
+// ------------------------------------------------------------------------------
+
+/// `n` distinct literal primitives, in drawn order.
+pub(super) fn distinct_prims(tc: &TestCase, n: usize) -> Vec<PrimitiveTy> {
+    let mut prims = LITERAL_PRIMS.to_vec();
+    shuffle(tc, &mut prims);
+    prims.truncate(n);
+    prims
+}
+
+/// Two distinct primitives in if-then-else: an exact 2-member union.
+pub(super) fn union_prim_if_else(tc: &TestCase) -> (RawTy, NixTextStr) {
+    let prims = distinct_prims(tc, 2);
+    let (a, b) = (prim_src(tc, prims[0]), prim_src(tc, prims[1]));
+    let ty = RawTy::Union(prims.into_iter().map(RawTy::Primitive).collect());
+    (ty, format!("(if true then ({a}) else ({b}))"))
+}
+
+/// Three distinct primitives in nested if-then-else: an exact 3-member union.
+pub(super) fn union_three_way(tc: &TestCase) -> (RawTy, NixTextStr) {
+    let prims = distinct_prims(tc, 3);
+    let (a, b, c) = (
+        prim_src(tc, prims[0]),
+        prim_src(tc, prims[1]),
+        prim_src(tc, prims[2]),
+    );
+    let ty = RawTy::Union(prims.into_iter().map(RawTy::Primitive).collect());
+    (
+        ty,
+        format!("(if true then ({a}) else (if true then ({b}) else ({c})))"),
+    )
+}
+
+/// Everything at once: deep recursive generation, type-directed generation,
+/// and the focused union generators. Weights 7/1/1/1.
+#[hegel::composite]
+pub(super) fn combined(tc: &TestCase) -> (RawTy, NixTextStr) {
+    match tc.draw(generators::integers::<u8>().max_value(9)) {
+        0..=6 => nix_text_with(tc, COMBINED_DEPTH, STOP_EARLY_DEEP),
+        7 => nix_text_from_ty(tc),
+        8 => union_prim_if_else(tc),
+        _ => union_three_way(tc),
+    }
 }
