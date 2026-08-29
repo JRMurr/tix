@@ -12,10 +12,13 @@ la-arena = { workspace = true }
 stacker = "0.1"
 
 proptest = { workspace = true, optional = true }
+hegeltest = { workspace = true, optional = true }
 
 
 [dev-dependencies]
 proptest = { workspace = true }
+hegeltest = { workspace = true }
 
 [features]
 proptest_support = ["dep:proptest"]
+hegel_support = ["dep:hegeltest", "proptest_support"]

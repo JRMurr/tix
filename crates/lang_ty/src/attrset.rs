@@ -293,3 +293,98 @@ mod tests {
         assert!(!merged.open, "closed.merge(closed) should stay closed");
     }
 }
+
+#[cfg(test)]
+mod hegel_tests {
+    use super::*;
+    use hegel::generators;
+    use hegel::TestCase;
+
+    /// `AttrSetTy` is generic over the field payload; `u32` keeps the laws
+    /// about the container itself, not the types inside.
+    type Attrs = AttrSetTy<u32>;
+
+    const MAX_FIELDS: usize = 6;
+
+    #[hegel::composite]
+    fn attrs(tc: &TestCase) -> Attrs {
+        // Small key alphabet so that two drawn attrsets usually overlap.
+        let keys: Vec<&str> = tc.draw(
+            generators::vecs(generators::sampled_from(vec!["a", "b", "c", "d", "e"]))
+                .max_size(MAX_FIELDS)
+                .unique(true),
+        );
+        let mut fields = BTreeMap::new();
+        let mut optional_fields = BTreeSet::new();
+        for k in keys {
+            fields.insert(SmolStr::from(k), tc.draw(generators::integers::<u32>()));
+            if tc.draw(generators::booleans()) {
+                optional_fields.insert(SmolStr::from(k));
+            }
+        }
+        Attrs {
+            fields,
+            dyn_ty: tc.draw(generators::optional(generators::integers::<u32>())),
+            open: tc.draw(generators::booleans()),
+            optional_fields,
+        }
+    }
+
+    #[hegel::test]
+    fn merge_idempotent(tc: TestCase) {
+        let a = tc.draw(attrs());
+        assert_eq!(a.clone().merge(a.clone()), a);
+    }
+
+    #[hegel::test]
+    fn merge_empty_is_identity(tc: TestCase) {
+        let a = tc.draw(attrs());
+        assert_eq!(Attrs::new().merge(a.clone()), a);
+        assert_eq!(a.clone().merge(Attrs::new()), a);
+    }
+
+    #[hegel::test]
+    fn merge_associative(tc: TestCase) {
+        let a = tc.draw(attrs());
+        let b = tc.draw(attrs());
+        let c = tc.draw(attrs());
+        let left = a.clone().merge(b.clone()).merge(c.clone());
+        let right = a.merge(b.merge(c));
+        assert_eq!(left, right);
+    }
+
+    #[hegel::test]
+    fn merge_right_biased_with_key_union(tc: TestCase) {
+        let a = tc.draw(attrs());
+        let b = tc.draw(attrs());
+        let merged = a.clone().merge(b.clone());
+
+        let expected_keys: BTreeSet<&SmolStr> = a.keys().chain(b.keys()).collect();
+        let actual_keys: BTreeSet<&SmolStr> = merged.keys().collect();
+        assert_eq!(actual_keys, expected_keys);
+
+        for (k, v) in &merged.fields {
+            let expected = b.get(k).or_else(|| a.get(k)).unwrap();
+            assert_eq!(v, expected, "field {k}");
+        }
+        assert_eq!(merged.open, a.open || b.open);
+        assert_eq!(merged.dyn_ty, b.dyn_ty.or(a.dyn_ty));
+    }
+
+    /// A field is optional after the merge iff its last contributor made it optional.
+    #[hegel::test]
+    fn merge_optional_follows_last_writer(tc: TestCase) {
+        let a = tc.draw(attrs());
+        let b = tc.draw(attrs());
+        let merged = a.clone().merge(b.clone());
+
+        for k in merged.keys() {
+            let expected = if b.fields.contains_key(k) {
+                b.optional_fields.contains(k)
+            } else {
+                a.optional_fields.contains(k)
+            };
+            assert_eq!(merged.optional_fields.contains(k), expected, "field {k}");
+        }
+    }
+}
