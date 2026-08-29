@@ -1270,8 +1270,8 @@ mod tests {
 #[cfg(test)]
 mod hegel_tests {
     use super::*;
-    use crate::arbitrary::intern_raw;
     use crate::hegel_gen::{raw_tys, shuffle_set_ops};
+    use crate::raw_ty::intern_raw;
 
     const DEPTH: u32 = 4;
 

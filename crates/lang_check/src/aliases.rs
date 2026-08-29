@@ -1980,8 +1980,8 @@ mod tests {
 mod hegel_tests {
     use super::*;
     use comment_parser::{parse_tix_file, TixDeclaration};
-    use lang_ty::arbitrary::{intern_raw, RawTy};
     use lang_ty::hegel_gen::raw_tys;
+    use lang_ty::raw_ty::{intern_raw, RawTy};
     use lang_ty::TypeArena;
 
     const DEPTH: u32 = 4;

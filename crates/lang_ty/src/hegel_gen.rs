@@ -9,7 +9,7 @@ use hegel::generators::{self, Generator};
 use hegel::TestCase;
 use smol_str::SmolStr;
 
-use crate::arbitrary::RawTy;
+use crate::raw_ty::RawTy;
 use crate::PrimitiveTy;
 
 /// Primitives that have a Nix literal form. `Path`/`Uri` are excluded because

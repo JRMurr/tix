@@ -1,7 +1,7 @@
 use indoc::indoc;
 use lang_ast::{Expr, Module};
-use lang_ty::arbitrary::{intern_raw, RawTy};
 use lang_ty::arena::{OwnedTy, TyRef};
+use lang_ty::raw_ty::{intern_raw, RawTy};
 use lang_ty::{arc_ty, OutputTy, PrimitiveTy, TypeArena};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

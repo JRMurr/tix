@@ -15,8 +15,8 @@ use std::collections::BTreeMap;
 use hegel::generators;
 use hegel::TestCase;
 use lang_ast::{BoolBinOp, OverloadBinOp};
-use lang_ty::arbitrary::{raw_spread_free_vars, RawTy};
 use lang_ty::hegel_gen::{idents, prims};
+use lang_ty::raw_ty::{raw_spread_free_vars, RawTy};
 use lang_ty::PrimitiveTy;
 use smol_str::SmolStr;
 
