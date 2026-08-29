@@ -231,6 +231,7 @@ mkDerivation { name = "my-package"; src = ./.; }
 | `a \| b` | Union type |
 | `a & b` | Intersection type |
 | `{ name: string, age: int }` | Closed attrset |
+| `{}` | Empty closed attrset |
 | `{ name: string, ... }` | Open attrset |
 | `{ _: int }` | Dynamic field type |
 

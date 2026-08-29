@@ -1975,3 +1975,68 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }
+
+#[cfg(test)]
+mod hegel_tests {
+    use super::*;
+    use comment_parser::{parse_tix_file, TixDeclaration};
+    use lang_ty::arbitrary::{intern_raw, RawTy};
+    use lang_ty::hegel_gen::raw_tys;
+    use lang_ty::TypeArena;
+
+    const DEPTH: u32 = 4;
+
+    /// Types the printer can express in `.tix` syntax: no negation (`~` has
+    /// no grammar rule), no `Named` (prints only the alias name), no `Uri`
+    /// (no keyword), and no type variables (`parsed_ty_to_output_ty` maps
+    /// every generic to `TyVar(0)`, so identity is not preserved).
+    fn printable(raw: &RawTy) -> bool {
+        !raw.contains_neg() && !raw.contains_named() && raw.free_type_vars().is_empty()
+    }
+
+    fn parse_val(src: &str) -> Option<ParsedTy> {
+        let file = parse_tix_file(src).ok()?;
+        file.declarations.into_iter().find_map(|d| match d {
+            TixDeclaration::ValDecl { ty, .. } => Some(ty),
+            _ => None,
+        })
+    }
+
+    #[hegel::test]
+    fn printed_type_parses(tc: hegel::TestCase) {
+        let raw = tc.draw(raw_tys(DEPTH));
+        tc.assume(printable(&raw));
+        let mut arena = TypeArena::new();
+        let root = intern_raw(&mut arena, &raw);
+        let printed = arena.display(root).to_string();
+        let src = format!("val x :: {printed};");
+        assert!(parse_val(&src).is_some(), "failed to parse: {src}");
+    }
+
+    #[hegel::test]
+    fn print_parse_roundtrip(tc: hegel::TestCase) {
+        let raw = tc.draw(raw_tys(DEPTH));
+        tc.assume(printable(&raw));
+        let mut arena = TypeArena::new();
+        let root = intern_raw(&mut arena, &raw);
+        let root = arena.normalize_set_ops(root);
+        let printed = arena.display(root).to_string();
+
+        let src = format!("val x :: {printed};");
+        let parsed = parse_val(&src).unwrap_or_else(|| panic!("failed to parse: {src}"));
+        let registry = TypeAliasRegistry::new();
+        // Lower into the same arena: it is hash-consed, so equal structure
+        // means equal TyRef. (Set-op order after normalization depends on
+        // TyRef indices, so a cross-arena comparison would be order-sensitive.)
+        let back = parsed_ty_to_output_ty(&parsed, &registry, &mut arena, 0);
+        let back = arena.intern(back);
+        let back = arena.normalize_set_ops(back);
+
+        assert_eq!(
+            root,
+            back,
+            "printed: {printed}\nreparsed: {}",
+            arena.display(back)
+        );
+    }
+}

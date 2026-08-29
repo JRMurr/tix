@@ -87,7 +87,7 @@ type_func    = @{ ("Param" | "Return") ~ !(ASCII_ALPHANUMERIC | "_") }
 
 // Attrset type: `{ name: string, age: int }` or `{ name: string, ... }` or `{ _: int }`.
 // Bodies must be single-line since WHITESPACE only covers " " | "\t" in this grammar.
-attrset_type = { "{" ~ attrset_inner ~ "}" }
+attrset_type = { "{" ~ attrset_inner? ~ "}" }
 attrset_inner = _{
     open_marker
   | dyn_field ~ ("," ~ open_marker)? ~ ","?

@@ -86,7 +86,7 @@ paren_type = { "(" ~ type_expr ~ ")" }
 list_type  = { "[" ~ type_expr ~ "]" }
 
 // Attrset types — same rules as comment.pest Phase 1.
-attrset_type = { "{" ~ attrset_inner ~ "}" }
+attrset_type = { "{" ~ attrset_inner? ~ "}" }
 attrset_inner = _{
     open_marker
   | dyn_field ~ ("," ~ open_marker)? ~ ","?

@@ -85,6 +85,7 @@ Casing matters: lowercase names like `a` and `b` are generic type variables (imp
 | `a \| b` | Union |
 | `a & b` | Intersection |
 | `{ name: string, age: int }` | Closed attrset |
+| `{}` | Empty closed attrset |
 | `{ name: string, ... }` | Open attrset |
 | `{ _: int }` | Dynamic field type (all values are `int`) |
 

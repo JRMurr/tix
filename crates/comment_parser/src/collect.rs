@@ -369,7 +369,7 @@ fn collect_attrset(pairs: Pairs<Rule>) -> Result<ParsedTy, CollectError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{known_ty, parse_comment_text};
+    use crate::{known_ty, parse_and_collect, parse_comment_text};
     use indoc::indoc;
 
     macro_rules! comment_decl_case {
@@ -468,6 +468,23 @@ mod tests {
         r#" type: opts :: { name: string, ... } "#,
         "opts" => { { "name": string; ... } }
     );
+
+    // Regression: the printer emits `{ }` for empty attrsets, so it must parse.
+    #[test]
+    fn attrset_empty() {
+        for src in ["type: e :: {}", "type: e :: { }"] {
+            let decls = parse_and_collect(src).expect("parse");
+            assert_eq!(decls.len(), 1, "{src}");
+            match &decls[0].type_expr {
+                ParsedTy::AttrSet(attrs) => {
+                    assert!(attrs.fields.is_empty());
+                    assert!(!attrs.open);
+                    assert!(attrs.dyn_ty.is_none());
+                }
+                other => panic!("{src}: expected attrset, got {other:?}"),
+            }
+        }
+    }
 
     comment_decl_case!(attrset_dyn_field,
         r#" type: dict :: { _: string } "#,
