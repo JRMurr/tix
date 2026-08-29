@@ -83,14 +83,17 @@ let
     cargoNextestExtraArgs = "-E 'not kind(test)' --failure-output immediate --success-output never";
   });
 
-  # PBT runs two groups with different case counts (mirroring scripts/pbt.sh).
-  # Lightweight tests get 10k cases, stub composition tests get 2k.
+  # Property-based tests at an elevated case count: legacy proptest suites
+  # under lang_check/src/pbt and hegel tests (`hegel_tests` modules) across
+  # crates. PROPTEST_CASES is currently ignored by lang_check's explicit
+  # configs (see SESSION.md); HEGEL_TEST_CASES overrides per-test settings.
   rustPbt = craneLib.cargoNextest (commonArgs // {
     inherit cargoArtifacts;
     nativeBuildInputs = [ pkgs.cargo-nextest ];
     pname = "tix-pbt";
-    cargoNextestExtraArgs = "-p lang_check -E 'test(pbt)' --failure-output immediate --success-output never";
+    cargoNextestExtraArgs = "--workspace -E 'test(pbt) or test(hegel_tests)' --failure-output immediate --success-output never";
     PROPTEST_CASES = "10000";
+    HEGEL_TEST_CASES = "10000";
   });
 in
 {

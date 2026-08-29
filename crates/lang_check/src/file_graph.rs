@@ -521,9 +521,9 @@ mod hegel_tests {
     }
 
     /// Brute-force reachability (reflexive) restricted to in-project files.
-    fn reachable(graph: &HashMap<PathBuf, Vec<PathBuf>>, from: &PathBuf) -> HashSet<PathBuf> {
+    fn reachable(graph: &HashMap<PathBuf, Vec<PathBuf>>, from: &Path) -> HashSet<PathBuf> {
         let mut seen = HashSet::new();
-        let mut stack = vec![from.clone()];
+        let mut stack = vec![from.to_path_buf()];
         while let Some(cur) = stack.pop() {
             if !seen.insert(cur.clone()) {
                 continue;

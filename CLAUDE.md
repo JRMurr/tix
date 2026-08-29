@@ -22,6 +22,7 @@ cargo fmt                            # Format (uses .rustfmt.toml)
 cargo clippy                         # Lint
 ./scripts/pbt.sh                     # Property-based tests (50k cases default)
 ./scripts/pbt.sh 100000              # PBT with custom case count
+HEGEL_TEST_CASES=1000 cargo nextest run -E 'test(hegel_tests)'  # hegel tests only, custom case count
 ./scripts/cov.sh                     # Coverage report (cargo-tarpaulin)
 cargo build --features dhat-heap      # Build with heap profiler
 nix build .#                         # Build with nix
@@ -238,7 +239,7 @@ mkDerivation { name = "my-package"; src = ./.; }
 ## Testing
 
 - **Unit tests**: inline in each crate (`tests.rs`, `#[cfg(test)]` modules)
-- **Property-based tests**: `lang_check/src/pbt/mod.rs` — generates arbitrary ASTs and types via proptest
+- **Property-based tests**: use [hegel](https://github.com/hegeltest) (`#[hegel::test]`, package `hegeltest`, crate name `hegel`). Put them in a `hegel_tests` module next to the code under test. Shared generators: `lang_ty/src/hegel_gen.rs` (`raw_tys`, `prims`, `idents`, `shuffle`) and `lang_check/src/pbt/gen.rs` (Nix source text paired with its expected `RawTy`). `HEGEL_TEST_CASES=N` overrides every test's case count; `./scripts/pbt.sh N` runs both frameworks at N cases. The proptest suites under `lang_check/src/pbt/` and `lsp/src/pbt*.rs` are legacy — port to hegel when touching them rather than extending them.
 - **LSP e2e tests**: `lsp/tests/e2e_*.rs` — protocol-level tests using in-process duplex transport via `LspTestHarness` (in `lsp/tests/common/mod.rs`). Tests cover diagnostics, hover, completion, config reload, multi-file, and lifecycle.
 - **Test fixtures**: Nix files in `test/` directory (e.g., `test/basic.nix`)
 

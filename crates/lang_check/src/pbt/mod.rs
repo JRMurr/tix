@@ -15,6 +15,11 @@
 //   intersections). Tested via || narrowing, has-field conjunction, and
 //   contradictory narrowing patterns.
 //
+// Framework: new tests use hegel (`gen.rs` holds the hegel generators). The
+// proptest strategies below are legacy; `test_{primitive,structural,lambda}_typing`
+// are already ported, the remaining modules still run on proptest and should be
+// ported when touched.
+//
 // Known limitations:
 // - High rejection rate: arb_nix_text_from_ty generates random OutputTy values
 //   that may contain intersections, Neg, Top/Bottom, or non-primitive lambda
@@ -26,6 +31,7 @@
 
 mod cyclic;
 mod frozen;
+mod gen;
 mod let_bridged_export;
 mod partial;
 mod stub_compose;
@@ -418,38 +424,6 @@ fn arb_primitive() -> impl Strategy<Value = (RawTy, NixTextStr)> {
         .prop_flat_map(|(ty, text)| (Just(ty), non_type_modifying_transform(text)))
 }
 
-/// Lists and attrsets of primitives, including `//` merging.
-fn arb_structural() -> impl Strategy<Value = (RawTy, NixTextStr)> {
-    let leaf = any::<PrimitiveTy>()
-        .prop_flat_map(|prim| (Just(RawTy::Primitive(prim)), prim_ty_to_string(prim)));
-
-    let list_strat = leaf
-        .clone()
-        .prop_map(|(ty, text)| (RawTy::List(Box::new(ty)), format!("[({text})]")));
-
-    prop_oneof![list_strat, attr_strat(leaf)]
-        .prop_flat_map(|(ty, text)| (Just(ty), non_type_modifying_transform(text)))
-}
-
-/// Lambdas (assertion-constrained + generic) with primitive or structural
-/// bodies. Tests generalization, extrusion, and early canonicalization.
-fn arb_lambda() -> impl Strategy<Value = (RawTy, NixTextStr)> {
-    let leaf = any::<PrimitiveTy>()
-        .prop_flat_map(|prim| (Just(RawTy::Primitive(prim)), prim_ty_to_string(prim)));
-
-    // Bodies can be primitives, lists, or attrsets (one level deep).
-    let body = {
-        let prim_body = leaf.clone();
-        let list_body = leaf
-            .clone()
-            .prop_map(|(ty, text)| (RawTy::List(Box::new(ty)), format!("[({text})]")));
-        let attr_body = attr_strat(leaf.clone());
-        prop_oneof![prim_body, list_body, attr_body]
-    };
-
-    func_strat(body).prop_flat_map(|(ty, text)| (Just(ty), non_type_modifying_transform(text)))
-}
-
 /// Combined strategy: full recursive generation + type-directed generation +
 /// focused union generators. arb_nix_text and arb_nix_text_from_ty now both
 /// include union types via if-then-else generation.
@@ -467,31 +441,45 @@ fn arb_combined() -> impl Strategy<Value = (RawTy, NixTextStr)> {
     ]
 }
 
-proptest! {
-    #![proptest_config(ProptestConfig {
-        cases: 256, .. ProptestConfig::default()
-    })]
+/// Inferred root type must equal the generator's expected type.
+#[track_caller]
+fn assert_infers((ty, text): (RawTy, NixTextStr)) {
+    let root_ty = get_inferred_root(&text).normalize_vars();
+    let expected = raw_to_root(&ty.normalize_vars());
+    assert_eq!(root_ty, expected, "source: {text}");
+}
 
-    #[test]
-    fn test_primitive_typing((ty, text) in arb_primitive()) {
-        let root_ty = get_inferred_root(&text).normalize_vars();
-        let expected = raw_to_root(&ty.normalize_vars());
-        prop_assert_eq!(root_ty, expected);
-    }
+#[hegel::test(test_cases = 256)]
+fn test_primitive_typing(tc: hegel::TestCase) {
+    assert_infers(tc.draw(gen::primitive()));
+}
 
-    #[test]
-    fn test_structural_typing((ty, text) in arb_structural()) {
-        let root_ty = get_inferred_root(&text).normalize_vars();
-        let expected = raw_to_root(&ty.normalize_vars());
-        prop_assert_eq!(root_ty, expected);
-    }
+#[hegel::test(test_cases = 256)]
+fn test_structural_typing(tc: hegel::TestCase) {
+    assert_infers(tc.draw(gen::structural()));
+}
 
-    #[test]
-    fn test_lambda_typing((ty, text) in arb_lambda()) {
-        let root_ty = get_inferred_root(&text).normalize_vars();
-        let expected = raw_to_root(&ty.normalize_vars());
-        prop_assert_eq!(root_ty, expected);
+#[hegel::test(test_cases = 256)]
+fn test_lambda_typing(tc: hegel::TestCase) {
+    assert_infers(tc.draw(gen::lambda_expr()));
+}
+
+/// Full recursive generation (hegel port of `arb_nix_text`). Same rule as
+/// `test_combined_typing`: unions with duplicate members normalize on the
+/// expected side but inference keeps distinct branch variables, so union
+/// cases only check crash freedom.
+#[hegel::test(test_cases = 256)]
+fn test_recursive_typing(tc: hegel::TestCase) {
+    const DEPTH: u32 = 5;
+    let (ty, text) = tc.draw(gen::nix_texts(DEPTH));
+    let actual = get_inferred_root(&text)
+        .normalize_vars()
+        .normalize_set_ops();
+    let expected = raw_to_root(&ty.normalize_vars()).normalize_set_ops();
+    if expected.contains_union_or_intersection() || actual.contains_union_or_intersection() {
+        return;
     }
+    assert_eq!(actual, expected, "source: {text}");
 }
 
 proptest! {
