@@ -30,7 +30,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Run benchmarks
         run: |
-          nix develop --command cargo bench -p lang_check --bench annotations \
+          nix develop --command cargo bench -p lang_check \
             | tee bench-results.txt
       - name: Summary
         run: |

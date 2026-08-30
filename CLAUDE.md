@@ -24,7 +24,7 @@ cargo clippy                         # Lint
 ./scripts/pbt.sh 100000              # PBT with custom case count
 HEGEL_TEST_CASES=1000 cargo nextest run -E 'test(hegel_tests)'  # hegel tests only, custom case count
 ./scripts/cov.sh                     # Coverage report (cargo-tarpaulin)
-cargo bench -p lang_check            # Annotation interning/extrusion micro-benchmarks (divan)
+cargo bench -p lang_check            # divan benches: annotations + pipeline stages/inference micro-cases
 cargo build --features dhat-heap      # Build with heap profiler
 nix build .#                         # Build with nix
 tixc test/basic.nix             # Type-check a local .nix file
