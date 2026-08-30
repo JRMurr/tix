@@ -50,6 +50,11 @@ Narrowing works well for most common patterns (see [Type System](./type-system.m
 
 `rec { ... }` works but types that refer to themselves can produce verbose output in some cases.
 
+## Recursive type aliases
+
+- Hovering over a value whose type is a partially unfolded recursive alias may show a bare type variable at the point where the alias recurs; the annotated binding itself displays the alias name.
+- An inline recursive alias (`# type Tree = ...` in a `.nix` file) is file-scoped. When such a type crosses an `import` into a file that does not know the alias, the recursion point becomes `any`. Put the alias in a `.tix` stub to keep it.
+
 ## Stubs
 
 - The built-in lib stubs cover common functions but not all of nixpkgs lib. Unstubbed functions get a fresh type variable (no error, just no type info).

@@ -7693,6 +7693,208 @@ fn inline_alias_references_another() {
     }
 }
 
+// ==========================================================================
+// Recursive type alias tests (GitHub #18)
+// ==========================================================================
+
+const ACCESS_PATH_PRELUDE: &str =
+    "# type AccessPath = [ string | { match: a, path: AccessPath } ];\n";
+
+fn access_path_src(body: &str) -> String {
+    format!(
+        "{ACCESS_PATH_PRELUDE}let\n  # type: countDown :: AccessPath -> int\n  countDown = n: if n == [] then 0 else countDown (builtins.tail n);\nin {body}"
+    )
+}
+
+/// Exact repro from the issue: annotating a self-recursive function with a
+/// recursive alias must not overflow the stack.
+#[test]
+fn recursive_alias_issue_18_no_overflow() {
+    let src = indoc! {r#"
+        # type AccessPath = [ string | { match: a, path: AccessPath } ];
+
+        rec {
+          # type: countDown :: AccessPath -> int
+          countDown =
+            n:
+            if n == [] then
+              0
+            else
+              countDown (builtins.tail n);
+        }
+    "#};
+    let ty = get_name_type(src, "countDown").to_string();
+    assert!(ty.contains("AccessPath"), "got: {ty}");
+    assert!(ty.contains("int"), "got: {ty}");
+}
+
+#[test]
+fn recursive_alias_accepts_valid_list() {
+    let src = access_path_src(r#"countDown ["a" { match = 1; path = []; }]"#);
+    expect_ty_inference(&src, expected_ty!(Int));
+}
+
+#[test]
+fn recursive_alias_nested_path_typechecks() {
+    let src = access_path_src(
+        r#"countDown ["x" { match = 1; path = [ { match = 2; path = ["y"]; } ]; }]"#,
+    );
+    expect_ty_inference(&src, expected_ty!(Int));
+}
+
+#[test]
+fn recursive_alias_rejects_bad_element() {
+    let src = access_path_src("countDown [1]");
+    let error = get_check_error(&src);
+    assert!(
+        matches!(error, TixDiagnosticKind::TypeMismatch { .. }),
+        "got: {error:?}"
+    );
+}
+
+#[test]
+fn mutually_recursive_aliases() {
+    let src = indoc! {r#"
+        # type A = { b: B | null };
+        # type B = { a: A };
+        let
+          # type: f :: A -> int
+          f = x: 0;
+        in f { b = { a = { b = null; }; }; }
+    "#};
+    expect_ty_inference(src, expected_ty!(Int));
+    let ty = get_name_type(src, "f").to_string();
+    assert!(ty.contains('A'), "got: {ty}");
+}
+
+/// `type A = A` has no constructor on the cycle; degrade instead of looping.
+#[test]
+fn degenerate_alias_self_reference_degrades() {
+    let src = indoc! {r#"
+        # type A = A;
+        let
+          # type: x :: A
+          x = 1;
+        in x
+    "#};
+    let (_, inference) = check_str(src);
+    assert!(inference.is_ok(), "got: {:?}", inference.err());
+}
+
+#[test]
+fn degenerate_alias_union_self_reference_degrades() {
+    let src = indoc! {r#"
+        # type A = A | int;
+        let
+          # type: x :: A
+          x = 1;
+        in x
+    "#};
+    let (_, inference) = check_str(src);
+    assert!(inference.is_ok(), "got: {:?}", inference.err());
+}
+
+#[test]
+fn degenerate_alias_pair_degrades() {
+    let src = indoc! {r#"
+        # type A = B;
+        # type B = A;
+        let
+          # type: x :: A
+          x = 1;
+        in x
+    "#};
+    let (_, inference) = check_str(src);
+    assert!(inference.is_ok(), "got: {:?}", inference.err());
+}
+
+#[test]
+fn recursive_alias_from_tix_stub() {
+    let registry =
+        registry_from_tix("type AccessPath = [ string | { match: a, path: AccessPath } ];");
+    let src = indoc! {r#"
+        let
+          # type: countDown :: AccessPath -> int
+          countDown = n: if n == [] then 0 else countDown (builtins.tail n);
+        in countDown ["a" { match = 1; path = ["b"]; }]
+    "#};
+    let ty = get_inferred_root_with_aliases(src, &registry);
+    assert_eq!(ty, expected_ty!(Int));
+}
+
+#[test]
+fn recursive_alias_cross_file_import() {
+    let registry =
+        registry_from_tix("type AccessPath = [ string | { match: a, path: AccessPath } ];");
+    let lib = indoc! {r#"
+        {
+          # type: countDown :: AccessPath -> int
+          countDown = n: if n == [] then 0 else countDown (builtins.tail n);
+        }
+    "#};
+    let main = r#"(import /lib.nix).countDown ["a" { match = 1; path = []; }]"#;
+    let ty = get_multifile_root_with_aliases(&[("/main.nix", main), ("/lib.nix", lib)], &registry);
+    assert_eq!(ty, expected_ty!(Int));
+}
+
+/// The generic var of a recursive alias is one variable per annotation
+/// instance, shared across unfoldings: a `Tree` is homogeneous in `a`, so
+/// mixing `int` and `string` for `v` is an error.
+#[test]
+fn recursive_alias_generic_var_shared_across_unfolding() {
+    let src = indoc! {r#"
+        # type Tree = { v: a, kids: [Tree] };
+        let
+          # type: t :: Tree
+          t = { v = 1; kids = [ { v = "s"; kids = []; } ]; };
+        in t.v
+    "#};
+    let error = get_check_error(src);
+    assert!(
+        matches!(error, TixDiagnosticKind::TypeMismatch { .. }),
+        "got: {error:?}"
+    );
+}
+
+/// A list-only recursive alias has no attrset/lambda on its cycle, so
+/// extrusion must break the cycle at the `Named` node.
+#[test]
+fn recursive_alias_list_only_multiple_call_sites() {
+    let src = indoc! {r#"
+        # type IntTree = [ IntTree | int ];
+        let
+          # type: depth :: IntTree -> int
+          depth = t: if t == [] then 0 else 1 + depth (builtins.tail t);
+        in depth [1 [2 [3]]] + depth [] + depth [[[]]]
+    "#};
+    expect_ty_inference(src, expected_ty!(Int));
+}
+
+/// Each call site extrudes the generalized annotated function; the cyclic
+/// alias graph must survive repeated extrusion.
+#[test]
+fn recursive_alias_multiple_call_sites() {
+    let src = access_path_src(
+        r#"countDown ["a"] + countDown [ { match = "m"; path = ["b" { match = true; path = []; }]; } ]"#,
+    );
+    expect_ty_inference(&src, expected_ty!(Int));
+}
+
+/// Unknown alias references are wildcards: each occurrence is an independent
+/// fresh variable, so `AttrSet -> AttrSet` does not unify param and return.
+/// (Regression: nixpkgs `renameCrossIndexTo :: String -> AttrSet -> AttrSet`.)
+#[test]
+fn unknown_alias_occurrences_are_independent() {
+    let src = indoc! {r#"
+        let
+          # type: rename :: String -> AttrSet -> AttrSet
+          rename = prefix: x: { "${prefix}Build" = x.buildBuild; };
+        in rename "self" { buildBuild = 1; }
+    "#};
+    let (_, inference) = check_str(src);
+    assert!(inference.is_ok(), "got: {:?}", inference.err());
+}
+
 // ==============================================================================
 // Duplicate Key Diagnostics
 // ==============================================================================

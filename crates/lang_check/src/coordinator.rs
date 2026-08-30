@@ -26,7 +26,9 @@ use dashmap::DashMap;
 use parking_lot::{Condvar, Mutex};
 use rayon::prelude::*;
 
-use crate::imports::{import_errors_to_diagnostics, resolve_import_types};
+use crate::imports::{
+    import_errors_to_diagnostics, resolve_import_types, ImportError, ImportErrorKind,
+};
 use crate::{run_inference, CheckResult, FileSignature, InferenceInputs, SyntaxBundle};
 use lang_ty::OwnedTy;
 
@@ -109,6 +111,40 @@ enum TypeExportSlot {
 // by returning ⊤ for the back-edge.
 thread_local! {
     static IN_PROGRESS: RefCell<HashSet<PathBuf>> = RefCell::new(HashSet::new());
+    /// Files whose type exports are being resolved via partial inference on
+    /// this thread. Re-entry would wait on our own `Computing` slot forever.
+    static TYPE_EXPORTS_IN_PROGRESS: RefCell<HashSet<PathBuf>> = RefCell::new(HashSet::new());
+    /// Files whose in-progress work was re-entered from a dependency on this
+    /// thread. Consumed by `resolve_type_imports` of that file to report the
+    /// cycle where the user can see it.
+    static CYCLE_HITS: RefCell<HashSet<PathBuf>> = RefCell::new(HashSet::new());
+}
+
+fn note_cycle_hit(path: &Path) {
+    CYCLE_HITS.with(|s| s.borrow_mut().insert(path.to_path_buf()));
+}
+
+fn take_cycle_hit(path: &Path) -> bool {
+    CYCLE_HITS.with(|s| s.borrow_mut().remove(path))
+}
+
+/// How `resolve_type_imports` obtains the root type for `typeof import(...)`.
+#[derive(Clone, Copy, Debug)]
+pub enum TypeofLookup {
+    /// Infer the file on demand if it is not cached.
+    Demand,
+    /// Use the coordinator cache only.
+    CacheOnly,
+}
+
+/// Resolved cross-file type references for one file.
+#[derive(Default)]
+pub struct TypeImportResolution {
+    pub imported_type_exports:
+        HashMap<PathBuf, HashMap<smol_str::SmolStr, comment_parser::ParsedTy>>,
+    pub typeof_import_types: HashMap<PathBuf, OwnedTy>,
+    /// Cyclic type imports, one per offending path.
+    pub errors: Vec<ImportError>,
 }
 
 impl InferenceCoordinator {
@@ -167,6 +203,7 @@ impl InferenceCoordinator {
         // we have an import cycle. Return None (maps to ⊤ in the importer).
         let is_cycle = IN_PROGRESS.with(|s| !s.borrow_mut().insert(path.to_path_buf()));
         if is_cycle {
+            note_cycle_hit(path);
             return None;
         }
 
@@ -275,6 +312,15 @@ impl InferenceCoordinator {
         path: &Path,
         syntax_provider: &dyn SyntaxProvider,
     ) -> Option<HashMap<smol_str::SmolStr, comment_parser::ParsedTy>> {
+        // 0. Re-entry from our own partial inference (this file's typeof
+        // export value-imports a file whose annotations import this file's
+        // types). Waiting on the Computing slot below would deadlock.
+        let is_cycle = TYPE_EXPORTS_IN_PROGRESS.with(|s| s.borrow().contains(path));
+        if is_cycle {
+            note_cycle_hit(path);
+            return None;
+        }
+
         // 1. Check cache
         if let Some(entry) = self.type_export_cache.get(path) {
             match &*entry {
@@ -326,6 +372,7 @@ impl InferenceCoordinator {
                 notify: notify.clone(),
             },
         );
+        TYPE_EXPORTS_IN_PROGRESS.with(|s| s.borrow_mut().insert(path.to_path_buf()));
 
         // Find max SCC group index needed
         let max_group = typeof_targets
@@ -369,6 +416,7 @@ impl InferenceCoordinator {
         };
 
         let binding_types = crate::run_partial_inference(&inputs, max_group, &typeof_targets);
+        TYPE_EXPORTS_IN_PROGRESS.with(|s| s.borrow_mut().remove(path));
 
         // 5. Resolve typeof references in exports
         let resolved_exports = crate::resolve_export_typeof(&raw_exports, &binding_types);
@@ -383,6 +431,68 @@ impl InferenceCoordinator {
         );
 
         Some(resolved_exports)
+    }
+
+    /// Resolve the cross-file type references (`import("x").T`,
+    /// `typeof import("x")`) in `module`'s doc comments.
+    ///
+    /// `path` is marked in progress for the duration so that a dependency
+    /// whose inference leads back here is reported as a cycle in `errors`
+    /// rather than silently degrading in the dependency (whose diagnostics
+    /// the user never sees).
+    pub fn resolve_type_imports(
+        &self,
+        path: &Path,
+        module: &lang_ast::Module,
+        binding_exprs: &HashMap<lang_ast::NameId, lang_ast::ExprId>,
+        syntax_provider: Option<&dyn SyntaxProvider>,
+        typeof_lookup: TypeofLookup,
+    ) -> TypeImportResolution {
+        let base_dir = path.parent().unwrap_or(Path::new("/"));
+        let anchors = crate::imports::scan_type_import_anchors(module, binding_exprs);
+        let mut res = TypeImportResolution::default();
+
+        // compute_file already holds the entry; the LSP entry path does not.
+        let inserted = IN_PROGRESS.with(|s| s.borrow_mut().insert(path.to_path_buf()));
+        // Hits recorded during value-import resolution are not ours to report.
+        take_cycle_hit(path);
+
+        for (path_str, at_expr) in anchors {
+            let resolved = base_dir.join(&path_str);
+            let canonical = resolved.canonicalize().unwrap_or(resolved);
+
+            if let Some(provider) = syntax_provider {
+                if let Some(exports) = self.demand_type_exports(&canonical, provider) {
+                    if !exports.is_empty() {
+                        res.imported_type_exports.insert(canonical.clone(), exports);
+                    }
+                }
+            }
+
+            if let Some(sig) = self.get_signature(&canonical) {
+                res.typeof_import_types.insert(canonical.clone(), sig);
+            } else if let (TypeofLookup::Demand, Some(provider)) = (typeof_lookup, syntax_provider)
+            {
+                if let Some(dep) = self.demand_file(&canonical, provider) {
+                    if let Some(sig) = dep.signature {
+                        res.typeof_import_types
+                            .insert(canonical.clone(), sig.root_ty);
+                    }
+                }
+            }
+
+            if take_cycle_hit(path) {
+                res.errors.push(ImportError {
+                    kind: ImportErrorKind::CyclicTypeImport(canonical),
+                    at_expr,
+                });
+            }
+        }
+
+        if inserted {
+            IN_PROGRESS.with(|s| s.borrow_mut().remove(path));
+        }
+        res
     }
 
     // =========================================================================
@@ -418,7 +528,7 @@ impl InferenceCoordinator {
             Some(&bundle.registry),
         );
 
-        let import_diagnostics = import_errors_to_diagnostics(&import_resolution.errors);
+        let mut import_diagnostics = import_errors_to_diagnostics(&import_resolution.errors);
 
         // Use the resolved paths from import resolution (already computed during
         // scanning) instead of re-scanning the AST.
@@ -428,29 +538,16 @@ impl InferenceCoordinator {
         self.record_deps(path, &import_paths);
 
         // Scan doc comments for cross-file type references and resolve them.
-        let type_import_paths = crate::imports::scan_type_import_paths(&bundle.module);
-        let mut imported_type_exports = HashMap::new();
-        let mut typeof_import_types = HashMap::new();
-        for path_str in &type_import_paths {
-            let resolved = base_dir.join(path_str);
-            let canonical = resolved.canonicalize().unwrap_or(resolved);
-
-            // Try type exports (import("path").TypeName)
-            if let Some(exports) = self.demand_type_exports(&canonical, syntax_provider) {
-                if !exports.is_empty() {
-                    imported_type_exports.insert(canonical.clone(), exports);
-                }
-            }
-
-            // Try typeof import (typeof import("path"))
-            if let Some(sig) = self.get_signature(&canonical) {
-                typeof_import_types.insert(canonical, sig);
-            } else if let Some(dep_result) = self.demand_file(&canonical, syntax_provider) {
-                if let Some(sig) = dep_result.signature {
-                    typeof_import_types.insert(canonical, sig.root_ty);
-                }
-            }
-        }
+        let type_imports = self.resolve_type_imports(
+            path,
+            &bundle.module,
+            &bundle.module_indices.binding_expr,
+            Some(syntax_provider),
+            TypeofLookup::Demand,
+        );
+        import_diagnostics.extend(import_errors_to_diagnostics(&type_imports.errors));
+        let imported_type_exports = type_imports.imported_type_exports;
+        let typeof_import_types = type_imports.typeof_import_types;
 
         // Build InferenceInputs and run inference.
         let inputs = InferenceInputs {
@@ -1429,6 +1526,103 @@ in
         );
     }
 
+    fn has_cyclic_type_import(result: &CoordinatedResult) -> bool {
+        result.check_result.diagnostics.iter().any(|d| {
+            matches!(
+                d.kind,
+                crate::diagnostic::TixDiagnosticKind::CyclicTypeImport { .. }
+            )
+        })
+    }
+
+    /// `typeof import` in both directions: the demanded file reports the
+    /// cycle and inference completes.
+    #[test]
+    fn cyclic_typeof_import_pair_reports_cycle() {
+        let dir = tempfile::tempdir().unwrap();
+        let a_path = write_nix(dir.path(), "a.nix", "1");
+        let b_path = write_nix(dir.path(), "b.nix", "1");
+        let a_src = format!(
+            "let /** type: x :: typeof import(\"{}\") */ x = 1; in x",
+            b_path.display()
+        );
+        let b_src = format!(
+            "let /** type: y :: typeof import(\"{}\") */ y = 1; in y",
+            a_path.display()
+        );
+        std::fs::write(&a_path, a_src).unwrap();
+        std::fs::write(&b_path, b_src).unwrap();
+
+        let provider = TestSyntaxProvider::new();
+        let coord = InferenceCoordinator::new();
+        let result = coord.demand_file(&a_path, &provider).expect("a.nix infers");
+
+        assert!(
+            has_cyclic_type_import(&result),
+            "expected E016, got: {:?}",
+            result.check_result.diagnostics
+        );
+    }
+
+    /// `import("...").T` in both directions.
+    #[test]
+    fn cyclic_import_type_pair_reports_cycle() {
+        let dir = tempfile::tempdir().unwrap();
+        let a_path = write_nix(dir.path(), "a.nix", "1");
+        let b_path = write_nix(dir.path(), "b.nix", "1");
+        let a_src = format!(
+            "/** type A = import(\"{}\").B; */\nlet /** type: x :: A */ x = 1; in x",
+            b_path.display()
+        );
+        let b_src = format!(
+            "/** type B = import(\"{}\").A; */\nlet /** type: y :: B */ y = 1; in y",
+            a_path.display()
+        );
+        std::fs::write(&a_path, a_src).unwrap();
+        std::fs::write(&b_path, b_src).unwrap();
+
+        let provider = TestSyntaxProvider::new();
+        let coord = InferenceCoordinator::new();
+        let result = coord.demand_file(&a_path, &provider).expect("a.nix infers");
+
+        assert!(
+            has_cyclic_type_import(&result),
+            "expected E016, got: {:?}",
+            result.check_result.diagnostics
+        );
+    }
+
+    /// Partial inference of B's `typeof` export value-imports C, and C's
+    /// annotation demands B's exports again on the same thread. This must
+    /// not wait on B's own in-progress slot.
+    #[test]
+    fn type_export_reentry_does_not_deadlock() {
+        let dir = tempfile::tempdir().unwrap();
+        let a_path = write_nix(dir.path(), "a.nix", "1");
+        let b_path = write_nix(dir.path(), "b.nix", "1");
+        let c_path = write_nix(dir.path(), "c.nix", "1");
+        let a_src = format!(
+            "let /** type: x :: import(\"{}\").T */ x = 1; in x",
+            b_path.display()
+        );
+        let b_src = format!(
+            "/** type T = typeof v; */\nlet v = import {}; in v",
+            c_path.display()
+        );
+        let c_src = format!(
+            "let /** type: y :: import(\"{}\").T */ y = 1; in y",
+            b_path.display()
+        );
+        std::fs::write(&a_path, a_src).unwrap();
+        std::fs::write(&b_path, b_src).unwrap();
+        std::fs::write(&c_path, c_src).unwrap();
+
+        let provider = TestSyntaxProvider::new();
+        let coord = InferenceCoordinator::new();
+        let result = coord.demand_file(&a_path, &provider).expect("a.nix infers");
+        assert!(result.check_result.inference.is_some());
+    }
+
     #[test]
     fn cross_file_type_import_mismatch_produces_error() {
         let dir = tempfile::tempdir().unwrap();
@@ -1569,6 +1763,97 @@ in
                 assert!(a.fields.contains_key("x"), "should have field x");
             }
             other => panic!("expected AttrSet, got: {other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod hegel_tests {
+    use super::*;
+    use crate::aliases::TypeAliasRegistry;
+    use hegel::generators;
+    use std::io::Write;
+
+    /// Number of files in a generated project.
+    const MAX_FILES: usize = 4;
+
+    /// One type-level reference from a file's annotation to another file.
+    #[derive(Clone, Copy, Debug)]
+    enum TypeEdge {
+        /// `typeof import("<target>")`
+        TypeOf,
+        /// `import("<target>").T`, where the target exports `type T = typeof v;`
+        /// and `v` value-imports the next file.
+        ExportTypeOf,
+    }
+
+    struct TestSyntaxProvider {
+        registry: Arc<TypeAliasRegistry>,
+    }
+
+    impl SyntaxProvider for TestSyntaxProvider {
+        fn syntax_for_file(&self, path: &Path) -> Option<SyntaxBundle> {
+            let contents = std::fs::read_to_string(path).ok()?;
+            let r = lang_ast::run_syntax_pipeline_for_file(path, &contents);
+            Some(SyntaxBundle {
+                path: path.to_path_buf(),
+                module: r.module,
+                module_indices: r.module_indices,
+                name_res: r.name_res,
+                grouped_defs: r.grouped_defs,
+                registry: Arc::clone(&self.registry),
+                context_args: Arc::default(),
+            })
+        }
+    }
+
+    /// Random directed graph of type-level references between `n` files,
+    /// with every file pointing at at least one other so cycles are common.
+    /// Any topology must infer without panicking or hanging.
+    #[hegel::test]
+    fn random_type_import_graph_terminates(tc: hegel::TestCase) {
+        let n = tc.draw(
+            generators::integers::<usize>()
+                .min_value(2)
+                .max_value(MAX_FILES),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let paths: Vec<PathBuf> = (0..n)
+            .map(|i| {
+                let path = dir.path().join(format!("f{i}.nix"));
+                std::fs::File::create(&path).unwrap();
+                path.canonicalize().unwrap()
+            })
+            .collect();
+
+        for (i, path) in paths.iter().enumerate() {
+            let target = tc.draw(generators::integers::<usize>().max_value(n - 1));
+            let next = tc.draw(generators::integers::<usize>().max_value(n - 1));
+            let edge = tc.draw(generators::sampled_from(vec![
+                TypeEdge::TypeOf,
+                TypeEdge::ExportTypeOf,
+            ]));
+            let target_path = paths[target].display();
+            let src = match edge {
+                TypeEdge::TypeOf => format!(
+                    "/** type T = typeof v; */\nlet /** type: x :: typeof import(\"{target_path}\") */ x = {i}; v = x; in v"
+                ),
+                TypeEdge::ExportTypeOf => format!(
+                    "/** type T = typeof v; */\nlet /** type: x :: import(\"{target_path}\").T */ x = {i}; v = import {}; in v",
+                    paths[next].display()
+                ),
+            };
+            let mut f = std::fs::File::create(path).unwrap();
+            f.write_all(src.as_bytes()).unwrap();
+        }
+
+        let provider = TestSyntaxProvider {
+            registry: Arc::new(TypeAliasRegistry::default()),
+        };
+        let coord = InferenceCoordinator::new();
+        for path in &paths {
+            let result = coord.demand_file(path, &provider);
+            assert!(result.is_some(), "{} should infer", path.display());
         }
     }
 }

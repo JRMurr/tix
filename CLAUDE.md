@@ -24,6 +24,7 @@ cargo clippy                         # Lint
 ./scripts/pbt.sh 100000              # PBT with custom case count
 HEGEL_TEST_CASES=1000 cargo nextest run -E 'test(hegel_tests)'  # hegel tests only, custom case count
 ./scripts/cov.sh                     # Coverage report (cargo-tarpaulin)
+cargo bench -p lang_check            # Annotation interning/extrusion micro-benchmarks (divan)
 cargo build --features dhat-heap      # Build with heap profiler
 nix build .#                         # Build with nix
 tixc test/basic.nix             # Type-check a local .nix file
@@ -119,6 +120,7 @@ Nix source → [lang_ast::lower] Parse with rnix → Tix AST
 - **Named is fully transparent**: `Named(name, inner)` is semantically identical to `inner`. Constrain unwraps it, extrude re-wraps it, canonicalize converts it to `OutputTy::Named`. Alias names flow structurally through the type system — no side-channel needed.
 - **Polarity-aware canonicalization**: positive positions expand to union of lower bounds; negative positions expand to intersection of upper bounds.
 - **Overload resolution is deferred**: operators like `+` and `*` are resolved after the SCC group is fully inferred.
+- **Recursive aliases tie the knot with a placeholder var**: `intern_alias_ref` hands back-references a fresh var and pins it to the finished `Named` (only when a List/Lambda/AttrSet guards the cycle; unguarded cycles degrade to `any`). Compaction can pin that var into a var-free cycle, so extrude has a placeholder for `Named` just like Lambda/AttrSet.
 
 ### Key files for type inference
 

@@ -31,6 +31,8 @@ use lang_ty::{OutputTy, OwnedTy, PrimitiveTy, Ty, TyRef, TypeArena};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+
+use smol_str::SmolStr;
 use std::sync::Arc;
 use thiserror::Error;
 use tracing::instrument;
@@ -829,6 +831,30 @@ pub struct DeferredConstraints {
     pub carried: FxHashMap<lang_ast::NameId, Vec<PendingOverload>>,
 }
 
+/// Identity of an alias being interned: a registry alias by name, or an
+/// `import("./x.nix").T` export by file and name.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum AliasKey {
+    Local(SmolStr),
+    Imported(PathBuf, SmolStr),
+}
+
+struct InProgressAlias {
+    /// Variable handed to back-references; allocated on first re-entry only,
+    /// so non-recursive aliases pay nothing.
+    placeholder: Option<TyId>,
+    guard_depth_at_entry: usize,
+}
+
+/// State threaded through one annotation's interning to detect and tie
+/// recursive alias references.
+#[derive(Default)]
+struct AliasInternState {
+    in_progress: HashMap<AliasKey, InProgressAlias>,
+    /// Number of List/Lambda/AttrSet constructors above the current position.
+    guard_depth: usize,
+}
+
 #[derive(Debug, Clone)]
 pub struct CheckCtx<'db> {
     module: &'db Module,
@@ -1485,60 +1511,120 @@ impl<'db> CheckCtx<'db> {
     /// and alias resolution for Reference vars. Each call produces an independent
     /// "instance" — analogous to polymorphic instantiation.
     fn intern_fresh_ty(&mut self, ty: ParsedTy) -> TyId {
+        let mut st = AliasInternState::default();
+        self.intern_fresh_ty_inner(ty, &mut st)
+    }
+
+    fn intern_fresh_ty_inner(&mut self, ty: ParsedTy, st: &mut AliasInternState) -> TyId {
         // Pre-resolve type operators (Param, Return, FieldAccess) at the
         // ParsedTy level before interning. This expands aliases and
         // destructures types so the result is a plain ParsedTy.
         let ty = self.resolve_type_operators(&ty);
 
-        let free_vars = ty.free_vars();
-
-        let subs: HashMap<TypeVarValue, TyId> = free_vars
-            .iter()
-            .map(|var| {
-                let ty_id = match var {
-                    TypeVarValue::Generic(_) => self.new_var(),
-                    TypeVarValue::Reference(ref_name) => {
-                        // Resolve against loaded type aliases. If found,
-                        // recursively intern the alias body (with its own
-                        // fresh vars) to get a polymorphic instance.
-                        if let Some(alias_body) = self.type_aliases.get(ref_name).cloned() {
-                            let inner_id = self.intern_fresh_ty(alias_body);
-                            let name = smol_str::SmolStr::from(ref_name.as_str());
-                            self.alloc_concrete(Ty::Named(name, inner_id))
-                        } else if let Some(prim) = uppercase_primitive_alias(ref_name) {
-                            // Nixpkgs doc comments conventionally use uppercase
-                            // primitive names (String, Bool, Int, etc.). Map them
-                            // to the corresponding lowercase primitive type.
-                            self.alloc_prim(prim)
-                        } else {
-                            // Unknown reference — degrade to fresh variable.
-                            self.new_var()
-                        }
-                    }
-                };
-                (var.clone(), ty_id)
-            })
+        // Generic vars get one fresh variable per instance. Alias references
+        // are resolved lazily during the walk (see `intern_alias_ref`) so that
+        // recursive aliases can tie the knot instead of unfolding forever.
+        let subs: HashMap<TypeVarValue, TyId> = ty
+            .free_vars()
+            .into_iter()
+            .filter(|var| matches!(var, TypeVarValue::Generic(_)))
+            .map(|var| (var, self.new_var()))
             .collect();
 
-        self.intern_parsed_ty(&ty, &subs)
+        let mut memo = HashMap::new();
+        self.intern_parsed_ty(&ty, &subs, st, &mut memo)
+    }
+
+    /// Resolve one alias occurrence. `memo` is per alias body so repeated
+    /// references within one body share an instance; `st.in_progress` spans
+    /// the whole annotation so a back-reference to an alias being interned
+    /// returns a placeholder variable instead of recursing.
+    fn intern_alias_ref(
+        &mut self,
+        key: AliasKey,
+        body: ParsedTy,
+        st: &mut AliasInternState,
+        memo: &mut HashMap<AliasKey, TyId>,
+    ) -> TyId {
+        if let Some(&id) = memo.get(&key) {
+            return id;
+        }
+
+        if let Some(entry) = st.in_progress.get_mut(&key) {
+            // Unguarded cycle (`type A = A`, `type A = A | int`): no constructor
+            // between the alias and its own reference, so there is no finite
+            // type to tie a knot on. Degrade to a fresh variable.
+            if st.guard_depth == entry.guard_depth_at_entry {
+                return self.types.new_var();
+            }
+            if let Some(p) = entry.placeholder {
+                return p;
+            }
+            let p = self.types.new_var();
+            entry.placeholder = Some(p);
+            return p;
+        }
+
+        st.in_progress.insert(
+            key.clone(),
+            InProgressAlias {
+                placeholder: None,
+                guard_depth_at_entry: st.guard_depth,
+            },
+        );
+        let inner = self.intern_fresh_ty_inner(body, st);
+        let entry = st
+            .in_progress
+            .remove(&key)
+            .expect("in_progress entry inserted above");
+
+        let result = match &key {
+            AliasKey::Local(name) => self.alloc_concrete(Ty::Named(name.clone(), inner)),
+            AliasKey::Imported(..) => inner,
+        };
+
+        // Tie the knot: the placeholder handed to back-references is pinned
+        // to the finished type. Direct bounds suffice — the placeholder is
+        // fresh, so there is nothing to propagate.
+        if let Some(p) = entry.placeholder {
+            self.types.storage.add_lower_bound(p, result);
+            self.types.storage.add_upper_bound(p, result);
+        }
+
+        memo.insert(key, result);
+        result
     }
 
     fn intern_parsed_ty(
         &mut self,
         ty: &ParsedTy,
         substitutions: &HashMap<TypeVarValue, TyId>,
+        st: &mut AliasInternState,
+        memo: &mut HashMap<AliasKey, TyId>,
     ) -> TyId {
         match ty {
-            ParsedTy::TyVar(var) => {
+            ParsedTy::TyVar(TypeVarValue::Reference(name)) => {
                 // `Any` is treated as a wildcard — each occurrence gets its own
                 // fresh variable so `Any -> Any` doesn't unify the two positions.
                 // This matches the noogle convention where `Any` means "some type"
                 // rather than "the same type everywhere".
-                if let comment_parser::TypeVarValue::Reference(name) = var {
-                    if name == "Any" && self.type_aliases.get("Any").is_none() {
-                        return self.new_var();
-                    }
+                if name == "Any" && self.type_aliases.get("Any").is_none() {
+                    return self.new_var();
                 }
+                if let Some(body) = self.type_aliases.get(name).cloned() {
+                    let key = AliasKey::Local(SmolStr::from(name.as_str()));
+                    return self.intern_alias_ref(key, body, st, memo);
+                }
+                // Nixpkgs doc comments conventionally use uppercase primitive
+                // names (String, Bool, Int, etc.). Map them to the
+                // corresponding lowercase primitive type.
+                if let Some(prim) = uppercase_primitive_alias(name) {
+                    return self.alloc_prim(prim);
+                }
+                // Unknown reference — degrade to fresh variable.
+                self.new_var()
+            }
+            ParsedTy::TyVar(var) => {
                 match substitutions.get(var) {
                     Some(replacement) => *replacement,
                     None => {
@@ -1553,28 +1639,37 @@ impl<'db> CheckCtx<'db> {
                 }
             }
             ParsedTy::Primitive(prim) => self.alloc_prim(*prim),
+            // List/Lambda/AttrSet are the constructors that guard alias
+            // recursion: a back-reference beneath one of them denotes a
+            // finite, well-formed recursive type.
             ParsedTy::List(inner) => {
-                let new_inner = self.intern_parsed_ty(&inner.0, substitutions);
+                st.guard_depth += 1;
+                let new_inner = self.intern_parsed_ty(&inner.0, substitutions, st, memo);
+                st.guard_depth -= 1;
                 self.alloc_concrete(Ty::List(new_inner))
             }
             ParsedTy::Lambda { param, body } => {
-                let new_param = self.intern_parsed_ty(&param.0, substitutions);
-                let new_body = self.intern_parsed_ty(&body.0, substitutions);
+                st.guard_depth += 1;
+                let new_param = self.intern_parsed_ty(&param.0, substitutions, st, memo);
+                let new_body = self.intern_parsed_ty(&body.0, substitutions, st, memo);
+                st.guard_depth -= 1;
                 self.alloc_concrete(Ty::Lambda {
                     param: new_param,
                     body: new_body,
                 })
             }
             ParsedTy::AttrSet(attr) => {
+                st.guard_depth += 1;
                 let mut fields = std::collections::BTreeMap::new();
                 for (k, v) in &attr.fields {
-                    let new_v = self.intern_parsed_ty(&v.0, substitutions);
+                    let new_v = self.intern_parsed_ty(&v.0, substitutions, st, memo);
                     fields.insert(k.clone(), new_v);
                 }
                 let dyn_ty = attr
                     .dyn_ty
                     .as_ref()
-                    .map(|d| self.intern_parsed_ty(&d.0, substitutions));
+                    .map(|d| self.intern_parsed_ty(&d.0, substitutions, st, memo));
+                st.guard_depth -= 1;
                 self.alloc_concrete(Ty::AttrSet(lang_ty::AttrSetTy {
                     fields,
                     dyn_ty,
@@ -1591,7 +1686,7 @@ impl<'db> CheckCtx<'db> {
             ParsedTy::Union(members) => {
                 let tys: Vec<TyId> = members
                     .iter()
-                    .map(|m| self.intern_parsed_ty(&m.0, substitutions))
+                    .map(|m| self.intern_parsed_ty(&m.0, substitutions, st, memo))
                     .collect();
                 tys.into_iter()
                     .reduce(|acc, ty| self.alloc_concrete(Ty::Union(acc, ty)))
@@ -1602,7 +1697,7 @@ impl<'db> CheckCtx<'db> {
             ParsedTy::Intersection(members) => {
                 let tys: Vec<TyId> = members
                     .iter()
-                    .map(|m| self.intern_parsed_ty(&m.0, substitutions))
+                    .map(|m| self.intern_parsed_ty(&m.0, substitutions, st, memo))
                     .collect();
                 tys.into_iter()
                     .reduce(|acc, ty| self.alloc_concrete(Ty::Inter(acc, ty)))
@@ -1652,15 +1747,15 @@ impl<'db> CheckCtx<'db> {
             // (e.g. Param(typeof f) where typeof needs TyId-level resolution).
             // Intern the inner type, then inspect the concrete result.
             ParsedTy::Param(inner) => {
-                let inner_ty = self.intern_parsed_ty(&inner.0, substitutions);
+                let inner_ty = self.intern_parsed_ty(&inner.0, substitutions, st, memo);
                 self.extract_param_ty(inner_ty)
             }
             ParsedTy::Return(inner) => {
-                let inner_ty = self.intern_parsed_ty(&inner.0, substitutions);
+                let inner_ty = self.intern_parsed_ty(&inner.0, substitutions, st, memo);
                 self.extract_return_ty(inner_ty)
             }
             ParsedTy::FieldAccess(inner, key) => {
-                let inner_ty = self.intern_parsed_ty(&inner.0, substitutions);
+                let inner_ty = self.intern_parsed_ty(&inner.0, substitutions, st, memo);
                 self.extract_field_ty(inner_ty, key)
             }
 
@@ -1670,7 +1765,8 @@ impl<'db> CheckCtx<'db> {
                     let resolved = base.join(path);
                     if let Some(exports) = self.imported_type_exports.get(&resolved) {
                         if let Some(alias_body) = exports.get(name.as_str()).cloned() {
-                            return self.intern_fresh_ty(alias_body);
+                            let key = AliasKey::Imported(resolved, name.clone());
+                            return self.intern_alias_ref(key, alias_body, st, memo);
                         }
                     }
                 }

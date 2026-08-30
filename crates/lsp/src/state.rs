@@ -17,11 +17,9 @@ use lang_ast::{
     NameId, NameResolution,
 };
 use lang_check::aliases::TypeAliasRegistry;
-use lang_check::coordinator::{InferenceCoordinator, SyntaxProvider};
+use lang_check::coordinator::{InferenceCoordinator, SyntaxProvider, TypeofLookup};
 use lang_check::diagnostic::{TixDiagnostic, TixDiagnosticKind};
-use lang_check::imports::{
-    import_errors_to_diagnostics, resolve_import_types, scan_type_import_paths,
-};
+use lang_check::imports::{import_errors_to_diagnostics, resolve_import_types};
 #[cfg(test)]
 use lang_check::InferenceResult;
 use lang_check::{CheckResult, SyntaxBundle};
@@ -297,25 +295,19 @@ pub fn resolve_imports_phase_b(
     let import_duration = t0.elapsed();
 
     // Scan doc comments for cross-file type references and resolve them.
-    let type_import_paths = scan_type_import_paths(&intermediate.module);
-    let mut imported_type_exports = HashMap::new();
-    let mut typeof_import_types = HashMap::new();
-    for path_str in &type_import_paths {
-        let resolved = base_dir.join(path_str);
-        let canonical = resolved.canonicalize().unwrap_or(resolved);
-
-        if let Some(provider) = syntax_provider {
-            if let Some(exports) = coordinator.demand_type_exports(&canonical, provider) {
-                if !exports.is_empty() {
-                    imported_type_exports.insert(canonical.clone(), exports);
-                }
-            }
-        }
-
-        if let Some(sig) = coordinator.get_signature(&canonical) {
-            typeof_import_types.insert(canonical, sig);
-        }
-    }
+    // typeof lookups are cache-only here: demanding a whole file for an
+    // annotation is deferred until that file is opened or warmed up.
+    let type_imports = coordinator.resolve_type_imports(
+        &intermediate.path,
+        &intermediate.module,
+        &intermediate.module_indices.binding_expr,
+        syntax_provider.map(|p| p as &dyn SyntaxProvider),
+        TypeofLookup::CacheOnly,
+    );
+    let mut import_diagnostics = import_diagnostics;
+    import_diagnostics.extend(import_errors_to_diagnostics(&type_imports.errors));
+    let imported_type_exports = type_imports.imported_type_exports;
+    let typeof_import_types = type_imports.typeof_import_types;
 
     let inference_inputs = LspInferenceInputs {
         core: lang_check::InferenceInputs {

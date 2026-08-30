@@ -266,6 +266,16 @@ impl ModuleTypeDecMap {
         self.name_map.insert(name_id, comments);
     }
 
+    /// Iterate over per-expression doc comments.
+    pub fn expr_docs(&self) -> impl Iterator<Item = (ExprId, &DocComments)> {
+        self.expr_map.iter()
+    }
+
+    /// Iterate over per-name doc comments.
+    pub fn name_docs(&self) -> impl Iterator<Item = (NameId, &DocComments)> {
+        self.name_map.iter()
+    }
+
     /// Iterate over all doc comment strings stored in this map (from both
     /// expressions and names).
     pub fn all_doc_strings(&self) -> impl Iterator<Item = &str> {

@@ -26,6 +26,7 @@
   - [E013: Imported File Not Analyzed](./diagnostics/e013.md)
   - [E014: Unknown Type](./diagnostics/e014.md)
   - [E015: Invalid String Interpolation](./diagnostics/e015.md)
+  - [E016: Cyclic Type Import](./diagnostics/e016.md)
 
 ---
 

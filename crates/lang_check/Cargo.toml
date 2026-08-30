@@ -34,9 +34,14 @@ indoc = { workspace = true }
 hegeltest = { workspace = true }
 rowan = { workspace = true }
 tempfile = "3"
+divan = "0.1"
 lang_ast = { path = "../lang_ast", features = ["test_support"] }
 lang_ty = { path = "../lang_ty", features = ["hegel_support"] }
 
 
 [lib]
 path = "src/lib.rs"
+
+[[bench]]
+name = "annotations"
+harness = false
