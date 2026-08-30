@@ -214,6 +214,14 @@ fn is_removable_var_member(
     }
 }
 
+/// Remove duplicate set-op members, keeping first occurrences in order.
+/// TyRefs are hash-consed, so ref equality is node equality; the members are
+/// not sorted here, so plain `dedup()` (adjacent-only) would miss duplicates.
+fn dedup_members(members: &mut Vec<TyRef>) {
+    let mut seen = FxHashSet::default();
+    members.retain(|&m| seen.insert(m));
+}
+
 fn apply_simplification(
     arena: &mut TypeArena,
     ty: TyRef,
@@ -293,7 +301,7 @@ fn apply_simplification(
                     flat.push(m);
                 }
             }
-            flat.dedup();
+            dedup_members(&mut flat);
 
             match flat.len() {
                 0 => apply_simplification(arena, members[0], substitution, &FxHashSet::default()),
@@ -333,7 +341,7 @@ fn apply_simplification(
                     flat.push(m);
                 }
             }
-            flat.dedup();
+            dedup_members(&mut flat);
 
             match flat.len() {
                 0 => apply_simplification(arena, members[0], substitution, &FxHashSet::default()),
@@ -557,6 +565,32 @@ mod hegel_tests {
             arena.display(result).to_string(),
             arena.display(again).to_string()
         );
+    }
+
+    /// After simplify, no Union/Intersection anywhere in the result may hold
+    /// the same member twice (TyRefs are hash-consed, so ref equality is
+    /// node equality).
+    #[hegel::test]
+    fn simplify_leaves_no_duplicate_members(tc: hegel::TestCase) {
+        fn assert_no_dups(arena: &TypeArena, ty: TyRef, seen: &mut FxHashSet<TyRef>) {
+            if !seen.insert(ty) {
+                return;
+            }
+            if let OutputTy::Union(members) | OutputTy::Intersection(members) = &arena[ty] {
+                let unique: FxHashSet<TyRef> = members.iter().copied().collect();
+                assert_eq!(
+                    unique.len(),
+                    members.len(),
+                    "duplicate members in {}",
+                    arena.display(ty)
+                );
+            }
+            arena[ty].for_each_child(&mut |child| assert_no_dups(arena, child, seen));
+        }
+
+        let (mut arena, ty) = interned(&tc);
+        let result = simplify(&mut arena, ty);
+        assert_no_dups(&arena, result, &mut FxHashSet::default());
     }
 
     #[hegel::test]

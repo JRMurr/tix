@@ -91,12 +91,7 @@ impl CheckCtx<'_> {
         let (result, diagnostics, _bailed_out) = self.infer_prog_partial(groups);
         // Return the first error diagnostic (skip warnings like UnresolvedName).
         for diag in diagnostics {
-            if !matches!(
-                diag.kind,
-                crate::diagnostic::TixDiagnosticKind::UnresolvedName { .. }
-                    | crate::diagnostic::TixDiagnosticKind::AnnotationArityMismatch { .. }
-                    | crate::diagnostic::TixDiagnosticKind::AnnotationUnchecked { .. }
-            ) {
+            if !diag.kind.is_warning() {
                 return Err(Box::new(diag));
             }
         }

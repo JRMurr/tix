@@ -8029,6 +8029,25 @@ fn duplicate_key_is_warning_not_error() {
 }
 
 #[test]
+fn check_source_skips_all_warning_kinds() {
+    // infer_prog must skip every warning-kind diagnostic (per is_warning()),
+    // not a hand-picked subset. AnnotationParseError is a warning and must
+    // not turn check_source into an Err.
+    let src = indoc! {"
+        let
+          /** type: x :: @@garbage@@ */
+          x = 1;
+        in x
+    "};
+    let result = crate::check_source(src);
+    assert!(
+        result.is_ok(),
+        "warning-kind diagnostic escalated to error: {:?}",
+        result.err()
+    );
+}
+
+#[test]
 fn duplicate_key_display_message() {
     let diags = collect_diagnostics("{ foo = 1; foo = 2; }");
     let dup = diags
