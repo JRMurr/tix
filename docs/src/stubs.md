@@ -22,6 +22,8 @@ tix inspect my-file.nix --stubs ./my-stubs/
 # Type aliases — lowercase vars are implicitly generic
 type Derivation = { name: string, system: string, ... };
 type Nullable = a | null;
+# Aliases may be recursive under a list/function/attrset constructor
+type Tree = { value: a, children: [Tree] };
 
 # Value declarations
 val mkDerivation :: { name: string, src: path, ... } -> Derivation;

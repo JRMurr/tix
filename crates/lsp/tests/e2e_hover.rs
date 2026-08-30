@@ -183,3 +183,39 @@ async fn hover_on_attrset_field() {
 
     h.shutdown().await;
 }
+
+/// A recursive inline alias must not crash the server (GitHub #18); hover
+/// shows the alias name.
+#[tokio::test]
+async fn hover_recursive_inline_alias_does_not_crash() {
+    let mut h = LspTestHarness::new(&[(
+        "test.nix",
+        indoc! {"
+            # type AccessPath = [ string | { match: a, path: AccessPath } ];
+            rec {
+              # type: countDown :: AccessPath -> int
+              countDown = n: if n == [] then 0 else countDown (builtins.tail n);
+            # ^1
+            }
+        "},
+    )])
+    .await;
+
+    h.open_and_wait("test.nix").await;
+    let m = h.markers("test.nix");
+
+    let hover = h
+        .hover("test.nix", m[&1].line, m[&1].character)
+        .await
+        .expect("hover should return a result");
+    let HoverContents::Markup(content) = &hover.contents else {
+        panic!("expected MarkupContent, got {:?}", hover.contents);
+    };
+    assert!(
+        content.value.contains("AccessPath"),
+        "hover should mention the alias, got: {}",
+        content.value,
+    );
+
+    h.shutdown().await;
+}

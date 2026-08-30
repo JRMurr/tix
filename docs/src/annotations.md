@@ -128,6 +128,25 @@ Both block (`/** ... */`) and line (`# type Foo = ...;`) comments work. The synt
 
 Inline aliases are file-scoped (visible everywhere in the file regardless of placement) and shadow any aliases with the same name from loaded stubs.
 
+### Recursive aliases
+
+An alias may refer to itself, or to another alias that refers back to it, as long as the reference sits inside a list, function, or attrset:
+
+```nix
+# type AccessPath = [ string | { match: a, path: AccessPath } ];
+# type Node = { value: int, next: Node | null };
+
+let
+  /** type: countDown :: AccessPath -> int */
+  countDown = n: if n == [] then 0 else countDown (builtins.tail n);
+in countDown [ "a" { match = 1; path = [ "b" ]; } ]
+```
+
+Two rules follow from how the knot is tied:
+
+- A cycle with no constructor on it — `type A = A;`, `type A = A | int;`, `type A = B; type B = A;` — has no finite meaning. In `.tix` stubs it is rejected as an "unguarded cyclic type alias"; inline, the self-reference degrades to `any`.
+- Generic variables are shared across unfoldings. In `type Tree = { v: a, kids: [Tree] }`, every `v` in one tree is the same `a`, so a tree mixing `int` and `string` values is a type error.
+
 **Disambiguation:** `type:` (with a colon) triggers a binding annotation (`type: name :: Type`). `type ` (with a space followed by an uppercase letter) triggers an alias declaration (`type Name = ...;`).
 
 ## Annotation safety

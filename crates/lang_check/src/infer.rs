@@ -960,7 +960,28 @@ impl CheckCtx<'_> {
                             extrude_binary!(a, b, |ea, eb| Ty::Union(ea, eb))
                         }
                         Ty::Named(name, inner) => {
-                            extrude_single!(inner, polarity, |e| Ty::Named(name, e))
+                            // Every recursive-alias cycle passes through a
+                            // Named node (see `intern_alias_ref`). Once
+                            // compaction pins the knot-tying placeholder, a
+                            // cycle like `[ IntTree | int ]` has no lambda or
+                            // attrset to break it, so Named needs its own
+                            // placeholder.
+                            let placeholder = self.new_var();
+                            cache.insert(ty_id, placeholder);
+
+                            let e = self.extrude_inner(inner, polarity, cache);
+                            if e == inner {
+                                return self.extrude_reuse(ty_id, cache);
+                            }
+
+                            let result = self.alloc_concrete(Ty::Named(name, e));
+                            self.constrain(result, placeholder).expect(
+                                "extrude placeholder link: fresh named and placeholder cannot conflict",
+                            );
+                            self.constrain(placeholder, result).expect(
+                                "extrude placeholder link: fresh named and placeholder cannot conflict",
+                            );
+                            result
                         }
                         // Frozen types are ground (no variables) — handled by the
                         // fast path above. Unreachable, but return as-is defensively.

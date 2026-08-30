@@ -726,14 +726,19 @@ impl TypeAliasRegistry {
         }
     }
 
-    /// Validate the registry for cycles in alias references.
-    /// Returns `Err` with the names involved in cycles if any are found.
+    /// Validate the registry for unguarded cycles in alias references.
+    ///
+    /// Recursion beneath a list, lambda, or attrset constructor is a valid
+    /// recursive type (`type Node = { next: Node | null }`). A cycle with no
+    /// constructor on it (`type A = A`, `type A = A | int`, `type A = B; type
+    /// B = A`) has no finite meaning and is rejected. Returns `Err` with the
+    /// names involved in such cycles.
     pub fn validate(&self) -> Result<(), Vec<SmolStr>> {
         let mut cycles = Vec::new();
         let mut visited = HashMap::<SmolStr, VisitState>::new();
 
         for name in self.aliases.keys() {
-            if self.has_cycle(name, &mut visited) {
+            if self.has_unguarded_cycle(name, 0, &mut visited) {
                 cycles.push(name.clone());
             }
         }
@@ -745,21 +750,36 @@ impl TypeAliasRegistry {
         }
     }
 
-    /// DFS cycle detection for alias references.
-    fn has_cycle(&self, name: &SmolStr, visited: &mut HashMap<SmolStr, VisitState>) -> bool {
+    /// DFS cycle detection. `guard_depth` counts the constructors between the
+    /// DFS root and the current alias; a back-edge at the same depth as the
+    /// alias was entered at is unguarded.
+    fn has_unguarded_cycle(
+        &self,
+        name: &SmolStr,
+        guard_depth: usize,
+        visited: &mut HashMap<SmolStr, VisitState>,
+    ) -> bool {
         match visited.get(name) {
-            Some(VisitState::InProgress) => return true,
+            Some(VisitState::InProgress {
+                guard_depth_at_entry,
+            }) => {
+                return *guard_depth_at_entry == guard_depth;
+            }
             Some(VisitState::Done) => return false,
             None => {}
         }
 
-        visited.insert(name.clone(), VisitState::InProgress);
+        visited.insert(
+            name.clone(),
+            VisitState::InProgress {
+                guard_depth_at_entry: guard_depth,
+            },
+        );
 
         if let Some(body) = self.aliases.get(name) {
-            let refs = collect_references(body);
-            for ref_name in refs {
+            for (ref_name, ref_depth) in collect_references_with_depth(body) {
                 if self.aliases.contains_key(ref_name.as_str())
-                    && self.has_cycle(&ref_name, visited)
+                    && self.has_unguarded_cycle(&ref_name, guard_depth + ref_depth, visited)
                 {
                     return true;
                 }
@@ -773,7 +793,7 @@ impl TypeAliasRegistry {
 
 #[derive(Debug, Clone, Copy)]
 enum VisitState {
-    InProgress,
+    InProgress { guard_depth_at_entry: usize },
     Done,
 }
 
@@ -886,46 +906,47 @@ fn merge_parsed_attrsets(
     }
 }
 
-/// Collect all `TypeVarValue::Reference` names from a ParsedTy.
-fn collect_references(ty: &ParsedTy) -> Vec<SmolStr> {
+/// Collect reference names paired with the number of List/Lambda/AttrSet
+/// constructors above each occurrence.
+fn collect_references_with_depth(ty: &ParsedTy) -> Vec<(SmolStr, usize)> {
     let mut refs = Vec::new();
-    collect_references_inner(ty, &mut refs);
+    collect_references_inner(ty, 0, &mut refs);
     refs
 }
 
-fn collect_references_inner(ty: &ParsedTy, refs: &mut Vec<SmolStr>) {
+fn collect_references_inner(ty: &ParsedTy, depth: usize, refs: &mut Vec<(SmolStr, usize)>) {
     match ty {
         ParsedTy::TyVar(comment_parser::TypeVarValue::Reference(name)) => {
-            refs.push(name.clone());
+            refs.push((name.clone(), depth));
         }
         ParsedTy::TyVar(comment_parser::TypeVarValue::Generic(_)) => {}
         ParsedTy::Primitive(_) | ParsedTy::Top | ParsedTy::Bottom => {}
-        ParsedTy::List(inner) => collect_references_inner(&inner.0, refs),
+        ParsedTy::List(inner) => collect_references_inner(&inner.0, depth + 1, refs),
         ParsedTy::Lambda { param, body } => {
-            collect_references_inner(&param.0, refs);
-            collect_references_inner(&body.0, refs);
+            collect_references_inner(&param.0, depth + 1, refs);
+            collect_references_inner(&body.0, depth + 1, refs);
         }
         ParsedTy::AttrSet(attr) => {
             for v in attr.fields.values() {
-                collect_references_inner(&v.0, refs);
+                collect_references_inner(&v.0, depth + 1, refs);
             }
             if let Some(dyn_ty) = &attr.dyn_ty {
-                collect_references_inner(&dyn_ty.0, refs);
+                collect_references_inner(&dyn_ty.0, depth + 1, refs);
             }
         }
         ParsedTy::Union(members) | ParsedTy::Intersection(members) => {
             for m in members {
-                collect_references_inner(&m.0, refs);
+                collect_references_inner(&m.0, depth, refs);
             }
         }
         // Type-level operators: opaque references have no type alias refs,
         // but Param/Return/FieldAccess may contain them in their inner types.
         ParsedTy::TypeOf(_) | ParsedTy::TypeOfImport(_) | ParsedTy::ImportType(_, _) => {}
         ParsedTy::Param(inner) | ParsedTy::Return(inner) => {
-            collect_references_inner(&inner.0, refs);
+            collect_references_inner(&inner.0, depth, refs);
         }
         ParsedTy::FieldAccess(inner, _) => {
-            collect_references_inner(&inner.0, refs);
+            collect_references_inner(&inner.0, depth, refs);
         }
     }
 }
@@ -940,13 +961,27 @@ fn collect_references_inner(ty: &ParsedTy, refs: &mut Vec<SmolStr>) {
 /// `arena` is used to intern child `TyRef` nodes. All `TyRef` values in the
 /// returned `OutputTy` are valid indices into the same arena.
 ///
-/// `depth` guards against infinite recursion on self-referential aliases.
-/// Generic type variables and unresolved references become `OutputTy::TyVar(0)`.
+/// A recursive alias is unfolded once: `OutputTy` has no back-reference
+/// form, so re-entering an alias yields `Named(name, TyVar(0))`, which
+/// displays as the alias name. `depth` is a safety net against deep
+/// alias chains. Generic type variables and unresolved references become
+/// `OutputTy::TyVar(0)`.
 pub fn parsed_ty_to_output_ty(
     ty: &ParsedTy,
     registry: &TypeAliasRegistry,
     arena: &mut TypeArena,
     depth: usize,
+) -> lang_ty::OutputTy {
+    let mut in_progress = Vec::new();
+    parsed_ty_to_output_ty_inner(ty, registry, arena, depth, &mut in_progress)
+}
+
+fn parsed_ty_to_output_ty_inner(
+    ty: &ParsedTy,
+    registry: &TypeAliasRegistry,
+    arena: &mut TypeArena,
+    depth: usize,
+    in_progress: &mut Vec<SmolStr>,
 ) -> lang_ty::OutputTy {
     use comment_parser::TypeVarValue;
     use lang_ty::OutputTy;
@@ -955,25 +990,38 @@ pub fn parsed_ty_to_output_ty(
         return OutputTy::TyVar(0);
     }
 
+    macro_rules! recurse {
+        ($ty:expr) => {
+            parsed_ty_to_output_ty_inner($ty, registry, arena, depth + 1, in_progress)
+        };
+    }
+
     match ty {
         ParsedTy::Primitive(p) => OutputTy::Primitive(*p),
         ParsedTy::TyVar(TypeVarValue::Reference(name)) => {
-            if let Some(alias_body) = registry.get(name) {
-                let inner = parsed_ty_to_output_ty(alias_body, registry, arena, depth + 1);
-                let inner_ref = arena.intern(inner);
-                OutputTy::Named(name.clone(), inner_ref)
-            } else {
-                OutputTy::TyVar(0)
+            if in_progress.contains(name) {
+                let hole = arena.intern(OutputTy::TyVar(0));
+                return OutputTy::Named(name.clone(), hole);
             }
+            let Some(alias_body) = registry.get(name) else {
+                return OutputTy::TyVar(0);
+            };
+
+            in_progress.push(name.clone());
+            let inner = recurse!(alias_body);
+            in_progress.pop();
+
+            let inner_ref = arena.intern(inner);
+            OutputTy::Named(name.clone(), inner_ref)
         }
         ParsedTy::TyVar(TypeVarValue::Generic(_)) => OutputTy::TyVar(0),
         ParsedTy::List(inner) => {
-            let inner_ty = parsed_ty_to_output_ty(&inner.0, registry, arena, depth + 1);
+            let inner_ty = recurse!(&inner.0);
             OutputTy::List(arena.intern(inner_ty))
         }
         ParsedTy::Lambda { param, body } => {
-            let param_ty = parsed_ty_to_output_ty(&param.0, registry, arena, depth + 1);
-            let body_ty = parsed_ty_to_output_ty(&body.0, registry, arena, depth + 1);
+            let param_ty = recurse!(&param.0);
+            let body_ty = recurse!(&body.0);
             OutputTy::Lambda {
                 param: arena.intern(param_ty),
                 body: arena.intern(body_ty),
@@ -984,12 +1032,12 @@ pub fn parsed_ty_to_output_ty(
                 .fields
                 .iter()
                 .map(|(k, v)| {
-                    let field_ty = parsed_ty_to_output_ty(&v.0, registry, arena, depth + 1);
+                    let field_ty = recurse!(&v.0);
                     (k.clone(), arena.intern(field_ty))
                 })
                 .collect();
             let dyn_ty = attr.dyn_ty.as_ref().map(|d| {
-                let d_ty = parsed_ty_to_output_ty(&d.0, registry, arena, depth + 1);
+                let d_ty = recurse!(&d.0);
                 arena.intern(d_ty)
             });
             OutputTy::AttrSet(AttrSetTy {
@@ -1003,7 +1051,7 @@ pub fn parsed_ty_to_output_ty(
             members
                 .iter()
                 .map(|m| {
-                    let m_ty = parsed_ty_to_output_ty(&m.0, registry, arena, depth + 1);
+                    let m_ty = recurse!(&m.0);
                     arena.intern(m_ty)
                 })
                 .collect(),
@@ -1012,7 +1060,7 @@ pub fn parsed_ty_to_output_ty(
             members
                 .iter()
                 .map(|m| {
-                    let m_ty = parsed_ty_to_output_ty(&m.0, registry, arena, depth + 1);
+                    let m_ty = recurse!(&m.0);
                     arena.intern(m_ty)
                 })
                 .collect(),
@@ -1033,7 +1081,8 @@ pub fn parsed_ty_to_output_ty(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use comment_parser::parse_tix_file;
+    use comment_parser::{parse_tix_file, TypeVarValue};
+    use lang_ty::OutputTy;
 
     #[test]
     fn load_type_alias() {
@@ -1096,6 +1145,72 @@ mod tests {
         registry.load_tix_file(&file);
 
         assert!(registry.validate().is_err());
+    }
+
+    /// Recursion under a list/lambda/attrset constructor is a valid
+    /// recursive type, not a cycle error.
+    #[test]
+    fn guarded_cycle_is_valid() {
+        let file = parse_tix_file(
+            r#"
+            type A = [ A | int ];
+            type Node = { next: Node | null };
+            type X = { y: Y };
+            type Y = { x: X | null };
+            "#,
+        )
+        .expect("parse error");
+        let mut registry = TypeAliasRegistry::new();
+        registry.load_tix_file(&file);
+
+        assert!(registry.validate().is_ok());
+    }
+
+    #[test]
+    fn unguarded_union_cycle_is_rejected() {
+        let file = parse_tix_file("type A = A | int;").expect("parse error");
+        let mut registry = TypeAliasRegistry::new();
+        registry.load_tix_file(&file);
+
+        assert!(registry.validate().is_err());
+    }
+
+    /// Re-entering a recursive alias stops at the first back-reference,
+    /// emitting `Named("A", <hole>)` instead of unfolding 20 levels deep.
+    #[test]
+    fn parsed_ty_to_output_ty_recursive_alias_terminates() {
+        let file = parse_tix_file("type A = [ A | int ];").expect("parse error");
+        let mut registry = TypeAliasRegistry::new();
+        registry.load_tix_file(&file);
+        let mut arena = TypeArena::new();
+
+        let reference = ParsedTy::TyVar(TypeVarValue::Reference("A".into()));
+        let out = parsed_ty_to_output_ty(&reference, &registry, &mut arena, 0);
+
+        // Named(A, [ A | int ]) where the inner A is Named("A", TyVar) — one
+        // level of unfolding only.
+        let OutputTy::Named(_, body) = out else {
+            panic!("expected Named, got {out:?}");
+        };
+        let OutputTy::List(elem) = &arena[body] else {
+            panic!("expected List, got {:?}", arena[body]);
+        };
+        let elem = *elem;
+        let OutputTy::Union(members) = &arena[elem] else {
+            panic!("expected Union, got {:?}", arena[elem]);
+        };
+        let named = members
+            .iter()
+            .find_map(|m| match &arena[*m] {
+                OutputTy::Named(name, inner) if name == "A" => Some(*inner),
+                _ => None,
+            })
+            .expect("union should contain Named(A)");
+        assert!(
+            matches!(arena[named], OutputTy::TyVar(_)),
+            "back-reference should be a hole, got {:?}",
+            arena[named]
+        );
     }
 
     #[test]
@@ -2011,6 +2126,52 @@ mod hegel_tests {
         let printed = arena.display(root).to_string();
         let src = format!("val x :: {printed};");
         assert!(parse_val(&src).is_some(), "failed to parse: {src}");
+    }
+
+    /// Splice a self-reference into a printed type. Guarded: under a list
+    /// constructor, so the alias is a valid recursive type. Unguarded: at
+    /// the top level of a union, which `validate()` must reject.
+    #[derive(Clone, Copy, Debug)]
+    enum SelfRef {
+        Guarded,
+        Unguarded,
+    }
+
+    fn recursive_alias_src(printed: &str, self_ref: SelfRef) -> String {
+        match self_ref {
+            SelfRef::Guarded => format!("type Rec = [ Rec | ({printed}) ];"),
+            SelfRef::Unguarded => format!("type Rec = Rec | ({printed});"),
+        }
+    }
+
+    /// Any printable type spliced into a recursive alias: `validate()`
+    /// classifies it by guardedness, output conversion terminates, and
+    /// inference through an annotation never panics or loops.
+    #[hegel::test]
+    fn recursive_alias_never_panics(tc: hegel::TestCase) {
+        let raw = tc.draw(raw_tys(DEPTH));
+        tc.assume(printable(&raw));
+        let self_ref = tc.draw(hegel::generators::sampled_from(vec![
+            SelfRef::Guarded,
+            SelfRef::Unguarded,
+        ]));
+
+        let mut arena = TypeArena::new();
+        let root = intern_raw(&mut arena, &raw);
+        let printed = arena.display(root).to_string();
+        let src = recursive_alias_src(&printed, self_ref);
+        let file = parse_tix_file(&src).unwrap_or_else(|e| panic!("failed to parse {src}: {e}"));
+        let mut registry = TypeAliasRegistry::new();
+        registry.load_tix_file(&file);
+
+        let valid = registry.validate().is_ok();
+        assert_eq!(valid, matches!(self_ref, SelfRef::Guarded), "src: {src}");
+
+        let reference = ParsedTy::TyVar(comment_parser::TypeVarValue::Reference("Rec".into()));
+        let _ = parsed_ty_to_output_ty(&reference, &registry, &mut arena, 0);
+
+        let nix = "let /** type: x :: Rec */ x = null; in x";
+        let _ = crate::check_source_with_aliases(nix, &registry);
     }
 
     #[hegel::test]
