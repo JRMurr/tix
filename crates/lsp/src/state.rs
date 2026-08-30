@@ -1135,14 +1135,14 @@ mod tests {
         let c = PathBuf::from("/c.nix");
 
         // A initially imports B.
-        state.record_import_deps(&a, &[b.clone()]);
+        state.record_import_deps(&a, std::slice::from_ref(&b));
         assert!(
             state.get_dependents(&b).contains(&a),
             "B should list A as dependent"
         );
 
         // A's imports change to C only.
-        state.record_import_deps(&a, &[c.clone()]);
+        state.record_import_deps(&a, std::slice::from_ref(&c));
         assert!(
             !state.get_dependents(&b).contains(&a),
             "B should no longer list A after deps replaced"
@@ -1194,7 +1194,7 @@ mod tests {
         let ty_int = make_owned_ty(OutputTy::Primitive(lang_ty::PrimitiveTy::Int));
 
         // A imports B, B has an ephemeral stub.
-        state.record_import_deps(&a, &[b.clone()]);
+        state.record_import_deps(&a, std::slice::from_ref(&b));
         state.update_ephemeral_stub(&b, ty_int);
 
         // Removing B's stub should return A as a dependent.

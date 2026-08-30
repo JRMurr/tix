@@ -206,7 +206,7 @@ mod tests {
             .map(|(file, deps)| {
                 (
                     PathBuf::from(file),
-                    deps.iter().map(|d| PathBuf::from(d)).collect(),
+                    deps.iter().map(PathBuf::from).collect(),
                 )
             })
             .collect()
@@ -476,5 +476,160 @@ mod tests {
             let scc_sorted = sorted_names(&scc_flat);
             assert_eq!(flat_sorted, scc_sorted);
         }
+    }
+}
+
+#[cfg(test)]
+mod hegel_tests {
+    use super::*;
+    use hegel::generators;
+    use hegel::TestCase;
+    use std::collections::HashSet;
+
+    const MAX_FILES: usize = 30;
+    const MAX_EDGES: usize = 60;
+    /// Edges may target files outside the project; those must be ignored.
+    const MAX_EXTERNAL: usize = 5;
+
+    fn file(i: usize) -> PathBuf {
+        PathBuf::from(format!("f{i}.nix"))
+    }
+
+    fn external(i: usize) -> PathBuf {
+        PathBuf::from(format!("ext{i}.nix"))
+    }
+
+    #[hegel::composite]
+    fn import_graphs(tc: &TestCase) -> HashMap<PathBuf, Vec<PathBuf>> {
+        let n = tc.draw(generators::integers::<usize>().max_value(MAX_FILES));
+        let mut graph: HashMap<PathBuf, Vec<PathBuf>> = (0..n).map(|i| (file(i), vec![])).collect();
+        if n == 0 {
+            return graph;
+        }
+        let edges: Vec<(usize, usize)> = tc.draw(
+            generators::vecs(generators::tuples!(
+                generators::integers::<usize>().max_value(n - 1),
+                generators::integers::<usize>().max_value(n - 1 + MAX_EXTERNAL),
+            ))
+            .max_size(MAX_EDGES),
+        );
+        for (from, to) in edges {
+            let target = if to < n { file(to) } else { external(to - n) };
+            graph.get_mut(&file(from)).unwrap().push(target);
+        }
+        graph
+    }
+
+    /// Brute-force reachability (reflexive) restricted to in-project files.
+    fn reachable(graph: &HashMap<PathBuf, Vec<PathBuf>>, from: &Path) -> HashSet<PathBuf> {
+        let mut seen = HashSet::new();
+        let mut stack = vec![from.to_path_buf()];
+        while let Some(cur) = stack.pop() {
+            if !seen.insert(cur.clone()) {
+                continue;
+            }
+            for dep in graph.get(&cur).into_iter().flatten() {
+                if graph.contains_key(dep) {
+                    stack.push(dep.clone());
+                }
+            }
+        }
+        seen
+    }
+
+    fn scc_index(layers: &[InferenceLayer]) -> HashMap<&PathBuf, (usize, usize)> {
+        let mut idx = HashMap::new();
+        for (li, layer) in layers.iter().enumerate() {
+            for (si, scc) in layer.sccs.iter().enumerate() {
+                for f in &scc.files {
+                    idx.insert(f, (li, si));
+                }
+            }
+        }
+        idx
+    }
+
+    #[hegel::test]
+    fn layers_partition_the_files(tc: TestCase) {
+        let graph = tc.draw(import_graphs());
+        let layers = build_file_layers_with_sccs(&graph);
+        let mut seen = HashSet::new();
+        for f in layers.iter().flat_map(|l| l.all_files()) {
+            assert!(seen.insert(f.clone()), "{f:?} appears twice");
+        }
+        let expected: HashSet<PathBuf> = graph.keys().cloned().collect();
+        assert_eq!(seen, expected);
+    }
+
+    #[hegel::test]
+    fn same_scc_iff_mutually_reachable(tc: TestCase) {
+        let graph = tc.draw(import_graphs());
+        let layers = build_file_layers_with_sccs(&graph);
+        let idx = scc_index(&layers);
+        let reach: HashMap<&PathBuf, HashSet<PathBuf>> =
+            graph.keys().map(|f| (f, reachable(&graph, f))).collect();
+        for a in graph.keys() {
+            for b in graph.keys() {
+                let mutual = reach[a].contains(b) && reach[b].contains(a);
+                assert_eq!(idx[a] == idx[b], mutual, "{a:?} {b:?}");
+            }
+        }
+    }
+
+    #[hegel::test]
+    fn dependencies_come_in_earlier_layers(tc: TestCase) {
+        let graph = tc.draw(import_graphs());
+        let layers = build_file_layers_with_sccs(&graph);
+        let idx = scc_index(&layers);
+        for (from, deps) in &graph {
+            for dep in deps.iter().filter(|d| graph.contains_key(*d)) {
+                if idx[from] == idx[dep] {
+                    continue;
+                }
+                assert!(idx[dep].0 < idx[from].0, "{dep:?} must precede {from:?}");
+            }
+        }
+    }
+
+    #[hegel::test]
+    fn is_cyclic_matches_structure(tc: TestCase) {
+        let graph = tc.draw(import_graphs());
+        let layers = build_file_layers_with_sccs(&graph);
+        for scc in layers.iter().flat_map(|l| l.sccs.iter()) {
+            let self_import = scc.files.len() == 1 && graph[&scc.files[0]].contains(&scc.files[0]);
+            assert_eq!(
+                scc.is_cyclic,
+                scc.files.len() > 1 || self_import,
+                "{:?}",
+                scc.files
+            );
+        }
+    }
+
+    #[hegel::test]
+    fn flat_layers_match_scc_layers(tc: TestCase) {
+        let graph = tc.draw(import_graphs());
+        let flat = build_file_layers(&graph);
+        let sccs = build_file_layers_with_sccs(&graph);
+        assert_eq!(flat.len(), sccs.len());
+        // Order within a layer is not part of the contract.
+        for (a, b) in flat.iter().zip(&sccs) {
+            let a: HashSet<&PathBuf> = a.iter().collect();
+            let b: HashSet<&PathBuf> = b.all_files().collect();
+            assert_eq!(a, b);
+        }
+    }
+
+    #[hegel::test]
+    fn importer_counts_count_in_project_edges(tc: TestCase) {
+        let graph = tc.draw(import_graphs());
+        let counts = compute_importer_counts(&graph);
+        let mut expected: HashMap<PathBuf, usize> = HashMap::new();
+        for deps in graph.values() {
+            for d in deps.iter().filter(|d| graph.contains_key(*d)) {
+                *expected.entry(d.clone()).or_default() += 1;
+            }
+        }
+        assert_eq!(counts, expected);
     }
 }

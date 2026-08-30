@@ -738,8 +738,8 @@ mod tests {
         coord.set_signature(&a, make_sig(OutputTy::Primitive(lang_ty::PrimitiveTy::Int)));
         coord.set_signature(&b, make_sig(OutputTy::Primitive(lang_ty::PrimitiveTy::Int)));
         coord.set_signature(&c, make_sig(OutputTy::Primitive(lang_ty::PrimitiveTy::Int)));
-        coord.record_deps(&a, &[b.clone()]);
-        coord.record_deps(&b, &[c.clone()]);
+        coord.record_deps(&a, std::slice::from_ref(&b));
+        coord.record_deps(&b, std::slice::from_ref(&c));
 
         // Invalidate c → should cascade to b and a.
         let evicted = coord.invalidate(&c);
@@ -870,8 +870,8 @@ mod tests {
         coord.set_signature(&b, make_sig(OutputTy::Primitive(lang_ty::PrimitiveTy::Int)));
 
         // Create a cycle: a→b and b→a in reverse deps.
-        coord.record_deps(&a, &[b.clone()]);
-        coord.record_deps(&b, &[a.clone()]);
+        coord.record_deps(&a, std::slice::from_ref(&b));
+        coord.record_deps(&b, std::slice::from_ref(&a));
 
         // Should not infinite-loop.
         let evicted = coord.invalidate(&a);

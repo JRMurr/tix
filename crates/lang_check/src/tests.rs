@@ -1,7 +1,7 @@
 use indoc::indoc;
 use lang_ast::{Expr, Module};
-use lang_ty::arbitrary::{intern_raw, RawTy};
 use lang_ty::arena::{OwnedTy, TyRef};
+use lang_ty::raw_ty::{intern_raw, RawTy};
 use lang_ty::{arc_ty, OutputTy, PrimitiveTy, TypeArena};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -1759,6 +1759,19 @@ test_case!(bool_inversion_lambda, "a: !a", (Bool -> Bool));
 
 // List concatenation — homogeneous.
 test_case!(list_concat, "[1 2] ++ [3 4]", [Int]);
+
+// Regression: `+` between a number and a string/path is an error in Nix, but
+// `resolve_add` used to accept it (returning the lhs type). Found by
+// `operators::hegel_tests::full_resolve_commutative`.
+#[test]
+fn add_number_and_string_is_error() {
+    for src in ["1 + \"a\"", "\"a\" + 1", "1.5 + ./foo", "./foo + 2"] {
+        assert!(
+            matches!(get_check_error(src), TixDiagnosticKind::InvalidBinOp { .. }),
+            "{src} should be an invalid binop"
+        );
+    }
+}
 
 // List concatenation — heterogeneous: `[1] ++ ["hi"]` should produce `[int | string]`.
 #[test]

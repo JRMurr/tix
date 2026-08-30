@@ -1011,7 +1011,7 @@ mod tests {
             (PathBuf::from("common/a.nix"), dummy_classification()),
             (PathBuf::from("common/b.nix"), dummy_classification()),
         ];
-        let library_files = vec![(
+        let library_files = [(
             PathBuf::from("common/c.nix"),
             classification(NixFileKind::Library),
         )];
@@ -1044,7 +1044,7 @@ mod tests {
                 dummy_classification(),
             ),
         ];
-        let library_files = vec![(
+        let library_files = [(
             PathBuf::from("common/c.nix"),
             classification(NixFileKind::Library),
         )];
@@ -1116,7 +1116,7 @@ mod tests {
             dummy_classification(),
         ));
 
-        let library_files = vec![
+        let library_files = [
             (
                 PathBuf::from("common/lib1.nix"),
                 classification(NixFileKind::Library),
@@ -1154,7 +1154,7 @@ mod tests {
             (PathBuf::from("common/a.nix"), dummy_classification()),
             (PathBuf::from("common/b.nix"), dummy_classification()),
         ];
-        let library_files = vec![
+        let library_files = [
             (
                 PathBuf::from("common/c.nix"),
                 classification(NixFileKind::Library),
@@ -1298,7 +1298,7 @@ mod tests {
             ),
         ];
         // One other-kind file under modules/hm/.
-        let library_files = vec![(
+        let library_files = [(
             PathBuf::from("modules/hm/lib.nix"),
             classification(NixFileKind::Library),
         )];
@@ -1503,7 +1503,7 @@ mod tests {
                 classification(NixFileKind::CallPackage),
             ),
         ];
-        let library_files = vec![
+        let library_files = [
             (
                 PathBuf::from("packages/foo/default.nix"),
                 classification(NixFileKind::Library),

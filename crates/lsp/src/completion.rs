@@ -605,7 +605,8 @@ fn try_callsite_completion(
                 from_map
             };
             (apply, existing)
-        } else if let Some(pat_node) = node.ancestors().find_map(rnix::ast::Pattern::cast) {
+        } else {
+            let pat_node = node.ancestors().find_map(rnix::ast::Pattern::cast)?;
             // rnix parsed `{ en }` as a Pattern (lambda param). Walk up:
             // Pattern → Lambda → Apply.
             let lambda_node = pat_node
@@ -622,8 +623,6 @@ fn try_callsite_completion(
                 .filter_map(|e| Some(e.ident()?.to_string().into()))
                 .collect();
             (apply, existing)
-        } else {
-            return None;
         };
 
     // Get the function expression from the Apply.
@@ -945,7 +944,8 @@ fn try_binding_type_completion(
                 from_map
             };
             (apv, existing)
-        } else if let Some(pat_node) = node.ancestors().find_map(rnix::ast::Pattern::cast) {
+        } else {
+            let pat_node = node.ancestors().find_map(rnix::ast::Pattern::cast)?;
             // rnix parsed `{ a }` as Pattern → Lambda. Walk up:
             // Pattern → Lambda → AttrpathValue
             let lambda_node = pat_node
@@ -961,8 +961,6 @@ fn try_binding_type_completion(
                 .filter_map(|e| Some(e.ident()?.to_string().into()))
                 .collect();
             (apv, existing)
-        } else {
-            return None;
         };
 
     // Confirm we're inside a LetIn.

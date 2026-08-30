@@ -198,3 +198,86 @@ mod tests {
         assert_eq!(idx.position(12), Position::new(1, 3));
     }
 }
+
+#[cfg(test)]
+mod hegel_tests {
+    use super::*;
+    use hegel::generators;
+    use hegel::TestCase;
+
+    /// Text biased toward the cases that matter for line/column math:
+    /// newlines, `\r\n`, and chars of every UTF-8/UTF-16 width.
+    #[hegel::composite]
+    fn sources(tc: &TestCase) -> String {
+        let pieces: Vec<&str> = tc.draw(
+            generators::vecs(generators::sampled_from(vec![
+                "a", "let", " ", "\n", "\r\n", "\r", "é", "€", "𝄞", "😀", "\u{2028}",
+            ]))
+            .max_size(40),
+        );
+        pieces.concat()
+    }
+
+    fn char_boundary_offset(tc: &TestCase, text: &str) -> u32 {
+        let boundaries: Vec<u32> = (0..=text.len())
+            .filter(|&i| text.is_char_boundary(i))
+            .map(|i| i as u32)
+            .collect();
+        tc.draw(generators::sampled_from(boundaries))
+    }
+
+    #[hegel::test]
+    fn offset_position_roundtrip(tc: TestCase) {
+        let text = tc.draw(sources());
+        let idx = LineIndex::new(&text);
+        let offset = char_boundary_offset(&tc, &text);
+        assert_eq!(idx.offset(idx.position(offset)), offset);
+    }
+
+    #[hegel::test]
+    fn position_offset_roundtrip(tc: TestCase) {
+        let text = tc.draw(sources());
+        let idx = LineIndex::new(&text);
+        let pos = idx.position(char_boundary_offset(&tc, &text));
+        assert_eq!(idx.position(idx.offset(pos)), pos);
+    }
+
+    #[hegel::test]
+    fn position_monotone_in_offset(tc: TestCase) {
+        let text = tc.draw(sources());
+        let idx = LineIndex::new(&text);
+        let a = char_boundary_offset(&tc, &text);
+        let b = char_boundary_offset(&tc, &text);
+        let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+        let (p, q) = (idx.position(lo), idx.position(hi));
+        assert!(
+            (p.line, p.character) <= (q.line, q.character),
+            "{p:?} > {q:?}"
+        );
+    }
+
+    /// Any position — even nonsense — maps to a valid char boundary in range.
+    #[hegel::test]
+    fn offset_always_in_bounds_on_boundary(tc: TestCase) {
+        let text = tc.draw(sources());
+        let idx = LineIndex::new(&text);
+        let pos = Position::new(
+            tc.draw(generators::integers::<u32>().max_value(100)),
+            tc.draw(generators::integers::<u32>().max_value(100)),
+        );
+        let offset = idx.offset(pos) as usize;
+        assert!(offset <= text.len());
+        assert!(text.is_char_boundary(offset));
+    }
+
+    #[hegel::test]
+    fn line_agrees_with_lang_ast(tc: TestCase) {
+        let text = tc.draw(sources());
+        let idx = LineIndex::new(&text);
+        let offset = char_boundary_offset(&tc, &text);
+        assert_eq!(
+            idx.position(offset).line,
+            lang_ast::line_of_offset(&text, offset as usize)
+        );
+    }
+}

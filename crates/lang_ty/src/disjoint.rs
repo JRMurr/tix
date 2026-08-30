@@ -183,3 +183,131 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod hegel_tests {
+    use super::*;
+    use crate::hegel_gen::{all_prims, ALL_PRIMS};
+    use hegel::generators;
+    use hegel::TestCase;
+
+    /// Owned backing data for a `ConstructorShape`, which only borrows.
+    #[derive(Debug, Clone)]
+    enum Shape {
+        Primitive(PrimitiveTy),
+        AttrSet {
+            keys: Vec<SmolStr>,
+            open: bool,
+            optional: BTreeSet<SmolStr>,
+        },
+        List,
+        Lambda,
+        Opaque,
+    }
+
+    impl Shape {
+        fn view(&self) -> ConstructorShape<'_> {
+            match self {
+                Shape::Primitive(p) => ConstructorShape::Primitive(*p),
+                Shape::AttrSet {
+                    keys,
+                    open,
+                    optional,
+                } => ConstructorShape::AttrSet {
+                    field_keys: keys,
+                    open: *open,
+                    optional,
+                },
+                Shape::List => ConstructorShape::List,
+                Shape::Lambda => ConstructorShape::Lambda,
+                Shape::Opaque => ConstructorShape::Opaque,
+            }
+        }
+    }
+
+    const FIELD_NAMES: [&str; 5] = ["a", "b", "c", "__functor", "x"];
+
+    #[hegel::composite]
+    fn shapes(tc: &TestCase) -> Shape {
+        match tc.draw(generators::integers::<u8>().max_value(4)) {
+            0 => Shape::Primitive(tc.draw(all_prims())),
+            1 => {
+                let mut keys: Vec<SmolStr> = tc
+                    .draw(
+                        generators::vecs(generators::sampled_from(FIELD_NAMES.to_vec()))
+                            .max_size(FIELD_NAMES.len())
+                            .unique(true),
+                    )
+                    .into_iter()
+                    .map(SmolStr::from)
+                    .collect();
+                keys.sort();
+                let mut optional = BTreeSet::new();
+                for k in &keys {
+                    if tc.draw(generators::booleans()) {
+                        optional.insert(k.clone());
+                    }
+                }
+                Shape::AttrSet {
+                    keys,
+                    open: tc.draw(generators::booleans()),
+                    optional,
+                }
+            }
+            2 => Shape::List,
+            3 => Shape::Lambda,
+            _ => Shape::Opaque,
+        }
+    }
+
+    #[hegel::test]
+    fn disjoint_symmetric(tc: TestCase) {
+        let a = tc.draw(shapes());
+        let b = tc.draw(shapes());
+        assert_eq!(
+            are_shapes_disjoint(&a.view(), &b.view()),
+            are_shapes_disjoint(&b.view(), &a.view())
+        );
+    }
+
+    #[hegel::test]
+    fn disjoint_irreflexive(tc: TestCase) {
+        let a = tc.draw(shapes());
+        assert!(!are_shapes_disjoint(&a.view(), &a.view()));
+    }
+
+    #[hegel::test]
+    fn opaque_never_disjoint(tc: TestCase) {
+        let a = tc.draw(shapes());
+        assert!(!are_shapes_disjoint(&a.view(), &ConstructorShape::Opaque));
+    }
+
+    #[hegel::test]
+    fn subtype_primitives_overlap(tc: TestCase) {
+        // Construct related pairs directly: only a handful exist in the lattice.
+        let related: Vec<(PrimitiveTy, PrimitiveTy)> = ALL_PRIMS
+            .iter()
+            .flat_map(|a| ALL_PRIMS.iter().map(move |b| (*a, *b)))
+            .filter(|(a, b)| a.is_subtype_of(b) || b.is_subtype_of(a))
+            .collect();
+        let (a, b) = tc.draw(generators::sampled_from(related));
+        assert!(!are_shapes_disjoint(
+            &ConstructorShape::Primitive(a),
+            &ConstructorShape::Primitive(b)
+        ));
+    }
+
+    /// The primitive lattice: reflexive-by-exclusion, antisymmetric, transitive.
+    #[hegel::test]
+    fn primitive_subtype_is_strict_partial_order(tc: TestCase) {
+        let a = tc.draw(all_prims());
+        let b = tc.draw(all_prims());
+        assert!(!a.is_subtype_of(&a));
+        assert!(!(a.is_subtype_of(&b) && b.is_subtype_of(&a)));
+        for c in ALL_PRIMS {
+            if a.is_subtype_of(&b) && b.is_subtype_of(&c) {
+                assert!(a.is_subtype_of(&c));
+            }
+        }
+    }
+}

@@ -4,8 +4,10 @@ mod attrset;
 pub mod disjoint;
 pub mod simplify;
 
-#[cfg(any(test, feature = "proptest_support"))]
-pub mod arbitrary;
+#[cfg(any(test, feature = "hegel_support"))]
+pub mod hegel_gen;
+#[cfg(any(test, feature = "hegel_support"))]
+pub mod raw_ty;
 
 pub use arc_ty::{DisplayConfig, OutputTy, Substitutions, TyRef};
 pub use arena::{OwnedTy, TypeArena, TypeDisplay};

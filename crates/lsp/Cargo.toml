@@ -32,7 +32,7 @@ dirs = { workspace = true }
 
 [dev-dependencies]
 indoc = { workspace = true }
-proptest = { workspace = true }
+hegeltest = { workspace = true }
 tempfile = "3"
 futures = "0.3"
 tower = { version = "0.4", features = ["util"] }

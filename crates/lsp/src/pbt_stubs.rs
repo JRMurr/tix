@@ -12,7 +12,8 @@
 // Key property: after merging modules from multiple files, ALL fields from ALL
 // files appear in LSP results — not just the last-loaded file.
 
-use proptest::prelude::*;
+use hegel::generators;
+use hegel::TestCase;
 use tower_lsp::lsp_types::CompletionResponse;
 
 use crate::completion::completion;
@@ -135,15 +136,27 @@ fn has_cross_file_merge(assignments: &[usize]) -> bool {
     path_to_files.values().any(|files| files.len() > 1)
 }
 
-fn build_split_stubs(num_files: usize, assignments: Vec<usize>) -> Option<SplitStubSet> {
-    let mut assignments = assignments;
-    for a in &mut assignments {
-        *a %= num_files;
+/// Rewrite `assignments` (chunk index → file index) so at least one module
+/// path is split across two files. Draws which chunk pair to split.
+fn ensure_cross_file_merge(tc: &TestCase, assignments: &mut [usize], num_files: usize) {
+    if has_cross_file_merge(assignments) {
+        return;
     }
+    let mut by_path: std::collections::HashMap<&str, Vec<usize>> = std::collections::HashMap::new();
+    for (i, chunk) in DECL_CHUNKS.iter().enumerate() {
+        by_path.entry(chunk.module_path).or_default().push(i);
+    }
+    let mut mergeable: Vec<Vec<usize>> = by_path.into_values().filter(|v| v.len() > 1).collect();
+    mergeable.sort();
+    let group = &mergeable[tc.draw(generators::integers::<usize>().max_value(mergeable.len() - 1))];
+    let first = group[0];
+    let second = group[1];
+    let other_file = (assignments[first] + 1) % num_files;
+    assignments[second] = other_file;
+}
 
-    if !has_cross_file_merge(&assignments) {
-        return None;
-    }
+fn build_split_stubs(num_files: usize, assignments: &[usize]) -> SplitStubSet {
+    debug_assert!(has_cross_file_merge(assignments));
 
     // Build file source strings
     let mut file_sources: Vec<String> = vec![String::new(); num_files];
@@ -161,7 +174,7 @@ fn build_split_stubs(num_files: usize, assignments: Vec<usize>) -> Option<SplitS
 
     // Create temp dir for stub files
     let temp_dir = temp_path("pbt_stubs");
-    std::fs::create_dir_all(&temp_dir).ok()?;
+    std::fs::create_dir_all(&temp_dir).expect("create stub temp dir");
 
     // Build registry
     let mut registry = TypeAliasRegistry::new();
@@ -170,26 +183,36 @@ fn build_split_stubs(num_files: usize, assignments: Vec<usize>) -> Option<SplitS
             continue;
         }
         let path = temp_dir.join(format!("stub_{i}.tix"));
-        std::fs::write(&path, src).ok()?;
-        let file = comment_parser::parse_tix_file(src).ok()?;
+        std::fs::write(&path, src).expect("write stub file");
+        let file = comment_parser::parse_tix_file(src).expect("stub chunks parse");
         registry.load_tix_file_with_path(&file, &path);
     }
 
-    Some(SplitStubSet {
+    SplitStubSet {
         files: file_sources,
         expected_fields,
         registry,
         _temp_dir: temp_dir,
-    })
+    }
 }
 
-fn arb_split_stubs() -> impl Strategy<Value = SplitStubSet> {
-    let num_files = 2..=3usize;
-    let assignments = proptest::collection::vec(0..3usize, DECL_CHUNKS.len());
-
-    (num_files, assignments).prop_filter_map("need cross-file merge", |(num_files, assignments)| {
-        build_split_stubs(num_files, assignments)
-    })
+/// Stub declarations split across 2-3 files, always with at least one
+/// module path merged across files.
+fn split_stubs(tc: &TestCase) -> SplitStubSet {
+    const MIN_FILES: usize = 2;
+    const MAX_FILES: usize = 3;
+    let num_files = tc.draw(
+        generators::integers::<usize>()
+            .min_value(MIN_FILES)
+            .max_value(MAX_FILES),
+    );
+    let mut assignments: Vec<usize> = tc.draw(
+        generators::vecs(generators::integers::<usize>().max_value(num_files - 1))
+            .min_size(DECL_CHUNKS.len())
+            .max_size(DECL_CHUNKS.len()),
+    );
+    ensure_cross_file_merge(tc, &mut assignments, num_files);
+    build_split_stubs(num_files, &assignments)
 }
 
 // ==============================================================================
@@ -398,14 +421,22 @@ fn build_test_case(stubs: &SplitStubSet, pattern: usize) -> NixTestCase {
 
 const NUM_PATTERNS: usize = 8;
 
-fn arb_nix_with_stubs() -> impl Strategy<Value = (SplitStubSet, NixTestCase)> {
-    arb_split_stubs().prop_flat_map(|stubs| {
-        let pattern_idx = 0..NUM_PATTERNS;
-        (Just(stubs), pattern_idx).prop_map(|(stubs, pat)| {
-            let test_case = build_test_case(&stubs, pat);
-            (stubs, test_case)
-        })
-    })
+/// Split stubs plus one usage pattern; `accept` restricts which patterns
+/// may be drawn (e.g. only those with hover targets).
+fn nix_with_stubs(tc: &TestCase, accept: fn(&NixTestCase) -> bool) -> (SplitStubSet, NixTestCase) {
+    let stubs = split_stubs(tc);
+    let candidates: Vec<NixTestCase> = (0..NUM_PATTERNS)
+        .map(|pat| build_test_case(&stubs, pat))
+        .filter(accept)
+        .collect();
+    assert!(!candidates.is_empty(), "no pattern satisfies the filter");
+    let idx = tc.draw(generators::integers::<usize>().max_value(candidates.len() - 1));
+    let test_case = candidates.into_iter().nth(idx).expect("idx in range");
+    (stubs, test_case)
+}
+
+fn any_pattern(_: &NixTestCase) -> bool {
+    true
 }
 
 // ==============================================================================
@@ -420,125 +451,114 @@ fn completion_labels(resp: &CompletionResponse) -> Vec<String> {
     }
 }
 
-fn pbt_config(default_cases: u32) -> ProptestConfig {
-    ProptestConfig {
-        cases: std::env::var("PROPTEST_CASES")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(default_cases),
-        ..ProptestConfig::default()
-    }
-}
-
 // ==============================================================================
 // Property Tests — Semantic Correctness
 // ==============================================================================
 
-proptest! {
-    #![proptest_config(pbt_config(64))]
+const SEMANTIC_CASES: u64 = 64;
+const CRASH_CASES: u64 = 128;
 
-    // -------------------------------------------------------------------------
-    // Hover at stub-resolved positions returns Some
-    // -------------------------------------------------------------------------
-    #[test]
-    fn pbt_stub_merge_hover_returns_some(
-        (stubs, test_case) in arb_nix_with_stubs()
-            .prop_filter("needs hover targets", |(_, tc)| !tc.hover_targets.is_empty())
-    ) {
-        match test_case.setup_mode {
-            SetupMode::WithRegistry => {
-                let t = TestAnalysis::with_registry(&test_case.source, stubs.registry.clone());
-                let snapshot = t.snapshot();
-                let docs = &t.state.registry.docs;
-                for &off in &test_case.hover_targets {
-                    let pos = snapshot.syntax.line_index.position(off);
-                    let result = hover(&snapshot, pos, &t.root, docs);
-                    prop_assert!(
-                        result.is_some(),
-                        "hover should return Some at offset {} in:\n{}",
-                        off, test_case.source
-                    );
-                }
+/// Hover at stub-resolved positions returns Some.
+#[hegel::test(test_cases = SEMANTIC_CASES)]
+fn pbt_stub_merge_hover_returns_some(tc: TestCase) {
+    let (stubs, test_case) = nix_with_stubs(&tc, |case| !case.hover_targets.is_empty());
+    match test_case.setup_mode {
+        SetupMode::WithRegistry => {
+            let t = TestAnalysis::with_registry(&test_case.source, stubs.registry.clone());
+            let snapshot = t.snapshot();
+            let docs = &t.state.registry.docs;
+            for &off in &test_case.hover_targets {
+                let pos = snapshot.syntax.line_index.position(off);
+                let result = hover(&snapshot, pos, &t.root, docs);
+                assert!(
+                    result.is_some(),
+                    "hover should return Some at offset {off} in:\n{}",
+                    test_case.source
+                );
             }
-            SetupMode::ContextSetup => {
-                let ctx_stubs = test_case.context_stubs.as_deref().unwrap();
-                let ctx = ContextTestSetup::new(&test_case.source, ctx_stubs);
-                let snapshot = ctx.snapshot();
-                let docs = ctx.docs();
-                let root = ctx.root();
-                for &off in &test_case.hover_targets {
-                    let pos = snapshot.syntax.line_index.position(off);
-                    let result = hover(&snapshot, pos, &root, docs);
-                    prop_assert!(
-                        result.is_some(),
-                        "hover should return Some at offset {} in:\n{}",
-                        off, test_case.source
-                    );
-                }
+        }
+        SetupMode::ContextSetup => {
+            let ctx_stubs = test_case.context_stubs.as_deref().unwrap();
+            let ctx = ContextTestSetup::new(&test_case.source, ctx_stubs);
+            let snapshot = ctx.snapshot();
+            let docs = ctx.docs();
+            let root = ctx.root();
+            for &off in &test_case.hover_targets {
+                let pos = snapshot.syntax.line_index.position(off);
+                let result = hover(&snapshot, pos, &root, docs);
+                assert!(
+                    result.is_some(),
+                    "hover should return Some at offset {off} in:\n{}",
+                    test_case.source
+                );
             }
         }
     }
-
-    // -------------------------------------------------------------------------
-    // Completion at dot position includes ALL merged fields
-    // -------------------------------------------------------------------------
-    #[test]
-    fn pbt_stub_merge_completion_includes_merged_fields(
-        (stubs, test_case) in arb_nix_with_stubs()
-            .prop_filter("needs completion target", |(_, tc)| tc.completion_target.is_some())
-    ) {
-        let (off, ref expected_names) = *test_case.completion_target.as_ref().unwrap();
-
-        match test_case.setup_mode {
-            SetupMode::WithRegistry => {
-                let t = TestAnalysis::with_registry(&test_case.source, stubs.registry.clone());
-                let snapshot = t.snapshot();
-                let docs = &t.state.registry.docs;
-                let pos = snapshot.syntax.line_index.position(off);
-                let result = completion(
-                    &snapshot, pos, &t.root, docs,
-                    &snapshot.syntax.line_index, None,
-                );
-                let labels = result.as_ref().map(completion_labels).unwrap_or_default();
-                for name in expected_names {
-                    prop_assert!(
-                        labels.contains(name),
-                        "completion missing field '{}' from merged stubs.\n\
-                         Got: {:?}\nExpected all of: {:?}\nSource:\n{}\nFiles: {:?}",
-                        name, labels, expected_names, test_case.source, stubs.files
-                    );
-                }
-            }
-            SetupMode::ContextSetup => {
-                let ctx_stubs = test_case.context_stubs.as_deref().unwrap();
-                let ctx = ContextTestSetup::new(&test_case.source, ctx_stubs);
-                let snapshot = ctx.snapshot();
-                let docs = ctx.docs();
-                let root = ctx.root();
-                let pos = snapshot.syntax.line_index.position(off);
-                let result = completion(
-                    &snapshot, pos, &root, docs,
-                    &snapshot.syntax.line_index, None,
-                );
-                let labels = result.as_ref().map(completion_labels).unwrap_or_default();
-                for name in expected_names {
-                    prop_assert!(
-                        labels.contains(name),
-                        "completion missing field '{}' from merged stubs.\n\
-                         Got: {:?}\nExpected all of: {:?}\nSource:\n{}\nStubs:\n{}",
-                        name, labels, expected_names, test_case.source, ctx_stubs
-                    );
-                }
-            }
-        }
-    }
-
-    // Goto-def crash freedom is covered by pbt_stub_merge_crash_freedom.
-    // Semantic goto-def assertions for stub-declared names are complex because
-    // the LSP's Select field lookup depends on source_map expr resolution,
-    // which varies by annotation style. The crash-freedom test ensures goto-def
-    // doesn't panic at any position with non-empty stubs.
 }
+
+/// Completion at the dot position includes ALL merged fields.
+#[hegel::test(test_cases = SEMANTIC_CASES)]
+fn pbt_stub_merge_completion_includes_merged_fields(tc: TestCase) {
+    let (stubs, test_case) = nix_with_stubs(&tc, |case| case.completion_target.is_some());
+    let (off, ref expected_names) = *test_case.completion_target.as_ref().unwrap();
+
+    match test_case.setup_mode {
+        SetupMode::WithRegistry => {
+            let t = TestAnalysis::with_registry(&test_case.source, stubs.registry.clone());
+            let snapshot = t.snapshot();
+            let docs = &t.state.registry.docs;
+            let pos = snapshot.syntax.line_index.position(off);
+            let result = completion(
+                &snapshot,
+                pos,
+                &t.root,
+                docs,
+                &snapshot.syntax.line_index,
+                None,
+            );
+            let labels = result.as_ref().map(completion_labels).unwrap_or_default();
+            for name in expected_names {
+                assert!(
+                    labels.contains(name),
+                    "completion missing field '{name}' from merged stubs.\n\
+                     Got: {labels:?}\nExpected all of: {expected_names:?}\nSource:\n{}\nFiles: {:?}",
+                    test_case.source, stubs.files
+                );
+            }
+        }
+        SetupMode::ContextSetup => {
+            let ctx_stubs = test_case.context_stubs.as_deref().unwrap();
+            let ctx = ContextTestSetup::new(&test_case.source, ctx_stubs);
+            let snapshot = ctx.snapshot();
+            let docs = ctx.docs();
+            let root = ctx.root();
+            let pos = snapshot.syntax.line_index.position(off);
+            let result = completion(
+                &snapshot,
+                pos,
+                &root,
+                docs,
+                &snapshot.syntax.line_index,
+                None,
+            );
+            let labels = result.as_ref().map(completion_labels).unwrap_or_default();
+            for name in expected_names {
+                assert!(
+                    labels.contains(name),
+                    "completion missing field '{name}' from merged stubs.\n\
+                     Got: {labels:?}\nExpected all of: {expected_names:?}\nSource:\n{}\nStubs:\n{ctx_stubs}",
+                    test_case.source
+                );
+            }
+        }
+    }
+}
+
+// Goto-def crash freedom is covered by pbt_stub_merge_crash_freedom.
+// Semantic goto-def assertions for stub-declared names are complex because
+// the LSP's Select field lookup depends on source_map expr resolution,
+// which varies by annotation style. The crash-freedom test ensures goto-def
+// doesn't panic at any position with non-empty stubs.
 
 // ==============================================================================
 // Property Tests — Crash Freedom
@@ -547,49 +567,52 @@ proptest! {
 // Run all LSP features at every interesting position with non-empty stubs.
 // No semantic assertions — just verify no panics.
 
-proptest! {
-    #![proptest_config(pbt_config(128))]
-
-    #[test]
-    fn pbt_stub_merge_crash_freedom(
-        (stubs, test_case) in arb_nix_with_stubs()
-    ) {
-        match test_case.setup_mode {
-            SetupMode::WithRegistry => {
-                let t = TestAnalysis::with_registry(&test_case.source, stubs.registry.clone());
-                let analysis = t.analysis();
-                let snapshot = t.snapshot();
-                let docs = &t.state.registry.docs;
-                let uri = t.uri();
-                let positions = interesting_positions(analysis, &t.root);
-                for ip in &positions {
-                    let pos = snapshot.syntax.line_index.position(ip.byte_offset());
-                    let _ = hover(&snapshot, pos, &t.root, docs);
-                    let _ = completion(
-                        &snapshot, pos, &t.root, docs,
-                        &snapshot.syntax.line_index, None,
-                    );
-                    let _ = goto_definition(&t.state, &snapshot, pos, &uri, &t.root);
-                }
+#[hegel::test(test_cases = CRASH_CASES)]
+fn pbt_stub_merge_crash_freedom(tc: TestCase) {
+    let (stubs, test_case) = nix_with_stubs(&tc, any_pattern);
+    match test_case.setup_mode {
+        SetupMode::WithRegistry => {
+            let t = TestAnalysis::with_registry(&test_case.source, stubs.registry.clone());
+            let analysis = t.analysis();
+            let snapshot = t.snapshot();
+            let docs = &t.state.registry.docs;
+            let uri = t.uri();
+            let positions = interesting_positions(analysis, &t.root);
+            for ip in &positions {
+                let pos = snapshot.syntax.line_index.position(ip.byte_offset());
+                let _ = hover(&snapshot, pos, &t.root, docs);
+                let _ = completion(
+                    &snapshot,
+                    pos,
+                    &t.root,
+                    docs,
+                    &snapshot.syntax.line_index,
+                    None,
+                );
+                let _ = goto_definition(&t.state, &snapshot, pos, &uri, &t.root);
             }
-            SetupMode::ContextSetup => {
-                let ctx_stubs = test_case.context_stubs.as_deref().unwrap();
-                let ctx = ContextTestSetup::new(&test_case.source, ctx_stubs);
-                let analysis = ctx.analysis();
-                let snapshot = ctx.snapshot();
-                let docs = ctx.docs();
-                let root = ctx.root();
-                let uri = tower_lsp::lsp_types::Url::from_file_path(&ctx.nix_path).unwrap();
-                let positions = interesting_positions(analysis, &root);
-                for ip in &positions {
-                    let pos = snapshot.syntax.line_index.position(ip.byte_offset());
-                    let _ = hover(&snapshot, pos, &root, docs);
-                    let _ = completion(
-                        &snapshot, pos, &root, docs,
-                        &snapshot.syntax.line_index, None,
-                    );
-                    let _ = goto_definition(&ctx.state, &snapshot, pos, &uri, &root);
-                }
+        }
+        SetupMode::ContextSetup => {
+            let ctx_stubs = test_case.context_stubs.as_deref().unwrap();
+            let ctx = ContextTestSetup::new(&test_case.source, ctx_stubs);
+            let analysis = ctx.analysis();
+            let snapshot = ctx.snapshot();
+            let docs = ctx.docs();
+            let root = ctx.root();
+            let uri = tower_lsp::lsp_types::Url::from_file_path(&ctx.nix_path).unwrap();
+            let positions = interesting_positions(analysis, &root);
+            for ip in &positions {
+                let pos = snapshot.syntax.line_index.position(ip.byte_offset());
+                let _ = hover(&snapshot, pos, &root, docs);
+                let _ = completion(
+                    &snapshot,
+                    pos,
+                    &root,
+                    docs,
+                    &snapshot.syntax.line_index,
+                    None,
+                );
+                let _ = goto_definition(&ctx.state, &snapshot, pos, &uri, &root);
             }
         }
     }

@@ -1266,3 +1266,140 @@ mod tests {
         assert!(plain.structurally_eq(&wrapped));
     }
 }
+
+#[cfg(test)]
+mod hegel_tests {
+    use super::*;
+    use crate::hegel_gen::{raw_tys, shuffle_set_ops};
+    use crate::raw_ty::intern_raw;
+
+    const DEPTH: u32 = 4;
+
+    fn interned(tc: &hegel::TestCase) -> (TypeArena, TyRef) {
+        let raw = tc.draw(raw_tys(DEPTH));
+        let mut arena = TypeArena::new();
+        let root = intern_raw(&mut arena, &raw);
+        (arena, root)
+    }
+
+    /// Check the set-op normal form: flat, sorted, deduplicated, no singletons.
+    fn assert_set_op_normal_form(arena: &TypeArena, ty: TyRef) {
+        let node = &arena[ty];
+        if let OutputTy::Union(members) | OutputTy::Intersection(members) = node {
+            let is_union = matches!(node, OutputTy::Union(_));
+            assert!(
+                members.len() >= 2,
+                "singleton set op: {}",
+                arena.display(ty)
+            );
+            for pair in members.windows(2) {
+                assert!(
+                    arena[pair[0]] < arena[pair[1]],
+                    "unsorted or duplicate members in {}",
+                    arena.display(ty)
+                );
+            }
+            for m in members {
+                let nested = match &arena[*m] {
+                    OutputTy::Union(_) => is_union,
+                    OutputTy::Intersection(_) => !is_union,
+                    _ => false,
+                };
+                assert!(!nested, "nested same-kind set op in {}", arena.display(ty));
+            }
+        }
+        let mut children = Vec::new();
+        node.map_children(&mut |c| {
+            children.push(c);
+            c
+        });
+        for child in children {
+            assert_set_op_normal_form(arena, child);
+        }
+    }
+
+    #[hegel::test]
+    fn normalize_set_ops_idempotent(tc: hegel::TestCase) {
+        let (mut arena, ty) = interned(&tc);
+        let once = arena.normalize_set_ops(ty);
+        let twice = arena.normalize_set_ops(once);
+        assert_eq!(once, twice);
+    }
+
+    #[hegel::test]
+    fn normalize_set_ops_is_normal_form(tc: hegel::TestCase) {
+        let (mut arena, ty) = interned(&tc);
+        let result = arena.normalize_set_ops(ty);
+        assert_set_op_normal_form(&arena, result);
+    }
+
+    /// Member order in the source type must not affect the normalized result.
+    #[hegel::test]
+    fn normalize_set_ops_permutation_invariant(tc: hegel::TestCase) {
+        let raw = tc.draw(raw_tys(DEPTH));
+        let mut shuffled = raw.clone();
+        shuffle_set_ops(&tc, &mut shuffled);
+
+        let mut arena = TypeArena::new();
+        let a = intern_raw(&mut arena, &raw);
+        let b = intern_raw(&mut arena, &shuffled);
+        let a = arena.normalize_set_ops(a);
+        let b = arena.normalize_set_ops(b);
+        assert_eq!(a, b, "{} vs {}", arena.display(a), arena.display(b));
+    }
+
+    #[hegel::test]
+    fn normalize_vars_idempotent(tc: hegel::TestCase) {
+        let (mut arena, ty) = interned(&tc);
+        let once = arena.normalize_vars(ty);
+        let twice = arena.normalize_vars(once);
+        assert_eq!(once, twice);
+    }
+
+    #[hegel::test]
+    fn normalize_vars_numbers_from_zero(tc: hegel::TestCase) {
+        let (mut arena, ty) = interned(&tc);
+        let result = arena.normalize_vars(ty);
+        let vars = arena.free_type_vars(result);
+        let expected: Vec<u32> = (0..vars.len() as u32).collect();
+        assert_eq!(vars, expected);
+    }
+
+    /// Renaming variables in the raw tree (injectively) must not change the
+    /// normalized form.
+    #[hegel::test]
+    fn normalize_vars_alpha_invariant(tc: hegel::TestCase) {
+        let raw = tc.draw(raw_tys(DEPTH));
+        let offset = tc.draw(hegel::generators::integers::<u32>().max_value(1000));
+        let mut num = offset as usize;
+        let renamed = raw.offset_free_vars(&mut num);
+
+        let mut arena = TypeArena::new();
+        let a = intern_raw(&mut arena, &raw);
+        let b = intern_raw(&mut arena, &renamed);
+        let a = arena.normalize_vars(a);
+        let b = arena.normalize_vars(b);
+        assert_eq!(a, b, "{} vs {}", arena.display(a), arena.display(b));
+    }
+
+    #[hegel::test]
+    fn compact_preserves_structure(tc: hegel::TestCase) {
+        let (arena, ty) = interned(&tc);
+        let (small, root) = arena.compact(ty);
+        assert!(small.len() <= arena.len());
+        let before = OwnedTy::new(Arc::new(arena), ty);
+        let after = OwnedTy::new(Arc::new(small), root);
+        assert!(before.structurally_eq(&after));
+    }
+
+    #[hegel::test]
+    fn intern_is_hash_consed(tc: hegel::TestCase) {
+        let raw = tc.draw(raw_tys(DEPTH));
+        let mut arena = TypeArena::new();
+        let a = intern_raw(&mut arena, &raw);
+        let len = arena.len();
+        let b = intern_raw(&mut arena, &raw);
+        assert_eq!(a, b);
+        assert_eq!(arena.len(), len, "re-interning allocated new nodes");
+    }
+}

@@ -3243,9 +3243,9 @@ mod tests {
         }"#;
         let tree: PkgTree = serde_json::from_str(json).unwrap();
         let args = tree["mkDerivation"].function_args.as_ref().unwrap();
-        assert_eq!(args["name"], false); // required
-        assert_eq!(args["src"], true); // has default
-        assert_eq!(args["buildInputs"], true); // has default
+        assert!(!args["name"]); // required
+        assert!(args["src"]); // has default
+        assert!(args["buildInputs"]); // has default
     }
 
     #[test]

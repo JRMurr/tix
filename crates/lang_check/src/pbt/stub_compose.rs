@@ -16,8 +16,9 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 
 use comment_parser::ParsedTy;
-use lang_ty::{arbitrary::RawTy, OutputTy, PrimitiveTy};
-use proptest::prelude::*;
+use hegel::generators;
+use hegel::TestCase;
+use lang_ty::{raw_ty::RawTy, OutputTy, PrimitiveTy};
 use smol_str::SmolStr;
 
 use crate::aliases::TypeAliasRegistry;
@@ -332,12 +333,18 @@ enum AccessPattern {
     PkgsLib,
 }
 
-fn arb_access_pattern() -> impl Strategy<Value = AccessPattern> {
-    prop_oneof![
-        Just(AccessPattern::Bare),
-        Just(AccessPattern::LambdaParam),
-        Just(AccessPattern::PkgsLib),
-    ]
+const ALL_ACCESS_PATTERNS: [AccessPattern; 3] = [
+    AccessPattern::Bare,
+    AccessPattern::LambdaParam,
+    AccessPattern::PkgsLib,
+];
+
+fn access_pattern(tc: &TestCase) -> AccessPattern {
+    tc.draw(generators::sampled_from(ALL_ACCESS_PATTERNS.to_vec()))
+}
+
+fn index(tc: &TestCase, len: usize) -> usize {
+    tc.draw(generators::integers::<usize>().max_value(len - 1))
 }
 
 /// Choose a function reference string based on the access pattern.
@@ -536,27 +543,25 @@ fn arg_for_param(param: Ty) -> (Ty, &'static str) {
     }
 }
 
-/// Strategy: pick a random stub function, access pattern, and generate a direct
+/// Pick a random stub function and access pattern, and generate a direct
 /// application expression with all arguments supplied.
-fn arb_stub_direct_apply() -> impl Strategy<Value = (AccessPattern, String, Ty)> {
-    let stub_idx = 0..STUB_FNS.len();
-    (stub_idx, arb_access_pattern()).prop_map(|(idx, pattern)| {
-        let stub = &STUB_FNS[idx];
-        let func_ref = fn_ref(stub, pattern);
+fn stub_direct_apply(tc: &TestCase) -> (AccessPattern, String, Ty) {
+    let stub = &STUB_FNS[index(tc, STUB_FNS.len())];
+    let pattern = access_pattern(tc);
+    let func_ref = fn_ref(stub, pattern);
 
-        // Build the full application by supplying all parameters
-        let mut expr = func_ref;
-        let mut last_arg_ty = Ty::Any;
-        for &param in stub.params {
-            let (arg_ty, arg_str) = arg_for_param(param);
-            last_arg_ty = arg_ty;
-            write!(expr, " ({arg_str})").unwrap();
-        }
+    // Build the full application by supplying all parameters
+    let mut expr = func_ref;
+    let mut last_arg_ty = Ty::Any;
+    for &param in stub.params {
+        let (arg_ty, arg_str) = arg_for_param(param);
+        last_arg_ty = arg_ty;
+        write!(expr, " ({arg_str})").unwrap();
+    }
 
-        let result_ty = resolve_result(stub, last_arg_ty);
-        let nix_src = wrap_expr(pattern, &expr);
-        (pattern, nix_src, result_ty)
-    })
+    let result_ty = resolve_result(stub, last_arg_ty);
+    let nix_src = wrap_expr(pattern, &expr);
+    (pattern, nix_src, result_ty)
 }
 
 // ==============================================================================
@@ -715,40 +720,37 @@ fn pipeline_fn_ref(pf: &PipelineFn, pattern: AccessPattern) -> String {
     }
 }
 
-/// Strategy: generate a chain of 2-3 compatible pipeline functions.
-fn arb_stub_pipeline() -> impl Strategy<Value = (AccessPattern, String, Ty)> {
-    let chain_len = 2..=3usize;
-    (arb_access_pattern(), chain_len).prop_flat_map(|(pattern, len)| {
-        // Pick `len` random indices; we'll use them to select from compatible candidates.
-        let step_selectors = proptest::collection::vec(any::<prop::sample::Index>(), len);
-        (Just(pattern), step_selectors).prop_filter_map(
-            "no compatible pipeline found",
-            move |(pattern, selectors)| {
-                let mut current_ty = Ty::String;
-                let mut inner_expr = String::from("\"hello\"");
+/// A chain of 2-3 compatible pipeline functions. Each step is drawn only
+/// from functions whose input matches the previous output, so no rejection
+/// is needed (every reachable type has at least one successor).
+fn stub_pipeline(tc: &TestCase) -> (AccessPattern, String, Ty) {
+    const MIN_CHAIN: usize = 2;
+    const MAX_CHAIN: usize = 3;
+    let pattern = access_pattern(tc);
+    let len = tc.draw(
+        generators::integers::<usize>()
+            .min_value(MIN_CHAIN)
+            .max_value(MAX_CHAIN),
+    );
 
-                for selector in &selectors {
-                    let candidates = compatible_successors(current_ty, pattern);
-                    if candidates.is_empty() {
-                        return None;
-                    }
-                    let fn_idx = candidates[selector.index(candidates.len())];
-                    let pf = &PIPELINE_FNS[fn_idx];
-                    let fref = pipeline_fn_ref(pf, pattern);
+    let mut current_ty = Ty::String;
+    let mut inner_expr = String::from("\"hello\"");
+    for _ in 0..len {
+        let candidates = compatible_successors(current_ty, pattern);
+        tc.assume(!candidates.is_empty());
+        let pf = &PIPELINE_FNS[candidates[index(tc, candidates.len())]];
+        let fref = pipeline_fn_ref(pf, pattern);
 
-                    if pf.extra_args.is_empty() {
-                        inner_expr = format!("({fref} ({inner_expr}))");
-                    } else {
-                        inner_expr = format!("({fref} {} ({inner_expr}))", pf.extra_args);
-                    }
-                    current_ty = pf.output;
-                }
+        inner_expr = if pf.extra_args.is_empty() {
+            format!("({fref} ({inner_expr}))")
+        } else {
+            format!("({fref} {} ({inner_expr}))", pf.extra_args)
+        };
+        current_ty = pf.output;
+    }
 
-                let nix_src = wrap_expr(pattern, &inner_expr);
-                Some((pattern, nix_src, current_ty))
-            },
-        )
-    })
+    let nix_src = wrap_expr(pattern, &inner_expr);
+    (pattern, nix_src, current_ty)
 }
 
 // ==============================================================================
@@ -859,25 +861,19 @@ const HOF_CASES: &[HofCase] = &[
     },
 ];
 
-/// Strategy: pick a random HOF case and access pattern.
-/// The HOF is always accessed via module path (it needs `lib.lists.X`);
-/// the fn_arg uses bare name for global val patterns and qualified for module patterns.
-fn arb_stub_hof() -> impl Strategy<Value = (AccessPattern, String, Ty)> {
-    let case_idx = 0..HOF_CASES.len();
-    // HOF requires module access, so we only use patterns that provide `lib`.
-    let pattern = prop_oneof![
-        Just(AccessPattern::LambdaParam),
-        Just(AccessPattern::PkgsLib),
-    ];
-    (case_idx, pattern).prop_map(|(idx, pattern)| {
-        let case = &HOF_CASES[idx];
-        // In let-annotated/lambda patterns, bare names aren't global vals —
-        // use module-qualified fn_arg instead.
-        let fn_arg = case.fn_arg_qualified;
-        let expr = format!("{} {} {}", case.module_path, fn_arg, case.list_arg);
-        let nix_src = wrap_expr(pattern, &expr);
-        (pattern, nix_src, case.result)
-    })
+/// Pick a random HOF case and access pattern.
+/// The HOF is always accessed via module path (it needs `lib.lists.X`), so
+/// only patterns that provide `lib` are used; the fn_arg is module-qualified.
+fn stub_hof(tc: &TestCase) -> (AccessPattern, String, Ty) {
+    let case = &HOF_CASES[index(tc, HOF_CASES.len())];
+    let pattern = tc.draw(generators::sampled_from(vec![
+        AccessPattern::LambdaParam,
+        AccessPattern::PkgsLib,
+    ]));
+    let fn_arg = case.fn_arg_qualified;
+    let expr = format!("{} {} {}", case.module_path, fn_arg, case.list_arg);
+    let nix_src = wrap_expr(pattern, &expr);
+    (pattern, nix_src, case.result)
 }
 
 // ==============================================================================
@@ -887,166 +883,107 @@ fn arb_stub_hof() -> impl Strategy<Value = (AccessPattern, String, Ty)> {
 // Pick 2-5 random stub functions and compose them in arbitrary nesting.
 // No type tracking — just verify no panic.
 
-fn arb_stub_compose_deep() -> impl Strategy<Value = (AccessPattern, String)> {
-    (
-        arb_access_pattern(),
-        proptest::collection::vec(0..STUB_FNS.len(), 2..=5),
-    )
-        .prop_map(|(pattern, fn_indices)| {
-            // Build a nested expression: f1(f2(f3(...)))
-            // Start from a literal and wrap outward.
-            let mut expr = String::from("42");
+fn stub_compose_deep(tc: &TestCase) -> (AccessPattern, String) {
+    const MIN_FNS: usize = 2;
+    const MAX_FNS: usize = 5;
+    let pattern = access_pattern(tc);
+    let fn_indices: Vec<usize> = tc.draw(
+        generators::vecs(generators::integers::<usize>().max_value(STUB_FNS.len() - 1))
+            .min_size(MIN_FNS)
+            .max_size(MAX_FNS),
+    );
 
-            for &idx in fn_indices.iter() {
-                let stub = &STUB_FNS[idx];
-                let fref = fn_ref(stub, pattern);
+    // Build a nested expression: f1(f2(f3(...)))
+    // Start from a literal and wrap outward.
+    let mut expr = String::from("42");
+    for &idx in &fn_indices {
+        let stub = &STUB_FNS[idx];
+        let fref = fn_ref(stub, pattern);
 
-                // Supply extra args for multi-param functions, then our accumulated expr
-                if stub.params.len() > 1 {
-                    let mut call = format!("({fref}");
-                    // Supply dummy literals for all params except the last
-                    for &param in &stub.params[..stub.params.len() - 1] {
-                        let (_, lit) = arg_for_param(param);
-                        write!(call, " ({lit})").unwrap();
-                    }
-                    write!(call, " ({expr}))").unwrap();
-                    expr = call;
-                } else {
-                    expr = format!("({fref} ({expr}))");
-                }
+        // Supply extra args for multi-param functions, then our accumulated expr
+        if stub.params.len() > 1 {
+            let mut call = format!("({fref}");
+            // Supply dummy literals for all params except the last
+            for &param in &stub.params[..stub.params.len() - 1] {
+                let (_, lit) = arg_for_param(param);
+                write!(call, " ({lit})").unwrap();
             }
+            write!(call, " ({expr}))").unwrap();
+            expr = call;
+        } else {
+            expr = format!("({fref} ({expr}))");
+        }
+    }
 
-            let nix_src = wrap_expr(pattern, &expr);
-            (pattern, nix_src)
-        })
+    let nix_src = wrap_expr(pattern, &expr);
+    (pattern, nix_src)
 }
 
 // ==============================================================================
 // Property Tests
 // ==============================================================================
-//
-proptest! {
-    #![proptest_config(ProptestConfig {
-        cases: 512,
-        .. ProptestConfig::default()
-    })]
 
-    // -------------------------------------------------------------------------
-    // Direct application with stubs — verify exact types
-    // -------------------------------------------------------------------------
-    #[test]
-    fn test_stub_direct_apply_with_stubs(
-        (pattern, nix_src, expected_ty) in arb_stub_direct_apply()
-    ) {
-        let registry = &*COMPOSABLE_REGISTRY;
-        let inferred = check_composed_expr(&nix_src, pattern, &registry);
-
-        // For concrete result types, assert exact match.
-        // For `Any` (polymorphic), the result is some concrete type — just check it's valid.
-        if let Some(expected_raw) = expected_ty.to_raw_ty() {
-            let expected = raw_to_root(&expected_raw);
-            prop_assert_eq!(
-                inferred, expected,
-                "pattern={:?}\nsrc:\n{}", pattern, nix_src
-            );
-        }
-    }
-
-    // -------------------------------------------------------------------------
-    // Direct application without stubs — crash-freedom
-    // -------------------------------------------------------------------------
-    #[test]
-    fn test_stub_direct_apply_no_stubs(
-        (_pattern, nix_src, _expected_ty) in arb_stub_direct_apply()
-    ) {
-        // Without stubs, function names are unresolved free vars.
-        // We only care that inference doesn't panic.
-        let _ = check_str(&nix_src);
-    }
-
-    // -------------------------------------------------------------------------
-    // Pipeline composition with stubs — verify exact types
-    // -------------------------------------------------------------------------
-    #[test]
-    fn test_stub_pipeline_with_stubs(
-        (pattern, nix_src, expected_ty) in arb_stub_pipeline()
-    ) {
-        let registry = &*COMPOSABLE_REGISTRY;
-        let inferred = check_composed_expr(&nix_src, pattern, &registry);
-
-        if let Some(expected_raw) = expected_ty.to_raw_ty() {
-            let expected = raw_to_root(&expected_raw);
-            prop_assert_eq!(
-                inferred, expected,
-                "pattern={:?}\nsrc:\n{}", pattern, nix_src
-            );
-        }
-    }
-
-    // -------------------------------------------------------------------------
-    // Pipeline composition without stubs — crash-freedom
-    // -------------------------------------------------------------------------
-    #[test]
-    fn test_stub_pipeline_no_stubs(
-        (_pattern, nix_src, _expected_ty) in arb_stub_pipeline()
-    ) {
-        let _ = check_str(&nix_src);
-    }
-
-    // -------------------------------------------------------------------------
-    // HOF composition with stubs — verify exact types
-    // -------------------------------------------------------------------------
-    #[test]
-    fn test_stub_hof_with_stubs(
-        (pattern, nix_src, expected_ty) in arb_stub_hof()
-    ) {
-        let registry = &*COMPOSABLE_REGISTRY;
-        let inferred = check_composed_expr(&nix_src, pattern, &registry);
-
-        if let Some(expected_raw) = expected_ty.to_raw_ty() {
-            let expected = raw_to_root(&expected_raw);
-            prop_assert_eq!(
-                inferred, expected,
-                "pattern={:?}\nsrc:\n{}", pattern, nix_src
-            );
-        }
-    }
-
-    // -------------------------------------------------------------------------
-    // HOF composition without stubs — crash-freedom
-    // -------------------------------------------------------------------------
-    #[test]
-    fn test_stub_hof_no_stubs(
-        (_pattern, nix_src, _expected_ty) in arb_stub_hof()
-    ) {
-        let _ = check_str(&nix_src);
+/// With stubs loaded, a concrete expected type must match exactly. For `Any`
+/// (polymorphic) results, inference just has to succeed.
+#[track_caller]
+fn assert_composed_type((pattern, nix_src, expected_ty): (AccessPattern, String, Ty)) {
+    let inferred = check_composed_expr(&nix_src, pattern, &COMPOSABLE_REGISTRY);
+    if let Some(expected_raw) = expected_ty.to_raw_ty() {
+        let expected = raw_to_root(&expected_raw);
+        assert_eq!(inferred, expected, "pattern={pattern:?}\nsrc:\n{nix_src}");
     }
 }
 
-proptest! {
-    #![proptest_config(ProptestConfig {
-        cases: 256,
-        .. ProptestConfig::default()
-    })]
+// Direct application — exact types with stubs, crash-freedom without.
+// (Without stubs, function names are unresolved free vars.)
 
-    // -------------------------------------------------------------------------
-    // Deep composition with stubs — crash-freedom
-    // -------------------------------------------------------------------------
-    #[test]
-    fn test_stub_compose_deep_with_stubs(
-        (pattern, nix_src) in arb_stub_compose_deep()
-    ) {
-        let registry = &*COMPOSABLE_REGISTRY;
-        check_no_crash_with_context(&nix_src, pattern, Some(registry));
-    }
+#[hegel::test(test_cases = 512)]
+fn test_stub_direct_apply_with_stubs(tc: TestCase) {
+    assert_composed_type(stub_direct_apply(&tc));
+}
 
-    // -------------------------------------------------------------------------
-    // Deep composition without stubs — crash-freedom
-    // -------------------------------------------------------------------------
-    #[test]
-    fn test_stub_compose_deep_no_stubs(
-        (_pattern, nix_src) in arb_stub_compose_deep()
-    ) {
-        let _ = check_str(&nix_src);
-    }
+#[hegel::test(test_cases = 512)]
+fn test_stub_direct_apply_no_stubs(tc: TestCase) {
+    let (_pattern, nix_src, _expected_ty) = stub_direct_apply(&tc);
+    let _ = check_str(&nix_src);
+}
+
+// Pipeline composition.
+
+#[hegel::test(test_cases = 512)]
+fn test_stub_pipeline_with_stubs(tc: TestCase) {
+    assert_composed_type(stub_pipeline(&tc));
+}
+
+#[hegel::test(test_cases = 512)]
+fn test_stub_pipeline_no_stubs(tc: TestCase) {
+    let (_pattern, nix_src, _expected_ty) = stub_pipeline(&tc);
+    let _ = check_str(&nix_src);
+}
+
+// HOF composition.
+
+#[hegel::test(test_cases = 512)]
+fn test_stub_hof_with_stubs(tc: TestCase) {
+    assert_composed_type(stub_hof(&tc));
+}
+
+#[hegel::test(test_cases = 512)]
+fn test_stub_hof_no_stubs(tc: TestCase) {
+    let (_pattern, nix_src, _expected_ty) = stub_hof(&tc);
+    let _ = check_str(&nix_src);
+}
+
+// Deep composition — crash-freedom only.
+
+#[hegel::test(test_cases = 256)]
+fn test_stub_compose_deep_with_stubs(tc: TestCase) {
+    let (pattern, nix_src) = stub_compose_deep(&tc);
+    check_no_crash_with_context(&nix_src, pattern, Some(&COMPOSABLE_REGISTRY));
+}
+
+#[hegel::test(test_cases = 256)]
+fn test_stub_compose_deep_no_stubs(tc: TestCase) {
+    let (_pattern, nix_src) = stub_compose_deep(&tc);
+    let _ = check_str(&nix_src);
 }

@@ -2689,7 +2689,7 @@ mod tests {
     fn flatten_large_n_no_nesting_skips_dedup() {
         // >64 members, no nesting → returns input unchanged (fast path).
         let a = TypeArena::new();
-        let members: Vec<OutputTy> = (0..70).map(|i| OutputTy::TyVar(i)).collect();
+        let members: Vec<OutputTy> = (0..70).map(OutputTy::TyVar).collect();
         let result = flatten_union(&a, members.clone());
         assert_eq!(result.len(), 70, "fast path should return all members");
         assert_eq!(result, members);

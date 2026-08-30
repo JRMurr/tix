@@ -519,3 +519,57 @@ mod tests {
 
     // TODO: PBT for simplify idempotency needs arena-aware Arbitrary impl
 }
+
+#[cfg(test)]
+mod hegel_tests {
+    use super::*;
+    use crate::hegel_gen::raw_tys;
+    use crate::raw_ty::intern_raw;
+
+    const DEPTH: u32 = 4;
+
+    fn interned(tc: &hegel::TestCase) -> (TypeArena, TyRef) {
+        let raw = tc.draw(raw_tys(DEPTH));
+        let mut arena = TypeArena::new();
+        let root = intern_raw(&mut arena, &raw);
+        (arena, root)
+    }
+
+    #[hegel::test]
+    fn simplify_idempotent(tc: hegel::TestCase) {
+        let (mut arena, ty) = interned(&tc);
+        let once = simplify(&mut arena, ty);
+        let twice = simplify(&mut arena, once);
+        assert_eq!(
+            arena.display(once).to_string(),
+            arena.display(twice).to_string()
+        );
+    }
+
+    /// `simplify` caps its loop at 5 rounds; the result must still be a fixpoint
+    /// of `simplify_once`, or the cap is silently hiding non-convergence.
+    #[hegel::test]
+    fn simplify_reaches_fixpoint(tc: hegel::TestCase) {
+        let (mut arena, ty) = interned(&tc);
+        let result = simplify(&mut arena, ty);
+        let again = simplify_once(&mut arena, result);
+        assert_eq!(
+            arena.display(result).to_string(),
+            arena.display(again).to_string()
+        );
+    }
+
+    #[hegel::test]
+    fn simplify_never_introduces_vars(tc: hegel::TestCase) {
+        let (mut arena, ty) = interned(&tc);
+        let before: std::collections::BTreeSet<u32> =
+            arena.free_type_vars(ty).into_iter().collect();
+        let result = simplify(&mut arena, ty);
+        let after: std::collections::BTreeSet<u32> =
+            arena.free_type_vars(result).into_iter().collect();
+        assert!(
+            after.is_subset(&before),
+            "before={before:?} after={after:?}"
+        );
+    }
+}

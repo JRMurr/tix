@@ -1237,11 +1237,8 @@ mod tests {
         let r = crate::run_syntax_pipeline(src);
         // Navigate through Lambda wrappers to get the body expression.
         let mut expr_id = r.module.entry_expr;
-        loop {
-            match &r.module[expr_id] {
-                Expr::Lambda { body, .. } => expr_id = *body,
-                _ => break,
-            }
+        while let Expr::Lambda { body, .. } = &r.module[expr_id] {
+            expr_id = *body;
         }
         detect_conditional_fn(&r.module, expr_id)
     }

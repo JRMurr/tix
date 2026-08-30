@@ -561,12 +561,10 @@ async fn nixpkgs_callpackage_lib_hover() {
             (
                 "tix.toml",
                 // Match the user's nixpkgs tix.toml format
-                &format!(
-                    "stubs = []\n\n\
+                "stubs = []\n\n\
                      [context.callpackage]\n\
                      includes = [\"pkgs/**/*.nix\"]\n\
-                     stubs = [\"@callpackage\"]\n"
-                ),
+                     stubs = [\"@callpackage\"]\n",
             ),
             (&rel_path, &source),
         ],
