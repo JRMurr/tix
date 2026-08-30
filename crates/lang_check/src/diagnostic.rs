@@ -152,13 +152,19 @@ pub enum TixDiagnosticKind {
     InvalidInterpolation {
         actual: DiagTy,
     },
+    /// A type-level import (`import("./x.nix").T` or `typeof import("./x.nix")`)
+    /// leads back to the file being checked. The referenced type is
+    /// unconstrained (`?`).
+    CyclicTypeImport {
+        path: String,
+    },
 }
 
 // ==============================================================================
 // Diagnostic Error Codes
 // ==============================================================================
 //
-// Every diagnostic has a stable error code (E001–E015) that appears in CLI
+// Every diagnostic has a stable error code (E001–E016) that appears in CLI
 // output (`error[E001]: ...`) and as a clickable link in the LSP.  Once
 // assigned, a code never changes meaning — new diagnostics get new codes.
 
@@ -182,6 +188,7 @@ impl TixDiagnosticKind {
             TixDiagnosticKind::AngleBracketImport { .. } => "E012",
             TixDiagnosticKind::ImportUnresolved { .. } => "E013",
             TixDiagnosticKind::InvalidInterpolation { .. } => "E015",
+            TixDiagnosticKind::CyclicTypeImport { .. } => "E016",
         }
     }
 
@@ -204,6 +211,7 @@ impl TixDiagnosticKind {
                 | TixDiagnosticKind::InferenceAborted { .. }
                 | TixDiagnosticKind::AngleBracketImport { .. }
                 | TixDiagnosticKind::ImportUnresolved { .. }
+                | TixDiagnosticKind::CyclicTypeImport { .. }
         )
     }
 }
@@ -303,6 +311,12 @@ impl fmt::Display for TixDiagnosticKind {
                 write!(
                     f,
                     "imported file `{path}` has not been analyzed — add it to [project] includes in tix.toml or open it in the editor"
+                )
+            }
+            TixDiagnosticKind::CyclicTypeImport { path } => {
+                write!(
+                    f,
+                    "type import of `{path}` is cyclic — it leads back to this file; the imported type is unconstrained"
                 )
             }
             TixDiagnosticKind::InvalidInterpolation { actual } => {

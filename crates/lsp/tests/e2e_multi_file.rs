@@ -297,3 +297,48 @@ async fn multiple_files_independent() {
 
     h.shutdown().await;
 }
+
+/// A type import whose resolution loops back to the open file is reported
+/// in the open file (E016) instead of hanging or overflowing.
+#[tokio::test]
+async fn cyclic_type_import_reports_e016_in_open_file() {
+    let mut h = LspTestHarness::new(&[
+        (
+            "a.nix",
+            indoc! {r#"
+                let
+                  /** type: x :: import("./b.nix").T */
+                  x = 1;
+                in x
+            "#},
+        ),
+        (
+            "b.nix",
+            indoc! {"
+                /** type T = typeof v; */
+                let v = import ./a.nix; in v
+            "},
+        ),
+    ])
+    .await;
+
+    h.open("a.nix").await;
+    let diags = h
+        .wait_for_diagnostics("a.nix", TIMEOUT)
+        .await
+        .expect("diagnostics for a.nix");
+
+    let cyclic: Vec<_> = diags
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == Some(NumberOrString::String("E016".to_string())))
+        .collect();
+    assert_eq!(
+        cyclic.len(),
+        1,
+        "expected one E016, got: {:?}",
+        diags.diagnostics
+    );
+
+    h.shutdown().await;
+}

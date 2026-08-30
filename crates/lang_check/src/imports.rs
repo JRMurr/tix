@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use comment_parser::{ParsedTy, ParsedTyRef, TypeVarValue};
 use lang_ast::nameres::ResolveResult;
-use lang_ast::{Expr, ExprId, Literal, Module, NameResolution};
+use lang_ast::{Expr, ExprId, Literal, Module, NameId, NameResolution};
 use lang_ty::{AttrSetTy, OutputTy, OwnedTy, TypeArena};
 use smol_str::SmolStr;
 
@@ -290,6 +290,8 @@ pub enum ImportErrorKind {
     AngleBracketImport(String),
     /// File exists but has no ephemeral stub (hasn't been analyzed).
     NoStubAvailable(PathBuf),
+    /// A type-level import whose resolution led back to the importing file.
+    CyclicTypeImport(PathBuf),
 }
 
 #[derive(Debug, Clone)]
@@ -564,6 +566,11 @@ pub fn import_errors_to_diagnostics(
                         path: path.display().to_string(),
                     }
                 }
+                ImportErrorKind::CyclicTypeImport(path) => {
+                    crate::diagnostic::TixDiagnosticKind::CyclicTypeImport {
+                        path: path.display().to_string(),
+                    }
+                }
             };
             crate::diagnostic::TixDiagnostic {
                 at_expr: err.at_expr,
@@ -581,24 +588,59 @@ pub fn import_errors_to_diagnostics(
 /// (`import("path").TypeName` and `typeof import("path")`). Returns the set
 /// of relative paths found in doc comments and inline type aliases.
 pub fn scan_type_import_paths(module: &Module) -> HashSet<String> {
-    let mut paths = HashSet::new();
+    scan_type_import_anchors(module, &HashMap::new())
+        .into_keys()
+        .collect()
+}
 
-    // From inline type aliases (e.g. `/** type Scope = import("./a.nix").Config; */`)
+/// Like [`scan_type_import_paths`], but each path is paired with the
+/// expression a diagnostic about it should attach to: the annotated
+/// binding's value for `type: name :: ...` comments, the annotated
+/// expression for expression-level comments, and the module entry
+/// expression for inline `type X = ...;` aliases. The first occurrence of a
+/// path wins.
+pub fn scan_type_import_anchors(
+    module: &Module,
+    binding_exprs: &HashMap<NameId, ExprId>,
+) -> HashMap<String, ExprId> {
+    let mut anchors = HashMap::new();
+    let entry = module.entry_expr;
+
+    let mut add = |paths: HashSet<String>, at_expr: ExprId| {
+        for path in paths {
+            anchors.entry(path).or_insert(at_expr);
+        }
+    };
+
     for alias_source in &module.inline_type_aliases {
         if let Some((_name, body)) = comment_parser::parse_inline_type_alias(alias_source) {
+            let mut paths = HashSet::new();
             collect_import_paths_from_parsed_ty(&body, &mut paths);
+            add(paths, entry);
         }
     }
 
-    // From per-binding type annotations (e.g. `/** type: x :: import("./a.nix").Config */`)
-    for doc in module.type_dec_map.all_doc_strings() {
+    for (expr_id, docs) in module.type_dec_map.expr_docs() {
+        add(paths_in_docs(docs), expr_id);
+    }
+
+    for (name_id, docs) in module.type_dec_map.name_docs() {
+        let at_expr = binding_exprs.get(&name_id).copied().unwrap_or(entry);
+        add(paths_in_docs(docs), at_expr);
+    }
+
+    anchors
+}
+
+fn paths_in_docs(docs: &[String]) -> HashSet<String> {
+    let mut paths = HashSet::new();
+    for doc in docs {
         if let Ok(decls) = comment_parser::parse_and_collect(doc) {
             for decl in &decls {
                 collect_import_paths_from_parsed_ty(&decl.type_expr, &mut paths);
             }
         }
     }
-
     paths
 }
 
