@@ -45,3 +45,7 @@ path = "src/lib.rs"
 [[bench]]
 name = "annotations"
 harness = false
+
+[[bench]]
+name = "pipeline"
+harness = false
