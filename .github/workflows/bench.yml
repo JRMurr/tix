@@ -1,0 +1,43 @@
+name: Bench
+
+# Runs alone on its own runner so test jobs don't compete for CPU.
+# Numbers are still runner-dependent; compare against the main run in the
+# artifact of the same day rather than across days.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - "crates/lang_check/**"
+      - "crates/lang_ty/**"
+      - "crates/comment_parser/**"
+      - "stubs/**"
+      - "Cargo.lock"
+  workflow_dispatch:
+
+concurrency:
+  group: bench-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bench:
+    name: cargo bench (lang_check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - uses: Swatinem/rust-cache@v2
+      - name: Run benchmarks
+        run: |
+          nix develop --command cargo bench -p lang_check --bench annotations \
+            | tee bench-results.txt
+      - name: Summary
+        run: |
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat bench-results.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench-results-${{ github.sha }}
+          path: bench-results.txt
