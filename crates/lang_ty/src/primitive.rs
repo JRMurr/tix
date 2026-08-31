@@ -1,7 +1,5 @@
 use super::{RefType, Ty};
 
-use lang_ast::Literal;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum PrimitiveTy {
     Null,
@@ -47,24 +45,6 @@ impl PrimitiveTy {
             (self, other),
             (PrimitiveTy::Int, PrimitiveTy::Number) | (PrimitiveTy::Float, PrimitiveTy::Number)
         )
-    }
-}
-
-impl From<Literal> for PrimitiveTy {
-    fn from(value: Literal) -> Self {
-        match value {
-            Literal::Float(_) => PrimitiveTy::Float,
-            Literal::Integer(_) => PrimitiveTy::Int,
-            Literal::String(_) => PrimitiveTy::String,
-            Literal::Path(_) => PrimitiveTy::Path,
-            Literal::Uri => PrimitiveTy::Uri,
-        }
-    }
-}
-
-impl<T: RefType> From<Literal> for Ty<T> {
-    fn from(value: Literal) -> Self {
-        Ty::Primitive(value.into())
     }
 }
 

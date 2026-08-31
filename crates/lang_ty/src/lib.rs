@@ -3,6 +3,7 @@ pub mod arena;
 mod attrset;
 pub mod disjoint;
 pub mod simplify;
+pub mod stack;
 
 #[cfg(any(test, feature = "hegel_support"))]
 pub mod hegel_gen;

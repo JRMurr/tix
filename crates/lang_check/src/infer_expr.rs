@@ -18,6 +18,18 @@ use lang_ast::{
 use lang_ty::{AttrSetTy, PrimitiveTy, Ty};
 use smol_str::SmolStr;
 
+/// Primitive type of a literal expression. (Was a `From<Literal>` impl in
+/// lang_ty, removed when the lang_ty → lang_ast dependency was flipped.)
+fn literal_prim(lit: &Literal) -> PrimitiveTy {
+    match lit {
+        Literal::Float(_) => PrimitiveTy::Float,
+        Literal::Integer(_) => PrimitiveTy::Int,
+        Literal::String(_) => PrimitiveTy::String,
+        Literal::Path(_) => PrimitiveTy::Path,
+        Literal::Uri => PrimitiveTy::Uri,
+    }
+}
+
 /// A deferred `with`-fallback constraint: the name must be found in at least
 /// one of the `with` environments (tried inner-to-outer at runtime).
 ///
@@ -109,7 +121,7 @@ impl CheckCtx<'_> {
             Expr::Missing => Ok(self.new_var()),
 
             Expr::Literal(lit) => {
-                let prim: PrimitiveTy = lit.into();
+                let prim = literal_prim(&lit);
                 Ok(self.alloc_prim(prim))
             }
 
@@ -715,11 +727,11 @@ impl CheckCtx<'_> {
         let new_constraint = match binding.predicate {
             crate::narrow::NarrowPredicate::IsType(prim) => {
                 // α ∧ PrimType — structural intersection with the primitive.
-                self.alloc_prim(crate::narrow::narrow_prim_to_ty(prim))
+                self.alloc_prim(prim)
             }
             crate::narrow::NarrowPredicate::IsNotType(prim) => {
                 // α ∧ ¬PrimType — structural intersection with negation.
-                let prim_ty = self.alloc_prim(crate::narrow::narrow_prim_to_ty(prim));
+                let prim_ty = self.alloc_prim(prim);
                 self.alloc_concrete(Ty::Neg(prim_ty))
             }
             crate::narrow::NarrowPredicate::HasField(ref field_name) => {

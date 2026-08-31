@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 la-arena = { workspace = true }
+lang_ty = { path = "../lang_ty" }
 derive_more = { workspace = true, features = ["debug", "from"] }
 log = { workspace = true }
 smol_str = { workspace = true }

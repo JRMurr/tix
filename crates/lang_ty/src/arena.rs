@@ -143,7 +143,7 @@ impl TypeArena {
             return cached;
         }
         let node = self[ty].clone();
-        let result = lang_ast::stack::with_stack(|| {
+        let result = crate::stack::with_stack(|| {
             if let OutputTy::TyVar(x) = &node {
                 return self.intern(OutputTy::TyVar(*subs.get(x).unwrap()));
             }
@@ -212,7 +212,7 @@ impl TypeArena {
             }
             return;
         }
-        lang_ast::stack::with_stack(|| {
+        crate::stack::with_stack(|| {
             self[ty].for_each_child(&mut |child| {
                 if visited.insert(child) {
                     self.collect_free_type_vars(child, result, seen, visited);
@@ -514,7 +514,7 @@ impl TypeArena {
         }
 
         let node = self[ty].clone();
-        lang_ast::stack::with_stack(|| match &node {
+        crate::stack::with_stack(|| match &node {
             OutputTy::Extern(owned) => {
                 owned.arena.write_truncated(owned.root, buf, state, depth);
             }
@@ -978,7 +978,7 @@ impl fmt::Display for TypeDisplay<'_> {
 }
 
 fn write_ty(arena: &TypeArena, ty: TyRef, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    lang_ast::stack::with_stack(|| match &arena[ty] {
+    crate::stack::with_stack(|| match &arena[ty] {
         OutputTy::Extern(owned) => write!(f, "{}", owned.arena.display(owned.root)),
         OutputTy::TyVar(x) => write!(f, "{}", tyvar_name(*x)),
         OutputTy::Primitive(p) => write!(f, "{p}"),

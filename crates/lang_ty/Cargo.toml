@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-lang_ast = { path = "../lang_ast" }
 derive_more = { workspace = true, features = ["debug", "from"] }
 smol_str = { workspace = true }
 rustc-hash = { workspace = true }

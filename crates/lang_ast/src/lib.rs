@@ -7,7 +7,7 @@ mod comment;
 mod lower;
 pub mod nameres;
 pub mod narrow;
-pub mod stack;
+pub use lang_ty::stack;
 
 #[cfg(any(test, feature = "test_support"))]
 pub mod tests;

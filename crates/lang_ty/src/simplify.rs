@@ -77,7 +77,7 @@ fn analyze(
     path: &mut Vec<PathSegment>,
     vars: &mut FxHashMap<u32, VarInfo>,
 ) {
-    lang_ast::stack::with_stack(|| {
+    crate::stack::with_stack(|| {
         let pol = if positive {
             Polarity::Positive
         } else {
@@ -252,7 +252,7 @@ fn apply_simplification_uncached(
     cache: &mut SimplifyCache,
 ) -> TyRef {
     let node = arena[ty].clone();
-    lang_ast::stack::with_stack(|| match &node {
+    crate::stack::with_stack(|| match &node {
         OutputTy::TyVar(v) => {
             let resolved = substitution.get(v).copied().unwrap_or(*v);
             arena.intern(OutputTy::TyVar(resolved))

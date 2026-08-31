@@ -12,6 +12,8 @@
 
 use rustc_hash::FxHashMap as HashMap;
 
+use lang_ty::PrimitiveTy;
+
 use crate::nameres::ResolveResult;
 use crate::{BinOP, Expr, ExprBinOp, ExprId, Literal, NameId, NormalBinOp};
 use smol_str::SmolStr;
@@ -21,39 +23,15 @@ use smol_str::SmolStr;
 /// Prevents infinite loops through pathological alias chains.
 const MAX_ALIAS_TRACE_DEPTH: u8 = 3;
 
-// ==============================================================================
-// Narrowing Primitive — lang_ast-local subset of primitive types
-// ==============================================================================
-//
-// lang_ast cannot depend on lang_ty (that would create a cycle), so we define
-// a narrowing-specific primitive enum here. The type checker in lang_check
-// converts these to lang_ty::PrimitiveTy via a From impl.
-
-/// Primitive types recognized by narrowing condition analysis.
-///
-/// This is the subset of primitive types that type-predicate builtins
-/// (`isNull`, `isString`, etc.) can narrow to. It deliberately excludes
-/// synthetic types like `Number` and types like `Uri` that have no
-/// corresponding builtin predicate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NarrowPrimitive {
-    Null,
-    String,
-    Int,
-    Float,
-    Bool,
-    Path,
-}
-
 /// What a condition tells us about a variable's type in a given branch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NarrowPredicate {
     /// The variable is known to be a specific primitive type.
     /// Covers `isNull x` (IsType(Null)), `isString x` (IsType(String)), etc.
-    IsType(NarrowPrimitive),
+    IsType(PrimitiveTy),
     /// The variable is known to NOT be a specific primitive type.
     /// Covers else-branches of type predicates.
-    IsNotType(NarrowPrimitive),
+    IsNotType(PrimitiveTy),
     /// The variable is known to have a field with this name (from `x ? field`).
     HasField(SmolStr),
     /// The variable is known to NOT have a field (else-branch of `x ? field`).
@@ -117,13 +95,13 @@ const CONDITIONAL_FN_NAMES: &[(&str, ConditionalFn)] = &[
 
 /// Primitive type predicates: isNull, isString, isInt, etc.
 /// Both then-branch and else-branch get narrowing (IsType / IsNotType).
-const TYPE_PREDICATES: &[(&str, NarrowPrimitive)] = &[
-    ("isNull", NarrowPrimitive::Null),
-    ("isString", NarrowPrimitive::String),
-    ("isInt", NarrowPrimitive::Int),
-    ("isFloat", NarrowPrimitive::Float),
-    ("isBool", NarrowPrimitive::Bool),
-    ("isPath", NarrowPrimitive::Path),
+const TYPE_PREDICATES: &[(&str, PrimitiveTy)] = &[
+    ("isNull", PrimitiveTy::Null),
+    ("isString", PrimitiveTy::String),
+    ("isInt", PrimitiveTy::Int),
+    ("isFloat", PrimitiveTy::Float),
+    ("isBool", PrimitiveTy::Bool),
+    ("isPath", PrimitiveTy::Path),
 ];
 
 /// Compound-type predicates: isAttrs, isList, isFunction.
@@ -223,7 +201,7 @@ fn analyze_condition_inner(
             // Only null is a singleton type where `x == null` being false
             // proves x is not null. For other primitives (int, bool, etc.),
             // `x == 1` being false doesn't mean x isn't an int — x could be 2.
-            let is_singleton = matches!(prim, NarrowPrimitive::Null);
+            let is_singleton = matches!(prim, PrimitiveTy::Null);
 
             let (then_pred, else_pred) = if is_eq {
                 (
@@ -428,7 +406,7 @@ fn try_literal_comparison(
     name_res: &NameRes,
     var_expr: ExprId,
     literal_expr: ExprId,
-) -> Option<(NameId, NarrowPrimitive)> {
+) -> Option<(NameId, PrimitiveTy)> {
     let prim = expr_literal_primitive(module, name_res, literal_expr)?;
     let name = expr_as_local_name(module, name_res, var_expr)?;
     Some((name, prim))
@@ -436,12 +414,8 @@ fn try_literal_comparison(
 
 /// If the expression is a literal (or a keyword like null/true/false that
 /// is represented as a Reference in the AST), return the corresponding
-/// NarrowPrimitive.
-fn expr_literal_primitive(
-    module: &Mod,
-    name_res: &NameRes,
-    expr: ExprId,
-) -> Option<NarrowPrimitive> {
+/// PrimitiveTy.
+fn expr_literal_primitive(module: &Mod, name_res: &NameRes, expr: ExprId) -> Option<PrimitiveTy> {
     match &module[expr] {
         // null, true, false are References in the Nix AST (no Literal variant).
         Expr::Reference(name) => {
@@ -451,18 +425,18 @@ fn expr_literal_primitive(
                 _ => false,
             };
             match name.as_str() {
-                "null" if is_keyword("null") => Some(NarrowPrimitive::Null),
-                "true" if is_keyword("true") => Some(NarrowPrimitive::Bool),
-                "false" if is_keyword("false") => Some(NarrowPrimitive::Bool),
+                "null" if is_keyword("null") => Some(PrimitiveTy::Null),
+                "true" if is_keyword("true") => Some(PrimitiveTy::Bool),
+                "false" if is_keyword("false") => Some(PrimitiveTy::Bool),
                 _ => None,
             }
         }
         // Actual Literal nodes in the AST.
         Expr::Literal(lit) => match lit {
-            Literal::Integer(_) => Some(NarrowPrimitive::Int),
-            Literal::Float(_) => Some(NarrowPrimitive::Float),
-            Literal::String(_) => Some(NarrowPrimitive::String),
-            Literal::Path(_) => Some(NarrowPrimitive::Path),
+            Literal::Integer(_) => Some(PrimitiveTy::Int),
+            Literal::Float(_) => Some(PrimitiveTy::Float),
+            Literal::String(_) => Some(PrimitiveTy::String),
+            Literal::Path(_) => Some(PrimitiveTy::Path),
             Literal::Uri => None,
         },
         _ => None,
@@ -758,14 +732,14 @@ mod tests {
             &info.then_branch[0],
             &module,
             "x",
-            &NarrowPredicate::IsType(NarrowPrimitive::Null),
+            &NarrowPredicate::IsType(PrimitiveTy::Null),
         );
         assert_eq!(info.else_branch.len(), 1);
         assert_binding(
             &info.else_branch[0],
             &module,
             "x",
-            &NarrowPredicate::IsNotType(NarrowPrimitive::Null),
+            &NarrowPredicate::IsNotType(PrimitiveTy::Null),
         );
     }
 
@@ -777,14 +751,14 @@ mod tests {
             &info.then_branch[0],
             &module,
             "x",
-            &NarrowPredicate::IsType(NarrowPrimitive::Null),
+            &NarrowPredicate::IsType(PrimitiveTy::Null),
         );
         assert_eq!(info.else_branch.len(), 1);
         assert_binding(
             &info.else_branch[0],
             &module,
             "x",
-            &NarrowPredicate::IsNotType(NarrowPrimitive::Null),
+            &NarrowPredicate::IsNotType(PrimitiveTy::Null),
         );
     }
 
@@ -796,14 +770,14 @@ mod tests {
             &info.then_branch[0],
             &module,
             "x",
-            &NarrowPredicate::IsNotType(NarrowPrimitive::Null),
+            &NarrowPredicate::IsNotType(PrimitiveTy::Null),
         );
         assert_eq!(info.else_branch.len(), 1);
         assert_binding(
             &info.else_branch[0],
             &module,
             "x",
-            &NarrowPredicate::IsType(NarrowPrimitive::Null),
+            &NarrowPredicate::IsType(PrimitiveTy::Null),
         );
     }
 
@@ -819,7 +793,7 @@ mod tests {
             &info.then_branch[0],
             &module,
             "x",
-            &NarrowPredicate::IsType(NarrowPrimitive::Int),
+            &NarrowPredicate::IsType(PrimitiveTy::Int),
         );
         assert!(
             info.else_branch.is_empty(),
@@ -835,7 +809,7 @@ mod tests {
             &info.then_branch[0],
             &module,
             "x",
-            &NarrowPredicate::IsType(NarrowPrimitive::String),
+            &NarrowPredicate::IsType(PrimitiveTy::String),
         );
         assert!(info.else_branch.is_empty());
     }
@@ -848,7 +822,7 @@ mod tests {
             &info.then_branch[0],
             &module,
             "x",
-            &NarrowPredicate::IsType(NarrowPrimitive::Bool),
+            &NarrowPredicate::IsType(PrimitiveTy::Bool),
         );
         assert!(info.else_branch.is_empty());
     }
@@ -861,7 +835,7 @@ mod tests {
             &info.then_branch[0],
             &module,
             "x",
-            &NarrowPredicate::IsType(NarrowPrimitive::Float),
+            &NarrowPredicate::IsType(PrimitiveTy::Float),
         );
         assert!(info.else_branch.is_empty());
     }
@@ -910,14 +884,14 @@ mod tests {
             &info.then_branch[0],
             &module,
             "x",
-            &NarrowPredicate::IsNotType(NarrowPrimitive::Null),
+            &NarrowPredicate::IsNotType(PrimitiveTy::Null),
         );
         assert_eq!(info.else_branch.len(), 1);
         assert_binding(
             &info.else_branch[0],
             &module,
             "x",
-            &NarrowPredicate::IsType(NarrowPrimitive::Null),
+            &NarrowPredicate::IsType(PrimitiveTy::Null),
         );
     }
 
@@ -930,14 +904,14 @@ mod tests {
             &info.then_branch[0],
             &module,
             "x",
-            &NarrowPredicate::IsType(NarrowPrimitive::Null),
+            &NarrowPredicate::IsType(PrimitiveTy::Null),
         );
         assert_eq!(info.else_branch.len(), 1);
         assert_binding(
             &info.else_branch[0],
             &module,
             "x",
-            &NarrowPredicate::IsNotType(NarrowPrimitive::Null),
+            &NarrowPredicate::IsNotType(PrimitiveTy::Null),
         );
     }
 
@@ -957,7 +931,7 @@ mod tests {
             &info.then_branch[0],
             &module,
             "x",
-            &NarrowPredicate::IsNotType(NarrowPrimitive::Null),
+            &NarrowPredicate::IsNotType(PrimitiveTy::Null),
         );
         assert_binding(
             &info.then_branch[1],
@@ -980,7 +954,7 @@ mod tests {
             &info.then_branch[0],
             &module,
             "x",
-            &NarrowPredicate::IsNotType(NarrowPrimitive::Null),
+            &NarrowPredicate::IsNotType(PrimitiveTy::Null),
         );
     }
 
@@ -1005,13 +979,13 @@ mod tests {
             &info.else_branch[0],
             &module,
             "x",
-            &NarrowPredicate::IsNotType(NarrowPrimitive::Null),
+            &NarrowPredicate::IsNotType(PrimitiveTy::Null),
         );
         assert_binding(
             &info.else_branch[1],
             &module,
             "y",
-            &NarrowPredicate::IsNotType(NarrowPrimitive::Null),
+            &NarrowPredicate::IsNotType(PrimitiveTy::Null),
         );
     }
 
@@ -1027,14 +1001,14 @@ mod tests {
             &info.then_branch[0],
             &module,
             "x",
-            &NarrowPredicate::IsType(NarrowPrimitive::Null),
+            &NarrowPredicate::IsType(PrimitiveTy::Null),
         );
         assert_eq!(info.else_branch.len(), 1);
         assert_binding(
             &info.else_branch[0],
             &module,
             "x",
-            &NarrowPredicate::IsNotType(NarrowPrimitive::Null),
+            &NarrowPredicate::IsNotType(PrimitiveTy::Null),
         );
     }
 
@@ -1045,13 +1019,13 @@ mod tests {
             &info.then_branch[0],
             &module,
             "x",
-            &NarrowPredicate::IsType(NarrowPrimitive::String),
+            &NarrowPredicate::IsType(PrimitiveTy::String),
         );
         assert_binding(
             &info.else_branch[0],
             &module,
             "x",
-            &NarrowPredicate::IsNotType(NarrowPrimitive::String),
+            &NarrowPredicate::IsNotType(PrimitiveTy::String),
         );
     }
 
@@ -1062,13 +1036,13 @@ mod tests {
             &info.then_branch[0],
             &module,
             "x",
-            &NarrowPredicate::IsType(NarrowPrimitive::Int),
+            &NarrowPredicate::IsType(PrimitiveTy::Int),
         );
         assert_binding(
             &info.else_branch[0],
             &module,
             "x",
-            &NarrowPredicate::IsNotType(NarrowPrimitive::Int),
+            &NarrowPredicate::IsNotType(PrimitiveTy::Int),
         );
     }
 
@@ -1079,13 +1053,13 @@ mod tests {
             &info.then_branch[0],
             &module,
             "x",
-            &NarrowPredicate::IsType(NarrowPrimitive::Float),
+            &NarrowPredicate::IsType(PrimitiveTy::Float),
         );
         assert_binding(
             &info.else_branch[0],
             &module,
             "x",
-            &NarrowPredicate::IsNotType(NarrowPrimitive::Float),
+            &NarrowPredicate::IsNotType(PrimitiveTy::Float),
         );
     }
 
@@ -1096,13 +1070,13 @@ mod tests {
             &info.then_branch[0],
             &module,
             "x",
-            &NarrowPredicate::IsType(NarrowPrimitive::Bool),
+            &NarrowPredicate::IsType(PrimitiveTy::Bool),
         );
         assert_binding(
             &info.else_branch[0],
             &module,
             "x",
-            &NarrowPredicate::IsNotType(NarrowPrimitive::Bool),
+            &NarrowPredicate::IsNotType(PrimitiveTy::Bool),
         );
     }
 
@@ -1113,13 +1087,13 @@ mod tests {
             &info.then_branch[0],
             &module,
             "x",
-            &NarrowPredicate::IsType(NarrowPrimitive::Path),
+            &NarrowPredicate::IsType(PrimitiveTy::Path),
         );
         assert_binding(
             &info.else_branch[0],
             &module,
             "x",
-            &NarrowPredicate::IsNotType(NarrowPrimitive::Path),
+            &NarrowPredicate::IsNotType(PrimitiveTy::Path),
         );
     }
 
@@ -1176,14 +1150,14 @@ mod tests {
             &info.then_branch[0],
             &module,
             "x",
-            &NarrowPredicate::IsType(NarrowPrimitive::Null),
+            &NarrowPredicate::IsType(PrimitiveTy::Null),
         );
         assert_eq!(info.else_branch.len(), 1);
         assert_binding(
             &info.else_branch[0],
             &module,
             "x",
-            &NarrowPredicate::IsNotType(NarrowPrimitive::Null),
+            &NarrowPredicate::IsNotType(PrimitiveTy::Null),
         );
     }
 
@@ -1205,7 +1179,7 @@ mod tests {
             &info.then_branch[0],
             &module,
             "x",
-            &NarrowPredicate::IsType(NarrowPrimitive::Null),
+            &NarrowPredicate::IsType(PrimitiveTy::Null),
         );
     }
 
@@ -1235,14 +1209,14 @@ mod tests {
             &info.then_branch[0],
             &module,
             "x",
-            &NarrowPredicate::IsType(NarrowPrimitive::String),
+            &NarrowPredicate::IsType(PrimitiveTy::String),
         );
         assert_eq!(info.else_branch.len(), 1);
         assert_binding(
             &info.else_branch[0],
             &module,
             "x",
-            &NarrowPredicate::IsNotType(NarrowPrimitive::String),
+            &NarrowPredicate::IsNotType(PrimitiveTy::String),
         );
     }
 
@@ -1254,7 +1228,7 @@ mod tests {
             &info.then_branch[0],
             &module,
             "x",
-            &NarrowPredicate::IsType(NarrowPrimitive::String),
+            &NarrowPredicate::IsType(PrimitiveTy::String),
         );
     }
 
@@ -1384,7 +1358,7 @@ mod tests {
             &info.then_branch[0],
             &module,
             "x",
-            &NarrowPredicate::IsNotType(NarrowPrimitive::Null),
+            &NarrowPredicate::IsNotType(PrimitiveTy::Null),
         );
     }
 
