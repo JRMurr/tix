@@ -2,6 +2,7 @@ mod common;
 
 use common::{LspTestHarness, TIMEOUT};
 use indoc::indoc;
+use std::time::Duration;
 use tower_lsp::lsp_types::*;
 
 /// Cross-file hover: A.nix defines a value, B.nix imports it, hover shows the type.
@@ -339,6 +340,59 @@ async fn cyclic_type_import_reports_e016_in_open_file() {
         "expected one E016, got: {:?}",
         diags.diagnostics
     );
+
+    h.shutdown().await;
+}
+
+/// Rapid successive edits of an imported file must not drop the dependent's
+/// re-analysis. Each edit cancels the in-flight batch; queued ReanalyzeFile
+/// entries for B have no newer event to resurrect them, so the loop must
+/// re-queue what it didn't finish. B's hover must reflect A's final type
+/// without B being touched.
+#[tokio::test]
+async fn import_reanalysis_survives_rapid_edits() {
+    let mut h = LspTestHarness::new(&[
+        ("a.nix", "{ val = 0; }"),
+        (
+            "b.nix",
+            indoc! {"
+                let a = import ./a.nix;
+                in a.val
+                #    ^1
+            "},
+        ),
+    ])
+    .await;
+
+    h.open_and_wait("a.nix").await;
+    h.open_and_wait("b.nix").await;
+
+    // Burst of edits with no waiting: each one cancels the in-flight batch.
+    // The last edit flips val from int to string.
+    for i in 0..5 {
+        h.edit("a.nix", &format!("{{ val = {i}; }}")).await;
+    }
+    h.edit("a.nix", "{ val = \"final\"; }").await;
+
+    // B must update via ReanalyzeFile alone — poll hover until it shows string.
+    let m = h.markers("b.nix");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        // Drain any pending diagnostics so the notification channel doesn't fill.
+        h.drain_diagnostics();
+        if let Some(hover) = h.hover("b.nix", m[&1].line, m[&1].character).await {
+            if let HoverContents::Markup(content) = &hover.contents {
+                if content.value.contains("string") {
+                    break;
+                }
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "b.nix hover never updated to string after rapid edits of a.nix"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 
     h.shutdown().await;
 }

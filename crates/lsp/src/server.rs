@@ -18,7 +18,7 @@
 // analyzed, the analysis loop checks the cancel flag between phases so it
 // can re-coalesce edits without waiting for inference to complete.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -330,46 +330,54 @@ fn spawn_analysis_loop(
 
             // Helper closure: process a single AnalysisEvent into the
             // appropriate accumulator.
-            let process_event = |event: AnalysisEvent,
-                                 changes: &mut HashMap<PathBuf, String>,
-                                 closed: &mut Vec<PathBuf>,
-                                 warmup_results: &mut Vec<crate::warmup::WarmupFileResult>,
-                                 file_versions: &mut HashMap<PathBuf, i32>,
-                                 state: &Mutex<AnalysisState>| {
-                match event {
-                    AnalysisEvent::FileChanged {
-                        path,
-                        text,
-                        version,
-                    } => {
-                        if let Some(v) = version {
-                            file_versions.insert(path.clone(), v);
-                        }
-                        changes.insert(path, text);
-                    }
-                    AnalysisEvent::FileClosed { path } => {
-                        changes.remove(&path);
-                        closed.push(path);
-                    }
-                    AnalysisEvent::ReanalyzeFile { path } => {
-                        let text = {
-                            let st = state.lock();
-                            st.files.get(&path).map(|a| a.source_text.clone())
-                        };
-                        if let Some(text) = text {
+            let process_event =
+                |event: AnalysisEvent,
+                 changes: &mut HashMap<PathBuf, String>,
+                 closed: &mut Vec<PathBuf>,
+                 warmup_results: &mut Vec<crate::warmup::WarmupFileResult>,
+                 file_versions: &mut HashMap<PathBuf, i32>,
+                 state: &Mutex<AnalysisState>,
+                 pending_text: &Mutex<HashMap<PathBuf, String>>| {
+                    match event {
+                        AnalysisEvent::FileChanged {
+                            path,
+                            text,
+                            version,
+                        } => {
+                            if let Some(v) = version {
+                                file_versions.insert(path.clone(), v);
+                            }
                             changes.insert(path, text);
-                        } else {
-                            log::debug!(
-                                "ReanalyzeFile for {:?}: file not in state, skipping",
-                                path
-                            );
+                        }
+                        AnalysisEvent::FileClosed { path } => {
+                            changes.remove(&path);
+                            closed.push(path);
+                        }
+                        AnalysisEvent::ReanalyzeFile { path } => {
+                            // Prefer pending_text: it holds the newest typed text
+                            // when a prior analysis of this file was cancelled
+                            // before catching up. state.files only has the last
+                            // fully-analyzed text.
+                            let text = pending_text.lock().get(&path).cloned().or_else(|| {
+                                let st = state.lock();
+                                st.files.get(&path).map(|a| a.source_text.clone())
+                            });
+                            if let Some(text) = text {
+                                // or_insert: a FileChanged coalesced earlier in this
+                                // batch carries at-least-as-new text; don't clobber it.
+                                changes.entry(path).or_insert(text);
+                            } else {
+                                log::debug!(
+                                    "ReanalyzeFile for {:?}: file not in state, skipping",
+                                    path
+                                );
+                            }
+                        }
+                        AnalysisEvent::WarmupComplete { results } => {
+                            warmup_results.extend(results);
                         }
                     }
-                    AnalysisEvent::WarmupComplete { results } => {
-                        warmup_results.extend(results);
-                    }
-                }
-            };
+                };
 
             // Process the first event (None when the background queue woke us).
             if let Some(first_event) = first_event {
@@ -380,6 +388,7 @@ fn spawn_analysis_loop(
                     &mut warmup_results,
                     &mut file_versions,
                     &state,
+                    &pending_text,
                 );
             }
 
@@ -392,6 +401,7 @@ fn spawn_analysis_loop(
                     &mut warmup_results,
                     &mut file_versions,
                     &state,
+                    &pending_text,
                 );
             }
 
@@ -523,6 +533,11 @@ fn spawn_analysis_loop(
             cancel_flag.store(false, Ordering::Relaxed);
 
             let mut any_completed = false;
+            // Paths fully analyzed this batch. Entries left in `changes` on an
+            // early break (new events / cancellation) are re-queued below —
+            // import-driven ReanalyzeFile entries have no newer event coming
+            // to resurrect them, so dropping them would leave stale diagnostics.
+            let mut processed: HashSet<PathBuf> = HashSet::new();
 
             for (path, text) in &changes {
                 // Check for new events or external cancellation between files.
@@ -728,6 +743,18 @@ fn spawn_analysis_loop(
                 // ── Phase 4: Defer diagnostic publication (quiescence) ──
                 pending_diags.insert(path.clone(), diags);
                 any_completed = true;
+                processed.insert(path.clone());
+            }
+
+            // Re-queue entries the batch didn't finish (early break, or the
+            // per-file cancellation `continue`). ReanalyzeFile re-resolves the
+            // freshest text and coalesces behind any newer queued FileChanged.
+            for path in changes.keys() {
+                if !processed.contains(path) {
+                    event_tx
+                        .send(AnalysisEvent::ReanalyzeFile { path: path.clone() })
+                        .ok();
+                }
             }
 
             if any_completed {
