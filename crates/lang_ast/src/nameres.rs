@@ -1,4 +1,6 @@
-use std::{collections::HashMap, iter, ops};
+use std::{iter, ops};
+
+use rustc_hash::FxHashMap as HashMap;
 
 use la_arena::{Arena, ArenaMap, Idx as Id};
 use petgraph::graph::DiGraph;
@@ -120,7 +122,7 @@ pub fn lookup_global_builtin(name: &str) -> Option<&'static str> {
 
 /// Build scopes for a module.
 pub fn compute_scopes(module: &Module) -> ModuleScopes {
-    ModuleScopes::new(module.clone())
+    ModuleScopes::new(module)
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
@@ -130,7 +132,7 @@ pub struct ModuleScopes {
 }
 
 impl ModuleScopes {
-    pub fn new(module: Module) -> Self {
+    pub fn new(module: &Module) -> Self {
         let mut ms = ModuleScopes {
             scopes: Arena::new(),
             scope_by_expr: ArenaMap::with_capacity(module.exprs.len()),
@@ -139,7 +141,7 @@ impl ModuleScopes {
             parent: None,
             kind: ScopeKind::Definitions(Default::default()),
         });
-        ms.traverse_expr(&module, module.entry_expr, root_scope);
+        ms.traverse_expr(module, module.entry_expr, root_scope);
 
         ms
     }
@@ -309,7 +311,7 @@ pub fn compute_name_resolution(module: &Module, scopes: &ModuleScopes) -> NameRe
         .collect();
 
     // Build the inverted index: NameId → Vec<ExprId>.
-    let mut refs_by_name: HashMap<NameId, Vec<ExprId>> = HashMap::new();
+    let mut refs_by_name: HashMap<NameId, Vec<ExprId>> = HashMap::default();
     for (expr_id, resolved) in resolve_map.iter() {
         if let Some(ResolveResult::Definition(name_id)) = resolved {
             refs_by_name.entry(*name_id).or_default().push(expr_id);
@@ -363,8 +365,8 @@ impl NameDependencies {
     ) -> Self {
         let mut name_deps = Self {
             edges: Vec::with_capacity(module.exprs.len()),
-            name_to_expr: HashMap::new(),
-            narrow_scopes: HashMap::new(),
+            name_to_expr: HashMap::default(),
+            narrow_scopes: HashMap::default(),
         };
 
         name_deps.traverse_expr(
@@ -607,7 +609,7 @@ pub fn compute_group_def(
     let num_refs = name_deps.edges.len();
 
     let mut dep_graph = DepGraph::with_capacity(num_names, num_refs);
-    let mut name_to_node_id = HashMap::new();
+    let mut name_to_node_id = HashMap::default();
 
     for (name_id, _) in module.names() {
         let node_id = dep_graph.add_node(name_id);

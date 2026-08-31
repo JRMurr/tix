@@ -6,7 +6,7 @@
 // The LSP server holds this behind a Mutex because rnix::Root is !Send + !Sync
 // and all analysis must run on a single thread (via spawn_blocking).
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -461,7 +461,7 @@ impl AnalysisState {
     pub fn new(registry: TypeAliasRegistry) -> Self {
         Self {
             registry: Arc::new(registry),
-            files: HashMap::new(),
+            files: HashMap::default(),
             project_config: None,
             config_dir: None,
             coordinator: Arc::new(InferenceCoordinator::new()),
@@ -694,8 +694,8 @@ impl AnalysisState {
             source_map: intermediate.source_map.clone(),
             name_res: intermediate.name_res.clone(),
             scopes: intermediate.scopes.clone(),
-            import_targets: HashMap::new(),
-            name_to_import: HashMap::new(),
+            import_targets: HashMap::default(),
+            name_to_import: HashMap::default(),
             context_arg_types: intermediate.context_arg_types.clone(),
             context_arg_arena: Arc::clone(&intermediate.context_arg_arena),
         };
@@ -758,8 +758,8 @@ impl AnalysisState {
                 context_args: intermediate.context_args.clone(),
                 rss_limit_mb: intermediate.rss_limit_mb,
                 file_path: Some(intermediate.path.clone()),
-                imported_type_exports: HashMap::new(),
-                typeof_import_types: HashMap::new(),
+                imported_type_exports: HashMap::default(),
+                typeof_import_types: HashMap::default(),
                 file_base_dir: file_dir.clone(),
             },
             source_text: intermediate.source_text.clone(),
@@ -833,7 +833,7 @@ pub(crate) fn build_name_to_import(
     grouped_defs: &GroupedDefs,
     file_dir: Option<&Path>,
 ) -> HashMap<NameId, PathBuf> {
-    let mut name_to_import = HashMap::new();
+    let mut name_to_import = HashMap::default();
     for group in grouped_defs.iter() {
         for typedef in group {
             let target =

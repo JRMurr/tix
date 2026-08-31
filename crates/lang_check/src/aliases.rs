@@ -7,7 +7,7 @@
 // so that `TypeVarValue::Reference` names resolve against loaded aliases, and
 // unresolved names can fall back to global val declarations.
 
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -551,7 +551,7 @@ impl TypeAliasRegistry {
         source: &str,
     ) -> Result<HashMap<SmolStr, ParsedTy>, Box<dyn std::error::Error>> {
         let file = comment_parser::parse_tix_file(source)?;
-        let mut context_args = HashMap::new();
+        let mut context_args = HashMap::default();
 
         // Pre-populate from top-level modules: each `module foo { val x :: ...; }`
         // contributes its fields as context args. `load_declarations` (below) then
@@ -653,7 +653,7 @@ impl TypeAliasRegistry {
         self.try_load_module_stub(&alias_name);
 
         if let Some(ParsedTy::AttrSet(attr)) = self.aliases.get(&alias_name).cloned() {
-            let mut context_args = HashMap::new();
+            let mut context_args = HashMap::default();
             for (field_name, field_ty) in &attr.fields {
                 context_args.insert(field_name.clone(), (*field_ty.0).clone());
             }
@@ -735,7 +735,7 @@ impl TypeAliasRegistry {
     /// names involved in such cycles.
     pub fn validate(&self) -> Result<(), Vec<SmolStr>> {
         let mut cycles = Vec::new();
-        let mut visited = HashMap::<SmolStr, VisitState>::new();
+        let mut visited = HashMap::<SmolStr, VisitState>::default();
 
         for name in self.aliases.keys() {
             if self.has_unguarded_cycle(name, 0, &mut visited) {

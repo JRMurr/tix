@@ -5,7 +5,7 @@ mod init;
 pub mod json_output;
 mod timing;
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 use std::sync::Arc;
 use std::{error::Error, path::PathBuf};
 
@@ -654,7 +654,7 @@ fn run_gen_stub(
         &module,
         &name_res,
         base_dir,
-        &HashMap::new(),
+        &HashMap::default(),
         Some(&registry),
     );
 
@@ -797,7 +797,7 @@ fn run_verify_stubs(
         &syntax.module,
         &syntax.name_res,
         base_dir,
-        &HashMap::new(),
+        &HashMap::default(),
         Some(&registry),
     );
 

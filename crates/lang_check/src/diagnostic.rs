@@ -709,7 +709,7 @@ pub fn warnings_to_diagnostics(warnings: &[Located<Warning>]) -> Vec<TixDiagnost
 /// `syntax_root` should be `root.syntax()` (the root `SyntaxNode`).
 pub fn filter_ignored_diagnostics(
     diagnostics: Vec<TixDiagnostic>,
-    ignore_lines: &std::collections::HashSet<u32>,
+    ignore_lines: &rustc_hash::FxHashSet<u32>,
     source_map: &lang_ast::ModuleSourceMap,
     syntax_root: &rnix::SyntaxNode,
     source_text: &str,

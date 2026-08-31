@@ -9,7 +9,7 @@
 // Lives in lang_ast so both CLI and LSP can use it without depending on
 // lang_check.
 
-use std::collections::HashSet;
+use rustc_hash::FxHashSet as HashSet;
 
 use smol_str::SmolStr;
 
@@ -353,7 +353,7 @@ fn classify_bare_attrset(module: &Module, bindings: &Bindings) -> Classification
 /// Collect reference names and select-chain leaf names from a body expression.
 /// Stops at nested Lambda boundaries to avoid inner-scope pollution.
 fn collect_body_references(module: &Module, body: ExprId) -> HashSet<SmolStr> {
-    let mut refs = HashSet::new();
+    let mut refs = HashSet::default();
     let mut stack = vec![body];
 
     while let Some(expr_id) = stack.pop() {
@@ -399,7 +399,7 @@ fn collect_body_references(module: &Module, body: ExprId) -> HashSet<SmolStr> {
 /// If body is a let-in, looks at the inner body. If body is an attrset,
 /// collects its static key names.
 fn collect_body_attrset_keys(module: &Module, body: ExprId) -> HashSet<SmolStr> {
-    let mut keys = HashSet::new();
+    let mut keys = HashSet::default();
     let target = unwrap_let_in(module, body);
 
     if let Expr::AttrSet { bindings, .. } = &module[target] {

@@ -193,9 +193,11 @@ impl TypeTable {
     }
 
     /// Get the concrete type for a TyId, panicking if it's a variable.
-    pub fn expect_concrete(&self, id: TyId) -> Ty<TyId> {
+    /// Borrow the concrete entry for `id` — no clone. Callers copy out the
+    /// TyIds they need before making `&mut self` calls.
+    pub fn concrete_ref(&self, id: TyId) -> &Ty<TyId> {
         match self.storage.get(id) {
-            TypeEntry::Concrete(t) => t.clone(),
+            TypeEntry::Concrete(t) => t,
             _ => unreachable!("expected concrete type for {id:?}"),
         }
     }

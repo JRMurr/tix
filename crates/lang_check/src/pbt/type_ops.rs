@@ -7,7 +7,7 @@
 // - Param/Return inverse: for function types, Param and Return extract correctly
 // - Composition crash-freedom: arbitrary operator chains don't panic
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 use std::sync::Arc;
 
 use comment_parser::ParsedTy;
@@ -195,11 +195,11 @@ fn attrset_with_typeof(tc: &TestCase) -> (ParsedTy, Vec<SmolStr>) {
 fn resolve_typeof_removes_all_typeof(tc: TestCase) {
     let (body, typeof_names) = attrset_with_typeof(&tc);
     let export_name: String = tc.draw(generators::from_regex("[A-Z][a-z]{2,5}"));
-    let mut raw_exports = HashMap::new();
+    let mut raw_exports = HashMap::default();
     raw_exports.insert(SmolStr::from(export_name), body);
 
     // Build binding_types for all typeof targets
-    let mut binding_types = HashMap::new();
+    let mut binding_types = HashMap::default();
     for name in &typeof_names {
         let mut arena = TypeArena::new();
         let root = arena.intern(OutputTy::Primitive(PrimitiveTy::Int));

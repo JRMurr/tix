@@ -12,7 +12,7 @@
 // OOM risk of caching all signatures simultaneously — a reference-counted
 // eviction strategy keeps only the "frontier" of needed signatures alive.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 use std::path::{Path, PathBuf};
 
 use petgraph::algo::{condensation, toposort};
@@ -59,7 +59,7 @@ pub fn build_file_layers_with_sccs(
     // =========================================================================
 
     let mut graph: DiGraph<PathBuf, ()> = DiGraph::new();
-    let mut node_map: HashMap<&Path, NodeIndex> = HashMap::new();
+    let mut node_map: HashMap<&Path, NodeIndex> = HashMap::default();
 
     for path in file_imports.keys() {
         let idx = graph.add_node(path.clone());
@@ -67,7 +67,7 @@ pub fn build_file_layers_with_sccs(
     }
 
     // Track self-edges before condensation (condensation strips them).
-    let mut has_self_edge: std::collections::HashSet<NodeIndex> = std::collections::HashSet::new();
+    let mut has_self_edge: rustc_hash::FxHashSet<NodeIndex> = rustc_hash::FxHashSet::default();
 
     for (importer, deps) in file_imports {
         let from = node_map[importer.as_path()];
@@ -83,7 +83,7 @@ pub fn build_file_layers_with_sccs(
 
     // Map from original graph NodeIndex → condensed SCC NodeIndex so we can
     // check self-edges on singleton SCCs.
-    let mut original_to_condensed: HashMap<NodeIndex, NodeIndex> = HashMap::new();
+    let mut original_to_condensed: HashMap<NodeIndex, NodeIndex> = HashMap::default();
 
     let condensed = condensation(graph, true);
 
@@ -115,7 +115,8 @@ pub fn build_file_layers_with_sccs(
         }
     };
 
-    let mut depth: HashMap<NodeIndex, usize> = HashMap::with_capacity(topo_order.len());
+    let mut depth: HashMap<NodeIndex, usize> =
+        HashMap::with_capacity_and_hasher(topo_order.len(), Default::default());
 
     for &node in topo_order.iter().rev() {
         let max_dep_depth = condensed
@@ -180,8 +181,8 @@ pub fn build_file_layers(file_imports: &HashMap<PathBuf, Vec<PathBuf>>) -> Vec<V
 pub fn compute_importer_counts(
     file_imports: &HashMap<PathBuf, Vec<PathBuf>>,
 ) -> HashMap<PathBuf, usize> {
-    let mut counts: HashMap<PathBuf, usize> = HashMap::new();
-    let project_files: std::collections::HashSet<&PathBuf> = file_imports.keys().collect();
+    let mut counts: HashMap<PathBuf, usize> = HashMap::default();
+    let project_files: rustc_hash::FxHashSet<&PathBuf> = file_imports.keys().collect();
 
     for deps in file_imports.values() {
         for dep in deps {
@@ -308,7 +309,7 @@ mod tests {
 
     #[test]
     fn empty_input() {
-        let imports = HashMap::new();
+        let imports = HashMap::default();
         let layers = build_file_layers(&imports);
         assert!(layers.is_empty());
     }
@@ -484,7 +485,7 @@ mod hegel_tests {
     use super::*;
     use hegel::generators;
     use hegel::TestCase;
-    use std::collections::HashSet;
+    use rustc_hash::FxHashSet as HashSet;
 
     const MAX_FILES: usize = 30;
     const MAX_EDGES: usize = 60;
@@ -522,7 +523,7 @@ mod hegel_tests {
 
     /// Brute-force reachability (reflexive) restricted to in-project files.
     fn reachable(graph: &HashMap<PathBuf, Vec<PathBuf>>, from: &Path) -> HashSet<PathBuf> {
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::default();
         let mut stack = vec![from.to_path_buf()];
         while let Some(cur) = stack.pop() {
             if !seen.insert(cur.clone()) {
@@ -538,7 +539,7 @@ mod hegel_tests {
     }
 
     fn scc_index(layers: &[InferenceLayer]) -> HashMap<&PathBuf, (usize, usize)> {
-        let mut idx = HashMap::new();
+        let mut idx = HashMap::default();
         for (li, layer) in layers.iter().enumerate() {
             for (si, scc) in layer.sccs.iter().enumerate() {
                 for f in &scc.files {
@@ -553,7 +554,7 @@ mod hegel_tests {
     fn layers_partition_the_files(tc: TestCase) {
         let graph = tc.draw(import_graphs());
         let layers = build_file_layers_with_sccs(&graph);
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::default();
         for f in layers.iter().flat_map(|l| l.all_files()) {
             assert!(seen.insert(f.clone()), "{f:?} appears twice");
         }
@@ -624,7 +625,7 @@ mod hegel_tests {
     fn importer_counts_count_in_project_edges(tc: TestCase) {
         let graph = tc.draw(import_graphs());
         let counts = compute_importer_counts(&graph);
-        let mut expected: HashMap<PathBuf, usize> = HashMap::new();
+        let mut expected: HashMap<PathBuf, usize> = HashMap::default();
         for deps in graph.values() {
             for d in deps.iter().filter(|d| graph.contains_key(*d)) {
                 *expected.entry(d.clone()).or_default() += 1;

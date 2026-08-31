@@ -3,7 +3,7 @@ use lang_ast::{Expr, Module};
 use lang_ty::arena::{OwnedTy, TyRef};
 use lang_ty::raw_ty::{intern_raw, RawTy};
 use lang_ty::{arc_ty, OutputTy, PrimitiveTy, TypeArena};
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -227,7 +227,7 @@ pub fn check_multifile_with_aliases(
 
     // Build ephemeral stubs by inferring all non-entry files first.
     // Process them in reverse order so transitive deps are available.
-    let mut ephemeral_stubs: HashMap<PathBuf, OwnedTy> = HashMap::new();
+    let mut ephemeral_stubs: HashMap<PathBuf, OwnedTy> = HashMap::default();
     for &(path_str, _) in files.iter().skip(1).rev() {
         let dep_path = PathBuf::from(path_str);
         if let Some(dep_r) = all_files.get(&dep_path) {
@@ -336,12 +336,12 @@ pub fn check_multifile_fixpoint(
     let (_entry, all_files) = lang_ast::tests::parse_multi_file(files);
     let aliases = TypeAliasRegistry::default();
 
-    let mut ephemeral_stubs: HashMap<PathBuf, OwnedTy> = HashMap::new();
+    let mut ephemeral_stubs: HashMap<PathBuf, OwnedTy> = HashMap::default();
     let mut rounds_taken = 0;
 
     for round in 0..max_rounds {
         rounds_taken = round + 1;
-        let mut new_stubs: HashMap<PathBuf, OwnedTy> = HashMap::new();
+        let mut new_stubs: HashMap<PathBuf, OwnedTy> = HashMap::default();
 
         for &(path_str, _) in files {
             let file_path = PathBuf::from(path_str);
@@ -1938,7 +1938,7 @@ fn alias_with_union_in_param_skips_bidirectional_constraints() {
     let result = crate::CheckBuilder::from_source(
         nix_src,
         Arc::new(registry.clone()),
-        HashMap::new(),
+        HashMap::default(),
         Arc::default(),
     )
     .run();
@@ -1999,7 +1999,7 @@ fn nested_alias_with_union_in_param_skips_bidirectional_constraints() {
     let result = crate::CheckBuilder::from_source(
         nix_src,
         Arc::new(registry.clone()),
-        HashMap::new(),
+        HashMap::default(),
         Arc::default(),
     )
     .run();
@@ -2088,7 +2088,7 @@ test_case!(
 
 mod import_tests {
     use lang_ty::{arc_ty, OutputTy, PrimitiveTy, TypeArena};
-    use std::collections::HashMap;
+    use rustc_hash::FxHashMap as HashMap;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
@@ -2506,7 +2506,7 @@ mod import_tests {
             &entry.module,
             &entry.name_res,
             Path::new("/"),
-            &HashMap::new(),
+            &HashMap::default(),
             None,
         );
 
@@ -3231,7 +3231,7 @@ mod import_tests {
             &entry.module,
             &entry.name_res,
             Path::new("/"),
-            &HashMap::new(),
+            &HashMap::default(),
             None,
         );
 
@@ -3644,7 +3644,7 @@ pub fn check_str_with_aliases_and_context(
     let result = crate::CheckBuilder::from_source(
         src,
         Arc::new(aliases.clone()),
-        HashMap::new(),
+        HashMap::default(),
         Arc::new(context_args),
     )
     .run();
@@ -3816,7 +3816,7 @@ fn doc_comment_context_on_inner_lambda() {
     let result = crate::CheckBuilder::from_source(
         nix_src,
         Arc::new(TypeAliasRegistry::with_builtins()),
-        HashMap::new(),
+        HashMap::default(),
         Arc::default(),
     )
     .run();
@@ -3884,9 +3884,13 @@ fn context_args_preserve_alias_provenance() {
         { config, ... }: config
     " };
     let r = lang_ast::run_syntax_pipeline(nix_src);
-    let result =
-        crate::CheckBuilder::from_source(nix_src, Arc::new(registry.clone()), HashMap::new(), ctx)
-            .run();
+    let result = crate::CheckBuilder::from_source(
+        nix_src,
+        Arc::new(registry.clone()),
+        HashMap::default(),
+        ctx,
+    )
+    .run();
     let inference = result.inference.expect("inference should succeed");
 
     // The `config` pattern field should be typed as Named("NixosConfig", ...)
@@ -3954,9 +3958,13 @@ fn callpackage_context_types_pkgs_parameter_as_alias() {
         { pkgs, ... }: pkgs.lib.id 42
     " };
     let r = lang_ast::run_syntax_pipeline(nix_src);
-    let result =
-        crate::CheckBuilder::from_source(nix_src, Arc::new(registry.clone()), HashMap::new(), ctx)
-            .run();
+    let result = crate::CheckBuilder::from_source(
+        nix_src,
+        Arc::new(registry.clone()),
+        HashMap::default(),
+        ctx,
+    )
+    .run();
     let inference = result.inference.expect("inference should succeed");
 
     // `pkgs` should be typed as Named("Pkgs", ...) via alias provenance.
@@ -4038,9 +4046,13 @@ fn callpackage_context_loads_pkgs_from_builtin_stubs_dir() {
         { emilua, ninja, ... }: emilua
     " };
     let r = lang_ast::run_syntax_pipeline(nix_src);
-    let result =
-        crate::CheckBuilder::from_source(nix_src, Arc::new(registry.clone()), HashMap::new(), ctx)
-            .run();
+    let result = crate::CheckBuilder::from_source(
+        nix_src,
+        Arc::new(registry.clone()),
+        HashMap::default(),
+        ctx,
+    )
+    .run();
     let inference = result.inference.expect("inference should succeed");
 
     let root_ref = *inference
@@ -5891,7 +5903,7 @@ fn annotation_arity_mismatch_skipped_with_warning() {
     let result = crate::CheckBuilder::from_source(
         nix_src,
         Arc::new(TypeAliasRegistry::default()),
-        HashMap::new(),
+        HashMap::default(),
         Arc::default(),
     )
     .run();
@@ -5964,7 +5976,7 @@ fn annotation_with_union_skipped() {
     let result = crate::CheckBuilder::from_source(
         nix_src,
         Arc::new(TypeAliasRegistry::default()),
-        HashMap::new(),
+        HashMap::default(),
         Arc::default(),
     )
     .run();
@@ -6411,7 +6423,7 @@ fn intersection_annotation_accepted() {
     let result = crate::CheckBuilder::from_source(
         nix_src,
         Arc::new(TypeAliasRegistry::default()),
-        HashMap::new(),
+        HashMap::default(),
         Arc::default(),
     )
     .run();
@@ -6449,7 +6461,7 @@ fn intersection_annotation_warning_emitted() {
     let result = crate::CheckBuilder::from_source(
         nix_src,
         Arc::new(TypeAliasRegistry::default()),
-        HashMap::new(),
+        HashMap::default(),
         Arc::default(),
     )
     .run();
@@ -6489,7 +6501,7 @@ fn non_lambda_intersection_falls_through() {
     let result = crate::CheckBuilder::from_source(
         nix_src,
         Arc::new(TypeAliasRegistry::default()),
-        HashMap::new(),
+        HashMap::default(),
         Arc::default(),
     )
     .run();
@@ -7905,7 +7917,7 @@ fn collect_diagnostics(src: &str) -> Vec<TixDiagnostic> {
     let result = crate::CheckBuilder::from_source(
         src,
         Arc::new(TypeAliasRegistry::default()),
-        HashMap::new(),
+        HashMap::default(),
         Arc::default(),
     )
     .run();
@@ -8012,7 +8024,7 @@ fn duplicate_key_is_warning_not_error() {
     let result = crate::CheckBuilder::from_source(
         "{ a = 1; a = 2; }",
         Arc::new(TypeAliasRegistry::default()),
-        HashMap::new(),
+        HashMap::default(),
         Arc::default(),
     )
     .run();
@@ -8262,7 +8274,7 @@ fn function_union_annotation_still_skips() {
     let result = crate::CheckBuilder::from_source(
         nix_src,
         Arc::new(registry.clone()),
-        HashMap::new(),
+        HashMap::default(),
         Arc::default(),
     )
     .run();
@@ -8624,7 +8636,7 @@ fn get_name_type_partial(src: &str, name: &str) -> Option<RootTy> {
         &r.name_res,
         &r.module_indices.binding_expr,
         aliases,
-        HashMap::new(),
+        HashMap::default(),
         Arc::default(),
     );
     let (result, _diags, _bailed_out) = check.infer_prog_partial(r.grouped_defs);
@@ -8954,7 +8966,7 @@ fn import_type_constrains() {
     use std::path::PathBuf;
 
     // Simulate file A declaring `type Config = { x: int };`
-    let mut exports = std::collections::HashMap::new();
+    let mut exports = rustc_hash::FxHashMap::default();
     let config_ty = comment_parser::ParsedTy::AttrSet(lang_ty::AttrSetTy {
         fields: [(
             smol_str::SmolStr::from("x"),
@@ -8970,7 +8982,7 @@ fn import_type_constrains() {
     });
     exports.insert(smol_str::SmolStr::from("Config"), config_ty);
 
-    let mut imported_exports = std::collections::HashMap::new();
+    let mut imported_exports = rustc_hash::FxHashMap::default();
     imported_exports.insert(PathBuf::from("/a.nix"), exports);
 
     // File B: annotate x with import("/a.nix").Config, but x = "hello" (string)
@@ -8994,7 +9006,7 @@ fn import_type_constrains() {
         &r.name_res,
         &r.module_indices.binding_expr,
         aliases,
-        std::collections::HashMap::new(),
+        rustc_hash::FxHashMap::default(),
         Arc::default(),
     )
     .with_imported_type_exports(imported_exports)
@@ -9013,11 +9025,11 @@ fn import_type_constrains() {
 fn import_type_basic() {
     use std::path::PathBuf;
 
-    let mut exports = std::collections::HashMap::new();
+    let mut exports = rustc_hash::FxHashMap::default();
     let config_ty = comment_parser::ParsedTy::Primitive(lang_ty::PrimitiveTy::Int);
     exports.insert(smol_str::SmolStr::from("MyInt"), config_ty);
 
-    let mut imported_exports = std::collections::HashMap::new();
+    let mut imported_exports = rustc_hash::FxHashMap::default();
     imported_exports.insert(PathBuf::from("/a.nix"), exports);
 
     let nix = indoc! {r#"
@@ -9040,7 +9052,7 @@ fn import_type_basic() {
         &r.name_res,
         &r.module_indices.binding_expr,
         aliases,
-        std::collections::HashMap::new(),
+        rustc_hash::FxHashMap::default(),
         Arc::default(),
     )
     .with_imported_type_exports(imported_exports)
@@ -9073,7 +9085,7 @@ fn typeof_import_basic() {
     let int_ref = arena.intern(lang_ty::OutputTy::Primitive(lang_ty::PrimitiveTy::Int));
     let owned = lang_ty::OwnedTy::new(Arc::new(arena), int_ref);
 
-    let mut typeof_imports = std::collections::HashMap::new();
+    let mut typeof_imports = rustc_hash::FxHashMap::default();
     typeof_imports.insert(PathBuf::from("/a.nix"), owned);
 
     let nix = indoc! {r#"
@@ -9096,7 +9108,7 @@ fn typeof_import_basic() {
         &r.name_res,
         &r.module_indices.binding_expr,
         aliases,
-        std::collections::HashMap::new(),
+        rustc_hash::FxHashMap::default(),
         Arc::default(),
     )
     .with_typeof_import_types(typeof_imports)
@@ -9124,7 +9136,7 @@ fn typeof_import_constrains() {
     let int_ref = arena.intern(lang_ty::OutputTy::Primitive(lang_ty::PrimitiveTy::Int));
     let owned = lang_ty::OwnedTy::new(Arc::new(arena), int_ref);
 
-    let mut typeof_imports = std::collections::HashMap::new();
+    let mut typeof_imports = rustc_hash::FxHashMap::default();
     typeof_imports.insert(PathBuf::from("/a.nix"), owned);
 
     let nix = indoc! {r#"
@@ -9147,7 +9159,7 @@ fn typeof_import_constrains() {
         &r.name_res,
         &r.module_indices.binding_expr,
         aliases,
-        std::collections::HashMap::new(),
+        rustc_hash::FxHashMap::default(),
         Arc::default(),
     )
     .with_typeof_import_types(typeof_imports)
@@ -9365,7 +9377,7 @@ fn resolve_export_typeof_simple() {
     use comment_parser::ParsedTy;
     use smol_str::SmolStr;
 
-    let mut raw_exports = HashMap::new();
+    let mut raw_exports = HashMap::default();
     raw_exports.insert(
         SmolStr::from("Scope"),
         ParsedTy::TypeOf(SmolStr::from("scope")),
@@ -9375,7 +9387,7 @@ fn resolve_export_typeof_simple() {
     let root = arena.intern(OutputTy::Primitive(PrimitiveTy::Int));
     let owned = OwnedTy::new(Arc::new(arena), root);
 
-    let mut binding_types = HashMap::new();
+    let mut binding_types = HashMap::default();
     binding_types.insert(SmolStr::from("scope"), owned);
 
     let resolved = crate::resolve_export_typeof(&raw_exports, &binding_types);
@@ -9397,7 +9409,7 @@ fn resolve_export_typeof_nested() {
         SmolStr::from("y"),
         ParsedTyRef::from(ParsedTy::TypeOf(SmolStr::from("b"))),
     );
-    let mut raw_exports = HashMap::new();
+    let mut raw_exports = HashMap::default();
     raw_exports.insert(
         SmolStr::from("Pair"),
         ParsedTy::AttrSet(lang_ty::AttrSetTy {
@@ -9413,7 +9425,7 @@ fn resolve_export_typeof_nested() {
     let mut arena_b = TypeArena::new();
     let root_b = arena_b.intern(OutputTy::Primitive(PrimitiveTy::String));
 
-    let mut binding_types = HashMap::new();
+    let mut binding_types = HashMap::default();
     binding_types.insert(SmolStr::from("a"), OwnedTy::new(Arc::new(arena_a), root_a));
     binding_types.insert(SmolStr::from("b"), OwnedTy::new(Arc::new(arena_b), root_b));
 
@@ -9451,7 +9463,7 @@ fn get_name_type_up_to_group(src: &str, name: &str, stop_after_group: usize) -> 
         &r.name_res,
         &r.module_indices.binding_expr,
         aliases,
-        HashMap::new(),
+        HashMap::default(),
         Arc::default(),
     );
     let (result, _diags) = check.infer_prog_up_to_group(r.grouped_defs, stop_after_group);
@@ -9498,8 +9510,8 @@ fn infer_prog_up_to_group_matches_full() {
 
 #[test]
 fn run_partial_inference_basic() {
+    use rustc_hash::FxHashSet as HashSet;
     use smol_str::SmolStr;
-    use std::collections::HashSet;
 
     let nix = "let scope = { mkDeriv = x: x; }; in scope";
     let r = lang_ast::run_syntax_pipeline(nix);
@@ -9510,17 +9522,17 @@ fn run_partial_inference_basic() {
         name_res: r.name_res,
         grouped_defs: r.grouped_defs,
         registry: Arc::new(TypeAliasRegistry::default()),
-        import_types: HashMap::new(),
+        import_types: HashMap::default(),
         import_diagnostics: vec![],
         context_args: Arc::default(),
         rss_limit_mb: None,
         file_path: None,
-        imported_type_exports: HashMap::new(),
-        typeof_import_types: HashMap::new(),
+        imported_type_exports: HashMap::default(),
+        typeof_import_types: HashMap::default(),
         file_base_dir: None,
     };
 
-    let mut target_names = HashSet::new();
+    let mut target_names = HashSet::default();
     target_names.insert(SmolStr::from("scope"));
 
     let binding_types = crate::run_partial_inference(&inputs, 0, &target_names);
@@ -9635,7 +9647,7 @@ fn filter_ignored_diagnostics_suppresses_target_line() {
     let result = crate::CheckBuilder::from_source(
         nix,
         Arc::new(TypeAliasRegistry::default()),
-        HashMap::new(),
+        HashMap::default(),
         Arc::default(),
     )
     .run();

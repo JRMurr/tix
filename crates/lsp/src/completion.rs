@@ -3337,7 +3337,7 @@ mod tests {
         let stubs_dir = temp_dir.join("stubs");
         std::fs::create_dir_all(&stubs_dir).unwrap();
 
-        let mut context_map = std::collections::HashMap::new();
+        let mut context_map = std::collections::HashMap::default();
         for (name, globs, stubs_content) in contexts {
             let stub_filename = format!("{name}.tix");
             std::fs::write(stubs_dir.join(&stub_filename), stubs_content).unwrap();
@@ -3388,7 +3388,7 @@ mod tests {
             registry.set_builtin_stubs_dir(dir);
         }
 
-        let mut context_map = std::collections::HashMap::new();
+        let mut context_map = std::collections::HashMap::default();
         for (name, globs) in contexts {
             context_map.insert(
                 name.to_string(),
@@ -3829,7 +3829,7 @@ mod tests {
         let mut registry = TypeAliasRegistry::default();
         registry.set_builtin_stubs_dir(generated_dir);
 
-        let mut context_map = std::collections::HashMap::new();
+        let mut context_map = std::collections::HashMap::default();
         context_map.insert(
             "nixos".to_string(),
             ContextConfig {
@@ -3980,7 +3980,7 @@ mod tests {
         std::fs::write(override_dir.join("nixos.tix"), nixos_stubs).unwrap();
         registry.set_builtin_stubs_dir(override_dir);
 
-        let mut context_map = std::collections::HashMap::new();
+        let mut context_map = std::collections::HashMap::default();
         context_map.insert(
             "nixos".to_string(),
             ContextConfig {
@@ -4071,7 +4071,7 @@ mod tests {
         std::fs::write(override_dir.join("pkgs.tix"), pkgs_stubs).unwrap();
         registry.set_builtin_stubs_dir(override_dir);
 
-        let mut context_map = std::collections::HashMap::new();
+        let mut context_map = std::collections::HashMap::default();
         context_map.insert(
             "nixos".to_string(),
             ContextConfig {
@@ -4163,7 +4163,7 @@ mod tests {
         std::fs::write(override_dir.join("nixos.tix"), nixos_stubs).unwrap();
         registry.set_builtin_stubs_dir(override_dir);
 
-        let mut context_map = std::collections::HashMap::new();
+        let mut context_map = std::collections::HashMap::default();
         context_map.insert(
             "nixos".to_string(),
             ContextConfig {

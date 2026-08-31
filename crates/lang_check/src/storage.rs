@@ -132,9 +132,16 @@ impl TypeStorage {
     }
 
     /// Record that `bound` is a lower bound of variable `var` (bound <: var).
+    /// Idempotent: bounds are semantically a set, and repeated extrusions of
+    /// the same reference would otherwise accumulate duplicates that every
+    /// later constrain walks (O(refs²)).
     pub fn add_lower_bound(&mut self, var: TyId, bound: TyId) {
         match self.get_mut(var) {
-            TypeEntry::Variable(v) => v.lower_bounds.push(bound),
+            TypeEntry::Variable(v) => {
+                if !v.lower_bounds.contains(&bound) {
+                    v.lower_bounds.push(bound);
+                }
+            }
             TypeEntry::Concrete(_) => {
                 debug_assert!(false, "add_lower_bound called on concrete type {var:?}");
             }
@@ -142,9 +149,14 @@ impl TypeStorage {
     }
 
     /// Record that `bound` is an upper bound of variable `var` (var <: bound).
+    /// Idempotent — see `add_lower_bound`.
     pub fn add_upper_bound(&mut self, var: TyId, bound: TyId) {
         match self.get_mut(var) {
-            TypeEntry::Variable(v) => v.upper_bounds.push(bound),
+            TypeEntry::Variable(v) => {
+                if !v.upper_bounds.contains(&bound) {
+                    v.upper_bounds.push(bound);
+                }
+            }
             TypeEntry::Concrete(_) => {
                 debug_assert!(false, "add_upper_bound called on concrete type {var:?}");
             }

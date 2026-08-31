@@ -12,7 +12,7 @@
 //        type flow and reference-counted signature eviction
 //   3.   Sequential Render  — deterministic diagnostic output in file order
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -82,14 +82,14 @@ struct RenderableResult {
     /// `true` if the file has `# tix-nocheck` — all diagnostics suppressed.
     nocheck: bool,
     /// 0-indexed lines where diagnostics are suppressed (`# tix-ignore`).
-    ignore_lines: std::collections::HashSet<u32>,
+    ignore_lines: rustc_hash::FxHashSet<u32>,
 }
 
 /// Intermediate result from inference (before combining with metadata for rendering).
 struct InferBundleResult {
     diagnostics: Vec<lang_check::diagnostic::TixDiagnostic>,
     nocheck: bool,
-    ignore_lines: std::collections::HashSet<u32>,
+    ignore_lines: rustc_hash::FxHashSet<u32>,
     bailed_out: bool,
 }
 
@@ -122,8 +122,8 @@ fn infer_bundle(
         context_args: bundle.context_args,
         rss_limit_mb: None,
         file_path: Some(file_path.to_path_buf()),
-        imported_type_exports: std::collections::HashMap::new(),
-        typeof_import_types: std::collections::HashMap::new(),
+        imported_type_exports: rustc_hash::FxHashMap::default(),
+        typeof_import_types: rustc_hash::FxHashMap::default(),
         file_base_dir: None,
     };
 
@@ -260,7 +260,7 @@ pub fn run_check_project(
         module_indices: lang_ast::ModuleIndices,
         name_res: lang_ast::NameResolution,
         grouped_defs: lang_ast::GroupedDefs,
-        context_args: Arc<std::collections::HashMap<smol_str::SmolStr, comment_parser::ParsedTy>>,
+        context_args: Arc<rustc_hash::FxHashMap<smol_str::SmolStr, comment_parser::ParsedTy>>,
         import_targets: Vec<PathBuf>,
     }
 
@@ -341,8 +341,9 @@ pub fn run_check_project(
     let precomputed: DashMap<PathBuf, SyntaxBundle> = DashMap::with_capacity(pre_prepared.len());
     let metadata_map: DashMap<PathBuf, FileMetadata> = DashMap::with_capacity(pre_prepared.len());
     let mut import_edges: HashMap<PathBuf, Vec<PathBuf>> =
-        HashMap::with_capacity(pre_prepared.len());
-    let mut expr_counts: HashMap<PathBuf, usize> = HashMap::with_capacity(pre_prepared.len());
+        HashMap::with_capacity_and_hasher(pre_prepared.len(), Default::default());
+    let mut expr_counts: HashMap<PathBuf, usize> =
+        HashMap::with_capacity_and_hasher(pre_prepared.len(), Default::default());
 
     // Track original discovery order for deterministic Phase 3 output.
     let mut file_order: Vec<PathBuf> = Vec::with_capacity(pre_prepared.len());

@@ -12,7 +12,7 @@
 // - Unresolved names that match a `val` in .tix stubs → jumps to the stub
 // - `lib.field` where `field` matches a stub val → jumps to the stub
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 use std::path::PathBuf;
 
 use lang_ast::nameres::ResolveResult;

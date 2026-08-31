@@ -405,7 +405,8 @@ impl CheckCtx<'_> {
             let (mut arena, ty) =
                 canonicalize_standalone(&self.types.storage, name_slot, Polarity::Positive);
             let simplified = simplify(&mut arena, ty);
-            self.early_canonical.insert(name_id, (arena, simplified));
+            self.early_canonical
+                .insert(name_id, (Arc::new(arena), simplified));
         }
 
         // Also capture early canonical for lambda parameter names by extracting
@@ -424,7 +425,7 @@ impl CheckCtx<'_> {
             let Some((func_arena, func_ty)) = self.early_canonical.get(def.name()) else {
                 continue;
             };
-            let func_arena = func_arena.clone();
+            let func_arena = Arc::clone(func_arena);
             let func_ty = *func_ty;
 
             let Some(field_types) = extract_lambda_param_fields(&func_arena, func_ty) else {
@@ -435,7 +436,7 @@ impl CheckCtx<'_> {
                 let field_text = &self.module[name_id].text;
                 if let Some(&field_tyref) = field_types.get(field_text) {
                     self.early_canonical
-                        .insert(name_id, (func_arena.clone(), field_tyref));
+                        .insert(name_id, (Arc::clone(&func_arena), field_tyref));
                 }
             }
         }
@@ -631,8 +632,23 @@ impl CheckCtx<'_> {
         polarity: Polarity,
         name: Option<lang_ast::NameId>,
     ) -> TyId {
-        let mut cache = FxHashMap::with_capacity_and_hasher(64, Default::default());
-        let result = self.extrude_inner(ty_id, polarity, &mut cache);
+        // Reuse one scratch map across calls — extrude runs per reference,
+        // and a fresh 64-slot map each time showed up in profiles.
+        let mut cache = std::mem::take(&mut self.extrude_scratch);
+        cache.clear();
+        let result = self.extrude_with_cache(ty_id, polarity, name, &mut cache);
+        self.extrude_scratch = cache;
+        result
+    }
+
+    fn extrude_with_cache(
+        &mut self,
+        ty_id: TyId,
+        polarity: Polarity,
+        name: Option<lang_ast::NameId>,
+        cache: &mut FxHashMap<TyId, TyId>,
+    ) -> TyId {
+        let result = self.extrude_inner(ty_id, polarity, cache);
 
         // Re-instantiate deferred overloads for the name being instantiated.
         // Only overloads carried under this name are scanned — this keeps
@@ -690,9 +706,9 @@ impl CheckCtx<'_> {
                             }
                         };
 
-                    let new_lhs = get_or_extrude(ov_lhs, self, &mut cache);
-                    let new_rhs = get_or_extrude(ov_rhs, self, &mut cache);
-                    let new_ret = get_or_extrude(ov_ret, self, &mut cache);
+                    let new_lhs = get_or_extrude(ov_lhs, self, cache);
+                    let new_rhs = get_or_extrude(ov_rhs, self, cache);
+                    let new_ret = get_or_extrude(ov_ret, self, cache);
 
                     self.deferred
                         .active

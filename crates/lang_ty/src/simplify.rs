@@ -222,11 +222,34 @@ fn dedup_members(members: &mut Vec<TyRef>) {
     members.retain(|&m| seen.insert(m));
 }
 
+/// Memoization cache for `apply_simplification`, keyed by node identity plus
+/// whether the empty-removable fallback set is in effect (the only way
+/// `removable` varies within one pass). The arena is a hash-consed DAG, so
+/// shared nodes would otherwise be re-simplified exponentially often.
+type SimplifyCache = FxHashMap<(TyRef, bool), TyRef>;
+
 fn apply_simplification(
     arena: &mut TypeArena,
     ty: TyRef,
     substitution: &FxHashMap<u32, u32>,
     removable: &FxHashSet<u32>,
+    cache: &mut SimplifyCache,
+) -> TyRef {
+    let key = (ty, removable.is_empty());
+    if let Some(&cached) = cache.get(&key) {
+        return cached;
+    }
+    let result = apply_simplification_uncached(arena, ty, substitution, removable, cache);
+    cache.insert(key, result);
+    result
+}
+
+fn apply_simplification_uncached(
+    arena: &mut TypeArena,
+    ty: TyRef,
+    substitution: &FxHashMap<u32, u32>,
+    removable: &FxHashSet<u32>,
+    cache: &mut SimplifyCache,
 ) -> TyRef {
     let node = arena[ty].clone();
     lang_ast::stack::with_stack(|| match &node {
@@ -236,12 +259,12 @@ fn apply_simplification(
         }
         OutputTy::Primitive(_) | OutputTy::Bottom | OutputTy::Top | OutputTy::Extern(_) => ty,
         OutputTy::List(inner) => {
-            let new_inner = apply_simplification(arena, *inner, substitution, removable);
+            let new_inner = apply_simplification(arena, *inner, substitution, removable, cache);
             arena.intern(OutputTy::List(new_inner))
         }
         OutputTy::Lambda { param, body } => {
-            let new_param = apply_simplification(arena, *param, substitution, removable);
-            let new_body = apply_simplification(arena, *body, substitution, removable);
+            let new_param = apply_simplification(arena, *param, substitution, removable, cache);
+            let new_body = apply_simplification(arena, *body, substitution, removable, cache);
             arena.intern(OutputTy::Lambda {
                 param: new_param,
                 body: new_body,
@@ -255,10 +278,15 @@ fn apply_simplification(
 
             let new_fields = fields
                 .into_iter()
-                .map(|(k, v)| (k, apply_simplification(arena, v, substitution, removable)))
+                .map(|(k, v)| {
+                    (
+                        k,
+                        apply_simplification(arena, v, substitution, removable, cache),
+                    )
+                })
                 .collect();
             let new_dyn_ty =
-                dyn_ty.map(|d| apply_simplification(arena, d, substitution, removable));
+                dyn_ty.map(|d| apply_simplification(arena, d, substitution, removable, cache));
             arena.intern(OutputTy::AttrSet(crate::AttrSetTy {
                 fields: new_fields,
                 dyn_ty: new_dyn_ty,
@@ -274,7 +302,7 @@ fn apply_simplification(
                     if is_removable_var_member(arena, &arena[m], substitution, removable) {
                         return None;
                     }
-                    let s = apply_simplification(arena, m, substitution, removable);
+                    let s = apply_simplification(arena, m, substitution, removable, cache);
                     if matches!(&arena[s], OutputTy::Bottom) {
                         return None;
                     }
@@ -304,7 +332,13 @@ fn apply_simplification(
             dedup_members(&mut flat);
 
             match flat.len() {
-                0 => apply_simplification(arena, members[0], substitution, &FxHashSet::default()),
+                0 => apply_simplification(
+                    arena,
+                    members[0],
+                    substitution,
+                    &FxHashSet::default(),
+                    cache,
+                ),
                 1 => flat[0],
                 _ => arena.intern(OutputTy::Union(flat)),
             }
@@ -317,7 +351,7 @@ fn apply_simplification(
                     if is_removable_var_member(arena, &arena[m], substitution, removable) {
                         return None;
                     }
-                    let s = apply_simplification(arena, m, substitution, removable);
+                    let s = apply_simplification(arena, m, substitution, removable, cache);
                     if matches!(&arena[s], OutputTy::Top) {
                         return None;
                     }
@@ -344,18 +378,24 @@ fn apply_simplification(
             dedup_members(&mut flat);
 
             match flat.len() {
-                0 => apply_simplification(arena, members[0], substitution, &FxHashSet::default()),
+                0 => apply_simplification(
+                    arena,
+                    members[0],
+                    substitution,
+                    &FxHashSet::default(),
+                    cache,
+                ),
                 1 => flat[0],
                 _ => arena.intern(OutputTy::Intersection(flat)),
             }
         }
         OutputTy::Named(name, inner) => {
             let name = name.clone();
-            let new_inner = apply_simplification(arena, *inner, substitution, removable);
+            let new_inner = apply_simplification(arena, *inner, substitution, removable, cache);
             arena.intern(OutputTy::Named(name, new_inner))
         }
         OutputTy::Neg(inner) => {
-            let new_inner = apply_simplification(arena, *inner, substitution, removable);
+            let new_inner = apply_simplification(arena, *inner, substitution, removable, cache);
             arena.intern(OutputTy::Neg(new_inner))
         }
     })
@@ -395,7 +435,8 @@ fn simplify_once(arena: &mut TypeArena, ty: TyRef) -> TyRef {
         polar_only_vars(&vars)
     };
 
-    apply_simplification(arena, ty, &substitution, &removable)
+    let mut cache = SimplifyCache::default();
+    apply_simplification(arena, ty, &substitution, &removable, &mut cache)
 }
 
 #[cfg(test)]

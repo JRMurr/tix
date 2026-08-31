@@ -15,7 +15,7 @@
 // The warmup runs on spawn_blocking, so the async analysis loop stays
 // responsive to user edits during warmup.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -156,7 +156,8 @@ pub fn run_batch_warmup(
     // Phase 1.5 — Dependency graph + topological layers
     // =========================================================================
 
-    let mut import_edges: HashMap<PathBuf, Vec<PathBuf>> = HashMap::with_capacity(prepared.len());
+    let mut import_edges: HashMap<PathBuf, Vec<PathBuf>> =
+        HashMap::with_capacity_and_hasher(prepared.len(), Default::default());
     for pp in &prepared {
         import_edges.insert(pp.path.clone(), pp.import_targets_raw.clone());
     }
@@ -223,8 +224,8 @@ pub fn run_batch_warmup(
             context_args: pp.context_args.clone(),
             rss_limit_mb,
             file_path: Some(pp.path.clone()),
-            imported_type_exports: HashMap::new(),
-            typeof_import_types: HashMap::new(),
+            imported_type_exports: HashMap::default(),
+            typeof_import_types: HashMap::default(),
             file_base_dir: None,
         };
 

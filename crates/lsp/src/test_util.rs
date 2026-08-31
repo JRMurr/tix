@@ -143,7 +143,7 @@ pub use internal::*;
 
 #[cfg(test)]
 mod internal {
-    use std::collections::HashSet;
+    use rustc_hash::FxHashSet as HashSet;
     use std::path::PathBuf;
 
     use lang_ast::Expr;
@@ -216,7 +216,7 @@ mod internal {
             let mut state = AnalysisState::new(TypeAliasRegistry::default());
 
             // Configure project context: all .nix files get our test context stubs.
-            let mut context = std::collections::HashMap::new();
+            let mut context = rustc_hash::FxHashMap::default();
             context.insert(
                 "test".to_string(),
                 ContextConfig {
@@ -299,7 +299,7 @@ mod internal {
         analysis: &FileAnalysis,
         root: &rnix::Root,
     ) -> Vec<InterestingPosition> {
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::default();
         let mut positions = Vec::new();
 
         // Name bindings: let-bound names, lambda params, pattern fields, etc.

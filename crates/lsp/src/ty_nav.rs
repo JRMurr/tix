@@ -6,7 +6,9 @@
 // Used by both completion and hover to resolve attrset fields, walk through
 // type aliases, and extract lambda parameter types.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
+
+use rustc_hash::FxHashMap as HashMap;
 use std::sync::Arc;
 
 use lang_ast::Expr;

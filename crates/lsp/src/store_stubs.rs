@@ -12,7 +12,7 @@
 //   2. [stubs.generate] runtime generation (this module)
 //   3. Compiled-in minimal stubs (existing fallback)
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -877,7 +877,7 @@ mod tests {
 
         let merged_root = tempfile::tempdir().unwrap();
         let merged = merged_root.path().join("out");
-        let systems = HashMap::new();
+        let systems = HashMap::default();
 
         populate_merged_stubs_dir(built_in.path(), &merged, &systems).unwrap();
 
@@ -900,7 +900,7 @@ mod tests {
 
         let merged_root = tempfile::tempdir().unwrap();
         let merged = merged_root.path().join("out");
-        let systems = HashMap::new();
+        let systems = HashMap::default();
 
         populate_merged_stubs_dir(built_in_a.path(), &merged, &systems).unwrap();
         assert!(merged.join("a.tix").exists());
@@ -929,7 +929,7 @@ mod tests {
 
     #[test]
     fn digest_systems_config_is_deterministic() {
-        let mut systems = HashMap::new();
+        let mut systems = HashMap::default();
         systems.insert(
             "flake-parts".into(),
             CustomSystem {
@@ -955,14 +955,14 @@ mod tests {
 
     #[test]
     fn digest_systems_config_empty_is_empty() {
-        let systems = HashMap::new();
+        let systems = HashMap::default();
         assert_eq!(digest_systems_config(&systems), "");
     }
 
     #[test]
     fn digest_systems_config_differs_on_options_expr_change() {
         let mk = |expr: &str| {
-            let mut systems = HashMap::new();
+            let mut systems = HashMap::default();
             systems.insert(
                 "mysys".into(),
                 CustomSystem {

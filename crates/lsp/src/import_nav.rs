@@ -5,7 +5,7 @@
 // Shared logic for following import chains transitively (goto-def) and
 // finding field references across importing files (find-all-references).
 
-use std::collections::HashSet;
+use rustc_hash::FxHashSet as HashSet;
 use std::path::{Path, PathBuf};
 
 use lang_ast::nameres::ResolveResult;
@@ -153,7 +153,7 @@ pub fn find_cross_file_field_references(
     field_name: &str,
 ) -> Vec<Location> {
     let mut locations = Vec::new();
-    let mut visited = HashSet::new();
+    let mut visited = HashSet::default();
     find_cross_file_field_references_inner(
         state,
         snapshots,
@@ -312,7 +312,7 @@ fn resolve_return_value_import(
     module: &Module,
     name_res: &lang_ast::NameResolution,
     indices: &lang_ast::ModuleIndices,
-    import_targets: &std::collections::HashMap<ExprId, PathBuf>,
+    import_targets: &rustc_hash::FxHashMap<ExprId, PathBuf>,
 ) -> Option<PathBuf> {
     // Unwrap through Lambda/LetIn to find the innermost return expression.
     let mut expr_id = module.entry_expr;
@@ -345,7 +345,7 @@ fn resolve_return_value_import(
 /// `fun` chain until it finds a match.
 fn chase_import_target(
     module: &Module,
-    import_targets: &std::collections::HashMap<ExprId, PathBuf>,
+    import_targets: &rustc_hash::FxHashMap<ExprId, PathBuf>,
     expr_id: ExprId,
 ) -> Option<PathBuf> {
     if let Some(path) = import_targets.get(&expr_id) {

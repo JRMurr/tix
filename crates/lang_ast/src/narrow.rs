@@ -10,7 +10,7 @@
 // These functions only depend on the Module, NameResolution, and binding_exprs
 // — they perform no type inference.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 use crate::nameres::ResolveResult;
 use crate::{BinOP, Expr, ExprBinOp, ExprId, Literal, NameId, NormalBinOp};

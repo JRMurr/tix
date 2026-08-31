@@ -29,7 +29,7 @@ use la_arena::ArenaMap;
 use lang_ast::{Expr, ExprId, Module, NameId, NameResolution, OverloadBinOp};
 use lang_ty::{OutputTy, OwnedTy, PrimitiveTy, Ty, TyRef, TypeArena};
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::path::PathBuf;
 
 use smol_str::SmolStr;
@@ -42,7 +42,7 @@ use type_table::TypeTable;
 /// Returns a map of alias name → ParsedTy body. These are the types that
 /// other files can import via `import("./path.nix").TypeName`.
 pub fn extract_type_exports(module: &lang_ast::Module) -> HashMap<smol_str::SmolStr, ParsedTy> {
-    let mut exports = HashMap::new();
+    let mut exports = HashMap::default();
     for alias_source in &module.inline_type_aliases {
         if let Some((name, body)) = comment_parser::parse_inline_type_alias(alias_source) {
             exports.insert(name, body);
@@ -56,7 +56,7 @@ pub fn extract_type_exports(module: &lang_ast::Module) -> HashMap<smol_str::Smol
 pub fn find_typeof_targets(
     exports: &HashMap<smol_str::SmolStr, ParsedTy>,
 ) -> HashSet<smol_str::SmolStr> {
-    let mut targets = HashSet::new();
+    let mut targets = HashSet::default();
     for body in exports.values() {
         collect_typeof_names(body, &mut targets);
     }
@@ -296,7 +296,7 @@ pub fn run_partial_inference(
     let (result, _diagnostics) =
         check.infer_prog_up_to_group(inputs.grouped_defs.clone(), stop_after_group);
 
-    let mut binding_types = HashMap::new();
+    let mut binding_types = HashMap::default();
     for (name_id, &ty_ref) in result.name_ty_map.iter() {
         let name_text = inputs.module[name_id].text.clone();
         if target_names.contains(name_text.as_str()) {
@@ -347,7 +347,7 @@ pub fn check_source_with_aliases(
         &r.name_res,
         &r.module_indices.binding_expr,
         aliases,
-        HashMap::new(),
+        HashMap::default(),
         Arc::default(),
     );
     check.infer_prog(r.grouped_defs)
@@ -711,8 +711,8 @@ impl CheckBuilder {
             import_types,
             context_args,
             rss_limit_mb: None,
-            imported_type_exports: HashMap::new(),
-            typeof_import_types: HashMap::new(),
+            imported_type_exports: HashMap::default(),
+            typeof_import_types: HashMap::default(),
             file_base_dir: None,
         }
     }
@@ -736,8 +736,8 @@ impl CheckBuilder {
             import_types,
             context_args,
             rss_limit_mb: None,
-            imported_type_exports: HashMap::new(),
-            typeof_import_types: HashMap::new(),
+            imported_type_exports: HashMap::default(),
+            typeof_import_types: HashMap::default(),
             file_base_dir: None,
         }
     }
@@ -888,10 +888,15 @@ pub struct CheckCtx<'db> {
     /// Constraints whose resolution is deferred until operand types are known.
     deferred: DeferredConstraints,
 
+    /// Reusable scratch map for `extrude` — cleared per call, kept allocated.
+    extrude_scratch: FxHashMap<TyId, TyId>,
+
     /// Early-canonicalized types for names, captured at generalization time
     /// before use-site extrusions contaminate polymorphic variables with
     /// concrete bounds.
-    early_canonical: ArenaMap<NameId, (TypeArena, TyRef)>,
+    /// Arc so lambda pattern fields can share the function's arena instead of
+    /// deep-copying it per field.
+    early_canonical: ArenaMap<NameId, (Arc<TypeArena>, TyRef)>,
 
     /// Type alias registry loaded from .tix declaration files.
     /// Wrapped in Arc for copy-on-write: most files share the registry
@@ -1005,6 +1010,7 @@ impl<'db> CheckCtx<'db> {
             types: TypeTable::with_capacity(module.names().len() + module.exprs().len()),
             poly_type_env: ArenaMap::new(),
             deferred: DeferredConstraints::default(),
+            extrude_scratch: FxHashMap::default(),
             early_canonical: ArenaMap::new(),
             type_aliases,
             import_types,
@@ -1015,9 +1021,9 @@ impl<'db> CheckCtx<'db> {
             bailed_out: false,
             rss_limit_mb: None,
             inferred_exprs: FxHashSet::default(),
-            imported_type_exports: HashMap::new(),
+            imported_type_exports: HashMap::default(),
             file_base_dir: None,
-            typeof_import_types: HashMap::new(),
+            typeof_import_types: HashMap::default(),
         }
     }
 
@@ -1164,8 +1170,8 @@ impl<'db> CheckCtx<'db> {
     /// source file's TypeStorage — constraints applied in this file cannot
     /// propagate back to the imported file.
     fn intern_output_ty(&mut self, owned: &OwnedTy) -> TyId {
-        let mut var_map: HashMap<u32, TyId> = HashMap::new();
-        let mut ref_cache: HashMap<TyRef, TyId> = HashMap::new();
+        let mut var_map: HashMap<u32, TyId> = HashMap::default();
+        let mut ref_cache: HashMap<TyRef, TyId> = HashMap::default();
         self.intern_output_ty_inner(&owned.arena, owned.root, &mut var_map, &mut ref_cache)
     }
 
@@ -1543,7 +1549,7 @@ impl<'db> CheckCtx<'db> {
             .map(|var| (var, self.new_var()))
             .collect();
 
-        let mut memo = HashMap::new();
+        let mut memo = HashMap::default();
         self.intern_parsed_ty(&ty, &subs, st, &mut memo)
     }
 

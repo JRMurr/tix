@@ -17,8 +17,8 @@
 // delegated to a `SyntaxProvider` trait, which the CLI and LSP implement
 // differently (pre-extracted HashMap vs on-demand parsing).
 
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -110,14 +110,14 @@ enum TypeExportSlot {
 // Used to detect import cycles (A imports B imports A) and break them
 // by returning ⊤ for the back-edge.
 thread_local! {
-    static IN_PROGRESS: RefCell<HashSet<PathBuf>> = RefCell::new(HashSet::new());
+    static IN_PROGRESS: RefCell<HashSet<PathBuf>> = RefCell::new(HashSet::default());
     /// Files whose type exports are being resolved via partial inference on
     /// this thread. Re-entry would wait on our own `Computing` slot forever.
-    static TYPE_EXPORTS_IN_PROGRESS: RefCell<HashSet<PathBuf>> = RefCell::new(HashSet::new());
+    static TYPE_EXPORTS_IN_PROGRESS: RefCell<HashSet<PathBuf>> = RefCell::new(HashSet::default());
     /// Files whose in-progress work was re-entered from a dependency on this
     /// thread. Consumed by `resolve_type_imports` of that file to report the
     /// cycle where the user can see it.
-    static CYCLE_HITS: RefCell<HashSet<PathBuf>> = RefCell::new(HashSet::new());
+    static CYCLE_HITS: RefCell<HashSet<PathBuf>> = RefCell::new(HashSet::default());
 }
 
 fn note_cycle_hit(path: &Path) {
@@ -152,8 +152,8 @@ impl InferenceCoordinator {
         Self {
             cache: DashMap::new(),
             type_export_cache: DashMap::new(),
-            reverse_deps: Mutex::new(HashMap::new()),
-            forward_deps: Mutex::new(HashMap::new()),
+            reverse_deps: Mutex::new(HashMap::default()),
+            forward_deps: Mutex::new(HashMap::default()),
         }
     }
 
@@ -347,9 +347,11 @@ impl InferenceCoordinator {
         let raw_exports = crate::extract_type_exports(&bundle.module);
 
         if raw_exports.is_empty() {
-            self.type_export_cache
-                .insert(path.to_path_buf(), TypeExportSlot::Ready(HashMap::new()));
-            return Some(HashMap::new());
+            self.type_export_cache.insert(
+                path.to_path_buf(),
+                TypeExportSlot::Ready(HashMap::default()),
+            );
+            return Some(HashMap::default());
         }
 
         // 3. Check if any exports contain typeof
@@ -410,8 +412,8 @@ impl InferenceCoordinator {
             context_args: bundle.context_args,
             rss_limit_mb: None,
             file_path: Some(path.to_path_buf()),
-            imported_type_exports: HashMap::new(),
-            typeof_import_types: HashMap::new(),
+            imported_type_exports: HashMap::default(),
+            typeof_import_types: HashMap::default(),
             file_base_dir: None,
         };
 
@@ -663,7 +665,7 @@ impl InferenceCoordinator {
     /// of paths that were evicted (excluding the root path itself).
     pub fn invalidate(&self, path: &Path) -> Vec<PathBuf> {
         let mut evicted = Vec::new();
-        let mut visited = HashSet::new();
+        let mut visited = HashSet::default();
         // Snapshot reverse_deps once to avoid multiple lock acquisitions
         // during recursion and to prevent TOCTOU races with concurrent
         // cache modifications.
@@ -1089,7 +1091,7 @@ mod tests {
         let a_path = write_nix(dir.path(), "a.nix", &a_contents);
 
         // Build the import edge map.
-        let mut import_edges = HashMap::new();
+        let mut import_edges = HashMap::default();
         import_edges.insert(a_path.clone(), vec![b_path.clone()]);
         import_edges.insert(b_path.clone(), vec![]);
 
@@ -1143,7 +1145,7 @@ mod tests {
         );
         let a_path = write_nix(dir.path(), "a.nix", &a_contents);
 
-        let mut import_edges = HashMap::new();
+        let mut import_edges = HashMap::default();
         import_edges.insert(d_path.clone(), vec![]);
         import_edges.insert(b_path.clone(), vec![d_path.clone()]);
         import_edges.insert(c_path.clone(), vec![d_path.clone()]);
@@ -1194,7 +1196,7 @@ mod tests {
         let a_path = a_path_raw.canonicalize().unwrap();
         let b_path = b_path_raw.canonicalize().unwrap();
 
-        let mut import_edges = HashMap::new();
+        let mut import_edges = HashMap::default();
         import_edges.insert(a_path.clone(), vec![b_path.clone()]);
         import_edges.insert(b_path.clone(), vec![a_path.clone()]);
 
@@ -1260,7 +1262,7 @@ in
         let call_path = write_nix(dir.path(), "call.nix", &call_contents);
 
         // Build the import edge map.
-        let mut import_edges = HashMap::new();
+        let mut import_edges = HashMap::default();
         import_edges.insert(call_path.clone(), vec![lib_path.clone()]);
         import_edges.insert(lib_path.clone(), vec![]);
 
@@ -1344,7 +1346,7 @@ in
         );
         let call_path = write_nix(dir.path(), "call.nix", &call_contents);
 
-        let mut import_edges = HashMap::new();
+        let mut import_edges = HashMap::default();
         import_edges.insert(call_path.clone(), vec![lib_path.clone()]);
         import_edges.insert(lib_path.clone(), vec![]);
 
@@ -1425,7 +1427,7 @@ in
         );
         let call_path = write_nix(dir.path(), "call.nix", &call_contents);
 
-        let mut import_edges = HashMap::new();
+        let mut import_edges = HashMap::default();
         import_edges.insert(call_path.clone(), vec![lib_path.clone()]);
         import_edges.insert(lib_path.clone(), vec![]);
 

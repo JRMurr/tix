@@ -12,7 +12,9 @@ pub mod stack;
 #[cfg(any(test, feature = "test_support"))]
 pub mod tests;
 
-use std::{collections::HashMap, collections::HashSet, fmt, ops, path::Path, sync::LazyLock};
+use std::{fmt, ops, path::Path, sync::LazyLock};
+
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 pub use comment::line_of_offset;
 use comment::{gather_doc_comments, gather_ignore_lines, has_nocheck_directive};
@@ -80,8 +82,8 @@ pub struct ModuleIndices {
 /// Build pre-computed indices for a Module (binding expressions, param-to-lambda mappings).
 #[instrument(level = "info", skip_all, name = "module_indices")]
 pub fn compute_module_indices(module: &Module) -> ModuleIndices {
-    let mut binding_expr = HashMap::new();
-    let mut param_to_lambda = HashMap::new();
+    let mut binding_expr = HashMap::default();
+    let mut param_to_lambda = HashMap::default();
 
     for (expr_id, expr) in module.exprs() {
         match expr {

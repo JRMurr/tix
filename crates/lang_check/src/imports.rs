@@ -11,7 +11,9 @@
 // derivation). Since callPackage applies the dependency-injection argument, we
 // peel one Lambda layer to get the return type.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
+
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
@@ -234,7 +236,7 @@ pub fn scan_all_import_paths(
     let literal = scan_literal_imports(module, name_res, base_dir);
     let callpackage = scan_callpackage_imports(module, base_dir);
 
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     let mut result = Vec::new();
 
     let all_paths = literal
@@ -414,9 +416,9 @@ where
         )
         .collect();
 
-    let mut types = HashMap::new();
+    let mut types = HashMap::default();
     let mut errors: Vec<ImportError> = Vec::new();
-    let mut targets = HashMap::new();
+    let mut targets = HashMap::default();
 
     // Attempt to resolve recognized angle bracket imports (e.g. <nixpkgs>)
     // to known type aliases. Unresolved ones become E012 warnings.
@@ -588,7 +590,7 @@ pub fn import_errors_to_diagnostics(
 /// (`import("path").TypeName` and `typeof import("path")`). Returns the set
 /// of relative paths found in doc comments and inline type aliases.
 pub fn scan_type_import_paths(module: &Module) -> HashSet<String> {
-    scan_type_import_anchors(module, &HashMap::new())
+    scan_type_import_anchors(module, &HashMap::default())
         .into_keys()
         .collect()
 }
@@ -603,7 +605,7 @@ pub fn scan_type_import_anchors(
     module: &Module,
     binding_exprs: &HashMap<NameId, ExprId>,
 ) -> HashMap<String, ExprId> {
-    let mut anchors = HashMap::new();
+    let mut anchors = HashMap::default();
     let entry = module.entry_expr;
 
     let mut add = |paths: HashSet<String>, at_expr: ExprId| {
@@ -614,7 +616,7 @@ pub fn scan_type_import_anchors(
 
     for alias_source in &module.inline_type_aliases {
         if let Some((_name, body)) = comment_parser::parse_inline_type_alias(alias_source) {
-            let mut paths = HashSet::new();
+            let mut paths = HashSet::default();
             collect_import_paths_from_parsed_ty(&body, &mut paths);
             add(paths, entry);
         }
@@ -633,7 +635,7 @@ pub fn scan_type_import_anchors(
 }
 
 fn paths_in_docs(docs: &[String]) -> HashSet<String> {
-    let mut paths = HashSet::new();
+    let mut paths = HashSet::default();
     for doc in docs {
         if let Ok(decls) = comment_parser::parse_and_collect(doc) {
             for decl in &decls {
