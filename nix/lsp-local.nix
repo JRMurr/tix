@@ -4,7 +4,9 @@
   */
   pkgs,
   # "debug" or "release" — selects the cargo build profile under target/.
-  profile ? "release",
+  # Required (no default): tix-lsp-dev once silently ran the release binary
+  # because a defaulted profile didn't match the debug build `just code` makes.
+  profile,
   name ? "tix-lsp-${profile}",
 }:
 
