@@ -202,13 +202,6 @@ pub fn expect_ty_inference(src: &str, expected: RootTy) {
     assert_eq!(root_ty, expected, "expected: {expected}, got: {root_ty}")
 }
 
-#[track_caller]
-pub fn expect_diagnostic_kind(src: &str, expected: TixDiagnosticKind) {
-    let error = get_check_error(src);
-
-    assert_eq!(error, expected)
-}
-
 // ==============================================================================
 // Multi-file inference helpers
 // ==============================================================================
@@ -447,13 +440,6 @@ macro_rules! error_case {
                 "expected {}, got: {error:?}",
                 stringify!($pat)
             );
-        }
-    };
-    ($name:ident, $file:tt, $expected:expr) => {
-        #[test]
-        fn $name() {
-            let file = indoc! { $file };
-            expect_diagnostic_kind(file, $expected);
         }
     };
 }
