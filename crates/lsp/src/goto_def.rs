@@ -1150,6 +1150,61 @@ mod tests {
         let _ = std::fs::remove_dir_all(&source_dir);
     }
 
+    /// Same as above, but the module body is wrapped in `lib.mkIf cond { … }`
+    /// — the common conditional-module shape (e.g. the nixos_fixture's
+    /// audio.nix). The attrset is an Apply argument, not the module's direct
+    /// return value.
+    #[test]
+    fn attrpath_key_jumps_to_field_source_in_mkif_body() {
+        use crate::test_util::ContextTestSetup;
+        use std::sync::Arc;
+
+        let source_dir = crate::test_util::temp_path("nixpkgs_src_mkif");
+        std::fs::create_dir_all(source_dir.join("nixos/modules/config")).unwrap();
+        let source_file = source_dir.join("nixos/modules/config/time.nix");
+        let source_content = "# placeholder\n".repeat(60);
+        std::fs::write(&source_file, &source_content).unwrap();
+
+        let stubs = indoc! {"
+            type TestConfig = {
+                @source nixpkgs:nixos/modules/config/time.nix:42:5
+                time: {
+                    @source nixpkgs:nixos/modules/config/time.nix:50:10
+                    timeZone: string,
+                    ...
+                },
+                ...
+            };
+            val config :: TestConfig;
+        "};
+        let src = indoc! {"
+            { config, lib, ... }:
+            lib.mkIf config.time.enable {
+              time.timeZone = \"America/New_York\";
+            #      ^1
+            }
+        "};
+        let markers = parse_markers(src);
+        let mut ctx = ContextTestSetup::new(src, stubs);
+
+        Arc::make_mut(&mut ctx.state.registry).set_source_root("nixpkgs", source_dir.clone());
+        ctx.state.update_file(ctx.nix_path.clone(), src.to_string());
+
+        let analysis = ctx.snapshot();
+        let root = ctx.root();
+        let uri = Url::from_file_path(&ctx.nix_path).unwrap();
+
+        let pos = analysis.syntax.line_index.position(markers[&1]);
+        let result = goto_definition(&ctx.state.registry, &analysis, pos, &uri, &root);
+
+        let loc = result.expect("should resolve attrpath key inside mkIf body to source");
+        let expected_uri = Url::from_file_path(&source_file).unwrap();
+        assert_eq!(loc.uri, expected_uri);
+        assert_eq!(loc.range.start.line, 49);
+
+        let _ = std::fs::remove_dir_all(&source_dir);
+    }
+
     // ------------------------------------------------------------------
     // with-resolved names: go-to-definition
     // ------------------------------------------------------------------
