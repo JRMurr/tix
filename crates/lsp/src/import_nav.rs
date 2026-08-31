@@ -14,7 +14,7 @@ use lang_check::imports::resolve_import_types;
 use rowan::ast::AstNode;
 use tower_lsp::lsp_types::{Location, Position, Range, Url};
 
-use crate::state::{AnalysisState, SyntaxData};
+use crate::state::SyntaxData;
 
 /// Maximum depth for transitive import resolution to prevent infinite loops.
 const MAX_DEPTH: usize = 8;
@@ -31,11 +31,7 @@ const MAX_DEPTH: usize = 8;
 /// - The name is not an import (actual definition) → returns its Location
 /// - The target file has no matching name → returns Location at file start
 /// - Depth limit reached → returns Location of last found name
-pub fn resolve_field_transitively(
-    _state: &AnalysisState,
-    target_path: &Path,
-    field_name: &str,
-) -> Option<Location> {
+pub fn resolve_field_transitively(target_path: &Path, field_name: &str) -> Option<Location> {
     let mut current_path = if target_path.is_dir() {
         target_path.join("default.nix")
     } else {
@@ -147,7 +143,7 @@ pub fn resolve_field_transitively(
 /// Only searches files with existing snapshots (open/analyzed files). Files
 /// that haven't been analyzed yet are skipped.
 pub fn find_cross_file_field_references(
-    state: &AnalysisState,
+    coordinator: &lang_check::coordinator::InferenceCoordinator,
     snapshots: &dashmap::DashMap<PathBuf, crate::state::FileSnapshot>,
     origin_path: &Path,
     field_name: &str,
@@ -155,7 +151,7 @@ pub fn find_cross_file_field_references(
     let mut locations = Vec::new();
     let mut visited = HashSet::default();
     find_cross_file_field_references_inner(
-        state,
+        coordinator,
         snapshots,
         origin_path,
         field_name,
@@ -166,7 +162,7 @@ pub fn find_cross_file_field_references(
 }
 
 fn find_cross_file_field_references_inner(
-    state: &AnalysisState,
+    coordinator: &lang_check::coordinator::InferenceCoordinator,
     snapshots: &dashmap::DashMap<PathBuf, crate::state::FileSnapshot>,
     origin_path: &Path,
     field_name: &str,
@@ -177,7 +173,7 @@ fn find_cross_file_field_references_inner(
         return;
     }
 
-    let dependents = state.coordinator.get_dependents(origin_path);
+    let dependents = coordinator.get_dependents(origin_path);
 
     for importer_path in &dependents {
         if let Some(snap) = snapshots.get(importer_path) {
@@ -194,7 +190,7 @@ fn find_cross_file_field_references_inner(
                 // If so, files importing THIS file might access the field.
                 if is_passthrough_of(&snap.syntax, origin_path) {
                     find_cross_file_field_references_inner(
-                        state,
+                        coordinator,
                         snapshots,
                         importer_path,
                         field_name,

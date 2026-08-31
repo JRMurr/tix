@@ -22,11 +22,11 @@ use rowan::ast::AstNode;
 use smol_str::SmolStr;
 use tower_lsp::lsp_types::{Location, Position, Range, Url};
 
-use crate::state::{AnalysisState, FileSnapshot};
+use crate::state::FileSnapshot;
 
 /// Try to find the definition location for the symbol at the given cursor position.
 pub fn goto_definition(
-    state: &AnalysisState,
+    registry: &lang_check::aliases::TypeAliasRegistry,
     analysis: &FileSnapshot,
     pos: Position,
     uri: &Url,
@@ -48,7 +48,7 @@ pub fn goto_definition(
     // Attrpath keys (e.g. `timeZone` in `{ time.timeZone = "..."; }`) may
     // not map to expression nodes in the source map — check them first using
     // the raw token before the expression walk loop.
-    if let Some(location) = try_resolve_attrpath_field_source(state, analysis, &token) {
+    if let Some(location) = try_resolve_attrpath_field_source(registry, analysis, &token) {
         return Some(location);
     }
 
@@ -77,13 +77,12 @@ pub fn goto_definition(
             // definition in the target file. Falls back to stub val declarations
             // for fields like `lib.someFunction` where `lib` comes from a stub module.
             if let Expr::Literal(Literal::String(field_name)) = &analysis.syntax.module[expr_id] {
-                if let Some(location) = try_resolve_select_field(state, analysis, &node, field_name)
-                {
+                if let Some(location) = try_resolve_select_field(analysis, &node, field_name) {
                     return Some(location);
                 }
                 if let Some(location) = decl_location_to_lsp(
-                    state.registry.decl_locations(field_name).first(),
-                    state.registry.source_roots(),
+                    registry.decl_locations(field_name).first(),
+                    registry.source_roots(),
                 ) {
                     return Some(location);
                 }
@@ -135,8 +134,8 @@ pub fn goto_definition(
                 // No same-file definition found — fall back to stub val
                 // declarations (e.g. `mkDerivation` or `vim` from .tix stubs).
                 if let Some(location) = decl_location_to_lsp(
-                    state.registry.decl_locations(ref_name.as_str()).first(),
-                    state.registry.source_roots(),
+                    registry.decl_locations(ref_name.as_str()).first(),
+                    registry.source_roots(),
                 ) {
                     return Some(location);
                 }
@@ -223,7 +222,6 @@ pub(crate) fn resolve_source_location(
 ///   module's top-level names. Nested scopes with the same name may cause
 ///   incorrect jumps.
 fn try_resolve_select_field(
-    state: &AnalysisState,
     analysis: &FileSnapshot,
     field_node: &rowan::SyntaxNode<rnix::NixLanguage>,
     field_name: &str,
@@ -274,7 +272,7 @@ fn try_resolve_select_field(
     };
 
     // Resolve the field transitively through barrel re-exports.
-    crate::import_nav::resolve_field_transitively(state, target_path, field_name)
+    crate::import_nav::resolve_field_transitively(target_path, field_name)
 }
 
 // ==============================================================================
@@ -288,16 +286,14 @@ fn try_resolve_select_field(
 /// the generated `nixos.tix` stubs carry `@source` annotations that point to
 /// the NixOS module source files where options are declared.
 fn try_resolve_attrpath_field_source(
-    state: &AnalysisState,
+    registry: &lang_check::aliases::TypeAliasRegistry,
     analysis: &FileSnapshot,
     token: &rowan::SyntaxToken<rnix::NixLanguage>,
 ) -> Option<Location> {
     let res = crate::hover::resolve_attrpath_key(analysis, token)?;
     let alias = res.alias_name.as_ref()?;
-    let source = state
-        .registry
-        .field_source_location(alias, &res.full_path)?;
-    resolve_source_location(source, state.registry.source_roots())
+    let source = registry.field_source_location(alias, &res.full_path)?;
+    resolve_source_location(source, registry.source_roots())
 }
 
 // ==============================================================================
@@ -413,7 +409,7 @@ mod tests {
 
         // Cursor on the trailing `x` (the reference).
         let pos = analysis.syntax.line_index.position(markers[&2]);
-        let loc = goto_definition(&state, &analysis, pos, &uri, &root);
+        let loc = goto_definition(&state.registry, &analysis, pos, &uri, &root);
         let loc = loc.expect("should resolve same-file reference");
 
         // Should jump to the definition `x` in `let x = 1`.
@@ -438,7 +434,7 @@ mod tests {
 
         // Cursor on `import` keyword.
         let pos = Position::new(0, 0);
-        let loc = goto_definition(&state, &analysis, pos, &uri, &root);
+        let loc = goto_definition(&state.registry, &analysis, pos, &uri, &root);
         let loc = loc.expect("should resolve import to target file");
 
         let lib_uri = Url::from_file_path(&lib_path).unwrap();
@@ -465,7 +461,7 @@ mod tests {
 
         // Cursor on the path literal `./lib.nix`.
         let pos = analysis.syntax.line_index.position(markers[&1]);
-        let loc = goto_definition(&state, &analysis, pos, &uri, &root);
+        let loc = goto_definition(&state.registry, &analysis, pos, &uri, &root);
         let loc = loc.expect("should resolve path literal to target file");
 
         let lib_uri = Url::from_file_path(&lib_path).unwrap();
@@ -494,7 +490,7 @@ mod tests {
 
         // Cursor on `x` in `lib.x` (the field name after the dot).
         let pos = analysis.syntax.line_index.position(markers[&1]);
-        let loc = goto_definition(&state, &analysis, pos, &uri, &root);
+        let loc = goto_definition(&state.registry, &analysis, pos, &uri, &root);
         let loc = loc.expect("should resolve select field to target file");
 
         let lib_uri = Url::from_file_path(&lib_path).unwrap();
@@ -534,7 +530,7 @@ mod tests {
 
         // Cursor on `name` in `attrs.name`.
         let pos = analysis.syntax.line_index.position(markers[&1]);
-        let loc = goto_definition(&state, &analysis, pos, &uri, &root);
+        let loc = goto_definition(&state.registry, &analysis, pos, &uri, &root);
         let loc = loc.expect("should resolve select field through applied import");
 
         let lib_uri = Url::from_file_path(&lib_path).unwrap();
@@ -574,7 +570,7 @@ mod tests {
 
         // Cursor on `name` in `x.name`.
         let pos = analysis.syntax.line_index.position(markers[&1]);
-        let loc = goto_definition(&state, &analysis, pos, &uri, &root);
+        let loc = goto_definition(&state.registry, &analysis, pos, &uri, &root);
         let loc = loc.expect("should resolve select field via path literal heuristic");
 
         let pkg_uri = Url::from_file_path(&pkg_path).unwrap();
@@ -612,7 +608,7 @@ mod tests {
 
         // Cursor on `name` in `x.name`.
         let pos = analysis.syntax.line_index.position(markers[&1]);
-        let loc = goto_definition(&state, &analysis, pos, &uri, &root);
+        let loc = goto_definition(&state.registry, &analysis, pos, &uri, &root);
         let loc = loc.expect("should resolve select field via directory path literal");
 
         let pkg_uri = Url::from_file_path(&pkg_path).unwrap();
@@ -650,7 +646,7 @@ mod tests {
         let root = rnix::Root::parse(&contents).tree();
 
         let pos = analysis.syntax.line_index.position(markers[&1]);
-        let loc = goto_definition(&state, &analysis, pos, &uri, &root);
+        let loc = goto_definition(&state.registry, &analysis, pos, &uri, &root);
         let loc = loc.expect("should resolve through barrel reexport");
 
         let real_uri = Url::from_file_path(&real_path).unwrap();
@@ -687,7 +683,7 @@ mod tests {
         let root = rnix::Root::parse(&contents).tree();
 
         let pos = analysis.syntax.line_index.position(markers[&1]);
-        let loc = goto_definition(&state, &analysis, pos, &uri, &root);
+        let loc = goto_definition(&state.registry, &analysis, pos, &uri, &root);
         let loc = loc.expect("should resolve through passthrough barrel");
 
         let real_uri = Url::from_file_path(&real_path).unwrap();
@@ -711,7 +707,7 @@ mod tests {
         let root = rnix::Root::parse(&contents).tree();
 
         let pos = Position::new(0, 0);
-        let loc = goto_definition(&state, &analysis, pos, &uri, &root);
+        let loc = goto_definition(&state.registry, &analysis, pos, &uri, &root);
         assert!(loc.is_none(), "literal should not resolve to a definition");
     }
 
@@ -737,7 +733,7 @@ mod tests {
 
         // Cursor on the path literal `./lib.nix`.
         let pos = analysis.syntax.line_index.position(markers[&1]);
-        let loc = goto_definition(&state, &analysis, pos, &uri, &root);
+        let loc = goto_definition(&state.registry, &analysis, pos, &uri, &root);
         let loc = loc.expect("bare path literal should resolve to target file");
 
         let lib_uri = Url::from_file_path(&lib_path).unwrap();
@@ -767,7 +763,7 @@ mod tests {
 
         // Cursor on the path literal `./pkg`.
         let pos = analysis.syntax.line_index.position(markers[&1]);
-        let loc = goto_definition(&state, &analysis, pos, &uri, &root);
+        let loc = goto_definition(&state.registry, &analysis, pos, &uri, &root);
         let loc = loc.expect("directory path literal should resolve to default.nix");
 
         let pkg_uri = Url::from_file_path(&pkg_default).unwrap();
@@ -811,7 +807,7 @@ mod tests {
 
         // Cursor on `mkDerivation` — an unresolved name backed by a stub val.
         let pos = analysis.syntax.line_index.position(markers[&1]);
-        let loc = goto_definition(&state, &analysis, pos, &uri, &root);
+        let loc = goto_definition(&state.registry, &analysis, pos, &uri, &root);
         let loc = loc.expect("should resolve unresolved ref to stub val");
 
         let stub_uri = Url::from_file_path(&stub_path).unwrap();
@@ -851,7 +847,7 @@ mod tests {
 
         // Cursor on `id` in `lib.id`.
         let pos = analysis.syntax.line_index.position(markers[&1]);
-        let loc = goto_definition(&state, &analysis, pos, &uri, &root);
+        let loc = goto_definition(&state.registry, &analysis, pos, &uri, &root);
         let loc = loc.expect("should resolve select field to stub val");
 
         let stub_uri = Url::from_file_path(&stub_path).unwrap();
@@ -892,7 +888,7 @@ mod tests {
         let root = rnix::Root::parse(&contents).tree();
 
         let pos = analysis.syntax.line_index.position(markers[&1]);
-        let loc = goto_definition(&state, &analysis, pos, &uri, &root);
+        let loc = goto_definition(&state.registry, &analysis, pos, &uri, &root);
         let loc = loc.expect("should resolve nested select field to stub val");
 
         let stub_uri = Url::from_file_path(&stub_path).unwrap();
@@ -933,7 +929,7 @@ mod tests {
         let root = rnix::Root::parse(&contents).tree();
 
         let pos = analysis.syntax.line_index.position(markers[&1]);
-        let loc = goto_definition(&state, &analysis, pos, &uri, &root);
+        let loc = goto_definition(&state.registry, &analysis, pos, &uri, &root);
         let loc = loc.expect("should resolve module name to stub module");
 
         let stub_uri = Url::from_file_path(&stub_path).unwrap();
@@ -974,7 +970,7 @@ mod tests {
         let root = rnix::Root::parse(&contents).tree();
 
         let pos = analysis.syntax.line_index.position(markers[&1]);
-        let loc = goto_definition(&state, &analysis, pos, &uri, &root);
+        let loc = goto_definition(&state.registry, &analysis, pos, &uri, &root);
         let loc = loc.expect("should resolve select field with lambda annotation");
 
         let stub_uri = Url::from_file_path(&stub_path).unwrap();
@@ -1003,7 +999,7 @@ mod tests {
         let root = rnix::Root::parse(&contents).tree();
 
         let pos = analysis.syntax.line_index.position(markers[&1]);
-        let loc = goto_definition(&state, &analysis, pos, &uri, &root);
+        let loc = goto_definition(&state.registry, &analysis, pos, &uri, &root);
         assert!(
             loc.is_none(),
             "unresolved ref with no stub should return None"
@@ -1045,7 +1041,7 @@ mod tests {
         let root = rnix::Root::parse(&contents).tree();
 
         let pos = analysis.syntax.line_index.position(markers[&1]);
-        let loc = goto_definition(&state, &analysis, pos, &uri, &root)
+        let loc = goto_definition(&state.registry, &analysis, pos, &uri, &root)
             .expect("should resolve to nixpkgs source");
 
         // Should jump to the nixpkgs file, not the stub file.
@@ -1082,7 +1078,7 @@ mod tests {
         let root = rnix::Root::parse(&contents).tree();
 
         let pos = analysis.syntax.line_index.position(markers[&1]);
-        let loc = goto_definition(&state, &analysis, pos, &uri, &root)
+        let loc = goto_definition(&state.registry, &analysis, pos, &uri, &root)
             .expect("should fall back to stub location");
 
         // Should fall back to the stub file.
@@ -1143,7 +1139,7 @@ mod tests {
         let uri = Url::from_file_path(&ctx.nix_path).unwrap();
 
         let pos = analysis.syntax.line_index.position(markers[&1]);
-        let result = goto_definition(&ctx.state, &analysis, pos, &uri, &root);
+        let result = goto_definition(&ctx.state.registry, &analysis, pos, &uri, &root);
 
         let loc = result.expect("should resolve attrpath key to source");
         let expected_uri = Url::from_file_path(&source_file).unwrap();
@@ -1170,7 +1166,7 @@ mod tests {
         let uri = t.uri();
 
         let pos = analysis.syntax.line_index.position(markers[&2]);
-        let loc = goto_definition(&t.state, &analysis, pos, &uri, &t.root);
+        let loc = goto_definition(&t.state.registry, &analysis, pos, &uri, &t.root);
         let loc = loc.expect("should resolve with-field to attrset key");
 
         assert_eq!(loc.uri, uri);
@@ -1193,7 +1189,7 @@ mod tests {
         let uri = t.uri();
 
         let pos = analysis.syntax.line_index.position(markers[&2]);
-        let loc = goto_definition(&t.state, &analysis, pos, &uri, &t.root);
+        let loc = goto_definition(&t.state.registry, &analysis, pos, &uri, &t.root);
         let loc = loc.expect("should follow let binding to attrset field");
 
         assert_eq!(loc.uri, uri);
@@ -1217,7 +1213,7 @@ mod tests {
         let uri = t.uri();
 
         let pos = analysis.syntax.line_index.position(markers[&2]);
-        let loc = goto_definition(&t.state, &analysis, pos, &uri, &t.root);
+        let loc = goto_definition(&t.state.registry, &analysis, pos, &uri, &t.root);
         let loc = loc.expect("should resolve to inner with's field");
 
         assert_eq!(loc.uri, uri);
@@ -1241,7 +1237,7 @@ mod tests {
         let uri = t.uri();
 
         let pos = analysis.syntax.line_index.position(markers[&2]);
-        let loc = goto_definition(&t.state, &analysis, pos, &uri, &t.root);
+        let loc = goto_definition(&t.state.registry, &analysis, pos, &uri, &t.root);
         let loc = loc.expect("should fall through inner and resolve from outer with");
 
         assert_eq!(loc.uri, uri);
@@ -1261,7 +1257,7 @@ mod tests {
         let analysis = t.snapshot();
 
         let pos = analysis.syntax.line_index.position(markers[&1]);
-        let loc = goto_definition(&t.state, &analysis, pos, &t.uri(), &t.root);
+        let loc = goto_definition(&t.state.registry, &analysis, pos, &t.uri(), &t.root);
         assert!(loc.is_none(), "unresolvable with env should return None");
     }
 
@@ -1282,7 +1278,7 @@ mod tests {
         let analysis = t.snapshot();
 
         let pos = analysis.syntax.line_index.position(markers[&1]);
-        let loc = goto_definition(&t.state, &analysis, pos, &t.uri(), &t.root);
+        let loc = goto_definition(&t.state.registry, &analysis, pos, &t.uri(), &t.root);
         let loc = loc.expect("with-resolved name should fall back to stub val");
 
         let stub_uri = Url::from_file_path(&stub_path).unwrap();

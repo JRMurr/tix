@@ -38,7 +38,6 @@ pub struct WarmupFileResult {
     pub path: PathBuf,
     pub syntax_data: SyntaxData,
     pub inference_data: InferenceData,
-    pub file_analysis: crate::state::FileAnalysis,
     pub diagnostics: Vec<TixDiagnostic>,
     pub import_paths: Vec<PathBuf>,
 }
@@ -74,7 +73,6 @@ pub fn run_batch_warmup(
 
     struct PreparedFile {
         path: PathBuf,
-        source_text: String,
         parsed: rnix::Parse<rnix::Root>,
         syntax: SyntaxResult,
         line_index: LineIndex,
@@ -131,7 +129,6 @@ pub fn run_batch_warmup(
 
         prepared.push(PreparedFile {
             path: file_path.clone(),
-            source_text: source_text.clone(),
             parsed,
             syntax,
             line_index,
@@ -242,9 +239,7 @@ pub fn run_batch_warmup(
 
         let import_paths: Vec<PathBuf> = import_targets.values().cloned().collect();
 
-        // Build LSP data structures. SyntaxData is built first by moving
-        // fields out of pp; FileAnalysis clones from it to avoid redundant
-        // copies from pp.
+        // Build LSP data structures by moving fields out of pp.
         let syntax_data = SyntaxData {
             parsed: pp.parsed,
             line_index: pp.line_index,
@@ -263,27 +258,10 @@ pub fn run_batch_warmup(
             check_result: check_result.clone(),
         };
 
-        let file_analysis = crate::state::FileAnalysis {
-            source_text: pp.source_text.into(),
-            line_index: syntax_data.line_index.clone(),
-            parsed: syntax_data.parsed.clone(),
-            module: syntax_data.module.clone(),
-            module_indices: syntax_data.module_indices.clone(),
-            source_map: syntax_data.source_map.clone(),
-            name_res: syntax_data.name_res.clone(),
-            scopes: syntax_data.scopes.clone(),
-            check_result,
-            import_targets: syntax_data.import_targets.clone(),
-            name_to_import: syntax_data.name_to_import.clone(),
-            context_arg_types: syntax_data.context_arg_types.clone(),
-            context_arg_arena: Arc::clone(&syntax_data.context_arg_arena),
-        };
-
         Some(WarmupFileResult {
             path: pp.path,
             syntax_data,
             inference_data,
-            file_analysis,
             diagnostics,
             import_paths,
         })
@@ -496,9 +474,9 @@ mod tests {
         for result in &results {
             let text = std::fs::read_to_string(&result.path).unwrap();
             assert_eq!(
-                &*result.file_analysis.source_text,
+                result.syntax_data.line_index.text(),
                 text,
-                "warmup should store source text in FileAnalysis for {}",
+                "warmup should retain source text (via LineIndex) for {}",
                 result.path.display()
             );
         }

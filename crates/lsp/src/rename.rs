@@ -16,7 +16,7 @@ use lang_ast::{Expr, ExprId, Literal, NameId};
 use rowan::ast::AstNode;
 use tower_lsp::lsp_types::*;
 
-use crate::state::{AnalysisState, FileSnapshot};
+use crate::state::FileSnapshot;
 
 /// Verify that the cursor is on a renameable name and return its range.
 pub fn prepare_rename(
@@ -67,7 +67,7 @@ pub fn rename(
     new_name: &str,
     uri: &Url,
     root: &rnix::Root,
-    state: Option<&AnalysisState>,
+    snapshots: Option<&dashmap::DashMap<PathBuf, FileSnapshot>>,
     current_path: Option<&PathBuf>,
 ) -> Option<RenameResult> {
     let target = crate::references::name_at_position(analysis, pos, root)?;
@@ -113,10 +113,10 @@ pub fn rename(
     // open for editing.
 
     let old_name = analysis.syntax.module[target].text.as_str();
-    let warning = if let (Some(state), Some(current_path)) = (state, current_path) {
+    let warning = if let (Some(snapshots), Some(current_path)) = (snapshots, current_path) {
         let is_top_level = is_top_level_export(analysis, target);
         if is_top_level {
-            collect_cross_file_edits(state, current_path, old_name, new_name, &mut changes)
+            collect_cross_file_edits(snapshots, current_path, old_name, new_name, &mut changes)
         } else {
             None
         }
@@ -169,7 +169,7 @@ fn fields_of_root_attrset(module: &lang_ast::Module, expr_id: ExprId) -> Option<
 /// Returns a warning message if we detect that some files on disk import the
 /// current file but aren't currently open in the editor.
 fn collect_cross_file_edits(
-    state: &AnalysisState,
+    snapshots: &dashmap::DashMap<PathBuf, FileSnapshot>,
     current_path: &PathBuf,
     old_name: &str,
     new_name: &str,
@@ -179,11 +179,13 @@ fn collect_cross_file_edits(
 
     // Walk every open file's name_to_import map looking for entries that
     // point to the file being edited.
-    for (other_path, other_analysis) in &state.files {
+    for entry in snapshots.iter() {
+        let (other_path, other_snap) = (entry.key(), entry.value());
         // Skip the file itself — its edits are already collected above.
         if other_path == current_path {
             continue;
         }
+        let other_analysis = &other_snap.syntax;
 
         // Collect NameIds in this file that are bound to imports of the target file.
         let importing_names: Vec<NameId> = other_analysis
@@ -409,13 +411,13 @@ mod tests {
     ) -> Option<RenameResult> {
         let project = TempProject::new(files);
 
-        // Analyze all files (order matters: imported files must be analyzed
-        // before importers for import resolution to work, but for our purpose
-        // we just need all files in state.files).
-        let mut state = AnalysisState::new(TypeAliasRegistry::default());
+        // Analyze all files into a snapshots map (the production shape).
+        let mut state = crate::state::AnalysisState::new(TypeAliasRegistry::default());
+        let snapshots = dashmap::DashMap::new();
         for (name, contents) in files {
             let path = project.path(name);
-            state.update_file(path, contents.to_string());
+            state.update_file(path.clone(), contents.to_string());
+            snapshots.insert(path.clone(), state.get_file(&path).unwrap().to_snapshot());
         }
 
         let rename_path = project.path(rename_file);
@@ -439,7 +441,7 @@ mod tests {
             new_name,
             &uri,
             &root,
-            Some(&state),
+            Some(&snapshots),
             Some(&rename_path),
         )
     }

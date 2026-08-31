@@ -589,7 +589,7 @@ fn pbt_stub_merge_crash_freedom(tc: TestCase) {
                     &snapshot.syntax.line_index,
                     None,
                 );
-                let _ = goto_definition(&t.state, &snapshot, pos, &uri, &t.root);
+                let _ = goto_definition(&t.state.registry, &snapshot, pos, &uri, &t.root);
             }
         }
         SetupMode::ContextSetup => {
@@ -612,7 +612,7 @@ fn pbt_stub_merge_crash_freedom(tc: TestCase) {
                     &snapshot.syntax.line_index,
                     None,
                 );
-                let _ = goto_definition(&ctx.state, &snapshot, pos, &uri, &root);
+                let _ = goto_definition(&ctx.state.registry, &snapshot, pos, &uri, &root);
             }
         }
     }

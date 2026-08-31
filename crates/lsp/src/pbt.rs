@@ -245,7 +245,7 @@ fn pbt_goto_definition_no_crash(tc: TestCase) {
     let positions = interesting_positions(analysis, &t.root);
     for ip in &positions {
         let pos = snapshot.syntax.line_index.position(ip.byte_offset());
-        let _ = goto_definition(&t.state, &snapshot, pos, &uri, &t.root);
+        let _ = goto_definition(&t.state.registry, &snapshot, pos, &uri, &t.root);
     }
 }
 

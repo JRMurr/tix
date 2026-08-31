@@ -18,6 +18,7 @@ use lang_ast::{
 };
 use lang_check::aliases::TypeAliasRegistry;
 use lang_check::coordinator::{InferenceCoordinator, SyntaxProvider, TypeofLookup};
+#[cfg(any(test, feature = "test_support"))]
 use lang_check::diagnostic::{TixDiagnostic, TixDiagnosticKind};
 use lang_check::imports::{import_errors_to_diagnostics, resolve_import_types};
 #[cfg(test)]
@@ -87,7 +88,6 @@ impl FileSnapshot {
 /// All fields are owned values — safe to hold across mutex releases.
 pub struct SyntaxIntermediate {
     pub path: PathBuf,
-    pub source_text: Arc<str>,
     pub module: Module,
     pub module_indices: ModuleIndices,
     pub name_res: NameResolution,
@@ -104,19 +104,12 @@ pub struct SyntaxIntermediate {
 }
 
 /// LSP-specific inference inputs. Wraps the shared `lang_check::InferenceInputs`
-/// with additional fields needed for building `FileAnalysis`/`FileSnapshot`.
+/// plus the import targets the analysis loop records as dependency edges.
+/// (Snapshot data — parse tree, line index, source map — is published to the
+/// DashMap during phase A and doesn't need to ride along here.)
 pub struct LspInferenceInputs {
     pub core: lang_check::InferenceInputs,
-    // LSP-specific fields for FileAnalysis/FileSnapshot:
-    pub source_text: Arc<str>,
-    pub line_index: LineIndex,
-    pub parsed: rnix::Parse<rnix::Root>,
-    pub source_map: ModuleSourceMap,
-    pub scopes: ModuleScopes,
     pub import_targets: HashMap<ExprId, PathBuf>,
-    pub name_to_import: HashMap<NameId, PathBuf>,
-    pub context_arg_types: HashMap<SmolStr, OutputTy>,
-    pub context_arg_arena: Arc<lang_ty::TypeArena>,
 }
 
 /// Run type inference using precomputed syntax data. Does not need the
@@ -128,27 +121,6 @@ pub fn run_inference(inputs: &LspInferenceInputs) -> (CheckResult, Duration) {
     let check_result = lang_check::run_inference(&inputs.core);
     let elapsed = t0.elapsed();
     (check_result, elapsed)
-}
-
-/// Build a `FileAnalysis` from inference inputs and check result. This is the
-/// legacy path used during the transition — handlers will eventually read from
-/// `FileSnapshot` instead.
-pub fn build_file_analysis(inputs: LspInferenceInputs, check_result: CheckResult) -> FileAnalysis {
-    FileAnalysis {
-        source_text: inputs.source_text,
-        line_index: inputs.line_index,
-        parsed: inputs.parsed,
-        module: inputs.core.module,
-        module_indices: inputs.core.module_indices,
-        source_map: inputs.source_map,
-        name_res: inputs.core.name_res,
-        scopes: inputs.scopes,
-        check_result,
-        import_targets: inputs.import_targets,
-        name_to_import: inputs.name_to_import,
-        context_arg_types: inputs.context_arg_types,
-        context_arg_arena: inputs.context_arg_arena,
-    }
 }
 
 // ==============================================================================
@@ -325,15 +297,7 @@ pub fn resolve_imports_phase_b(
             typeof_import_types,
             file_base_dir: file_dir.clone(),
         },
-        source_text: intermediate.source_text.clone(),
-        line_index: intermediate.line_index.clone(),
-        parsed: intermediate.parsed.clone(),
-        source_map: intermediate.source_map.clone(),
-        scopes: intermediate.scopes.clone(),
         import_targets: import_targets.clone(),
-        name_to_import: name_to_import.clone(),
-        context_arg_types: intermediate.context_arg_types.clone(),
-        context_arg_arena: Arc::clone(&intermediate.context_arg_arena),
     };
 
     (
@@ -344,9 +308,9 @@ pub fn resolve_imports_phase_b(
     )
 }
 
+#[cfg(any(test, feature = "test_support"))]
 impl FileAnalysis {
-    /// Convert a FileAnalysis into a FileSnapshot. Used by tests and the
-    /// transitional period where both representations coexist.
+    /// Convert a FileAnalysis into a FileSnapshot for test harnesses.
     pub fn to_snapshot(&self) -> FileSnapshot {
         FileSnapshot {
             syntax: SyntaxData {
@@ -370,6 +334,7 @@ impl FileAnalysis {
 }
 
 /// Cached analysis output for a single open file.
+#[cfg(any(test, feature = "test_support"))]
 pub struct FileAnalysis {
     /// Source text used for this analysis pass. Stored so that
     /// `reload_registry` and `ReanalyzeFile` can re-run analysis without
@@ -402,6 +367,7 @@ pub struct FileAnalysis {
     pub context_arg_arena: Arc<lang_ty::TypeArena>,
 }
 
+#[cfg(any(test, feature = "test_support"))]
 impl FileAnalysis {
     #[cfg(test)]
     pub fn inference(&self) -> Option<&InferenceResult> {
@@ -437,7 +403,10 @@ impl fmt::Display for AnalysisTiming {
 /// All mutable state for the LSP's analysis pipeline.
 pub struct AnalysisState {
     pub registry: Arc<TypeAliasRegistry>,
-    /// Cached per-file analysis, keyed by canonical path.
+    /// Cached per-file analysis, keyed by canonical path. Test-only: the
+    /// production server reads exclusively from the snapshots DashMap; unit
+    /// tests drive analysis through `update_file` and read back snapshots.
+    #[cfg(any(test, feature = "test_support"))]
     pub files: HashMap<PathBuf, FileAnalysis>,
     /// Project-level tix.toml configuration (if discovered).
     pub project_config: Option<ProjectConfig>,
@@ -461,6 +430,7 @@ impl AnalysisState {
     pub fn new(registry: TypeAliasRegistry) -> Self {
         Self {
             registry: Arc::new(registry),
+            #[cfg(any(test, feature = "test_support"))]
             files: HashMap::default(),
             project_config: None,
             config_dir: None,
@@ -498,10 +468,10 @@ impl AnalysisState {
     /// available. The production analysis loop in `server.rs` uses
     /// `resolve_imports_phase_b()` instead, which adds demand-driven inference
     /// for unopened dependencies.
-    // Only tests drive analysis through this synchronous path now — the
+    // Only tests drive analysis through this synchronous path — the
     // production loop uses the phase A/B/C split, and reload_registry queues
     // ReanalyzeFile events instead of re-checking inline.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(any(test, feature = "test_support"))]
     pub fn update_file(
         &mut self,
         path: PathBuf,
@@ -510,6 +480,7 @@ impl AnalysisState {
         self.update_file_inner(path, contents)
     }
 
+    #[cfg(any(test, feature = "test_support"))]
     fn update_file_inner(
         &mut self,
         path: PathBuf,
@@ -638,7 +609,7 @@ impl AnalysisState {
         (self.files.get(&path).unwrap(), timing)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test_support"))]
     pub fn get_file(&self, path: &PathBuf) -> Option<&FileAnalysis> {
         self.files.get(path)
     }
@@ -676,7 +647,6 @@ impl AnalysisState {
         // that the previous order required.
         let intermediate = SyntaxIntermediate {
             path,
-            source_text: contents,
             module: r.module,
             module_indices: r.module_indices,
             name_res: r.name_res,
@@ -770,15 +740,7 @@ impl AnalysisState {
                 typeof_import_types: HashMap::default(),
                 file_base_dir: file_dir.clone(),
             },
-            source_text: intermediate.source_text.clone(),
-            line_index: intermediate.line_index.clone(),
-            parsed: intermediate.parsed.clone(),
-            source_map: intermediate.source_map.clone(),
-            scopes: intermediate.scopes.clone(),
             import_targets: import_targets.clone(),
-            name_to_import: name_to_import.clone(),
-            context_arg_types: intermediate.context_arg_types.clone(),
-            context_arg_arena: Arc::clone(&intermediate.context_arg_arena),
         };
 
         (
@@ -813,14 +775,13 @@ impl AnalysisState {
         self.coordinator.remove_signature(path)
     }
 
-    /// Replace the type alias registry and clear cached signatures. Returns
-    /// the open files that need re-analysis — callers queue ReanalyzeFile
-    /// events for them so the re-check runs in the analysis loop rather than
+    /// Replace the type alias registry and clear cached signatures. Callers
+    /// queue ReanalyzeFile events for the open files (enumerated from the
+    /// snapshots map) so the re-check runs in the analysis loop rather than
     /// synchronously under the state mutex.
-    pub fn reload_registry(&mut self, registry: TypeAliasRegistry) -> Vec<PathBuf> {
+    pub fn reload_registry(&mut self, registry: TypeAliasRegistry) {
         self.registry = Arc::new(registry);
         self.coordinator.clear();
-        self.files.keys().cloned().collect()
     }
 }
 

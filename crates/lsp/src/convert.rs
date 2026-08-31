@@ -88,6 +88,11 @@ impl LineIndex {
         (byte_offset as u32).min(self.len)
     }
 
+    /// The source text this index was built from.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
     /// Convert a rowan TextRange to an LSP Range.
     pub fn range(&self, text_range: rowan::TextRange) -> Range {
         Range::new(

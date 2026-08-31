@@ -390,7 +390,8 @@ fn spawn_analysis_loop(
                  warmup_results: &mut Vec<crate::warmup::WarmupFileResult>,
                  file_versions: &mut HashMap<PathBuf, i32>,
                  state: &Mutex<AnalysisState>,
-                 pending_text: &Mutex<HashMap<PathBuf, String>>| {
+                 pending_text: &Mutex<HashMap<PathBuf, String>>,
+                 snapshots: &DashMap<PathBuf, FileSnapshot>| {
                     match event {
                         AnalysisEvent::FileChanged {
                             path,
@@ -412,8 +413,9 @@ fn spawn_analysis_loop(
                             // before catching up. state.files only has the last
                             // fully-analyzed text.
                             let text = pending_text.lock().get(&path).cloned().or_else(|| {
-                                let st = state.lock();
-                                st.files.get(&path).map(|a| a.source_text.to_string())
+                                snapshots
+                                    .get(&path)
+                                    .map(|s| s.syntax.line_index.text().to_string())
                             });
                             if let Some(text) = text {
                                 // or_insert: a FileChanged coalesced earlier in this
@@ -459,6 +461,7 @@ fn spawn_analysis_loop(
                     &mut file_versions,
                     &state,
                     &pending_text,
+                    &snapshots,
                 );
             }
 
@@ -472,6 +475,7 @@ fn spawn_analysis_loop(
                     &mut file_versions,
                     &state,
                     &pending_text,
+                    &snapshots,
                 );
             }
 
@@ -520,16 +524,18 @@ fn spawn_analysis_loop(
                         continue;
                     }
 
-                    // Destructure so the snapshot and legacy state take the
-                    // parts by move — no per-file deep clones.
+                    // Destructure so the snapshot takes the parts by move —
+                    // no per-file deep clones.
                     let crate::warmup::WarmupFileResult {
                         path,
                         syntax_data,
                         inference_data,
-                        file_analysis,
                         diagnostics,
                         import_paths,
                     } = result;
+
+                    // Keep the (Arc-shared) text for ignore-line filtering below.
+                    let source_text: Arc<str> = syntax_data.line_index.text().into();
 
                     // Write snapshot to DashMap (handlers can read immediately).
                     snapshots.insert(
@@ -540,17 +546,9 @@ fn spawn_analysis_loop(
                         },
                     );
 
-                    // Keep the (Arc-shared) text for ignore-line filtering below.
-                    let source_text = Arc::clone(&file_analysis.source_text);
-
-                    // Record import deps and store in legacy state.files.
-                    {
-                        let mut st = state.lock();
-                        st.record_import_deps(&path, &import_paths);
-
-                        // Signature is already in the coordinator (set during warmup).
-                        st.files.insert(path.clone(), file_analysis);
-                    }
+                    // Record import deps for dependency tracking.
+                    // (Signature is already in the coordinator, set during warmup.)
+                    state.lock().record_import_deps(&path, &import_paths);
 
                     // Buffer diagnostics for quiescence publication.
                     if dc.enable {
@@ -717,7 +715,6 @@ fn spawn_analysis_loop(
                     });
                 }
 
-                // Also store in legacy state.files for backward compat.
                 // Extract import paths for dependency tracking.
                 let import_paths: Vec<PathBuf> = inference_inputs
                     .import_targets
@@ -726,20 +723,15 @@ fn spawn_analysis_loop(
                     .collect::<std::collections::HashSet<_>>()
                     .into_iter()
                     .collect();
-                let file_analysis =
-                    crate::state::build_file_analysis(inference_inputs, check_result.clone());
 
                 // Extract root type and update ephemeral stub. If the stub
                 // changed, schedule re-analysis for all dependents.
                 // Build an OwnedTy from the TyRef + the inference arena so the
                 // type is self-contained (valid across file boundaries).
-                let root_ty: Option<lang_ty::OwnedTy> = file_analysis
-                    .check_result
-                    .inference
-                    .as_ref()
-                    .and_then(|inf| {
+                let root_ty: Option<lang_ty::OwnedTy> =
+                    check_result.inference.as_ref().and_then(|inf| {
                         inf.expr_ty_map
-                            .get(file_analysis.module.entry_expr)
+                            .get(inference_inputs.core.module.entry_expr)
                             .map(|&ty_ref| {
                                 lang_ty::OwnedTy::new(std::sync::Arc::clone(&inf.arena), ty_ref)
                             })
@@ -748,7 +740,6 @@ fn spawn_analysis_loop(
                 let mut reanalyze_paths = Vec::new();
                 {
                     let mut st = state.lock();
-                    st.files.insert(path.clone(), file_analysis);
                     st.record_import_deps(path, &import_paths);
                     if let Some(owned_ty) = root_ty {
                         if st.update_ephemeral_stub(path, owned_ty) {
@@ -852,10 +843,12 @@ impl LanguageServer for TixLanguageServer {
                         // Rebuild the registry to include both CLI and
                         // editor-configured stubs.
                         let registry = self.build_registry(&init_config);
-                        let reanalyze = self.state.lock().reload_registry(registry);
-                        for path in reanalyze {
+                        self.state.lock().reload_registry(registry);
+                        for entry in self.snapshots.iter() {
                             self.event_tx
-                                .send(AnalysisEvent::ReanalyzeFile { path })
+                                .send(AnalysisEvent::ReanalyzeFile {
+                                    path: entry.key().clone(),
+                                })
                                 .ok();
                         }
                     }
@@ -1153,7 +1146,6 @@ impl LanguageServer for TixLanguageServer {
         if let Some(path) = uri_to_path(&params.text_document.uri) {
             self.cancel_flag.store(true, Ordering::Relaxed);
             self.pending_text.lock().remove(&path);
-            self.state.lock().files.remove(&path);
             self.event_tx.send(AnalysisEvent::FileClosed { path }).ok();
         }
     }
@@ -1181,10 +1173,12 @@ impl LanguageServer for TixLanguageServer {
         // re-analysis completes — no synchronous re-check under the mutex.
         if stubs_changed {
             let registry = self.build_registry(&new_config);
-            let reanalyze = self.state.lock().reload_registry(registry);
-            for path in reanalyze {
+            self.state.lock().reload_registry(registry);
+            for entry in self.snapshots.iter() {
                 self.event_tx
-                    .send(AnalysisEvent::ReanalyzeFile { path })
+                    .send(AnalysisEvent::ReanalyzeFile {
+                        path: entry.key().clone(),
+                    })
                     .ok();
             }
         }
@@ -1228,9 +1222,11 @@ impl LanguageServer for TixLanguageServer {
             None => return Err(content_modified_error()),
         };
         let root = snap_ref.syntax.parsed.tree();
-        let state = self.state.lock();
+        // Only the registry is needed — clone the Arc so the state lock is
+        // released before the (potentially file-reading) resolution runs.
+        let registry = Arc::clone(&self.state.lock().registry);
         Ok(
-            crate::goto_def::goto_definition(&state, &snap_ref, pos, &uri, &root)
+            crate::goto_def::goto_definition(&registry, &snap_ref, pos, &uri, &root)
                 .map(GotoDefinitionResponse::Scalar),
         )
     }
@@ -1386,9 +1382,9 @@ impl LanguageServer for TixLanguageServer {
             None => return Err(content_modified_error()),
         };
         let root = snap_ref.syntax.parsed.tree();
-        let state = self.state.lock();
+        let coordinator = Arc::clone(&self.state.lock().coordinator);
         Ok(Some(crate::references::find_references_cross_file(
-            &state,
+            &coordinator,
             &self.snapshots,
             &snap_ref,
             pos,
@@ -1443,14 +1439,13 @@ impl LanguageServer for TixLanguageServer {
                 None => return Err(content_modified_error()),
             };
             let root = snap_ref.syntax.parsed.tree();
-            let state = self.state.lock();
             let result = crate::rename::rename(
                 &snap_ref,
                 pos,
                 &new_name,
                 &uri,
                 &root,
-                Some(&state),
+                Some(&self.snapshots),
                 path.as_ref(),
             );
 
@@ -1505,9 +1500,8 @@ impl LanguageServer for TixLanguageServer {
         &self,
         params: WorkspaceSymbolParams,
     ) -> Result<Option<Vec<SymbolInformation>>> {
-        let state = self.state.lock();
         Ok(crate::workspace_symbols::handle_workspace_symbols(
-            &state,
+            &self.snapshots,
             &params.query,
         ))
     }
