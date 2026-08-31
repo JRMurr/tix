@@ -2,6 +2,11 @@
 //! workspace. Deeply nested input (machine-generated Nix, huge binop chains)
 //! would otherwise overflow the stack.
 
+/// Stack size for worker threads (rayon pools, the LSP's tokio runtime).
+/// Deep recursion on large files needs big stacks even with `with_stack`
+/// guards, since guards only cover our own recursive walks.
+pub const WORKER_STACK_SIZE: usize = 16 * 1024 * 1024;
+
 /// Remaining-stack threshold below which a new segment is allocated.
 pub const STACK_RED_ZONE: usize = 256 * 1024;
 

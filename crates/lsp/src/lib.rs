@@ -24,6 +24,7 @@ pub mod server;
 mod signature_help;
 mod state;
 pub mod store_stubs;
+#[cfg(any(test, feature = "test_support"))]
 pub mod test_util;
 mod ty_nav;
 mod type_def;
@@ -89,7 +90,7 @@ pub fn run_lsp(mem_limit_override: Option<u64>, log_level_override: Option<Strin
     // NameResolution, CheckCtx, etc. on the stack.
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
-        .thread_stack_size(16 * 1024 * 1024)
+        .thread_stack_size(lang_ty::stack::WORKER_STACK_SIZE)
         .build()
         .expect("failed to build tokio runtime");
     rt.block_on(async_lsp_main(mem_limit_override, log_level_override));

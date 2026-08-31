@@ -8,7 +8,6 @@
 
 use lang_ast::{AstPtr, Expr, Literal};
 use lang_check::aliases::TypeAliasRegistry;
-use rowan::ast::AstNode;
 use tower_lsp::lsp_types::{Location, Position, Url};
 
 use crate::state::FileSnapshot;
@@ -30,12 +29,12 @@ pub fn goto_type_definition(
     let Some(inference) = analysis.inference_result() else {
         return Vec::new();
     };
-    let offset = analysis.syntax.line_index.offset(pos);
-    let Some(token) = root
-        .syntax()
-        .token_at_offset(rowan::TextSize::from(offset))
-        .right_biased()
-    else {
+    let Some(token) = crate::convert::token_at_pos(
+        &analysis.syntax.line_index,
+        root,
+        pos,
+        crate::convert::Bias::Right,
+    ) else {
         return Vec::new();
     };
 

@@ -97,6 +97,30 @@ impl LineIndex {
     }
 }
 
+/// Which side to prefer when an LSP position falls between two tokens.
+#[derive(Clone, Copy)]
+pub(crate) enum Bias {
+    Left,
+    Right,
+}
+
+/// Resolve an LSP position to the syntax token under it — the shared prelude
+/// of every cursor-driven feature (hover, goto-def, references, ...).
+pub(crate) fn token_at_pos(
+    line_index: &LineIndex,
+    root: &rnix::Root,
+    pos: Position,
+    bias: Bias,
+) -> Option<rowan::SyntaxToken<rnix::NixLanguage>> {
+    use rowan::ast::AstNode;
+    let offset = line_index.offset(pos);
+    let at = root.syntax().token_at_offset(rowan::TextSize::from(offset));
+    match bias {
+        Bias::Left => at.left_biased(),
+        Bias::Right => at.right_biased(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

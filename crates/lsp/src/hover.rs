@@ -30,11 +30,12 @@ pub fn hover(
     docs: &DocIndex,
 ) -> Option<Hover> {
     let inference = analysis.inference_result()?;
-    let offset = analysis.syntax.line_index.offset(pos);
-    let token = root
-        .syntax()
-        .token_at_offset(rowan::TextSize::from(offset))
-        .right_biased()?;
+    let token = crate::convert::token_at_pos(
+        &analysis.syntax.line_index,
+        root,
+        pos,
+        crate::convert::Bias::Right,
+    )?;
 
     // Walk up from the token to find the smallest node that has a source map entry.
     let mut node = token.parent()?;

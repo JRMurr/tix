@@ -156,7 +156,8 @@ pub fn run_check_project(
     // deeply recursive inference on large generated files (e.g.
     // hackage-packages.nix) doesn't blow the default 8 MB stack.
     {
-        let mut builder = rayon::ThreadPoolBuilder::new().stack_size(16 * 1024 * 1024);
+        let mut builder =
+            rayon::ThreadPoolBuilder::new().stack_size(lang_ty::stack::WORKER_STACK_SIZE);
         if let Some(n) = jobs {
             builder = builder.num_threads(n);
         }

@@ -995,7 +995,7 @@ impl CheckCtx<'_> {
                             result
                         }
                         // Frozen types are ground (no variables) — handled by the
-                        // fast path above. Unreachable, but return as-is defensively.
+                        // fast path above.
                         Ty::Frozen(_) => {
                             unreachable!("Frozen should be caught by variable_free fast path")
                         }

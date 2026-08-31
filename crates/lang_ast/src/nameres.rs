@@ -93,31 +93,7 @@ pub const GLOBAL_BUILTIN_NAMES: &[&str] = &[
 /// Returns the static name string if `name` is a known global builtin
 /// (i.e. available without the `builtins.` prefix in Nix).
 pub fn lookup_global_builtin(name: &str) -> Option<&'static str> {
-    match name {
-        "abort" => Some("abort"),
-        "baseNameOf" => Some("baseNameOf"),
-        "builtins" => Some("builtins"),
-        "derivation" => Some("derivation"),
-        "dirOf" => Some("dirOf"),
-        "false" => Some("false"),
-        "fetchGit" => Some("fetchGit"),
-        "fetchMercurial" => Some("fetchMercurial"),
-        "fetchTarball" => Some("fetchTarball"),
-        "fetchTree" => Some("fetchTree"),
-        "fetchurl" => Some("fetchurl"),
-        "fromTOML" => Some("fromTOML"),
-        "import" => Some("import"),
-        "isNull" => Some("isNull"),
-        "map" => Some("map"),
-        "null" => Some("null"),
-        "placeholder" => Some("placeholder"),
-        "removeAttrs" => Some("removeAttrs"),
-        "scopedImport" => Some("scopedImport"),
-        "throw" => Some("throw"),
-        "toString" => Some("toString"),
-        "true" => Some("true"),
-        _ => None,
-    }
+    GLOBAL_BUILTIN_NAMES.iter().find(|&&b| b == name).copied()
 }
 
 /// Build scopes for a module.

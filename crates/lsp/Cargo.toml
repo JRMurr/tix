@@ -32,6 +32,7 @@ thiserror = { workspace = true }
 dirs = { workspace = true }
 
 [dev-dependencies]
+tix-lsp = { path = ".", features = ["test_support"] }
 indoc = { workspace = true }
 hegeltest = { workspace = true }
 tempfile = "3"
@@ -42,3 +43,6 @@ tower = { version = "0.4", features = ["util"] }
 name = "tix_lsp"
 path = "src/lib.rs"
 
+
+[features]
+test_support = []

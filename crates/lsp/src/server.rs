@@ -107,7 +107,7 @@ impl TixLanguageServer {
         // Initialize rayon's global thread pool with 16 MB stacks, matching the
         // CLI. Deep recursion on large files needs this to avoid stack overflow.
         rayon::ThreadPoolBuilder::new()
-            .stack_size(16 * 1024 * 1024)
+            .stack_size(lang_ty::stack::WORKER_STACK_SIZE)
             .build_global()
             .ok(); // Ignored if pool already initialized.
 
@@ -309,7 +309,7 @@ fn spawn_analysis_loop(
     client: Client,
     pending_text: Arc<Mutex<HashMap<PathBuf, String>>>,
     cancel_flag: Arc<AtomicBool>,
-    _snapshots: Arc<DashMap<PathBuf, FileSnapshot>>,
+    snapshots: Arc<DashMap<PathBuf, FileSnapshot>>,
     diag_config: Arc<Mutex<DiagnosticsConfig>>,
     coordinator: Arc<lang_check::coordinator::InferenceCoordinator>,
     lsp_syntax_provider: Arc<crate::state::LspSyntaxProvider>,
@@ -513,7 +513,7 @@ fn spawn_analysis_loop(
 
                     // Skip if there's already a snapshot with inference data
                     // (e.g. from demand-driven inference triggered by a user file).
-                    if _snapshots
+                    if snapshots
                         .get(&result.path)
                         .is_some_and(|s| s.inference.is_some())
                     {
@@ -532,7 +532,7 @@ fn spawn_analysis_loop(
                     } = result;
 
                     // Write snapshot to DashMap (handlers can read immediately).
-                    _snapshots.insert(
+                    snapshots.insert(
                         path.clone(),
                         FileSnapshot {
                             syntax: syntax_data,
@@ -554,7 +554,7 @@ fn spawn_analysis_loop(
 
                     // Buffer diagnostics for quiescence publication.
                     if dc.enable {
-                        if let Some(snap) = _snapshots.get(&path) {
+                        if let Some(snap) = snapshots.get(&path) {
                             let file_uri = Url::from_file_path(&path)
                                 .unwrap_or_else(|_| Url::parse("file:///unknown").unwrap());
                             let check_result = &snap
@@ -637,10 +637,10 @@ fn spawn_analysis_loop(
                 // fresh syntax data while inference is still running.
                 {
                     // Preserve existing inference data when updating syntax.
-                    let prev_inference = _snapshots
+                    let prev_inference = snapshots
                         .get(path)
                         .and_then(|snap| snap.inference.as_ref().cloned());
-                    _snapshots.insert(
+                    snapshots.insert(
                         path.clone(),
                         FileSnapshot {
                             syntax: syntax_data,
@@ -674,7 +674,7 @@ fn spawn_analysis_loop(
                 };
 
                 // Update DashMap with import data from Phase B.
-                if let Some(mut snap) = _snapshots.get_mut(path) {
+                if let Some(mut snap) = snapshots.get_mut(path) {
                     snap.syntax.import_targets = import_targets;
                     snap.syntax.name_to_import = name_to_import;
                 }
@@ -711,7 +711,7 @@ fn spawn_analysis_loop(
                 }
 
                 // Phase C: Store inference results in DashMap and legacy state.
-                if let Some(mut snap) = _snapshots.get_mut(path) {
+                if let Some(mut snap) = snapshots.get_mut(path) {
                     snap.inference = Some(InferenceData {
                         check_result: check_result.clone(),
                     });
@@ -768,7 +768,7 @@ fn spawn_analysis_loop(
 
                 let dc = diag_config.lock().clone();
                 let diags = if !was_cancelled {
-                    if let Some(snap) = _snapshots.get(path) {
+                    if let Some(snap) = snapshots.get(path) {
                         let file_uri = Url::from_file_path(path)
                             .unwrap_or_else(|_| Url::parse("file:///unknown").unwrap());
                         build_diagnostics(
@@ -912,7 +912,7 @@ impl LanguageServer for TixLanguageServer {
                                     let gen_config_dir = config_dir.clone();
                                     let gen_state = self.state.clone();
                                     let gen_event_tx = self.event_tx.clone();
-                                    let gen_snapshots = self.snapshots.clone();
+                                    let gensnapshots = self.snapshots.clone();
 
                                     tokio::task::spawn_blocking(move || {
                                         log::info!("Starting runtime stub generation...");
@@ -934,7 +934,7 @@ impl LanguageServer for TixLanguageServer {
 
                                                 // Re-analyze all open files so they
                                                 // pick up the new stubs.
-                                                for entry in gen_snapshots.iter() {
+                                                for entry in gensnapshots.iter() {
                                                     gen_event_tx
                                                         .send(AnalysisEvent::ReanalyzeFile {
                                                             path: entry.key().clone(),

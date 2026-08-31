@@ -21,7 +21,6 @@ struct LowerCtx {
     diagnostics: Vec<LowerDiagnostic>,
 }
 
-#[allow(dead_code)]
 pub fn lower(root: rnix::Root, doc_comments: DocCommentCtx) -> (Module, ModuleSourceMap) {
     let mut ctx = LowerCtx {
         exprs: Arena::new(),

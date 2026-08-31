@@ -1591,38 +1591,9 @@ fn build_registry(
 
 /// Load .tix files from a path. If the path is a file, load it directly.
 /// If it's a directory, recursively find all .tix files and load them.
-fn load_stubs(registry: &mut TypeAliasRegistry, path: &PathBuf) -> Result<(), Box<dyn Error>> {
-    if path.is_dir() {
-        for entry in std::fs::read_dir(path)? {
-            let entry = entry?;
-            let entry_path = entry.path();
-            if entry_path.is_dir() {
-                if let Some(name) = entry_path.file_name().and_then(|n| n.to_str()) {
-                    if comment_parser::SKIP_STUB_DIRS.contains(&name) {
-                        continue;
-                    }
-                }
-                load_stubs(registry, &entry_path)?;
-            } else if entry_path.extension().is_some_and(|ext| ext == "tix") {
-                load_single_stub(registry, &entry_path)?;
-            }
-        }
-    } else {
-        load_single_stub(registry, path)?;
-    }
-    Ok(())
-}
-
-fn load_single_stub(
-    registry: &mut TypeAliasRegistry,
-    path: &PathBuf,
-) -> Result<(), Box<dyn Error>> {
-    let source = std::fs::read_to_string(path)?;
-    let file = comment_parser::parse_tix_file(&source)
-        .map_err(|e| format!("Error parsing {}: {}", path.display(), e))?;
-    registry.load_tix_file_with_path(&file, path);
-    Ok(())
-}
+/// Shared with the LSP — one implementation for loading `.tix` stubs from a
+/// file or directory tree.
+pub(crate) use tix_lsp::load_stubs;
 
 #[cfg(test)]
 mod tests {

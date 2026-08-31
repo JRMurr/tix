@@ -1969,6 +1969,7 @@ dependencies = [
  "smol_str",
  "tempfile",
  "thiserror 2.0.9",
+ "tix-lsp",
  "tokio",
  "toml",
  "tower",

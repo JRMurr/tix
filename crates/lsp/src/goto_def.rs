@@ -32,11 +32,12 @@ pub fn goto_definition(
     uri: &Url,
     root: &rnix::Root,
 ) -> Option<Location> {
-    let offset = analysis.syntax.line_index.offset(pos);
-    let token = root
-        .syntax()
-        .token_at_offset(rowan::TextSize::from(offset))
-        .right_biased()?;
+    let token = crate::convert::token_at_pos(
+        &analysis.syntax.line_index,
+        root,
+        pos,
+        crate::convert::Bias::Right,
+    )?;
 
     log::debug!(
         "goto_definition: pos={pos:?}, token={:?} {:?}",
