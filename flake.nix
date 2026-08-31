@@ -40,6 +40,7 @@
           rustAttrs = import ./nix/rust.nix { inherit pkgs crane; };
           tix-lsp-dev = import ./nix/lsp-local.nix {
             inherit pkgs;
+            profile = "debug";
             name = "tix-lsp-dev";
           };
           tix-lsp-release = import ./nix/lsp-local.nix {

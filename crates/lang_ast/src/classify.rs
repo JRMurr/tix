@@ -9,7 +9,7 @@
 // Lives in lang_ast so both CLI and LSP can use it without depending on
 // lang_check.
 
-use std::collections::HashSet;
+use rustc_hash::FxHashSet as HashSet;
 
 use smol_str::SmolStr;
 
@@ -188,6 +188,77 @@ fn check_explicit_context(module: &Module) -> Option<Classification> {
 // Pattern Lambda Scoring
 // ==============================================================================
 
+/// Score contribution of one classification signal: added to the
+/// (NixOS module, Home Manager module, callPackage) scores when it fires.
+struct SignalWeight {
+    nixos: f32,
+    hm: f32,
+    callpkg: f32,
+}
+
+const W_PARAM_CONFIG: SignalWeight = SignalWeight {
+    nixos: 4.0,
+    hm: 2.0,
+    callpkg: 0.0,
+};
+/// osConfig is definitive for Home Manager.
+const W_PARAM_OSCONFIG: SignalWeight = SignalWeight {
+    nixos: 0.0,
+    hm: 10.0,
+    callpkg: 0.0,
+};
+const W_PARAM_STDENV: SignalWeight = SignalWeight {
+    nixos: 0.0,
+    hm: 0.0,
+    callpkg: 6.0,
+};
+const W_PARAM_FETCHERS: SignalWeight = SignalWeight {
+    nixos: 0.0,
+    hm: 0.0,
+    callpkg: 3.0,
+};
+/// config absent + pkgs/stdenv present suggests callPackage, not NixOS module.
+const W_PKGS_WITHOUT_CONFIG: SignalWeight = SignalWeight {
+    nixos: -3.0,
+    hm: 0.0,
+    callpkg: 0.0,
+};
+const W_BODY_MKOPTION: SignalWeight = SignalWeight {
+    nixos: 4.0,
+    hm: 0.0,
+    callpkg: 0.0,
+};
+const W_BODY_MKDERIVATION: SignalWeight = SignalWeight {
+    nixos: 0.0,
+    hm: 0.0,
+    callpkg: 5.0,
+};
+const W_BODY_LANG_BUILDERS: SignalWeight = SignalWeight {
+    nixos: 0.0,
+    hm: 0.0,
+    callpkg: 4.0,
+};
+const W_BODY_MK_MODIFIERS: SignalWeight = SignalWeight {
+    nixos: 2.0,
+    hm: 2.0,
+    callpkg: 0.0,
+};
+const W_KEY_OPTIONS: SignalWeight = SignalWeight {
+    nixos: 3.0,
+    hm: 0.0,
+    callpkg: 0.0,
+};
+const W_KEY_IMPORTS: SignalWeight = SignalWeight {
+    nixos: 1.0,
+    hm: 1.0,
+    callpkg: 0.0,
+};
+const W_MODULE_RETURN_SHAPE: SignalWeight = SignalWeight {
+    nixos: 2.0,
+    hm: 1.0,
+    callpkg: 0.0,
+};
+
 /// Score a pattern-lambda file based on parameter names, body references,
 /// and body attrset keys.
 fn score_pattern_lambda(
@@ -202,77 +273,56 @@ fn score_pattern_lambda(
     let mut hm_score: f32 = 0.0;
     let mut callpkg_score: f32 = 0.0;
 
+    let mut apply = |fires: bool, w: &SignalWeight| {
+        if fires {
+            nixos_score += w.nixos;
+            hm_score += w.hm;
+            callpkg_score += w.callpkg;
+        }
+    };
+
     // ---- Parameter name scoring ----
-
-    if param_names.contains("config") {
-        nixos_score += 4.0;
-        hm_score += 2.0;
-    }
-
-    // osConfig is definitive for Home Manager.
-    if param_names.contains("osConfig") {
-        hm_score += 10.0;
-    }
-
-    if param_names.contains("stdenv") {
-        callpkg_score += 6.0;
-    }
-
-    if param_names.contains("fetchFromGitHub") || param_names.contains("fetchurl") {
-        callpkg_score += 3.0;
-    }
-
-    // lib is common across all module types but doesn't help disambiguate much.
-    // config absent + pkgs/stdenv present suggests callPackage, not NixOS module.
-    if !param_names.contains("config")
-        && (param_names.contains("pkgs") || param_names.contains("stdenv"))
-    {
-        nixos_score -= 3.0;
-    }
+    // lib is common across all module types but doesn't help disambiguate.
+    apply(param_names.contains("config"), &W_PARAM_CONFIG);
+    apply(param_names.contains("osConfig"), &W_PARAM_OSCONFIG);
+    apply(param_names.contains("stdenv"), &W_PARAM_STDENV);
+    apply(
+        param_names.contains("fetchFromGitHub") || param_names.contains("fetchurl"),
+        &W_PARAM_FETCHERS,
+    );
+    apply(
+        !param_names.contains("config")
+            && (param_names.contains("pkgs") || param_names.contains("stdenv")),
+        &W_PKGS_WITHOUT_CONFIG,
+    );
 
     // ---- Body reference scoring ----
-
-    if body_refs.contains("mkOption") || body_refs.contains("mkEnableOption") {
-        nixos_score += 4.0;
-    }
-
-    if body_refs.contains("mkDerivation") {
-        callpkg_score += 5.0;
-    }
-
-    if body_refs.contains("buildPythonPackage")
-        || body_refs.contains("buildGoModule")
-        || body_refs.contains("buildRustPackage")
-    {
-        callpkg_score += 4.0;
-    }
-
-    if body_refs.contains("mkIf")
-        || body_refs.contains("mkDefault")
-        || body_refs.contains("mkForce")
-    {
-        nixos_score += 2.0;
-        hm_score += 2.0;
-    }
+    apply(
+        body_refs.contains("mkOption") || body_refs.contains("mkEnableOption"),
+        &W_BODY_MKOPTION,
+    );
+    apply(body_refs.contains("mkDerivation"), &W_BODY_MKDERIVATION);
+    apply(
+        body_refs.contains("buildPythonPackage")
+            || body_refs.contains("buildGoModule")
+            || body_refs.contains("buildRustPackage"),
+        &W_BODY_LANG_BUILDERS,
+    );
+    apply(
+        body_refs.contains("mkIf")
+            || body_refs.contains("mkDefault")
+            || body_refs.contains("mkForce"),
+        &W_BODY_MK_MODIFIERS,
+    );
 
     // ---- Body attrset key scoring ----
+    apply(body_keys.contains("options"), &W_KEY_OPTIONS);
+    apply(body_keys.contains("imports"), &W_KEY_IMPORTS);
 
-    if body_keys.contains("options") {
-        nixos_score += 3.0;
-    }
-
-    if body_keys.contains("imports") {
-        nixos_score += 1.0;
-        hm_score += 1.0;
-    }
-
-    // ---- Check for a `{ options, config, ... }` return shape (NixOS module convention) ----
-    // A NixOS module typically returns an attrset with `options` and/or `config` keys,
-    // or is wrapped in mkMerge / mkIf.
-    if is_module_return_shape(module, body) {
-        nixos_score += 2.0;
-        hm_score += 1.0;
-    }
+    // ---- `{ options, config, ... }` return shape (NixOS module convention) ----
+    // A NixOS module typically returns an attrset with `options` and/or
+    // `config` keys, or is wrapped in mkMerge / mkIf.
+    apply(is_module_return_shape(module, body), &W_MODULE_RETURN_SHAPE);
 
     // ---- Pick the winner ----
     let scores = [
@@ -353,7 +403,7 @@ fn classify_bare_attrset(module: &Module, bindings: &Bindings) -> Classification
 /// Collect reference names and select-chain leaf names from a body expression.
 /// Stops at nested Lambda boundaries to avoid inner-scope pollution.
 fn collect_body_references(module: &Module, body: ExprId) -> HashSet<SmolStr> {
-    let mut refs = HashSet::new();
+    let mut refs = HashSet::default();
     let mut stack = vec![body];
 
     while let Some(expr_id) = stack.pop() {
@@ -399,7 +449,7 @@ fn collect_body_references(module: &Module, body: ExprId) -> HashSet<SmolStr> {
 /// If body is a let-in, looks at the inner body. If body is an attrset,
 /// collects its static key names.
 fn collect_body_attrset_keys(module: &Module, body: ExprId) -> HashSet<SmolStr> {
-    let mut keys = HashSet::new();
+    let mut keys = HashSet::default();
     let target = unwrap_let_in(module, body);
 
     if let Expr::AttrSet { bindings, .. } = &module[target] {

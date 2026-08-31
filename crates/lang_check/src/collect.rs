@@ -240,7 +240,7 @@ impl<'a> Canonicalizer<'a> {
         // canonicalize_child is the single recursive entry point —
         // expand_bounds, canonicalize_inner, and canonicalize_concrete
         // all recurse through here.
-        stacker::maybe_grow(256 * 1024, 1024 * 1024, || {
+        lang_ast::stack::with_stack(|| {
             self.in_progress.insert(key);
             let result = self.canonicalize_inner(ty_id, polarity);
             self.in_progress.remove(&key);
@@ -426,7 +426,7 @@ impl<'a> Canonicalizer<'a> {
         //    Cooccurring TyVars survive — see `should_drop_filler`.
         let concrete: Vec<OutputTy> = flattened
             .into_iter()
-            .filter(|m| !should_drop_filler(m, &self.cooccurring))
+            .filter(|m| !should_drop_filler(m, &self.cooccurring, self.table.len()))
             .collect();
 
         // 4. Polarity-specific normalization.
@@ -606,7 +606,7 @@ impl<'a> Canonicalizer<'a> {
                 let all_members = members.clone();
                 let concrete: Vec<OutputTy> = members
                     .into_iter()
-                    .filter(|m| !should_drop_filler(m, &self.cooccurring))
+                    .filter(|m| !should_drop_filler(m, &self.cooccurring, self.table.len()))
                     .collect();
                 // Check for contradictions in all polarities for Inter types.
                 // Unlike variable-bound intersections (negative polarity only),
@@ -641,7 +641,7 @@ impl<'a> Canonicalizer<'a> {
                             flatten_intersection(&self.arena, vec![ca_retry, cb_retry]);
                         let retry_concrete: Vec<OutputTy> = retry_members
                             .into_iter()
-                            .filter(|m| !should_drop_filler(m, &self.cooccurring))
+                            .filter(|m| !should_drop_filler(m, &self.cooccurring, self.table.len()))
                             .collect();
                         // Distribute negations into unions before re-checking.
                         let retry_concrete =
@@ -699,7 +699,7 @@ impl<'a> Canonicalizer<'a> {
                 let all_members = members.clone();
                 let concrete: Vec<OutputTy> = members
                     .into_iter()
-                    .filter(|m| !should_drop_filler(m, &self.cooccurring))
+                    .filter(|m| !should_drop_filler(m, &self.cooccurring, self.table.len()))
                     .collect();
                 let had_concrete = !concrete.is_empty();
                 let concrete = match polarity {
@@ -787,7 +787,7 @@ pub fn canonicalize_standalone_with_deadline(
 fn negate_output_ty(arena: &mut TypeArena, inner: OutputTy) -> OutputTy {
     // Guard against stack overflow on deeply nested Union/Intersection trees
     // (De Morgan expansion recurses independently of canonicalize).
-    stacker::maybe_grow(256 * 1024, 1024 * 1024, || match inner {
+    lang_ast::stack::with_stack(|| match inner {
         // ¬(¬A) → A
         OutputTy::Neg(a) => arena[a].clone(),
 
@@ -1414,9 +1414,13 @@ fn flatten_composite(
 ///
 /// In the single-pass `Collector` path, `cooccurring` is always empty, so
 /// this behaves as an unconditional drop.
-fn should_drop_filler(m: &OutputTy, cooccurring: &FxHashSet<TyId>) -> bool {
+/// `storage_len` bounds the storage TyId namespace: a `TyVar` id at or above
+/// it is an external var (frozen stub) that can never be cooccurring — same
+/// guard as `EquivDsu::find`, without it a colliding external id would be
+/// spuriously kept.
+fn should_drop_filler(m: &OutputTy, cooccurring: &FxHashSet<TyId>, storage_len: usize) -> bool {
     match m {
-        OutputTy::TyVar(n) => !cooccurring.contains(&TyId::from(*n)),
+        OutputTy::TyVar(n) => *n as usize >= storage_len || !cooccurring.contains(&TyId::from(*n)),
         OutputTy::Bottom | OutputTy::Top => true,
         _ => false,
     }
@@ -1716,6 +1720,25 @@ mod tests {
     /// Helper: create an OutputTy::Intersection with arena-interned members.
     fn isect(arena: &mut TypeArena, members: Vec<OutputTy>) -> OutputTy {
         OutputTy::Intersection(members.into_iter().map(|m| arena.intern(m)).collect())
+    }
+
+    // -- should_drop_filler tests ---------------------------------------------
+
+    /// `cooccurring` holds storage TyIds, but a `TyVar` in canonicalized
+    /// output can carry an external var id (frozen stub) from a separate
+    /// id namespace. A colliding external id must still be dropped.
+    #[test]
+    fn drop_filler_ignores_external_var_ids() {
+        let mut cooccurring = FxHashSet::default();
+        cooccurring.insert(TyId(5));
+        let storage_len = 3; // TyId(5) can't be a storage id here.
+
+        assert!(
+            should_drop_filler(&OutputTy::TyVar(5), &cooccurring, storage_len),
+            "external var id colliding with a cooccurring storage id must be dropped"
+        );
+        // A genuine in-range cooccurring var survives.
+        assert!(!should_drop_filler(&OutputTy::TyVar(5), &cooccurring, 10));
     }
 
     // -- negate_output_ty tests -----------------------------------------------

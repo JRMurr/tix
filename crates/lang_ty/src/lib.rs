@@ -3,6 +3,7 @@ pub mod arena;
 mod attrset;
 pub mod disjoint;
 pub mod simplify;
+pub mod stack;
 
 #[cfg(any(test, feature = "hegel_support"))]
 pub mod hegel_gen;
@@ -10,7 +11,7 @@ pub mod hegel_gen;
 pub mod raw_ty;
 
 pub use arc_ty::{DisplayConfig, OutputTy, Substitutions, TyRef};
-pub use arena::{OwnedTy, TypeArena, TypeDisplay};
+pub use arena::{import_from_arena, import_node_from_arena, OwnedTy, TypeArena, TypeDisplay};
 pub use attrset::AttrSetTy;
 use derive_more::Debug;
 pub use primitive::PrimitiveTy;

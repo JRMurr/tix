@@ -31,11 +31,12 @@ pub fn signature_help(
     root: &rnix::Root,
 ) -> Option<SignatureHelp> {
     let inference = analysis.inference_result()?;
-    let offset = analysis.syntax.line_index.offset(pos);
-    let token = root
-        .syntax()
-        .token_at_offset(rowan::TextSize::from(offset))
-        .left_biased()?;
+    let token = crate::convert::token_at_pos(
+        &analysis.syntax.line_index,
+        root,
+        pos,
+        crate::convert::Bias::Left,
+    )?;
 
     let node = token.parent()?;
 
@@ -65,7 +66,7 @@ pub fn signature_help(
 
     // Determine the active parameter by checking which argument range contains
     // the cursor.
-    let cursor_offset = rowan::TextSize::from(offset);
+    let cursor_offset = rowan::TextSize::from(analysis.syntax.line_index.offset(pos));
     let total_params = chain.len();
     let mut active_param: u32 = (total_params - 1) as u32; // default to last
 

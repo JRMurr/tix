@@ -18,6 +18,18 @@ use lang_ast::{
 use lang_ty::{AttrSetTy, PrimitiveTy, Ty};
 use smol_str::SmolStr;
 
+/// Primitive type of a literal expression. (Was a `From<Literal>` impl in
+/// lang_ty, removed when the lang_ty → lang_ast dependency was flipped.)
+fn literal_prim(lit: &Literal) -> PrimitiveTy {
+    match lit {
+        Literal::Float(_) => PrimitiveTy::Float,
+        Literal::Integer(_) => PrimitiveTy::Int,
+        Literal::String(_) => PrimitiveTy::String,
+        Literal::Path(_) => PrimitiveTy::Path,
+        Literal::Uri => PrimitiveTy::Uri,
+    }
+}
+
 /// A deferred `with`-fallback constraint: the name must be found in at least
 /// one of the `with` environments (tried inner-to-outer at runtime).
 ///
@@ -82,7 +94,7 @@ impl CheckCtx<'_> {
         // Guard against stack overflow: infer_expr recurses through the AST
         // via infer_expr_inner, which can be very deep on large generated files
         // (e.g. hackage-packages.nix with 769k lines).
-        stacker::maybe_grow(256 * 1024, 1024 * 1024, || {
+        lang_ast::stack::with_stack(|| {
             // Track the current expression so errors from constrain() and
             // sub-calls are attributed to the correct source location.
             self.current_expr = e;
@@ -109,7 +121,7 @@ impl CheckCtx<'_> {
             Expr::Missing => Ok(self.new_var()),
 
             Expr::Literal(lit) => {
-                let prim: PrimitiveTy = lit.into();
+                let prim = literal_prim(&lit);
                 Ok(self.alloc_prim(prim))
             }
 
@@ -194,9 +206,7 @@ impl CheckCtx<'_> {
                         {
                             Ok(ty) => ty,
                             Err(err) => {
-                                if lambda_error.is_none() {
-                                    lambda_error = Some(err);
-                                }
+                                lambda_error.get_or_insert(err);
                                 None
                             }
                         };
@@ -218,9 +228,7 @@ impl CheckCtx<'_> {
                             // polymorphism.
                             self.types.storage.mark_default_param(name_ty);
                             if let Err(err) = self.constrain_at(default_ty, name_ty) {
-                                if lambda_error.is_none() {
-                                    lambda_error = Some(err);
-                                }
+                                lambda_error.get_or_insert(err);
                             }
                         }
                         // Apply doc comment type annotations and context args, unless
@@ -228,21 +236,12 @@ impl CheckCtx<'_> {
                         // (to avoid double-applying and creating redundant constraint paths).
                         let field_text = self.module[name].text.clone();
                         if !self.pre_annotated_params.contains(&name) {
-                            if let Err(err) = self.apply_type_annotation(name, name_ty) {
-                                if lambda_error.is_none() {
-                                    lambda_error = Some(err);
-                                }
-                            }
-
-                            if let Some(ref ctx_args) = effective_context {
-                                if let Some(ctx_ty) = ctx_args.get(&field_text).cloned() {
-                                    let interned = self.intern_fresh_ty(ctx_ty);
-                                    if let Err(err) = self.constrain_equal(interned, name_ty) {
-                                        if lambda_error.is_none() {
-                                            lambda_error = Some(err);
-                                        }
-                                    }
-                                }
+                            if let Err(err) = self.apply_param_annotations(
+                                name,
+                                name_ty,
+                                effective_context.as_ref(),
+                            ) {
+                                lambda_error.get_or_insert(err);
                             }
                         }
 
@@ -262,18 +261,14 @@ impl CheckCtx<'_> {
                     }));
 
                     if let Err(err) = self.constrain_equal(param_ty, attr) {
-                        if lambda_error.is_none() {
-                            lambda_error = Some(err);
-                        }
+                        lambda_error.get_or_insert(err);
                     }
                 }
 
                 let body_ty = match self.infer_expr(body) {
                     Ok(ty) => ty,
                     Err(err) => {
-                        if lambda_error.is_none() {
-                            lambda_error = Some(err);
-                        }
+                        lambda_error.get_or_insert(err);
                         // Use a fresh unconstrained tyvar for the return type
                         // so the lambda still has a function type.
                         self.new_var()
@@ -715,11 +710,11 @@ impl CheckCtx<'_> {
         let new_constraint = match binding.predicate {
             crate::narrow::NarrowPredicate::IsType(prim) => {
                 // α ∧ PrimType — structural intersection with the primitive.
-                self.alloc_prim(crate::narrow::narrow_prim_to_ty(prim))
+                self.alloc_prim(prim)
             }
             crate::narrow::NarrowPredicate::IsNotType(prim) => {
                 // α ∧ ¬PrimType — structural intersection with negation.
-                let prim_ty = self.alloc_prim(crate::narrow::narrow_prim_to_ty(prim));
+                let prim_ty = self.alloc_prim(prim);
                 self.alloc_concrete(Ty::Neg(prim_ty))
             }
             crate::narrow::NarrowPredicate::HasField(ref field_name) => {

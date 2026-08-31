@@ -100,7 +100,7 @@ impl CheckCtx<'_> {
         // Guard against stack overflow: constrain() recurses through variable
         // bounds chains and structural children, which can be very deep on
         // complex type graphs.
-        stacker::maybe_grow(256 * 1024, 1024 * 1024, || {
+        lang_ast::stack::with_stack(|| {
             // Check entry discriminants without cloning. We only clone the data
             // we actually need for each case: bounds Vecs for variables (cheap —
             // Vec<TyId> is Vec<u32>), or the full Ty for concrete types.
@@ -160,12 +160,8 @@ impl CheckCtx<'_> {
                     Ok(())
                 }
 
-                // Both concrete — structural subtyping. Clone only the Ty values.
-                (false, false) => {
-                    let sub_ty = self.types.expect_concrete(sub);
-                    let sup_ty = self.types.expect_concrete(sup);
-                    self.constrain_concrete(sub, sup, &sub_ty, &sup_ty)
-                }
+                // Both concrete — structural subtyping.
+                (false, false) => self.constrain_concrete(sub, sup),
             }
         })
     }
@@ -175,17 +171,24 @@ impl CheckCtx<'_> {
     /// `sub_id`/`sup_id` are the original TyIds from `constrain()` — passed
     /// through so that Inter/Union decomposition reuses them instead of
     /// allocating fresh copies (which would defeat the constrain_cache).
-    fn constrain_concrete(
-        &mut self,
-        sub_id: TyId,
-        sup_id: TyId,
-        sub: &Ty<TyId>,
-        sup: &Ty<TyId>,
-    ) -> Result<(), InferenceError> {
-        match (sub, sup) {
+    ///
+    /// Matches on borrowed entries; each arm copies out only the TyIds it
+    /// needs (or clones only what it must) before making `&mut self` calls.
+    /// This is the hottest function in inference — no unconditional clones.
+    fn constrain_concrete(&mut self, sub_id: TyId, sup_id: TyId) -> Result<(), InferenceError> {
+        match (
+            self.types.concrete_ref(sub_id),
+            self.types.concrete_ref(sup_id),
+        ) {
             // Named is transparent — unwrap and constrain the inner type.
-            (Ty::Named(_, inner), _) => self.constrain(*inner, sup_id),
-            (_, Ty::Named(_, inner)) => self.constrain(sub_id, *inner),
+            (Ty::Named(_, inner), _) => {
+                let inner = *inner;
+                self.constrain(inner, sup_id)
+            }
+            (_, Ty::Named(_, inner)) => {
+                let inner = *inner;
+                self.constrain(sub_id, inner)
+            }
 
             // ── Frozen import types: lazy materialization ──────────────────
             //
@@ -262,8 +265,9 @@ impl CheckCtx<'_> {
                     body: b2,
                 },
             ) => {
-                self.constrain(*p2, *p1)?; // contravariant
-                self.constrain(*b1, *b2)?; // covariant
+                let (p1, b1, p2, b2) = (*p1, *b1, *p2, *b2);
+                self.constrain(p2, p1)?; // contravariant
+                self.constrain(b1, b2)?; // covariant
                 Ok(())
             }
 
@@ -275,12 +279,13 @@ impl CheckCtx<'_> {
             // alias a `List<Cat>` as `List<Animal>`, then write a `Dog` into
             // it through the `Animal` reference, violating the `Cat` invariant.
             // Nix has no such mutation, so `[Cat] <: [Animal]` is safe.
-            (Ty::List(e1), Ty::List(e2)) => self.constrain(*e1, *e2),
+            (Ty::List(e1), Ty::List(e2)) => {
+                let (e1, e2) = (*e1, *e2);
+                self.constrain(e1, e2)
+            }
 
             // AttrSet: width subtyping — sub must have all fields that sup requires.
-            (Ty::AttrSet(sub_attr), Ty::AttrSet(sup_attr)) => {
-                self.constrain_attrsets(sub_attr, sup_attr)
-            }
+            (Ty::AttrSet(_), Ty::AttrSet(_)) => self.constrain_attrsets(sub_id, sup_id),
 
             // Identical primitives are subtypes of each other.
             (Ty::Primitive(p1), Ty::Primitive(p2)) if p1 == p2 => Ok(()),
@@ -290,7 +295,10 @@ impl CheckCtx<'_> {
             // ── Negation rules (BAS) ────────────────────────────────────────
             //
             // Neg(A) <: Neg(B) iff B <: A (contravariant flip).
-            (Ty::Neg(a), Ty::Neg(b)) => self.constrain(*b, *a),
+            (Ty::Neg(a), Ty::Neg(b)) => {
+                let (a, b) = (*a, *b);
+                self.constrain(b, a)
+            }
 
             // Concrete <: Neg(inner): succeeds when the concrete type is
             // provably disjoint from the negated type. Handles all constructor
@@ -308,7 +316,7 @@ impl CheckCtx<'_> {
                 } else {
                     Err(InferenceError::TypeMismatch(Box::new((
                         sub.clone(),
-                        sup.clone(),
+                        Ty::Neg(*inner),
                     ))))
                 }
             }
@@ -336,15 +344,19 @@ impl CheckCtx<'_> {
             // Variable isolation: when one member is a variable, move the
             // other across the <: boundary with negation flipped.
             //   α ∧ C <: U → α <: U ∨ ¬C
-            (Ty::Inter(a, b), _) => {
+            (Ty::Inter(a, b), sup) => {
                 let (a, b) = (*a, *b);
-                self.constrain_lhs_inter(a, b, sup_id, sup)
+                // Clone only here: the helper needs the sup value for
+                // disjointness checks and error reporting.
+                let sup = sup.clone();
+                self.constrain_lhs_inter(a, b, sup_id, &sup)
             }
 
             // Union on RHS: route concrete sub to the appropriate member.
-            (_, Ty::Union(a, b)) => {
+            (sub, Ty::Union(a, b)) => {
                 let (a, b) = (*a, *b);
-                self.constrain_rhs_union(sub, a, b, sub_id)
+                let sub = sub.clone();
+                self.constrain_rhs_union(&sub, a, b, sub_id)
             }
 
             // ── __functor calling convention ──────────────────────────────
@@ -357,12 +369,10 @@ impl CheckCtx<'_> {
                 if attr.fields.contains_key("__functor") =>
             {
                 let functor_ty = attr.fields["__functor"];
+                let (param, body) = (*param, *body);
                 // __functor has type `self -> arg -> result` in Nix.
                 // Constrain: functor_ty <: (sub_id -> Lambda { param, body })
-                let inner_lambda = self.alloc_concrete(Ty::Lambda {
-                    param: *param,
-                    body: *body,
-                });
+                let inner_lambda = self.alloc_concrete(Ty::Lambda { param, body });
                 let expected_functor = self.alloc_concrete(Ty::Lambda {
                     param: sub_id,
                     body: inner_lambda,
@@ -371,7 +381,7 @@ impl CheckCtx<'_> {
             }
 
             // Type mismatch.
-            _ => Err(InferenceError::TypeMismatch(Box::new((
+            (sub, sup) => Err(InferenceError::TypeMismatch(Box::new((
                 sub.clone(),
                 sup.clone(),
             )))),
@@ -470,8 +480,9 @@ impl CheckCtx<'_> {
                 // Check the Inter itself first (unlikely to match, but handles
                 // exotic cases). Then recurse into members.
                 are_types_disjoint(ty, sup)
-                    || self.is_disjoint_from_sup(a, sup)
-                    || self.is_disjoint_from_sup(b, sup)
+                    || lang_ast::stack::with_stack(|| {
+                        self.is_disjoint_from_sup(a, sup) || self.is_disjoint_from_sup(b, sup)
+                    })
             }
             TypeEntry::Concrete(ty) => are_types_disjoint(ty, sup),
             _ => false,
@@ -490,7 +501,9 @@ impl CheckCtx<'_> {
             TypeEntry::Variable(_) => true,
             TypeEntry::Concrete(Ty::Inter(a, b)) => {
                 let (a, b) = (*a, *b);
-                self.inter_contains_var(a) || self.inter_contains_var(b)
+                lang_ast::stack::with_stack(|| {
+                    self.inter_contains_var(a) || self.inter_contains_var(b)
+                })
             }
             TypeEntry::Concrete(Ty::Named(_, inner)) => {
                 let inner = *inner;
@@ -522,7 +535,9 @@ impl CheckCtx<'_> {
         let result = match self.types.storage.get(id) {
             TypeEntry::Concrete(Ty::Union(a, b)) => {
                 let (a, b) = (*a, *b);
-                self.union_contains_member(a, target) || self.union_contains_member(b, target)
+                lang_ast::stack::with_stack(|| {
+                    self.union_contains_member(a, target) || self.union_contains_member(b, target)
+                })
             }
             TypeEntry::Concrete(Ty::Named(_, inner)) => {
                 let inner = *inner;
@@ -569,10 +584,13 @@ impl CheckCtx<'_> {
             }
             // Both concrete: use disjointness analysis.
             (false, false) => {
-                let a_ty = self.types.expect_concrete(a);
-                let b_ty = self.types.expect_concrete(b);
-                let disjoint_a = are_types_disjoint(sub, &a_ty);
-                let disjoint_b = are_types_disjoint(sub, &b_ty);
+                // Borrow both entries just long enough to compute the
+                // routing predicates — no clones.
+                let (a_ty, b_ty) = (self.types.concrete_ref(a), self.types.concrete_ref(b));
+                let disjoint_a = are_types_disjoint(sub, a_ty);
+                let disjoint_b = are_types_disjoint(sub, b_ty);
+                let disc_a = discriminant_matches(sub, a_ty);
+                let disc_b = discriminant_matches(sub, b_ty);
 
                 match (disjoint_a, disjoint_b) {
                     (true, false) => self.constrain(sub_id, b),
@@ -583,11 +601,9 @@ impl CheckCtx<'_> {
                     )))),
                     (false, false) => {
                         // Tiebreaker: same-constructor match.
-                        if discriminant_matches(sub, &a_ty) && !discriminant_matches(sub, &b_ty) {
+                        if disc_a && !disc_b {
                             self.constrain(sub_id, a)
-                        } else if discriminant_matches(sub, &b_ty)
-                            && !discriminant_matches(sub, &a_ty)
-                        {
+                        } else if disc_b && !disc_a {
                             self.constrain(sub_id, b)
                         } else {
                             // Can't route deterministically — constrain to both.
@@ -610,20 +626,27 @@ impl CheckCtx<'_> {
 
     /// Width subtyping for attribute sets: the sub-type must have every field the super-type has,
     /// and each field must be a subtype. The sub-type can have extra fields (width subtyping).
-    fn constrain_attrsets(
-        &mut self,
-        sub_attr: &AttrSetTy<TyId>,
-        sup_attr: &AttrSetTy<TyId>,
-    ) -> Result<(), InferenceError> {
-        for (key, sup_field) in &sup_attr.fields {
+    ///
+    /// Takes TyIds and collects the field constraint pairs up front so the
+    /// attrset BTreeMaps are never cloned (this is the hottest structural arm).
+    fn constrain_attrsets(&mut self, sub_id: TyId, sup_id: TyId) -> Result<(), InferenceError> {
+        let (Ty::AttrSet(sub_attr), Ty::AttrSet(sup_attr)) = (
+            self.types.concrete_ref(sub_id),
+            self.types.concrete_ref(sup_id),
+        ) else {
+            unreachable!("constrain_attrsets called on non-attrset ids")
+        };
+
+        let mut pairs: SmallVec<[(TyId, TyId); 8]> = SmallVec::new();
+        for (key, &sup_field) in &sup_attr.fields {
             match sub_attr.fields.get(key) {
-                Some(sub_field) => self.constrain(*sub_field, *sup_field)?,
+                Some(&sub_field) => pairs.push((sub_field, sup_field)),
                 None => {
                     // If the sub has a dyn_ty, use it to satisfy the missing
                     // named field: dyn_ty represents the type of any field not
                     // explicitly listed, so sub.dyn_ty <: sup_field must hold.
                     if let Some(sub_dyn) = sub_attr.dyn_ty {
-                        self.constrain(sub_dyn, *sup_field)?;
+                        pairs.push((sub_dyn, sup_field));
                     } else if !sub_attr.open && !sup_attr.optional_fields.contains(key) {
                         // Skip the error if the field is optional in the supertype
                         // (it has a default value in the lambda pattern).
@@ -648,9 +671,12 @@ impl CheckCtx<'_> {
         // Propagate dyn_ty constraints: if both attrsets have a dynamic field
         // type, the sub's dyn_ty must be a subtype of the sup's dyn_ty.
         if let (Some(sub_dyn), Some(sup_dyn)) = (sub_attr.dyn_ty, sup_attr.dyn_ty) {
-            self.constrain(sub_dyn, sup_dyn)?;
+            pairs.push((sub_dyn, sup_dyn));
         }
 
+        for (sub_field, sup_field) in pairs {
+            self.constrain(sub_field, sup_field)?;
+        }
         Ok(())
     }
 

@@ -78,7 +78,7 @@ fn partial_matches_full_for_independent_bindings(tc: hegel::TestCase) {
         &r.name_res,
         &r.module_indices.binding_expr,
         aliases,
-        std::collections::HashMap::new(),
+        std::collections::HashMap::default(),
         std::sync::Arc::default(),
     );
     let (partial_result, _diags) = check.infer_prog_up_to_group(r.grouped_defs, n_groups - 1);

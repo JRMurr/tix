@@ -18,14 +18,14 @@ log = { workspace = true }
 # TODO: replace refs to this with my own type
 rnix = { workspace = true }
 
-dashmap = "6.1.0"
+dashmap = { workspace = true }
 rayon = { workspace = true }
 petgraph = { workspace = true }
-parking_lot = "0.12"
+parking_lot = { workspace = true }
 itertools = "0.14.0"
-rustc-hash = "2.1.0"
+rustc-hash = { workspace = true }
 smallvec = { workspace = true }
-stacker = "0.1"
+stacker = { workspace = true }
 tracing = { workspace = true }
 
 

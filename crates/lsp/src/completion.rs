@@ -137,23 +137,19 @@ pub fn completion(
         }
     } else {
         // No inference available (cold start) — offer scope-based identifier
-        // completion without type details.
+        // completion without type details. (This branch only runs when
+        // inference_result() is None, so there is no arena to display
+        // types from.)
         let scope_id = scope_at_token(analysis, &token)?;
         let visible = collect_visible_names_no_inference(analysis, scope_id);
 
-        // Arena may come from stale inference; without it we can't display types.
-        let stale_arena = analysis.inference_result().map(|inf| inf.arena.clone());
-        let dc = lang_ty::DisplayConfig::completion();
         let items: Vec<CompletionItem> = visible
             .into_iter()
-            .map(|(name, ty)| {
-                let arena_ref = stale_arena.as_deref();
-                CompletionItem {
-                    label: name.to_string(),
-                    kind: Some(completion_kind_for_ty(arena_ref, ty)),
-                    detail: ty.and_then(|t| arena_ref.map(|a| a.display_truncated(t, &dc))),
-                    ..Default::default()
-                }
+            .map(|(name, ty)| CompletionItem {
+                label: name.to_string(),
+                kind: Some(completion_kind_for_ty(None, ty)),
+                detail: None,
+                ..Default::default()
             })
             .collect();
 
@@ -3337,7 +3333,7 @@ mod tests {
         let stubs_dir = temp_dir.join("stubs");
         std::fs::create_dir_all(&stubs_dir).unwrap();
 
-        let mut context_map = std::collections::HashMap::new();
+        let mut context_map = std::collections::HashMap::default();
         for (name, globs, stubs_content) in contexts {
             let stub_filename = format!("{name}.tix");
             std::fs::write(stubs_dir.join(&stub_filename), stubs_content).unwrap();
@@ -3388,7 +3384,7 @@ mod tests {
             registry.set_builtin_stubs_dir(dir);
         }
 
-        let mut context_map = std::collections::HashMap::new();
+        let mut context_map = std::collections::HashMap::default();
         for (name, globs) in contexts {
             context_map.insert(
                 name.to_string(),
@@ -3829,7 +3825,7 @@ mod tests {
         let mut registry = TypeAliasRegistry::default();
         registry.set_builtin_stubs_dir(generated_dir);
 
-        let mut context_map = std::collections::HashMap::new();
+        let mut context_map = std::collections::HashMap::default();
         context_map.insert(
             "nixos".to_string(),
             ContextConfig {
@@ -3980,7 +3976,7 @@ mod tests {
         std::fs::write(override_dir.join("nixos.tix"), nixos_stubs).unwrap();
         registry.set_builtin_stubs_dir(override_dir);
 
-        let mut context_map = std::collections::HashMap::new();
+        let mut context_map = std::collections::HashMap::default();
         context_map.insert(
             "nixos".to_string(),
             ContextConfig {
@@ -4071,7 +4067,7 @@ mod tests {
         std::fs::write(override_dir.join("pkgs.tix"), pkgs_stubs).unwrap();
         registry.set_builtin_stubs_dir(override_dir);
 
-        let mut context_map = std::collections::HashMap::new();
+        let mut context_map = std::collections::HashMap::default();
         context_map.insert(
             "nixos".to_string(),
             ContextConfig {
@@ -4163,7 +4159,7 @@ mod tests {
         std::fs::write(override_dir.join("nixos.tix"), nixos_stubs).unwrap();
         registry.set_builtin_stubs_dir(override_dir);
 
-        let mut context_map = std::collections::HashMap::new();
+        let mut context_map = std::collections::HashMap::default();
         context_map.insert(
             "nixos".to_string(),
             ContextConfig {

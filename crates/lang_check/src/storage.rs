@@ -131,10 +131,25 @@ impl TypeStorage {
         }
     }
 
+    /// Bound lists up to this length are deduplicated on insert (linear scan).
+    /// Beyond it, duplicates are accepted: the O(refs²) accumulation this
+    /// guards against comes from many references each re-adding a few bounds
+    /// (short lists), while vars with hundreds of bounds (16K-field attrset
+    /// merges in hackage-packages.nix) have mostly-distinct bounds where the
+    /// scan itself becomes the quadratic cost.
+    const BOUND_DEDUP_SCAN_LIMIT: usize = 32;
+
     /// Record that `bound` is a lower bound of variable `var` (bound <: var).
+    /// Idempotent for short bound lists — see [`Self::BOUND_DEDUP_SCAN_LIMIT`].
     pub fn add_lower_bound(&mut self, var: TyId, bound: TyId) {
         match self.get_mut(var) {
-            TypeEntry::Variable(v) => v.lower_bounds.push(bound),
+            TypeEntry::Variable(v) => {
+                if v.lower_bounds.len() > Self::BOUND_DEDUP_SCAN_LIMIT
+                    || !v.lower_bounds.contains(&bound)
+                {
+                    v.lower_bounds.push(bound);
+                }
+            }
             TypeEntry::Concrete(_) => {
                 debug_assert!(false, "add_lower_bound called on concrete type {var:?}");
             }
@@ -142,9 +157,16 @@ impl TypeStorage {
     }
 
     /// Record that `bound` is an upper bound of variable `var` (var <: bound).
+    /// Idempotent for short bound lists — see [`Self::BOUND_DEDUP_SCAN_LIMIT`].
     pub fn add_upper_bound(&mut self, var: TyId, bound: TyId) {
         match self.get_mut(var) {
-            TypeEntry::Variable(v) => v.upper_bounds.push(bound),
+            TypeEntry::Variable(v) => {
+                if v.upper_bounds.len() > Self::BOUND_DEDUP_SCAN_LIMIT
+                    || !v.upper_bounds.contains(&bound)
+                {
+                    v.upper_bounds.push(bound);
+                }
+            }
             TypeEntry::Concrete(_) => {
                 debug_assert!(false, "add_upper_bound called on concrete type {var:?}");
             }

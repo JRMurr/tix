@@ -5,7 +5,7 @@
 // Shared logic for following import chains transitively (goto-def) and
 // finding field references across importing files (find-all-references).
 
-use std::collections::HashSet;
+use rustc_hash::FxHashSet as HashSet;
 use std::path::{Path, PathBuf};
 
 use lang_ast::nameres::ResolveResult;
@@ -14,7 +14,7 @@ use lang_check::imports::resolve_import_types;
 use rowan::ast::AstNode;
 use tower_lsp::lsp_types::{Location, Position, Range, Url};
 
-use crate::state::{AnalysisState, SyntaxData};
+use crate::state::SyntaxData;
 
 /// Maximum depth for transitive import resolution to prevent infinite loops.
 const MAX_DEPTH: usize = 8;
@@ -31,11 +31,7 @@ const MAX_DEPTH: usize = 8;
 /// - The name is not an import (actual definition) → returns its Location
 /// - The target file has no matching name → returns Location at file start
 /// - Depth limit reached → returns Location of last found name
-pub fn resolve_field_transitively(
-    _state: &AnalysisState,
-    target_path: &Path,
-    field_name: &str,
-) -> Option<Location> {
+pub fn resolve_field_transitively(target_path: &Path, field_name: &str) -> Option<Location> {
     let mut current_path = if target_path.is_dir() {
         target_path.join("default.nix")
     } else {
@@ -117,7 +113,7 @@ pub fn resolve_field_transitively(
         // Not an import — this is the actual definition. Return its location.
         let target_ptr = r.source_map.nodes_for_name(target_name_id).next()?;
         let target_node = target_ptr.to_node(target_root.syntax());
-        let target_line_index = crate::convert::LineIndex::new(&target_contents);
+        let target_line_index = crate::convert::LineIndex::new(target_contents.as_str());
         let target_range = target_line_index.range(target_node.text_range());
         let target_uri = Url::from_file_path(&current_path).ok()?;
         return Some(Location::new(target_uri, target_range));
@@ -147,15 +143,15 @@ pub fn resolve_field_transitively(
 /// Only searches files with existing snapshots (open/analyzed files). Files
 /// that haven't been analyzed yet are skipped.
 pub fn find_cross_file_field_references(
-    state: &AnalysisState,
+    coordinator: &lang_check::coordinator::InferenceCoordinator,
     snapshots: &dashmap::DashMap<PathBuf, crate::state::FileSnapshot>,
     origin_path: &Path,
     field_name: &str,
 ) -> Vec<Location> {
     let mut locations = Vec::new();
-    let mut visited = HashSet::new();
+    let mut visited = HashSet::default();
     find_cross_file_field_references_inner(
-        state,
+        coordinator,
         snapshots,
         origin_path,
         field_name,
@@ -166,7 +162,7 @@ pub fn find_cross_file_field_references(
 }
 
 fn find_cross_file_field_references_inner(
-    state: &AnalysisState,
+    coordinator: &lang_check::coordinator::InferenceCoordinator,
     snapshots: &dashmap::DashMap<PathBuf, crate::state::FileSnapshot>,
     origin_path: &Path,
     field_name: &str,
@@ -177,7 +173,7 @@ fn find_cross_file_field_references_inner(
         return;
     }
 
-    let dependents = state.coordinator.get_dependents(origin_path);
+    let dependents = coordinator.get_dependents(origin_path);
 
     for importer_path in &dependents {
         if let Some(snap) = snapshots.get(importer_path) {
@@ -194,7 +190,7 @@ fn find_cross_file_field_references_inner(
                 // If so, files importing THIS file might access the field.
                 if is_passthrough_of(&snap.syntax, origin_path) {
                     find_cross_file_field_references_inner(
-                        state,
+                        coordinator,
                         snapshots,
                         importer_path,
                         field_name,
@@ -213,10 +209,14 @@ fn find_cross_file_field_references_inner(
 /// A pass-through file imports origin_path and returns the result directly.
 fn is_passthrough_of(syntax: &SyntaxData, origin_path: &Path) -> bool {
     // Check if any name in this file is bound to an import of origin_path.
+    // name_to_import paths are canonicalized at build time, so canonicalize
+    // the origin once and compare directly.
+    let origin_canon = origin_path.canonicalize();
+    let origin: &Path = origin_canon.as_deref().unwrap_or(origin_path);
     let import_names: Vec<_> = syntax
         .name_to_import
         .iter()
-        .filter(|(_, path)| paths_equal(path, origin_path))
+        .filter(|(_, path)| path.as_path() == origin)
         .map(|(&name_id, _)| name_id)
         .collect();
 
@@ -257,10 +257,13 @@ fn scan_file_for_field_references(
     };
 
     // Find all NameIds that are bound to imports of origin_path.
+    // name_to_import paths are canonicalized at build time — see above.
+    let origin_canon = origin_path.canonicalize();
+    let origin: &Path = origin_canon.as_deref().unwrap_or(origin_path);
     let import_names: HashSet<NameId> = syntax
         .name_to_import
         .iter()
-        .filter(|(_, path)| paths_equal(path, origin_path))
+        .filter(|(_, path)| path.as_path() == origin)
         .map(|(&name_id, _)| name_id)
         .collect();
 
@@ -312,7 +315,7 @@ fn resolve_return_value_import(
     module: &Module,
     name_res: &lang_ast::NameResolution,
     indices: &lang_ast::ModuleIndices,
-    import_targets: &std::collections::HashMap<ExprId, PathBuf>,
+    import_targets: &rustc_hash::FxHashMap<ExprId, PathBuf>,
 ) -> Option<PathBuf> {
     // Unwrap through Lambda/LetIn to find the innermost return expression.
     let mut expr_id = module.entry_expr;
@@ -345,7 +348,7 @@ fn resolve_return_value_import(
 /// `fun` chain until it finds a match.
 fn chase_import_target(
     module: &Module,
-    import_targets: &std::collections::HashMap<ExprId, PathBuf>,
+    import_targets: &rustc_hash::FxHashMap<ExprId, PathBuf>,
     expr_id: ExprId,
 ) -> Option<PathBuf> {
     if let Some(path) = import_targets.get(&expr_id) {
@@ -355,12 +358,4 @@ fn chase_import_target(
         return chase_import_target(module, import_targets, *fun);
     }
     None
-}
-
-/// Compare two paths for equality, using canonicalization when possible.
-fn paths_equal(a: &Path, b: &Path) -> bool {
-    match (a.canonicalize(), b.canonicalize()) {
-        (Ok(ca), Ok(cb)) => ca == cb,
-        _ => a == b,
-    }
 }

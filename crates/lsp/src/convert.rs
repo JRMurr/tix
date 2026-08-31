@@ -10,13 +10,16 @@
 // For pure-ASCII text (the common case for Nix), this degrades to a simple
 // subtraction since every ASCII char is 1 UTF-16 code unit.
 
+use std::sync::Arc;
+
 use tower_lsp::lsp_types::{Position, Range};
 
 /// Pre-computed line start byte offsets for fast offset <-> position conversion.
 #[derive(Clone)]
 pub struct LineIndex {
-    /// Source text, retained for UTF-16 column conversion.
-    text: String,
+    /// Source text, retained for UTF-16 column conversion. Arc so clones of
+    /// the index (SyntaxData, FileAnalysis, snapshots, …) share one buffer.
+    text: Arc<str>,
     /// Byte offset of the start of each line (line 0 starts at offset 0).
     line_starts: Vec<u32>,
     /// Total length of the source text in bytes.
@@ -24,17 +27,19 @@ pub struct LineIndex {
 }
 
 impl LineIndex {
-    pub fn new(text: &str) -> Self {
+    pub fn new(text: impl Into<Arc<str>>) -> Self {
+        let text: Arc<str> = text.into();
         let mut line_starts = vec![0u32];
         for (i, byte) in text.bytes().enumerate() {
             if byte == b'\n' {
                 line_starts.push((i + 1) as u32);
             }
         }
+        let len = text.len() as u32;
         LineIndex {
-            text: text.to_owned(),
+            text,
             line_starts,
-            len: text.len() as u32,
+            len,
         }
     }
 
@@ -83,12 +88,41 @@ impl LineIndex {
         (byte_offset as u32).min(self.len)
     }
 
+    /// The source text this index was built from.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
     /// Convert a rowan TextRange to an LSP Range.
     pub fn range(&self, text_range: rowan::TextRange) -> Range {
         Range::new(
             self.position(text_range.start().into()),
             self.position(text_range.end().into()),
         )
+    }
+}
+
+/// Which side to prefer when an LSP position falls between two tokens.
+#[derive(Clone, Copy)]
+pub(crate) enum Bias {
+    Left,
+    Right,
+}
+
+/// Resolve an LSP position to the syntax token under it — the shared prelude
+/// of every cursor-driven feature (hover, goto-def, references, ...).
+pub(crate) fn token_at_pos(
+    line_index: &LineIndex,
+    root: &rnix::Root,
+    pos: Position,
+    bias: Bias,
+) -> Option<rowan::SyntaxToken<rnix::NixLanguage>> {
+    use rowan::ast::AstNode;
+    let offset = line_index.offset(pos);
+    let at = root.syntax().token_at_offset(rowan::TextSize::from(offset));
+    match bias {
+        Bias::Left => at.left_biased(),
+        Bias::Right => at.right_biased(),
     }
 }
 
@@ -229,7 +263,7 @@ mod hegel_tests {
     #[hegel::test]
     fn offset_position_roundtrip(tc: TestCase) {
         let text = tc.draw(sources());
-        let idx = LineIndex::new(&text);
+        let idx = LineIndex::new(text.as_str());
         let offset = char_boundary_offset(&tc, &text);
         assert_eq!(idx.offset(idx.position(offset)), offset);
     }
@@ -237,7 +271,7 @@ mod hegel_tests {
     #[hegel::test]
     fn position_offset_roundtrip(tc: TestCase) {
         let text = tc.draw(sources());
-        let idx = LineIndex::new(&text);
+        let idx = LineIndex::new(text.as_str());
         let pos = idx.position(char_boundary_offset(&tc, &text));
         assert_eq!(idx.position(idx.offset(pos)), pos);
     }
@@ -245,7 +279,7 @@ mod hegel_tests {
     #[hegel::test]
     fn position_monotone_in_offset(tc: TestCase) {
         let text = tc.draw(sources());
-        let idx = LineIndex::new(&text);
+        let idx = LineIndex::new(text.as_str());
         let a = char_boundary_offset(&tc, &text);
         let b = char_boundary_offset(&tc, &text);
         let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
@@ -260,7 +294,7 @@ mod hegel_tests {
     #[hegel::test]
     fn offset_always_in_bounds_on_boundary(tc: TestCase) {
         let text = tc.draw(sources());
-        let idx = LineIndex::new(&text);
+        let idx = LineIndex::new(text.as_str());
         let pos = Position::new(
             tc.draw(generators::integers::<u32>().max_value(100)),
             tc.draw(generators::integers::<u32>().max_value(100)),
@@ -273,7 +307,7 @@ mod hegel_tests {
     #[hegel::test]
     fn line_agrees_with_lang_ast(tc: TestCase) {
         let text = tc.draw(sources());
-        let idx = LineIndex::new(&text);
+        let idx = LineIndex::new(text.as_str());
         let offset = char_boundary_offset(&tc, &text);
         assert_eq!(
             idx.position(offset).line,

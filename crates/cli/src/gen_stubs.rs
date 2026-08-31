@@ -17,6 +17,26 @@ use serde::Deserialize;
 // =============================================================================
 
 /// Try to format a `NixPosition` as an `@source` annotation string.
+/// If `explicit` is unset, fall back to the source root registered under
+/// `id`. Evaluating options from a different nixpkgs than the one
+/// `--source-root` points at makes every option position miss the root, so
+/// `@source` annotations would be silently dropped.
+fn eval_source_or_root(
+    explicit: &Option<PathBuf>,
+    source_roots: &[(String, PathBuf)],
+    id: &str,
+) -> Option<PathBuf> {
+    if explicit.is_some() {
+        return explicit.clone();
+    }
+    let (_, root) = source_roots.iter().find(|(rid, _)| rid == id)?;
+    eprintln!(
+        "No --{id} given; evaluating from --source-root {id}={} so @source annotations line up",
+        root.display()
+    );
+    Some(root.clone())
+}
+
 ///
 /// Strips the absolute path against configured source roots to produce a
 /// relative annotation like `@source nixpkgs:lib/trivial.nix:61:8`.
@@ -842,7 +862,9 @@ fn read_json_file(
 }
 
 /// Run the `gen-stubs nixos` subcommand.
-pub fn run_nixos(opts: NixosOptions) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run_nixos(mut opts: NixosOptions) -> Result<(), Box<dyn std::error::Error>> {
+    opts.common.nixpkgs =
+        eval_source_or_root(&opts.common.nixpkgs, &opts.common.source_roots, "nixpkgs");
     let tree = match opts.common.from_json {
         Some(ref path) => read_json_file(path)?,
         None => invoke_nix_eval(&opts)?,
@@ -853,11 +875,23 @@ pub fn run_nixos(opts: NixosOptions) -> Result<(), Box<dyn std::error::Error>> {
         opts.common.descriptions,
         &opts.common.source_roots,
     );
-    write_generated_stubs(&tix_content, opts.common.output.as_ref(), "NixOS")
+    write_generated_stubs(
+        &tix_content,
+        opts.common.output.as_ref(),
+        "NixOS",
+        &opts.common.source_roots,
+    )
 }
 
 /// Run the `gen-stubs home-manager` subcommand.
-pub fn run_home_manager(opts: HomeManagerOptions) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run_home_manager(mut opts: HomeManagerOptions) -> Result<(), Box<dyn std::error::Error>> {
+    opts.common.nixpkgs =
+        eval_source_or_root(&opts.common.nixpkgs, &opts.common.source_roots, "nixpkgs");
+    opts.home_manager = eval_source_or_root(
+        &opts.home_manager,
+        &opts.common.source_roots,
+        "home-manager",
+    );
     let tree = match opts.common.from_json {
         Some(ref path) => read_json_file(path)?,
         None => invoke_hm_nix_eval(&opts)?,
@@ -868,7 +902,12 @@ pub fn run_home_manager(opts: HomeManagerOptions) -> Result<(), Box<dyn std::err
         opts.common.descriptions,
         &opts.common.source_roots,
     );
-    write_generated_stubs(&tix_content, opts.common.output.as_ref(), "Home Manager")
+    write_generated_stubs(
+        &tix_content,
+        opts.common.output.as_ref(),
+        "Home Manager",
+        &opts.common.source_roots,
+    )
 }
 
 // =============================================================================
@@ -925,7 +964,12 @@ pub fn run_module(opts: ModuleOptions) -> Result<(), Box<dyn std::error::Error>>
         opts.common.descriptions,
         &opts.common.source_roots,
     );
-    write_generated_stubs(&tix_content, opts.common.output.as_ref(), &opts.name)
+    write_generated_stubs(
+        &tix_content,
+        opts.common.output.as_ref(),
+        &opts.name,
+        &opts.common.source_roots,
+    )
 }
 
 // =============================================================================
@@ -1310,7 +1354,8 @@ fn emit_function_args(args: &std::collections::BTreeMap<String, bool>) -> String
 }
 
 /// Run the `gen-stubs pkgs` subcommand.
-pub fn run_pkgs(opts: PkgsOptions) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run_pkgs(mut opts: PkgsOptions) -> Result<(), Box<dyn std::error::Error>> {
+    opts.nixpkgs = eval_source_or_root(&opts.nixpkgs, &opts.source_roots, "nixpkgs");
     let tree: PkgTree = match opts.from_json {
         Some(ref path) => {
             let data = std::fs::read(path)
@@ -1321,7 +1366,12 @@ pub fn run_pkgs(opts: PkgsOptions) -> Result<(), Box<dyn std::error::Error>> {
         None => invoke_pkgs_classify(&opts.nixpkgs, opts.max_depth)?,
     };
     let tix_content = generate_pkgs_tix(&tree, &opts.source_roots);
-    write_generated_stubs(&tix_content, opts.output.as_ref(), "pkgs")
+    write_generated_stubs(
+        &tix_content,
+        opts.output.as_ref(),
+        "pkgs",
+        &opts.source_roots,
+    )
 }
 
 /// Validate and write generated .tix content to a file or stdout.
@@ -1329,6 +1379,7 @@ fn write_generated_stubs(
     tix_content: &str,
     output: Option<&PathBuf>,
     label: &str,
+    source_roots: &[(String, PathBuf)],
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Validate the generated .tix output parses correctly.
     if let Err(e) = comment_parser::parse_tix_file(tix_content) {
@@ -1346,12 +1397,62 @@ fn write_generated_stubs(
             }
             std::fs::write(path, tix_content)?;
             eprintln!("Wrote {} option stubs to {}", label, path.display());
+
+            if !source_roots.is_empty() && !tix_content.contains("@source ") {
+                eprintln!(
+                    "Warning: --source-root given but no @source annotations were emitted. \
+                     Option positions did not match any source root — is the evaluated \
+                     source tree the same as the --source-root path?"
+                );
+            }
+
+            // Record the source roots next to the stubs so consumers of the
+            // directory (TIX_BUILTIN_STUBS) can resolve `@source` annotations
+            // without re-running generation.
+            if !source_roots.is_empty() {
+                if let Some(parent) = path.parent() {
+                    merge_source_roots_file(parent, source_roots)?;
+                }
+            }
         }
         None => {
             std::io::stdout().write_all(tix_content.as_bytes())?;
         }
     }
 
+    Ok(())
+}
+
+/// Merge `source_roots` into `<dir>/source-roots.txt` (`id=path` per line),
+/// preserving entries from earlier generator runs into the same directory
+/// (e.g. nixos.tix and home-manager.tix are generated separately).
+fn merge_source_roots_file(
+    dir: &Path,
+    source_roots: &[(String, PathBuf)],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let path = dir.join(lang_check::aliases::SOURCE_ROOTS_FILE);
+    let mut entries: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+
+    if let Ok(existing) = std::fs::read_to_string(&path) {
+        for line in existing.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if let Some((id, root)) = line.split_once('=') {
+                entries.insert(id.trim().to_string(), root.trim().to_string());
+            }
+        }
+    }
+    for (id, root) in source_roots {
+        entries.insert(id.clone(), root.display().to_string());
+    }
+
+    let mut contents = String::from("# Source roots for @source annotations. Generated by tix.\n");
+    for (id, root) in &entries {
+        contents.push_str(&format!("{id}={root}\n"));
+    }
+    std::fs::write(&path, contents)?;
     Ok(())
 }
 
@@ -1363,6 +1464,36 @@ fn write_generated_stubs(
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn source_roots_file_merges_across_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        merge_source_roots_file(
+            dir.path(),
+            &[("nixpkgs".to_string(), PathBuf::from("/nix/store/aaa"))],
+        )
+        .unwrap();
+        // Second generator run (e.g. home-manager.tix) adds a root and
+        // updates an existing one.
+        merge_source_roots_file(
+            dir.path(),
+            &[
+                ("nixpkgs".to_string(), PathBuf::from("/nix/store/bbb")),
+                ("home-manager".to_string(), PathBuf::from("/nix/store/hm")),
+            ],
+        )
+        .unwrap();
+
+        let contents =
+            std::fs::read_to_string(dir.path().join(lang_check::aliases::SOURCE_ROOTS_FILE))
+                .unwrap();
+        assert!(contents.contains("nixpkgs=/nix/store/bbb"), "{contents}");
+        assert!(
+            contents.contains("home-manager=/nix/store/hm"),
+            "{contents}"
+        );
+        assert!(!contents.contains("/nix/store/aaa"), "{contents}");
+    }
 
     // -------------------------------------------------------------------------
     // StubKind::Custom

@@ -1,4 +1,6 @@
-use std::{collections::HashMap, iter, ops};
+use std::{iter, ops};
+
+use rustc_hash::FxHashMap as HashMap;
 
 use la_arena::{Arena, ArenaMap, Idx as Id};
 use petgraph::graph::DiGraph;
@@ -91,36 +93,12 @@ pub const GLOBAL_BUILTIN_NAMES: &[&str] = &[
 /// Returns the static name string if `name` is a known global builtin
 /// (i.e. available without the `builtins.` prefix in Nix).
 pub fn lookup_global_builtin(name: &str) -> Option<&'static str> {
-    match name {
-        "abort" => Some("abort"),
-        "baseNameOf" => Some("baseNameOf"),
-        "builtins" => Some("builtins"),
-        "derivation" => Some("derivation"),
-        "dirOf" => Some("dirOf"),
-        "false" => Some("false"),
-        "fetchGit" => Some("fetchGit"),
-        "fetchMercurial" => Some("fetchMercurial"),
-        "fetchTarball" => Some("fetchTarball"),
-        "fetchTree" => Some("fetchTree"),
-        "fetchurl" => Some("fetchurl"),
-        "fromTOML" => Some("fromTOML"),
-        "import" => Some("import"),
-        "isNull" => Some("isNull"),
-        "map" => Some("map"),
-        "null" => Some("null"),
-        "placeholder" => Some("placeholder"),
-        "removeAttrs" => Some("removeAttrs"),
-        "scopedImport" => Some("scopedImport"),
-        "throw" => Some("throw"),
-        "toString" => Some("toString"),
-        "true" => Some("true"),
-        _ => None,
-    }
+    GLOBAL_BUILTIN_NAMES.iter().find(|&&b| b == name).copied()
 }
 
 /// Build scopes for a module.
 pub fn compute_scopes(module: &Module) -> ModuleScopes {
-    ModuleScopes::new(module.clone())
+    ModuleScopes::new(module)
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
@@ -130,7 +108,7 @@ pub struct ModuleScopes {
 }
 
 impl ModuleScopes {
-    pub fn new(module: Module) -> Self {
+    pub fn new(module: &Module) -> Self {
         let mut ms = ModuleScopes {
             scopes: Arena::new(),
             scope_by_expr: ArenaMap::with_capacity(module.exprs.len()),
@@ -139,7 +117,7 @@ impl ModuleScopes {
             parent: None,
             kind: ScopeKind::Definitions(Default::default()),
         });
-        ms.traverse_expr(&module, module.entry_expr, root_scope);
+        ms.traverse_expr(module, module.entry_expr, root_scope);
 
         ms
     }
@@ -175,6 +153,10 @@ impl ModuleScopes {
     }
 
     fn traverse_expr(&mut self, module: &Module, expr: ExprId, scope: ScopeId) {
+        crate::stack::with_stack(|| self.traverse_expr_inner(module, expr, scope))
+    }
+
+    fn traverse_expr_inner(&mut self, module: &Module, expr: ExprId, scope: ScopeId) {
         self.scope_by_expr.insert(expr, scope);
 
         match &module[expr] {
@@ -305,7 +287,7 @@ pub fn compute_name_resolution(module: &Module, scopes: &ModuleScopes) -> NameRe
         .collect();
 
     // Build the inverted index: NameId → Vec<ExprId>.
-    let mut refs_by_name: HashMap<NameId, Vec<ExprId>> = HashMap::new();
+    let mut refs_by_name: HashMap<NameId, Vec<ExprId>> = HashMap::default();
     for (expr_id, resolved) in resolve_map.iter() {
         if let Some(ResolveResult::Definition(name_id)) = resolved {
             refs_by_name.entry(*name_id).or_default().push(expr_id);
@@ -359,8 +341,8 @@ impl NameDependencies {
     ) -> Self {
         let mut name_deps = Self {
             edges: Vec::with_capacity(module.exprs.len()),
-            name_to_expr: HashMap::new(),
-            narrow_scopes: HashMap::new(),
+            name_to_expr: HashMap::default(),
+            narrow_scopes: HashMap::default(),
         };
 
         name_deps.traverse_expr(
@@ -376,6 +358,21 @@ impl NameDependencies {
     }
 
     fn traverse_expr(
+        &mut self,
+        module: &Module,
+        name_res: &NameResolution,
+        binding_exprs: &HashMap<NameId, ExprId>,
+        expr: ExprId,
+        curr_binding: Option<NameId>,
+        active: &[crate::narrow::NarrowBinding],
+    ) {
+        crate::stack::with_stack(|| {
+            self.traverse_expr_inner(module, name_res, binding_exprs, expr, curr_binding, active)
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn traverse_expr_inner(
         &mut self,
         module: &Module,
         name_res: &NameResolution,
@@ -588,7 +585,7 @@ pub fn compute_group_def(
     let num_refs = name_deps.edges.len();
 
     let mut dep_graph = DepGraph::with_capacity(num_names, num_refs);
-    let mut name_to_node_id = HashMap::new();
+    let mut name_to_node_id = HashMap::default();
 
     for (name_id, _) in module.names() {
         let node_id = dep_graph.add_node(name_id);

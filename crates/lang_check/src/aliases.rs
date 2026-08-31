@@ -7,7 +7,7 @@
 // so that `TypeVarValue::Reference` names resolve against loaded aliases, and
 // unresolved names can fall back to global val declarations.
 
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -108,6 +108,12 @@ pub struct DeclLocation {
     pub source: Option<SourceLocation>,
 }
 
+/// Filename of the source-root mapping the stub generator writes next to
+/// generated `.tix` files (`id=path` per line). Read back by
+/// [`TypeAliasRegistry::set_builtin_stubs_dir`] so `@source` annotations in
+/// pre-baked stubs dirs resolve without runtime generation.
+pub const SOURCE_ROOTS_FILE: &str = "source-roots.txt";
+
 // =============================================================================
 // TypeAliasRegistry
 // =============================================================================
@@ -120,8 +126,9 @@ pub struct TypeAliasRegistry {
     /// Top-level val declarations (e.g. `mkDerivation` -> `{ name: string, ... } -> Derivation`)
     global_vals: HashMap<SmolStr, ParsedTy>,
 
-    /// Documentation extracted from .tix stub files.
-    pub docs: DocIndex,
+    /// Documentation extracted from .tix stub files. Arc so LSP handlers can
+    /// snapshot it per request without deep-cloning the maps.
+    pub docs: Arc<DocIndex>,
 
     /// Override directory for built-in context stubs. When set,
     /// `load_context_by_name("nixos")` checks for `<dir>/nixos.tix` before
@@ -212,6 +219,33 @@ impl TypeAliasRegistry {
                     Err(e) => log::warn!("Failed to parse {}: {e}", lib_path.display()),
                 },
                 Err(e) => log::warn!("Failed to read {}: {e}", lib_path.display()),
+            }
+        }
+
+        // Load the source-root mapping the generator wrote next to the stubs
+        // (`id=path` lines). Without it, `@source nixpkgs:...` annotations in
+        // a pre-baked stubs dir (TIX_BUILTIN_STUBS) can't resolve to files —
+        // hover docs work but go-to-definition silently fails.
+        let roots_path = dir.join(SOURCE_ROOTS_FILE);
+        if roots_path.is_file() {
+            match std::fs::read_to_string(&roots_path) {
+                Ok(contents) => {
+                    for line in contents.lines() {
+                        let line = line.trim();
+                        if line.is_empty() || line.starts_with('#') {
+                            continue;
+                        }
+                        match line.split_once('=') {
+                            Some((id, root)) => {
+                                self.set_source_root(id.trim(), PathBuf::from(root.trim()));
+                            }
+                            None => {
+                                log::warn!("Malformed line in {}: {line:?}", roots_path.display())
+                            }
+                        }
+                    }
+                }
+                Err(e) => log::warn!("Failed to read {}: {e}", roots_path.display()),
             }
         }
 
@@ -346,7 +380,7 @@ impl TypeAliasRegistry {
                 } => {
                     self.aliases.insert(name.clone(), body.clone());
                     if let Some(doc) = doc {
-                        self.docs.insert_decl_doc(name.clone(), doc.clone());
+                        Arc::make_mut(&mut self.docs).insert_decl_doc(name.clone(), doc.clone());
                     }
                 }
                 TixDeclaration::ValDecl { name, ty, doc, .. } => {
@@ -359,7 +393,7 @@ impl TypeAliasRegistry {
                         }
                     }
                     if let Some(doc) = doc {
-                        self.docs.insert_decl_doc(name.clone(), doc.clone());
+                        Arc::make_mut(&mut self.docs).insert_decl_doc(name.clone(), doc.clone());
                     }
                 }
                 TixDeclaration::Module {
@@ -387,7 +421,8 @@ impl TypeAliasRegistry {
                     self.aliases.insert(alias_name.clone(), merged);
 
                     if let Some(doc) = doc {
-                        self.docs.insert_decl_doc(alias_name.clone(), doc.clone());
+                        Arc::make_mut(&mut self.docs)
+                            .insert_decl_doc(alias_name.clone(), doc.clone());
                     }
 
                     // Module val docs become field docs on the capitalized alias.
@@ -411,8 +446,11 @@ impl TypeAliasRegistry {
             if field_doc.path.len() >= 2 {
                 let alias = field_doc.path[0].clone();
                 let field_path = field_doc.path[1..].to_vec();
-                self.docs
-                    .insert_field_doc(alias, field_path, field_doc.doc.clone());
+                Arc::make_mut(&mut self.docs).insert_field_doc(
+                    alias,
+                    field_path,
+                    field_doc.doc.clone(),
+                );
             }
         }
     }
@@ -445,8 +483,11 @@ impl TypeAliasRegistry {
                     if let Some(doc) = doc {
                         let mut path = prefix.to_vec();
                         path.push(name.clone());
-                        self.docs
-                            .insert_field_doc(alias_name.clone(), path, doc.clone());
+                        Arc::make_mut(&mut self.docs).insert_field_doc(
+                            alias_name.clone(),
+                            path,
+                            doc.clone(),
+                        );
                     }
                 }
                 TixDeclaration::Module {
@@ -458,8 +499,11 @@ impl TypeAliasRegistry {
                     if let Some(doc) = doc {
                         let mut path = prefix.to_vec();
                         path.push(name.clone());
-                        self.docs
-                            .insert_field_doc(alias_name.clone(), path, doc.clone());
+                        Arc::make_mut(&mut self.docs).insert_field_doc(
+                            alias_name.clone(),
+                            path,
+                            doc.clone(),
+                        );
                     }
                     let mut child_prefix = prefix.to_vec();
                     child_prefix.push(name.clone());
@@ -551,7 +595,7 @@ impl TypeAliasRegistry {
         source: &str,
     ) -> Result<HashMap<SmolStr, ParsedTy>, Box<dyn std::error::Error>> {
         let file = comment_parser::parse_tix_file(source)?;
-        let mut context_args = HashMap::new();
+        let mut context_args = HashMap::default();
 
         // Pre-populate from top-level modules: each `module foo { val x :: ...; }`
         // contributes its fields as context args. `load_declarations` (below) then
@@ -653,7 +697,7 @@ impl TypeAliasRegistry {
         self.try_load_module_stub(&alias_name);
 
         if let Some(ParsedTy::AttrSet(attr)) = self.aliases.get(&alias_name).cloned() {
-            let mut context_args = HashMap::new();
+            let mut context_args = HashMap::default();
             for (field_name, field_ty) in &attr.fields {
                 context_args.insert(field_name.clone(), (*field_ty.0).clone());
             }
@@ -735,7 +779,7 @@ impl TypeAliasRegistry {
     /// names involved in such cycles.
     pub fn validate(&self) -> Result<(), Vec<SmolStr>> {
         let mut cycles = Vec::new();
-        let mut visited = HashMap::<SmolStr, VisitState>::new();
+        let mut visited = HashMap::<SmolStr, VisitState>::default();
 
         for name in self.aliases.keys() {
             if self.has_unguarded_cycle(name, 0, &mut visited) {
@@ -1080,6 +1124,34 @@ fn parsed_ty_to_output_ty_inner(
 
 #[cfg(test)]
 mod tests {
+    // -- source-roots.txt loading ---------------------------------------------
+
+    /// A pre-baked stubs dir (TIX_BUILTIN_STUBS) must carry its own
+    /// source-root mapping: goto-definition on @source annotations needs
+    /// `nixpkgs -> store path`, which was previously only registered by the
+    /// runtime-generation path (skipped when the env var is set).
+    #[test]
+    fn builtin_stubs_dir_loads_source_roots_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("source-roots.txt"),
+            "# generated by tix stubs generate\nnixpkgs=/nix/store/abc-source\nhome-manager=/nix/store/def-hm\n",
+        )
+        .unwrap();
+
+        let mut reg = TypeAliasRegistry::default();
+        reg.set_builtin_stubs_dir(dir.path().to_path_buf());
+
+        assert_eq!(
+            reg.source_roots().get("nixpkgs").map(|p| p.as_path()),
+            Some(std::path::Path::new("/nix/store/abc-source"))
+        );
+        assert_eq!(
+            reg.source_roots().get("home-manager").map(|p| p.as_path()),
+            Some(std::path::Path::new("/nix/store/def-hm"))
+        );
+    }
+
     use super::*;
     use comment_parser::{parse_tix_file, TypeVarValue};
     use lang_ty::OutputTy;

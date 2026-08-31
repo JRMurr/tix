@@ -13,8 +13,6 @@
 
 use tower_lsp::lsp_types::{DocumentSymbol, Location, SymbolInformation, Url};
 
-use crate::state::AnalysisState;
-
 /// Maximum number of results to return. Prevents flooding the editor with
 /// thousands of symbols when the query is short or empty.
 const MAX_RESULTS: usize = 200;
@@ -25,20 +23,23 @@ const MAX_RESULTS: usize = 200;
 /// filter by case-insensitive substring match, with results sorted so that
 /// prefix matches come first.
 #[allow(deprecated)] // SymbolInformation.deprecated field is deprecated but required
-pub fn workspace_symbols(state: &AnalysisState, query: &str) -> Vec<SymbolInformation> {
+pub fn workspace_symbols(
+    snapshots: &dashmap::DashMap<std::path::PathBuf, crate::state::FileSnapshot>,
+    query: &str,
+) -> Vec<SymbolInformation> {
     let query_lower = query.to_lowercase();
 
     let mut results: Vec<(SymbolInformation, MatchQuality)> = Vec::new();
 
-    for (path, analysis) in &state.files {
-        let uri = match Url::from_file_path(path) {
+    for entry in snapshots.iter() {
+        let uri = match Url::from_file_path(entry.key()) {
             Ok(u) => u,
             Err(()) => continue,
         };
 
-        let snapshot = analysis.to_snapshot();
+        let snapshot = entry.value();
         let root = snapshot.syntax.parsed.tree();
-        let doc_symbols = crate::document_symbol::document_symbols(&snapshot, &root);
+        let doc_symbols = crate::document_symbol::document_symbols(snapshot, &root);
 
         // Flatten the hierarchical DocumentSymbol tree into workspace-level
         // SymbolInformation entries, filtering by name as we go.
@@ -134,10 +135,10 @@ fn flatten_and_filter(
 /// Convenience wrapper for use from `server.rs` — calls `workspace_symbols`
 /// with the locked state. Separated so the handler can remain thin.
 pub fn handle_workspace_symbols(
-    state: &AnalysisState,
+    snapshots: &dashmap::DashMap<std::path::PathBuf, crate::state::FileSnapshot>,
     query: &str,
 ) -> Option<Vec<SymbolInformation>> {
-    let results = workspace_symbols(state, query);
+    let results = workspace_symbols(snapshots, query);
     Some(results)
 }
 
@@ -148,16 +149,16 @@ mod tests {
     use lang_check::aliases::TypeAliasRegistry;
     use tower_lsp::lsp_types::SymbolKind;
 
-    use crate::state::AnalysisState;
-
     /// Helper: create an AnalysisState with multiple files and query workspace symbols.
     fn query_workspace(files: &[(&str, &str)], query: &str) -> Vec<SymbolInformation> {
-        let mut state = AnalysisState::new(TypeAliasRegistry::default());
+        let mut state = crate::state::AnalysisState::new(TypeAliasRegistry::default());
+        let snapshots = dashmap::DashMap::new();
         for (name, src) in files {
             let path = temp_path(name);
-            state.update_file(path, src.to_string());
+            state.update_file(path.clone(), src.to_string());
+            snapshots.insert(path.clone(), state.get_file(&path).unwrap().to_snapshot());
         }
-        workspace_symbols(&state, query)
+        workspace_symbols(&snapshots, query)
     }
 
     #[test]

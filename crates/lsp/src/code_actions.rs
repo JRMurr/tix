@@ -21,6 +21,29 @@ use tower_lsp::lsp_types::*;
 
 use crate::state::FileSnapshot;
 
+/// Build a quickfix-style CodeAction. `diagnostic` attaches the triggering
+/// diagnostic; `is_preferred` marks the action the editor should apply on
+/// auto-fix.
+fn quickfix(
+    title: String,
+    kind: CodeActionKind,
+    diagnostic: Option<Diagnostic>,
+    changes: std::collections::HashMap<Url, Vec<TextEdit>>,
+    is_preferred: Option<bool>,
+) -> CodeActionOrCommand {
+    CodeActionOrCommand::CodeAction(CodeAction {
+        title,
+        kind: Some(kind),
+        diagnostics: diagnostic.map(|d| vec![d]),
+        edit: Some(WorkspaceEdit {
+            changes: Some(changes),
+            ..Default::default()
+        }),
+        is_preferred,
+        ..Default::default()
+    })
+}
+
 /// Compute code actions for the given range in the document.
 ///
 /// The LSP client sends the cursor range and any diagnostics the editor shows
@@ -129,16 +152,13 @@ fn add_missing_field_actions(
             ..Default::default()
         };
 
-        actions.push(CodeActionOrCommand::CodeAction(CodeAction {
-            title: format!("Add missing field `{field_name}`"),
-            kind: Some(CodeActionKind::QUICKFIX),
-            diagnostics: Some(vec![lsp_diag]),
-            edit: Some(WorkspaceEdit {
-                changes: Some(changes),
-                ..Default::default()
-            }),
-            ..Default::default()
-        }));
+        actions.push(quickfix(
+            format!("Add missing field `{field_name}`"),
+            CodeActionKind::QUICKFIX,
+            Some(lsp_diag),
+            changes,
+            None,
+        ));
     }
 }
 
@@ -342,17 +362,13 @@ fn add_path_concatenation_actions(
             ..Default::default()
         };
 
-        actions.push(CodeActionOrCommand::CodeAction(CodeAction {
-            title: "Use path concatenation instead of string interpolation".to_string(),
-            kind: Some(CodeActionKind::QUICKFIX),
-            diagnostics: Some(vec![lsp_diag]),
-            edit: Some(WorkspaceEdit {
-                changes: Some(changes),
-                ..Default::default()
-            }),
-            is_preferred: Some(true),
-            ..Default::default()
-        }));
+        actions.push(quickfix(
+            "Use path concatenation instead of string interpolation".to_string(),
+            CodeActionKind::QUICKFIX,
+            Some(lsp_diag),
+            changes,
+            Some(true),
+        ));
     }
 }
 
@@ -419,17 +435,13 @@ fn add_string_coercion_actions(
             let mut changes = std::collections::HashMap::new();
             changes.insert(uri.clone(), vec![edit]);
 
-            actions.push(CodeActionOrCommand::CodeAction(CodeAction {
-                title: "Wrap in `toString`".to_string(),
-                kind: Some(CodeActionKind::QUICKFIX),
-                diagnostics: Some(vec![lsp_diag.clone()]),
-                edit: Some(WorkspaceEdit {
-                    changes: Some(changes),
-                    ..Default::default()
-                }),
-                is_preferred: Some(true),
-                ..Default::default()
-            }));
+            actions.push(quickfix(
+                "Wrap in `toString`".to_string(),
+                CodeActionKind::QUICKFIX,
+                Some(lsp_diag.clone()),
+                changes,
+                Some(true),
+            ));
         }
 
         // Offer string interpolation wrapping only for types that support it.
@@ -442,16 +454,13 @@ fn add_string_coercion_actions(
             let mut changes = std::collections::HashMap::new();
             changes.insert(uri.clone(), vec![edit]);
 
-            actions.push(CodeActionOrCommand::CodeAction(CodeAction {
-                title: "Wrap in string interpolation".to_string(),
-                kind: Some(CodeActionKind::QUICKFIX),
-                diagnostics: Some(vec![lsp_diag]),
-                edit: Some(WorkspaceEdit {
-                    changes: Some(changes),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            }));
+            actions.push(quickfix(
+                "Wrap in string interpolation".to_string(),
+                CodeActionKind::QUICKFIX,
+                Some(lsp_diag),
+                changes,
+                None,
+            ));
         }
     }
 }
@@ -512,17 +521,13 @@ fn add_invalid_interpolation_actions(
             ..Default::default()
         };
 
-        actions.push(CodeActionOrCommand::CodeAction(CodeAction {
-            title: "Wrap in `toString`".to_string(),
-            kind: Some(CodeActionKind::QUICKFIX),
-            diagnostics: Some(vec![lsp_diag]),
-            edit: Some(WorkspaceEdit {
-                changes: Some(changes),
-                ..Default::default()
-            }),
-            is_preferred: Some(true),
-            ..Default::default()
-        }));
+        actions.push(quickfix(
+            "Wrap in `toString`".to_string(),
+            CodeActionKind::QUICKFIX,
+            Some(lsp_diag),
+            changes,
+            Some(true),
+        ));
     }
 }
 
@@ -599,15 +604,13 @@ fn add_type_annotation_actions(
         let mut changes = std::collections::HashMap::new();
         changes.insert(uri.clone(), vec![edit]);
 
-        actions.push(CodeActionOrCommand::CodeAction(CodeAction {
-            title: format!("Add type annotation for `{name_text}`"),
-            kind: Some(CodeActionKind::REFACTOR),
-            edit: Some(WorkspaceEdit {
-                changes: Some(changes),
-                ..Default::default()
-            }),
-            ..Default::default()
-        }));
+        actions.push(quickfix(
+            format!("Add type annotation for `{name_text}`"),
+            CodeActionKind::REFACTOR,
+            None,
+            changes,
+            None,
+        ));
     }
 }
 
@@ -762,16 +765,13 @@ fn remove_unused_binding_actions(
         changes.insert(uri.clone(), vec![edit]);
 
         let name_text = &name.text;
-        actions.push(CodeActionOrCommand::CodeAction(CodeAction {
-            title: format!("Remove unused binding `{name_text}`"),
-            kind: Some(CodeActionKind::QUICKFIX),
-            edit: Some(WorkspaceEdit {
-                changes: Some(changes),
-                ..Default::default()
-            }),
-            is_preferred: Some(false),
-            ..Default::default()
-        }));
+        actions.push(quickfix(
+            format!("Remove unused binding `{name_text}`"),
+            CodeActionKind::QUICKFIX,
+            None,
+            changes,
+            Some(false),
+        ));
     }
 }
 

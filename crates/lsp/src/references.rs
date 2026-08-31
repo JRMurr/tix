@@ -13,7 +13,7 @@ use lang_ast::{AstPtr, Expr, Literal, NameId};
 use rowan::ast::AstNode;
 use tower_lsp::lsp_types::{Location, Position, Url};
 
-use crate::state::{AnalysisState, FileSnapshot};
+use crate::state::FileSnapshot;
 
 /// Find the NameId under the cursor. Works on both definition sites (where a
 /// name is bound) and reference sites (where a name is used).
@@ -119,7 +119,7 @@ pub fn find_references(
 /// - If the cursor is on a Select field literal (e.g. `helper` in `lib.helper`),
 ///   resolves to the target file's definition and finds all references from there.
 pub fn find_references_cross_file(
-    state: &AnalysisState,
+    coordinator: &lang_check::coordinator::InferenceCoordinator,
     snapshots: &DashMap<PathBuf, FileSnapshot>,
     analysis: &FileSnapshot,
     pos: Position,
@@ -138,7 +138,10 @@ pub fn find_references_cross_file(
         let name_text = &analysis.syntax.module[target_name_id].text;
 
         let cross_file = crate::import_nav::find_cross_file_field_references(
-            state, snapshots, &file_path, name_text,
+            coordinator,
+            snapshots,
+            &file_path,
+            name_text,
         );
         locations.extend(cross_file);
 
@@ -151,7 +154,7 @@ pub fn find_references_cross_file(
         resolve_select_field_at_position(analysis, pos, root)
     {
         return references_for_field_in_file(
-            state,
+            coordinator,
             snapshots,
             &target_file_path,
             &field_name,
@@ -170,11 +173,12 @@ fn resolve_select_field_at_position(
     pos: Position,
     root: &rnix::Root,
 ) -> Option<(PathBuf, String)> {
-    let offset = analysis.syntax.line_index.offset(pos);
-    let token = root
-        .syntax()
-        .token_at_offset(rowan::TextSize::from(offset))
-        .right_biased()?;
+    let token = crate::convert::token_at_pos(
+        &analysis.syntax.line_index,
+        root,
+        pos,
+        crate::convert::Bias::Right,
+    )?;
 
     let mut node = token.parent()?;
     loop {
@@ -214,7 +218,7 @@ fn resolve_select_field_at_position(
 /// Find all references to a field defined in a specific file.
 /// Returns the declaration in the target file + cross-file usages.
 fn references_for_field_in_file(
-    state: &AnalysisState,
+    coordinator: &lang_check::coordinator::InferenceCoordinator,
     snapshots: &DashMap<PathBuf, FileSnapshot>,
     target_file_path: &std::path::Path,
     field_name: &str,
@@ -224,8 +228,7 @@ fn references_for_field_in_file(
 
     // Resolve transitively through barrels to find the actual definition file.
     // This reuses the same logic as goto-def.
-    let resolved =
-        crate::import_nav::resolve_field_transitively(state, target_file_path, field_name);
+    let resolved = crate::import_nav::resolve_field_transitively(target_file_path, field_name);
 
     // Add the declaration site if requested.
     if include_declaration {
@@ -242,7 +245,7 @@ fn references_for_field_in_file(
 
     // Find cross-file references from the definition file.
     let cross_file = crate::import_nav::find_cross_file_field_references(
-        state,
+        coordinator,
         snapshots,
         &def_file_path,
         field_name,

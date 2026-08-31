@@ -31,38 +31,41 @@ clippy:
 # =============================================================================
 
 stubs_dir := "stubs/generated"
-nixpkgs_src := `nix eval --raw nixpkgs#path 2>/dev/null || echo ""`
+# Command string only — evaluated lazily via shell() inside the gen-stubs
+# recipes. A top-level backtick would run `nix eval` (which can hang on
+# flake registry/network access) on every just invocation, even `just fmt`.
+nixpkgs_src_cmd := 'nix eval --raw nixpkgs#path 2>/dev/null || echo ""'
 
 # Generate NixOS option stubs (with doc comments)
 gen-stubs-nixos *args="": _ensure-stubs-dir
     cargo run --bin tix -- stubs generate nixos --descriptions \
-        --source-root nixpkgs={{ nixpkgs_src }} \
+        --source-root nixpkgs={{ shell(nixpkgs_src_cmd) }} \
         -o {{ stubs_dir }}/nixos.tix {{ args }}
 
 # Generate Home Manager option stubs (with doc comments)
 gen-stubs-home-manager *args="": _ensure-stubs-dir
     cargo run --bin tix -- stubs generate home-manager --descriptions \
-        --source-root nixpkgs={{ nixpkgs_src }} \
+        --source-root nixpkgs={{ shell(nixpkgs_src_cmd) }} \
         -o {{ stubs_dir }}/home-manager.tix {{ args }}
 
 # Generate NixOS stubs from a flake's nixosConfigurations
 gen-stubs-nixos-flake flake hostname="": _ensure-stubs-dir
     cargo run --bin tix -- stubs generate nixos --descriptions --flake {{ flake }} \
         {{ if hostname != "" { "--hostname " + hostname } else { "" } }} \
-        --source-root nixpkgs={{ nixpkgs_src }} \
+        --source-root nixpkgs={{ shell(nixpkgs_src_cmd) }} \
         -o {{ stubs_dir }}/nixos.tix
 
 # Generate Home Manager stubs from a flake's homeConfigurations
 gen-stubs-hm-flake flake username="": _ensure-stubs-dir
     cargo run --bin tix -- stubs generate home-manager --descriptions --flake {{ flake }} \
         {{ if username != "" { "--username " + username } else { "" } }} \
-        --source-root nixpkgs={{ nixpkgs_src }} \
+        --source-root nixpkgs={{ shell(nixpkgs_src_cmd) }} \
         -o {{ stubs_dir }}/home-manager.tix
 
 # Generate nixpkgs top-level package stubs (for @callpackage context)
 gen-stubs-pkgs *args="": _ensure-stubs-dir
     cargo run --bin tix -- stubs generate pkgs \
-        --source-root nixpkgs={{ nixpkgs_src }} \
+        --source-root nixpkgs={{ shell(nixpkgs_src_cmd) }} \
         -o {{ stubs_dir }}/pkgs.tix {{ args }}
 
 # Generate all stubs (NixOS + Home Manager + Pkgs)

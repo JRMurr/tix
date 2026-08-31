@@ -6,7 +6,7 @@
 // The LSP server holds this behind a Mutex because rnix::Root is !Send + !Sync
 // and all analysis must run on a single thread (via spawn_blocking).
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -18,6 +18,7 @@ use lang_ast::{
 };
 use lang_check::aliases::TypeAliasRegistry;
 use lang_check::coordinator::{InferenceCoordinator, SyntaxProvider, TypeofLookup};
+#[cfg(test)]
 use lang_check::diagnostic::{TixDiagnostic, TixDiagnosticKind};
 use lang_check::imports::{import_errors_to_diagnostics, resolve_import_types};
 #[cfg(test)]
@@ -87,7 +88,6 @@ impl FileSnapshot {
 /// All fields are owned values — safe to hold across mutex releases.
 pub struct SyntaxIntermediate {
     pub path: PathBuf,
-    pub source_text: String,
     pub module: Module,
     pub module_indices: ModuleIndices,
     pub name_res: NameResolution,
@@ -104,19 +104,12 @@ pub struct SyntaxIntermediate {
 }
 
 /// LSP-specific inference inputs. Wraps the shared `lang_check::InferenceInputs`
-/// with additional fields needed for building `FileAnalysis`/`FileSnapshot`.
+/// plus the import targets the analysis loop records as dependency edges.
+/// (Snapshot data — parse tree, line index, source map — is published to the
+/// DashMap during phase A and doesn't need to ride along here.)
 pub struct LspInferenceInputs {
     pub core: lang_check::InferenceInputs,
-    // LSP-specific fields for FileAnalysis/FileSnapshot:
-    pub source_text: String,
-    pub line_index: LineIndex,
-    pub parsed: rnix::Parse<rnix::Root>,
-    pub source_map: ModuleSourceMap,
-    pub scopes: ModuleScopes,
     pub import_targets: HashMap<ExprId, PathBuf>,
-    pub name_to_import: HashMap<NameId, PathBuf>,
-    pub context_arg_types: HashMap<SmolStr, OutputTy>,
-    pub context_arg_arena: Arc<lang_ty::TypeArena>,
 }
 
 /// Run type inference using precomputed syntax data. Does not need the
@@ -128,27 +121,6 @@ pub fn run_inference(inputs: &LspInferenceInputs) -> (CheckResult, Duration) {
     let check_result = lang_check::run_inference(&inputs.core);
     let elapsed = t0.elapsed();
     (check_result, elapsed)
-}
-
-/// Build a `FileAnalysis` from inference inputs and check result. This is the
-/// legacy path used during the transition — handlers will eventually read from
-/// `FileSnapshot` instead.
-pub fn build_file_analysis(inputs: LspInferenceInputs, check_result: CheckResult) -> FileAnalysis {
-    FileAnalysis {
-        source_text: inputs.source_text,
-        line_index: inputs.line_index,
-        parsed: inputs.parsed,
-        module: inputs.core.module,
-        module_indices: inputs.core.module_indices,
-        source_map: inputs.source_map,
-        name_res: inputs.core.name_res,
-        scopes: inputs.scopes,
-        check_result,
-        import_targets: inputs.import_targets,
-        name_to_import: inputs.name_to_import,
-        context_arg_types: inputs.context_arg_types,
-        context_arg_arena: inputs.context_arg_arena,
-    }
 }
 
 // ==============================================================================
@@ -325,15 +297,7 @@ pub fn resolve_imports_phase_b(
             typeof_import_types,
             file_base_dir: file_dir.clone(),
         },
-        source_text: intermediate.source_text.clone(),
-        line_index: intermediate.line_index.clone(),
-        parsed: intermediate.parsed.clone(),
-        source_map: intermediate.source_map.clone(),
-        scopes: intermediate.scopes.clone(),
         import_targets: import_targets.clone(),
-        name_to_import: name_to_import.clone(),
-        context_arg_types: intermediate.context_arg_types.clone(),
-        context_arg_arena: Arc::clone(&intermediate.context_arg_arena),
     };
 
     (
@@ -344,9 +308,9 @@ pub fn resolve_imports_phase_b(
     )
 }
 
+#[cfg(test)]
 impl FileAnalysis {
-    /// Convert a FileAnalysis into a FileSnapshot. Used by tests and the
-    /// transitional period where both representations coexist.
+    /// Convert a FileAnalysis into a FileSnapshot for test harnesses.
     pub fn to_snapshot(&self) -> FileSnapshot {
         FileSnapshot {
             syntax: SyntaxData {
@@ -370,11 +334,12 @@ impl FileAnalysis {
 }
 
 /// Cached analysis output for a single open file.
+#[cfg(test)]
 pub struct FileAnalysis {
     /// Source text used for this analysis pass. Stored so that
     /// `reload_registry` and `ReanalyzeFile` can re-run analysis without
     /// reading from disk (which might miss unsaved editor changes).
-    pub source_text: String,
+    pub source_text: Arc<str>,
     pub line_index: LineIndex,
     /// Cached parse result. Call `.tree()` to get an rnix::Root.
     /// We store the Parse (which contains the Send-safe green tree) rather
@@ -402,6 +367,7 @@ pub struct FileAnalysis {
     pub context_arg_arena: Arc<lang_ty::TypeArena>,
 }
 
+#[cfg(test)]
 impl FileAnalysis {
     #[cfg(test)]
     pub fn inference(&self) -> Option<&InferenceResult> {
@@ -437,7 +403,10 @@ impl fmt::Display for AnalysisTiming {
 /// All mutable state for the LSP's analysis pipeline.
 pub struct AnalysisState {
     pub registry: Arc<TypeAliasRegistry>,
-    /// Cached per-file analysis, keyed by canonical path.
+    /// Cached per-file analysis, keyed by canonical path. Test-only: the
+    /// production server reads exclusively from the snapshots DashMap; unit
+    /// tests drive analysis through `update_file` and read back snapshots.
+    #[cfg(test)]
     pub files: HashMap<PathBuf, FileAnalysis>,
     /// Project-level tix.toml configuration (if discovered).
     pub project_config: Option<ProjectConfig>,
@@ -461,7 +430,8 @@ impl AnalysisState {
     pub fn new(registry: TypeAliasRegistry) -> Self {
         Self {
             registry: Arc::new(registry),
-            files: HashMap::new(),
+            #[cfg(test)]
+            files: HashMap::default(),
             project_config: None,
             config_dir: None,
             coordinator: Arc::new(InferenceCoordinator::new()),
@@ -498,6 +468,10 @@ impl AnalysisState {
     /// available. The production analysis loop in `server.rs` uses
     /// `resolve_imports_phase_b()` instead, which adds demand-driven inference
     /// for unopened dependencies.
+    // Only tests drive analysis through this synchronous path — the
+    // production loop uses the phase A/B/C split, and reload_registry queues
+    // ReanalyzeFile events instead of re-checking inline.
+    #[cfg(test)]
     pub fn update_file(
         &mut self,
         path: PathBuf,
@@ -506,6 +480,7 @@ impl AnalysisState {
         self.update_file_inner(path, contents)
     }
 
+    #[cfg(test)]
     fn update_file_inner(
         &mut self,
         path: PathBuf,
@@ -513,10 +488,12 @@ impl AnalysisState {
     ) -> (&FileAnalysis, AnalysisTiming) {
         // Path is expected to be pre-canonicalized by uri_to_path() at the LSP boundary.
         let t_total = Instant::now();
+        // One shared buffer for line_index + source_text.
+        let contents: Arc<str> = contents.into();
 
         // -- Phase 1: Parse --
         let t0 = Instant::now();
-        let line_index = LineIndex::new(&contents);
+        let line_index = LineIndex::new(Arc::clone(&contents));
         let parsed = rnix::Root::parse(&contents);
         let t_parse = t0.elapsed();
 
@@ -649,9 +626,11 @@ impl AnalysisState {
         contents: String,
     ) -> (SyntaxData, SyntaxIntermediate, Duration) {
         let t0 = Instant::now();
+        // One shared buffer for line_index + source_text.
+        let contents: Arc<str> = contents.into();
 
         // -- Parse --
-        let line_index = LineIndex::new(&contents);
+        let line_index = LineIndex::new(Arc::clone(&contents));
         let parsed = rnix::Root::parse(&contents);
 
         // -- Lower to Tix AST + name resolution --
@@ -668,7 +647,6 @@ impl AnalysisState {
         // that the previous order required.
         let intermediate = SyntaxIntermediate {
             path,
-            source_text: contents,
             module: r.module,
             module_indices: r.module_indices,
             name_res: r.name_res,
@@ -694,8 +672,8 @@ impl AnalysisState {
             source_map: intermediate.source_map.clone(),
             name_res: intermediate.name_res.clone(),
             scopes: intermediate.scopes.clone(),
-            import_targets: HashMap::new(),
-            name_to_import: HashMap::new(),
+            import_targets: HashMap::default(),
+            name_to_import: HashMap::default(),
             context_arg_types: intermediate.context_arg_types.clone(),
             context_arg_arena: Arc::clone(&intermediate.context_arg_arena),
         };
@@ -758,19 +736,11 @@ impl AnalysisState {
                 context_args: intermediate.context_args.clone(),
                 rss_limit_mb: intermediate.rss_limit_mb,
                 file_path: Some(intermediate.path.clone()),
-                imported_type_exports: HashMap::new(),
-                typeof_import_types: HashMap::new(),
+                imported_type_exports: HashMap::default(),
+                typeof_import_types: HashMap::default(),
                 file_base_dir: file_dir.clone(),
             },
-            source_text: intermediate.source_text.clone(),
-            line_index: intermediate.line_index.clone(),
-            parsed: intermediate.parsed.clone(),
-            source_map: intermediate.source_map.clone(),
-            scopes: intermediate.scopes.clone(),
             import_targets: import_targets.clone(),
-            name_to_import: name_to_import.clone(),
-            context_arg_types: intermediate.context_arg_types.clone(),
-            context_arg_arena: Arc::clone(&intermediate.context_arg_arena),
         };
 
         (
@@ -805,19 +775,13 @@ impl AnalysisState {
         self.coordinator.remove_signature(path)
     }
 
-    /// Replace the type alias registry and re-analyze all open files.
-    /// Used when stubs configuration changes at runtime.
+    /// Replace the type alias registry and clear cached signatures. Callers
+    /// queue ReanalyzeFile events for the open files (enumerated from the
+    /// snapshots map) so the re-check runs in the analysis loop rather than
+    /// synchronously under the state mutex.
     pub fn reload_registry(&mut self, registry: TypeAliasRegistry) {
         self.registry = Arc::new(registry);
         self.coordinator.clear();
-
-        // Re-analyze every open file with the new registry.
-        let paths: Vec<PathBuf> = self.files.keys().cloned().collect();
-        for path in paths {
-            let contents = self.files.get(&path).unwrap().source_text.clone();
-            let (_analysis, timing) = self.update_file(path.clone(), contents);
-            log::info!("re-analyzed {}: {timing}", path.display());
-        }
     }
 }
 
@@ -833,7 +797,7 @@ pub(crate) fn build_name_to_import(
     grouped_defs: &GroupedDefs,
     file_dir: Option<&Path>,
 ) -> HashMap<NameId, PathBuf> {
-    let mut name_to_import = HashMap::new();
+    let mut name_to_import = HashMap::default();
     for group in grouped_defs.iter() {
         for typedef in group {
             let target =
@@ -842,6 +806,10 @@ pub(crate) fn build_name_to_import(
                     find_path_literal_target(module, typedef.expr(), dir)
                 });
             if let Some(path) = target {
+                // Canonicalize once here so per-request consumers (e.g.
+                // import_nav's pass-through scans) can compare directly
+                // instead of canonicalizing per element.
+                let path = path.canonicalize().unwrap_or(path);
                 name_to_import.insert(typedef.name(), path);
             }
         }

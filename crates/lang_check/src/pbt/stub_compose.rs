@@ -12,7 +12,7 @@
 // Tested both with stubs loaded (types resolve, expected output types verified)
 // and without stubs (names become fresh type vars, crash-freedom verified).
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 use std::fmt::Write as _;
 
 use comment_parser::ParsedTy;
@@ -395,17 +395,17 @@ fn make_context_args(
     match pattern {
         AccessPattern::LambdaParam => {
             let lib_ty = registry.get("Lib").expect("Lib alias must exist").clone();
-            let mut map = HashMap::new();
+            let mut map = HashMap::default();
             map.insert(SmolStr::new("lib"), lib_ty);
             map
         }
         AccessPattern::PkgsLib => {
             let pkgs_ty = registry.get("Pkgs").expect("Pkgs alias must exist").clone();
-            let mut map = HashMap::new();
+            let mut map = HashMap::default();
             map.insert(SmolStr::new("pkgs"), pkgs_ty);
             map
         }
-        _ => HashMap::new(),
+        _ => HashMap::default(),
     }
 }
 

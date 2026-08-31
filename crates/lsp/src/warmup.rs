@@ -15,7 +15,7 @@
 // The warmup runs on spawn_blocking, so the async analysis loop stays
 // responsive to user edits during warmup.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -30,7 +30,7 @@ use smol_str::SmolStr;
 
 use crate::convert::LineIndex;
 use crate::project_config::ProjectConfig;
-use crate::state::{FileSnapshot, InferenceData, SyntaxData};
+use crate::state::{InferenceData, SyntaxData};
 
 /// Result of batch warmup for a single file. The caller (analysis loop) uses
 /// these to populate state.files, DashMap snapshots, and publish diagnostics.
@@ -38,7 +38,6 @@ pub struct WarmupFileResult {
     pub path: PathBuf,
     pub syntax_data: SyntaxData,
     pub inference_data: InferenceData,
-    pub file_analysis: crate::state::FileAnalysis,
     pub diagnostics: Vec<TixDiagnostic>,
     pub import_paths: Vec<PathBuf>,
 }
@@ -57,9 +56,9 @@ pub fn run_batch_warmup(
     project_config: Option<&ProjectConfig>,
     config_dir: Option<&Path>,
     rss_limit_mb: Option<f64>,
-) -> Vec<WarmupFileResult> {
+) -> (Vec<WarmupFileResult>, Arc<TypeAliasRegistry>) {
     if files.is_empty() {
-        return vec![];
+        return (vec![], registry);
     }
 
     let t_total = Instant::now();
@@ -74,7 +73,6 @@ pub fn run_batch_warmup(
 
     struct PreparedFile {
         path: PathBuf,
-        source_text: String,
         parsed: rnix::Parse<rnix::Root>,
         syntax: SyntaxResult,
         line_index: LineIndex,
@@ -99,7 +97,7 @@ pub fn run_batch_warmup(
 
         let parsed = rnix::Root::parse(source_text);
         let syntax = lang_ast::run_syntax_pipeline_for_file(file_path, source_text);
-        let line_index = LineIndex::new(source_text);
+        let line_index = LineIndex::new(source_text.as_str());
 
         // Scan imports for dependency graph.
         let base_dir = file_path.parent().unwrap_or(Path::new("/"));
@@ -131,7 +129,6 @@ pub fn run_batch_warmup(
 
         prepared.push(PreparedFile {
             path: file_path.clone(),
-            source_text: source_text.clone(),
             parsed,
             syntax,
             line_index,
@@ -156,7 +153,8 @@ pub fn run_batch_warmup(
     // Phase 1.5 — Dependency graph + topological layers
     // =========================================================================
 
-    let mut import_edges: HashMap<PathBuf, Vec<PathBuf>> = HashMap::with_capacity(prepared.len());
+    let mut import_edges: HashMap<PathBuf, Vec<PathBuf>> =
+        HashMap::with_capacity_and_hasher(prepared.len(), Default::default());
     for pp in &prepared {
         import_edges.insert(pp.path.clone(), pp.import_targets_raw.clone());
     }
@@ -223,8 +221,8 @@ pub fn run_batch_warmup(
             context_args: pp.context_args.clone(),
             rss_limit_mb,
             file_path: Some(pp.path.clone()),
-            imported_type_exports: HashMap::new(),
-            typeof_import_types: HashMap::new(),
+            imported_type_exports: HashMap::default(),
+            typeof_import_types: HashMap::default(),
             file_base_dir: None,
         };
 
@@ -241,9 +239,7 @@ pub fn run_batch_warmup(
 
         let import_paths: Vec<PathBuf> = import_targets.values().cloned().collect();
 
-        // Build LSP data structures. SyntaxData is built first by moving
-        // fields out of pp; FileAnalysis clones from it to avoid redundant
-        // copies from pp.
+        // Build LSP data structures by moving fields out of pp.
         let syntax_data = SyntaxData {
             parsed: pp.parsed,
             line_index: pp.line_index,
@@ -262,27 +258,10 @@ pub fn run_batch_warmup(
             check_result: check_result.clone(),
         };
 
-        let file_analysis = crate::state::FileAnalysis {
-            source_text: pp.source_text,
-            line_index: syntax_data.line_index.clone(),
-            parsed: syntax_data.parsed.clone(),
-            module: syntax_data.module.clone(),
-            module_indices: syntax_data.module_indices.clone(),
-            source_map: syntax_data.source_map.clone(),
-            name_res: syntax_data.name_res.clone(),
-            scopes: syntax_data.scopes.clone(),
-            check_result,
-            import_targets: syntax_data.import_targets.clone(),
-            name_to_import: syntax_data.name_to_import.clone(),
-            context_arg_types: syntax_data.context_arg_types.clone(),
-            context_arg_arena: Arc::clone(&syntax_data.context_arg_arena),
-        };
-
         Some(WarmupFileResult {
             path: pp.path,
             syntax_data,
             inference_data,
-            file_analysis,
             diagnostics,
             import_paths,
         })
@@ -327,13 +306,18 @@ pub fn run_batch_warmup(
         layers.len(),
     );
 
-    all_results
+    // Return the accumulated registry too: context resolution may have
+    // lazily loaded context stubs, which the caller writes back so open
+    // files don't redo that work.
+    (all_results, registry)
 }
 
-/// Convert warmup results into FileSnapshots for direct DashMap insertion.
+/// Convert warmup results into FileSnapshots. The production merge path in
+/// server.rs destructures the result by move instead; tests use this.
+#[cfg(test)]
 impl WarmupFileResult {
-    pub fn to_snapshot(&self) -> FileSnapshot {
-        FileSnapshot {
+    pub fn to_snapshot(&self) -> crate::state::FileSnapshot {
+        crate::state::FileSnapshot {
             syntax: self.syntax_data.clone(),
             inference: Some(self.inference_data.clone()),
         }
@@ -376,7 +360,8 @@ mod tests {
         let registry = Arc::new(TypeAliasRegistry::with_builtins());
         let coordinator = InferenceCoordinator::new();
 
-        let results = run_batch_warmup(files.clone(), registry, &coordinator, None, None, None);
+        let (results, _registry) =
+            run_batch_warmup(files.clone(), registry, &coordinator, None, None, None);
 
         assert_eq!(results.len(), 3, "should get results for all 3 files");
 
@@ -411,7 +396,8 @@ mod tests {
         let registry = Arc::new(TypeAliasRegistry::with_builtins());
         let coordinator = InferenceCoordinator::new();
 
-        let results = run_batch_warmup(files.clone(), registry, &coordinator, None, None, None);
+        let (results, _registry) =
+            run_batch_warmup(files.clone(), registry, &coordinator, None, None, None);
 
         assert_eq!(results.len(), 2);
 
@@ -443,7 +429,8 @@ mod tests {
         let registry = Arc::new(TypeAliasRegistry::with_builtins());
         let coordinator = InferenceCoordinator::new();
 
-        let results = run_batch_warmup(vec![], registry, &coordinator, None, None, None);
+        let (results, _registry) =
+            run_batch_warmup(vec![], registry, &coordinator, None, None, None);
         assert!(results.is_empty());
     }
 
@@ -456,7 +443,8 @@ mod tests {
         let registry = Arc::new(TypeAliasRegistry::with_builtins());
         let coordinator = InferenceCoordinator::new();
 
-        let results = run_batch_warmup(files, registry, &coordinator, None, None, None);
+        let (results, _registry) =
+            run_batch_warmup(files, registry, &coordinator, None, None, None);
         assert_eq!(results.len(), 1);
 
         let snap = results[0].to_snapshot();
@@ -479,15 +467,16 @@ mod tests {
         let registry = Arc::new(TypeAliasRegistry::with_builtins());
         let coordinator = InferenceCoordinator::new();
 
-        let results = run_batch_warmup(files, registry, &coordinator, None, None, None);
+        let (results, _registry) =
+            run_batch_warmup(files, registry, &coordinator, None, None, None);
         assert_eq!(results.len(), 3);
 
         for result in &results {
             let text = std::fs::read_to_string(&result.path).unwrap();
             assert_eq!(
-                result.file_analysis.source_text,
+                result.syntax_data.line_index.text(),
                 text,
-                "warmup should store source text in FileAnalysis for {}",
+                "warmup should retain source text (via LineIndex) for {}",
                 result.path.display()
             );
         }

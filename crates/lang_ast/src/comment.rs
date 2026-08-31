@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use rnix::{
     ast::{self, AstToken},
@@ -154,7 +154,7 @@ pub fn has_nocheck_directive(root: &Root) -> bool {
 /// For each `# tix-ignore` comment on line N, the *next* line (N+1) is added
 /// to the returned set.
 pub fn gather_ignore_lines(root: &Root, source: &str) -> HashSet<u32> {
-    let mut ignored = HashSet::new();
+    let mut ignored = HashSet::default();
     for event in root.syntax().preorder_with_tokens() {
         if let WalkEvent::Enter(NodeOrToken::Token(ref token)) = event {
             match_ast! { match token {
@@ -225,7 +225,7 @@ mod tests {
         let src = "# tix-ignore\n1 + \"a\"\n";
         let root = parse(src);
         let lines = gather_ignore_lines(&root, src);
-        assert_eq!(lines, HashSet::from([1]));
+        assert_eq!(lines, HashSet::from_iter([1]));
     }
 
     #[test]
@@ -233,7 +233,7 @@ mod tests {
         let src = "# tix-ignore\nfoo\nbar\n# tix-ignore\nbaz\n";
         let root = parse(src);
         let lines = gather_ignore_lines(&root, src);
-        assert_eq!(lines, HashSet::from([1, 4]));
+        assert_eq!(lines, HashSet::from_iter([1, 4]));
     }
 
     #[test]
@@ -257,7 +257,7 @@ mod tests {
         let src = "#   tix-ignore  \nfoo\n";
         let root = parse(src);
         let lines = gather_ignore_lines(&root, src);
-        assert_eq!(lines, HashSet::from([1]));
+        assert_eq!(lines, HashSet::from_iter([1]));
     }
 
     // =========================================================================

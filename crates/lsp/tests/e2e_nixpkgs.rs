@@ -65,6 +65,10 @@ fn try_nixpkgs_src() -> Option<PathBuf> {
 
 /// Recursively collect `.nix` files under `dir`, excluding `tests/` and
 /// `deprecated/` subdirectories.
+///
+/// Only used by the parked `nixpkgs_lib_no_crash` test below (commented out
+/// as too slow) — kept so reviving the test doesn't need re-writing it.
+#[allow(dead_code)]
 fn collect_nix_files(dir: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     collect_recursive(dir, &mut files);
@@ -72,6 +76,7 @@ fn collect_nix_files(dir: &Path) -> Vec<PathBuf> {
     files
 }
 
+#[allow(dead_code)]
 fn collect_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,

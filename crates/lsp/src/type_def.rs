@@ -8,7 +8,6 @@
 
 use lang_ast::{AstPtr, Expr, Literal};
 use lang_check::aliases::TypeAliasRegistry;
-use rowan::ast::AstNode;
 use tower_lsp::lsp_types::{Location, Position, Url};
 
 use crate::state::FileSnapshot;
@@ -30,12 +29,12 @@ pub fn goto_type_definition(
     let Some(inference) = analysis.inference_result() else {
         return Vec::new();
     };
-    let offset = analysis.syntax.line_index.offset(pos);
-    let Some(token) = root
-        .syntax()
-        .token_at_offset(rowan::TextSize::from(offset))
-        .right_biased()
-    else {
+    let Some(token) = crate::convert::token_at_pos(
+        &analysis.syntax.line_index,
+        root,
+        pos,
+        crate::convert::Bias::Right,
+    ) else {
         return Vec::new();
     };
 
@@ -117,7 +116,7 @@ fn resolve_decl_locations(
             // Fall back to the .tix stub file location (with header-trimmed span).
             let source = std::fs::read_to_string(&loc.file_path).ok()?;
             let span_end = trim_to_header(&source, loc.span);
-            let line_index = crate::convert::LineIndex::new(&source);
+            let line_index = crate::convert::LineIndex::new(source.as_str());
             let start = line_index.position(loc.span.0 as u32);
             let end = line_index.position(span_end as u32);
             let uri = Url::from_file_path(&loc.file_path).ok()?;

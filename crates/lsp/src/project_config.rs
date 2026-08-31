@@ -5,7 +5,7 @@
 // Mirrors the CLI's config module for discovering and loading `tix.toml` files.
 // Provides per-file context resolution for NixOS/Home Manager module typing.
 
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -273,7 +273,7 @@ fn load_stub_entry(
 fn warn_empty_context_once(entry: &str) -> bool {
     static WARNED: OnceLock<Mutex<HashSet<SmolStr>>> = OnceLock::new();
     let mut set = WARNED
-        .get_or_init(|| Mutex::new(HashSet::new()))
+        .get_or_init(|| Mutex::new(HashSet::default()))
         .lock()
         .unwrap();
     set.insert(entry.into())
@@ -324,7 +324,7 @@ pub fn resolve_context_for_file(
             // rely on this to refine opaque types from a generated stub
             // (e.g. `["@flake-parts", "./extras.tix"]` to give precise
             // types to args the generator doesn't know about).
-            let mut merged = HashMap::new();
+            let mut merged = HashMap::default();
             for stub_entry in &ctx.stubs {
                 match load_stub_entry(stub_entry, config_dir, registry) {
                     Ok(args) => merged.extend(args.iter().map(|(k, v)| (k.clone(), v.clone()))),
@@ -392,7 +392,7 @@ pub fn resolve_include_globs(config: &ProjectConfig, config_dir: &Path) -> Vec<P
 
     // Walk the config directory recursively, matching .nix files.
     let mut paths = Vec::new();
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = std::collections::HashSet::default();
     walk_dir_matching(
         config_dir,
         config_dir,

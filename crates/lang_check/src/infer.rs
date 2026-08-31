@@ -91,12 +91,7 @@ impl CheckCtx<'_> {
         let (result, diagnostics, _bailed_out) = self.infer_prog_partial(groups);
         // Return the first error diagnostic (skip warnings like UnresolvedName).
         for diag in diagnostics {
-            if !matches!(
-                diag.kind,
-                crate::diagnostic::TixDiagnosticKind::UnresolvedName { .. }
-                    | crate::diagnostic::TixDiagnosticKind::AnnotationArityMismatch { .. }
-                    | crate::diagnostic::TixDiagnosticKind::AnnotationUnchecked { .. }
-            ) {
+            if !diag.kind.is_warning() {
                 return Err(Box::new(diag));
             }
         }
@@ -111,8 +106,28 @@ impl CheckCtx<'_> {
     /// Returns `(result, diagnostics, bailed_out)` where `bailed_out` is true
     /// when inference was aborted due to memory pressure (RSS limit).
     pub fn infer_prog_partial(
+        self,
+        groups: GroupedDefs,
+    ) -> (InferenceResult, Vec<TixDiagnostic>, bool) {
+        self.infer_prog_impl(groups, None)
+    }
+
+    /// Like [`infer_prog_partial`], but stops after the given SCC group and
+    /// skips infer_root/interpolation checks and expr-level canonicalization —
+    /// only name-level types are needed by the partial-inference consumers.
+    pub fn infer_prog_up_to_group(
+        self,
+        groups: GroupedDefs,
+        stop_after_group: usize,
+    ) -> (InferenceResult, Vec<TixDiagnostic>) {
+        let (result, diagnostics, _bailed) = self.infer_prog_impl(groups, Some(stop_after_group));
+        (result, diagnostics)
+    }
+
+    fn infer_prog_impl(
         mut self,
         groups: GroupedDefs,
+        stop_after_group: Option<usize>,
     ) -> (InferenceResult, Vec<TixDiagnostic>, bool) {
         // Pre-allocate TyIds for all names and expressions so they can be
         // referenced before they are inferred (needed for recursive definitions).
@@ -137,6 +152,9 @@ impl CheckCtx<'_> {
 
         let n_groups = groups.len();
         for (i, group) in groups.into_iter().enumerate() {
+            if stop_after_group.is_some_and(|stop| i > stop) {
+                break;
+            }
             // Check memory pressure before each SCC group. Partial results
             // (types inferred so far) are still returned.
             if self.should_bail() {
@@ -160,7 +178,11 @@ impl CheckCtx<'_> {
             errors.extend(group_errors);
         }
 
-        if !self.should_bail() {
+        let interpolation_diagnostics = if stop_after_group.is_some() {
+            // Partial inference: only name-level types up to the stop group
+            // are needed — no root inference or interpolation validation.
+            Vec::new()
+        } else if !self.should_bail() {
             let root_err = log_if_slow!(10, self.infer_root(), |elapsed| log::debug!(
                 "infer_root took {:.1}ms (cache: {}, slots: {}, RSS: {:.0}MB)",
                 elapsed.as_secs_f64() * 1000.0,
@@ -171,14 +193,15 @@ impl CheckCtx<'_> {
             if let Err(err) = root_err {
                 errors.push(err);
             }
+
+            // Validate string interpolation sub-expressions now that all types
+            // are as resolved as they'll get. Emit diagnostics for types that
+            // Nix cannot interpolate (int, bool, float, null, list, lambda).
+            self.check_interpolation_types()
         } else {
             log::warn!("skipping infer_root due to memory pressure");
-        }
-
-        // Validate string interpolation sub-expressions now that all types
-        // are as resolved as they'll get. Emit diagnostics for types that
-        // Nix cannot interpolate (int, bool, float, null, list, lambda).
-        let interpolation_diagnostics = self.check_interpolation_types();
+            self.check_interpolation_types()
+        };
 
         // Convert internal errors and warnings to display-ready diagnostics
         // while we still have access to the TypeStorage for canonicalization.
@@ -210,6 +233,12 @@ impl CheckCtx<'_> {
             }
         }
 
+        if stop_after_group.is_some() {
+            // Force bailed_out so finalize_inference skips expr
+            // canonicalization and file_sig_ty computation.
+            self.bailed_out = true;
+        }
+
         // Capture before self is moved into Collector.
         let bailed_out = self.should_bail();
 
@@ -226,44 +255,6 @@ impl CheckCtx<'_> {
     /// expr-level canonicalization. Used by the coordinator to get binding
     /// types for `typeof` references in type exports without running full
     /// file inference.
-    pub fn infer_prog_up_to_group(
-        mut self,
-        groups: GroupedDefs,
-        stop_after_group: usize,
-    ) -> (InferenceResult, Vec<TixDiagnostic>) {
-        let len = self.module.names().len() + self.module.exprs().len();
-        for _ in 0..len {
-            self.new_var();
-        }
-
-        let mut errors = Vec::new();
-
-        if let Some(err) = self.pre_apply_entry_lambda_annotations() {
-            errors.push(err);
-        }
-
-        for (i, group) in groups.into_iter().enumerate() {
-            if i > stop_after_group {
-                break;
-            }
-            errors.extend(self.infer_scc_group(group));
-        }
-
-        errors.extend(std::mem::take(&mut self.deferred_errors));
-        let warnings = std::mem::take(&mut self.warnings);
-        let mut diagnostics =
-            diagnostic::errors_to_diagnostics(&errors, &self.types.storage, self.module);
-        diagnostics.extend(diagnostic::warnings_to_diagnostics(&warnings));
-
-        // Force bailed_out so finalize_inference skips expr canonicalization
-        // and file_sig_ty computation — we only need name-level types.
-        self.bailed_out = true;
-
-        let mut collector = Collector::new(self);
-        let result = collector.finalize_inference();
-        (result, diagnostics)
-    }
-
     fn infer_root(&mut self) -> Result<(), LocatedError> {
         let expr_result = log_if_slow!(50, self.infer_expr(self.module.entry_expr), |elapsed| {
             log::info!(
@@ -310,20 +301,10 @@ impl CheckCtx<'_> {
             let Some(name) = name else { continue };
             let name_ty = self.ty_for_name_direct(name);
 
-            // Apply doc comment type annotations (e.g. /** type: lib :: Lib */).
-            if let Err(err) = self.apply_type_annotation(name, name_ty) {
+            if let Err(err) =
+                self.apply_param_annotations(name, name_ty, effective_context.as_ref())
+            {
                 return Some(err);
-            }
-
-            // Apply context arg types (from tix.toml or /** context: <name> */).
-            let field_text = self.module[name].text.clone();
-            if let Some(ref ctx_args) = effective_context {
-                if let Some(ctx_ty) = ctx_args.get(&field_text).cloned() {
-                    let interned = self.intern_fresh_ty(ctx_ty);
-                    if let Err(err) = self.constrain_equal(interned, name_ty) {
-                        return Some(err);
-                    }
-                }
             }
 
             // Record this name so Lambda inference in infer_root() skips it.
@@ -331,6 +312,31 @@ impl CheckCtx<'_> {
         }
 
         None
+    }
+
+    /// Apply a pattern-field's doc comment type annotation
+    /// (e.g. `/** type: lib :: Lib */`) and any context arg type
+    /// (from tix.toml or `/** context: <name> */`) to its param slot.
+    /// Shared by `pre_apply_entry_lambda_annotations` and the Lambda arm of
+    /// `infer_expr_inner` (which skips names already pre-annotated).
+    pub(crate) fn apply_param_annotations(
+        &mut self,
+        name: lang_ast::NameId,
+        name_ty: TyId,
+        effective_context: Option<
+            &Arc<rustc_hash::FxHashMap<smol_str::SmolStr, comment_parser::ParsedTy>>,
+        >,
+    ) -> Result<(), LocatedError> {
+        self.apply_type_annotation(name, name_ty)?;
+
+        if let Some(ctx_args) = effective_context {
+            let field_text = self.module[name].text.clone();
+            if let Some(ctx_ty) = ctx_args.get(&field_text).cloned() {
+                let interned = self.intern_fresh_ty(ctx_ty);
+                self.constrain_equal(interned, name_ty)?;
+            }
+        }
+        Ok(())
     }
 
     /// Infer an SCC group, returning any errors that occurred. Cleanup (level
@@ -410,7 +416,8 @@ impl CheckCtx<'_> {
             let (mut arena, ty) =
                 canonicalize_standalone(&self.types.storage, name_slot, Polarity::Positive);
             let simplified = simplify(&mut arena, ty);
-            self.early_canonical.insert(name_id, (arena, simplified));
+            self.early_canonical
+                .insert(name_id, (Arc::new(arena), simplified));
         }
 
         // Also capture early canonical for lambda parameter names by extracting
@@ -429,7 +436,7 @@ impl CheckCtx<'_> {
             let Some((func_arena, func_ty)) = self.early_canonical.get(def.name()) else {
                 continue;
             };
-            let func_arena = func_arena.clone();
+            let func_arena = Arc::clone(func_arena);
             let func_ty = *func_ty;
 
             let Some(field_types) = extract_lambda_param_fields(&func_arena, func_ty) else {
@@ -440,7 +447,7 @@ impl CheckCtx<'_> {
                 let field_text = &self.module[name_id].text;
                 if let Some(&field_tyref) = field_types.get(field_text) {
                     self.early_canonical
-                        .insert(name_id, (func_arena.clone(), field_tyref));
+                        .insert(name_id, (Arc::clone(&func_arena), field_tyref));
                 }
             }
         }
@@ -636,8 +643,23 @@ impl CheckCtx<'_> {
         polarity: Polarity,
         name: Option<lang_ast::NameId>,
     ) -> TyId {
-        let mut cache = FxHashMap::with_capacity_and_hasher(64, Default::default());
-        let result = self.extrude_inner(ty_id, polarity, &mut cache);
+        // Reuse one scratch map across calls — extrude runs per reference,
+        // and a fresh 64-slot map each time showed up in profiles.
+        let mut cache = std::mem::take(&mut self.extrude_scratch);
+        cache.clear();
+        let result = self.extrude_with_cache(ty_id, polarity, name, &mut cache);
+        self.extrude_scratch = cache;
+        result
+    }
+
+    fn extrude_with_cache(
+        &mut self,
+        ty_id: TyId,
+        polarity: Polarity,
+        name: Option<lang_ast::NameId>,
+        cache: &mut FxHashMap<TyId, TyId>,
+    ) -> TyId {
+        let result = self.extrude_inner(ty_id, polarity, cache);
 
         // Re-instantiate deferred overloads for the name being instantiated.
         // Only overloads carried under this name are scanned — this keeps
@@ -695,9 +717,9 @@ impl CheckCtx<'_> {
                             }
                         };
 
-                    let new_lhs = get_or_extrude(ov_lhs, self, &mut cache);
-                    let new_rhs = get_or_extrude(ov_rhs, self, &mut cache);
-                    let new_ret = get_or_extrude(ov_ret, self, &mut cache);
+                    let new_lhs = get_or_extrude(ov_lhs, self, cache);
+                    let new_rhs = get_or_extrude(ov_rhs, self, cache);
+                    let new_ret = get_or_extrude(ov_ret, self, cache);
 
                     self.deferred
                         .active
@@ -764,7 +786,7 @@ impl CheckCtx<'_> {
         }
 
         // Guard against stack overflow on deeply nested type graphs.
-        stacker::maybe_grow(256 * 1024, 1024 * 1024, || {
+        lang_ast::stack::with_stack(|| {
             // For polymorphic variables and structural concrete types, clone to
             // release the borrow on storage before calling &mut self methods.
             let entry = self.types.storage.get(ty_id).clone();
@@ -984,7 +1006,7 @@ impl CheckCtx<'_> {
                             result
                         }
                         // Frozen types are ground (no variables) — handled by the
-                        // fast path above. Unreachable, but return as-is defensively.
+                        // fast path above.
                         Ty::Frozen(_) => {
                             unreachable!("Frozen should be caught by variable_free fast path")
                         }
@@ -1151,42 +1173,11 @@ impl CheckCtx<'_> {
     ) -> Result<OverloadProgress, InferenceError> {
         let c = &ov.constraint;
         let spec = crate::operators::overload_spec(ov.op);
-        // Use find_concrete_through_inter so narrowed types like
-        // Inter(α, Int) are visible to the overload resolver as Int.
-        let lhs_concrete = self.types.find_concrete_through_inter(c.lhs);
-        let rhs_concrete = self.types.find_concrete_through_inter(c.rhs);
-
-        // Named is transparent — unwrap before matching, just like
-        // try_resolve_merge and constrain do.
-        let unwrap_named = |ty: Ty<TyId>, storage: &crate::storage::TypeStorage| -> Ty<TyId> {
-            let mut current = ty;
-            while let Ty::Named(_, inner) = &current {
-                match storage.get(*inner) {
-                    crate::storage::TypeEntry::Concrete(c) => current = c.clone(),
-                    _ => break,
-                }
-            }
-            current
-        };
-
-        let lhs_concrete = lhs_concrete.map(|t| unwrap_named(t, &self.types.storage));
-        let rhs_concrete = rhs_concrete.map(|t| unwrap_named(t, &self.types.storage));
-
-        // Frozen types (from cross-file imports) wrap an OutputTy in a
-        // single TyId. Intern them so the Primitive match below can see
-        // through the wrapper.
-        let lhs_concrete = if let Some(Ty::Frozen(owned)) = &lhs_concrete {
-            let interned = self.intern_output_ty(owned);
-            self.types.find_concrete(interned)
-        } else {
-            lhs_concrete
-        };
-        let rhs_concrete = if let Some(Ty::Frozen(owned)) = &rhs_concrete {
-            let interned = self.intern_output_ty(owned);
-            self.types.find_concrete(interned)
-        } else {
-            rhs_concrete
-        };
+        // resolve_operand_concrete looks through Inter wrappers (so narrowed
+        // types like Inter(α, Int) are visible as Int), transparent Named
+        // layers, and Frozen imports.
+        let lhs_concrete = self.resolve_operand_concrete(c.lhs);
+        let rhs_concrete = self.resolve_operand_concrete(c.rhs);
 
         // ---- Phase 1: Full Resolution — both operands concrete ----
 
@@ -1383,40 +1374,30 @@ impl CheckCtx<'_> {
         Ok(false)
     }
 
-    fn try_resolve_merge(&mut self, mg: &PendingMerge) -> Result<bool, InferenceError> {
-        let lhs_concrete = self.types.find_concrete_through_inter(mg.lhs);
-        let rhs_concrete = self.types.find_concrete_through_inter(mg.rhs);
-
-        // Named is transparent — unwrap before matching, just like constrain does.
-        let unwrap_named = |ty: Ty<TyId>, storage: &crate::storage::TypeStorage| -> Ty<TyId> {
-            let mut current = ty;
-            while let Ty::Named(_, inner) = &current {
-                match storage.get(*inner) {
-                    crate::storage::TypeEntry::Concrete(c) => current = c.clone(),
-                    _ => break,
-                }
+    /// Resolve an operand for overload/merge resolution: look through Inter
+    /// wrappers for a concrete type, unwrap transparent Named layers, and
+    /// intern Frozen imports so the caller's match sees the real constructor.
+    fn resolve_operand_concrete(&mut self, id: TyId) -> Option<Ty<TyId>> {
+        let mut current = self.types.find_concrete_through_inter(id)?;
+        while let Ty::Named(_, inner) = &current {
+            match self.types.storage.get(*inner) {
+                crate::storage::TypeEntry::Concrete(c) => current = c.clone(),
+                _ => break,
             }
-            current
-        };
+        }
+        if let Ty::Frozen(owned) = &current {
+            let owned = owned.clone();
+            let interned = self.intern_output_ty(&owned);
+            return self.types.find_concrete(interned);
+        }
+        Some(current)
+    }
 
-        let lhs_unwrapped = lhs_concrete.map(|t| unwrap_named(t, &self.types.storage));
-        let rhs_unwrapped = rhs_concrete.map(|t| unwrap_named(t, &self.types.storage));
-
-        // Frozen types (from cross-file imports) wrap an OutputTy in a single
-        // TyId. Intern them into the inference type table so the AttrSet match
-        // below can see through the wrapper.
-        let lhs_unwrapped = if let Some(Ty::Frozen(owned)) = &lhs_unwrapped {
-            let interned = self.intern_output_ty(owned);
-            self.types.find_concrete(interned)
-        } else {
-            lhs_unwrapped
-        };
-        let rhs_unwrapped = if let Some(Ty::Frozen(owned)) = &rhs_unwrapped {
-            let interned = self.intern_output_ty(owned);
-            self.types.find_concrete(interned)
-        } else {
-            rhs_unwrapped
-        };
+    fn try_resolve_merge(&mut self, mg: &PendingMerge) -> Result<bool, InferenceError> {
+        // See resolve_operand_concrete: Inter, Named, and Frozen wrappers
+        // are all looked through before the AttrSet match below.
+        let lhs_unwrapped = self.resolve_operand_concrete(mg.lhs);
+        let rhs_unwrapped = self.resolve_operand_concrete(mg.rhs);
 
         match (lhs_unwrapped, rhs_unwrapped) {
             (Some(Ty::AttrSet(lhs_attr)), Some(Ty::AttrSet(rhs_attr))) => {
@@ -1497,16 +1478,18 @@ impl CheckCtx<'_> {
     /// are treated as polymorphic and get fresh copies — preventing use-site
     /// constraints from leaking back through shared expression slots.
     fn lift_expr_slots(&mut self, expr: lang_ast::ExprId) {
-        let slot = self.ty_for_expr(expr);
-        self.types
-            .storage
-            .set_var_level(slot, self.types.storage.current_level);
-        // Collect child ExprIds (all Copy) to avoid cloning the full Expr.
-        let mut children = Vec::new();
-        self.module[expr].walk_child_exprs(|child| children.push(child));
-        for child in children {
-            self.lift_expr_slots(child);
-        }
+        lang_ast::stack::with_stack(|| {
+            let slot = self.ty_for_expr(expr);
+            self.types
+                .storage
+                .set_var_level(slot, self.types.storage.current_level);
+            // Collect child ExprIds (all Copy) to avoid cloning the full Expr.
+            let mut children = Vec::new();
+            self.module[expr].walk_child_exprs(|child| children.push(child));
+            for child in children {
+                self.lift_expr_slots(child);
+            }
+        })
     }
 
     /// Walk the type graph reachable from `ty_id` and lift any variables
@@ -1523,7 +1506,10 @@ impl CheckCtx<'_> {
         if !visited.insert(ty_id) {
             return;
         }
+        lang_ast::stack::with_stack(|| self.lift_reachable_vars_guarded(ty_id, visited))
+    }
 
+    fn lift_reachable_vars_guarded(&mut self, ty_id: TyId, visited: &mut FxHashSet<TyId>) {
         // Variable-free subtrees contain no type variables to lift.
         if self.types.variable_free.contains(&ty_id) {
             return;

@@ -143,7 +143,7 @@ impl TypeArena {
             return cached;
         }
         let node = self[ty].clone();
-        let result = stacker::maybe_grow(256 * 1024, 1024 * 1024, || {
+        let result = crate::stack::with_stack(|| {
             if let OutputTy::TyVar(x) = &node {
                 return self.intern(OutputTy::TyVar(*subs.get(x).unwrap()));
             }
@@ -212,7 +212,7 @@ impl TypeArena {
             }
             return;
         }
-        stacker::maybe_grow(256 * 1024, 1024 * 1024, || {
+        crate::stack::with_stack(|| {
             self[ty].for_each_child(&mut |child| {
                 if visited.insert(child) {
                     self.collect_free_type_vars(child, result, seen, visited);
@@ -514,7 +514,7 @@ impl TypeArena {
         }
 
         let node = self[ty].clone();
-        stacker::maybe_grow(256 * 1024, 1024 * 1024, || match &node {
+        crate::stack::with_stack(|| match &node {
             OutputTy::Extern(owned) => {
                 owned.arena.write_truncated(owned.root, buf, state, depth);
             }
@@ -761,6 +761,19 @@ pub fn import_from_arena(
     result
 }
 
+/// Like [`import_from_arena`], but for a detached `OutputTy` node whose
+/// children reference `source`. Interns the node into `target` after
+/// importing its children.
+pub fn import_node_from_arena(
+    target: &mut TypeArena,
+    source: &TypeArena,
+    node: OutputTy,
+    cache: &mut FxHashMap<TyRef, TyRef>,
+) -> TyRef {
+    let new_node = node.map_children(&mut |child| import_from_arena(target, source, child, cache));
+    target.intern(new_node)
+}
+
 // ==============================================================================
 // OwnedTy — arena + index bundle for cross-file boundaries
 // ==============================================================================
@@ -965,7 +978,7 @@ impl fmt::Display for TypeDisplay<'_> {
 }
 
 fn write_ty(arena: &TypeArena, ty: TyRef, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    stacker::maybe_grow(256 * 1024, 1024 * 1024, || match &arena[ty] {
+    crate::stack::with_stack(|| match &arena[ty] {
         OutputTy::Extern(owned) => write!(f, "{}", owned.arena.display(owned.root)),
         OutputTy::TyVar(x) => write!(f, "{}", tyvar_name(*x)),
         OutputTy::Primitive(p) => write!(f, "{p}"),
@@ -1075,7 +1088,12 @@ impl TruncState<'_> {
         }
         let max = self.config.max_chars;
         if max > 0 && self.bytes_written + s.len() > max {
-            let remaining = max.saturating_sub(self.bytes_written);
+            // Floor the byte budget to a char boundary — slicing mid-codepoint
+            // panics.
+            let mut remaining = max.saturating_sub(self.bytes_written);
+            while remaining > 0 && !s.is_char_boundary(remaining) {
+                remaining -= 1;
+            }
             if remaining > 0 {
                 buf.push_str(&s[..remaining]);
             }
@@ -1100,6 +1118,32 @@ mod tests {
         let mut arena = TypeArena::new();
         let root = f(&mut arena);
         OwnedTy::new(Arc::new(arena), root)
+    }
+
+    /// Truncation cuts at a byte budget; a multibyte field name straddling the
+    /// cut must not panic on a non-char-boundary slice.
+    #[test]
+    fn truncated_display_multibyte_no_panic() {
+        let mut arena = TypeArena::new();
+        let int = arena.intern(OutputTy::Primitive(PrimitiveTy::Int));
+        let fields: std::collections::BTreeMap<smol_str::SmolStr, TyRef> = (0..30)
+            .map(|i| (smol_str::SmolStr::from(format!("héllø_wörld_{i}")), int))
+            .collect();
+        let attrs = arena.intern(OutputTy::AttrSet(crate::AttrSetTy {
+            fields,
+            optional_fields: Default::default(),
+            dyn_ty: None,
+            open: false,
+        }));
+
+        // Sweep budgets so some cut lands mid-codepoint.
+        for max_chars in 1..200 {
+            let config = DisplayConfig {
+                max_chars,
+                ..DisplayConfig::inlay()
+            };
+            let _ = arena.display_truncated(attrs, &config);
+        }
     }
 
     #[test]
