@@ -358,6 +358,14 @@ the root to produce relative paths. At LSP startup the source root is resolved
 When using `[stubs.generate]` in `tix.toml`, source roots are passed
 automatically — no manual `--source-root` flags needed.
 
+The generator also records the mapping in a `source-roots.txt` file
+(`id=path` per line) next to the generated `.tix` files. When a pre-baked
+stubs directory is used via `TIX_BUILTIN_STUBS` (where runtime generation
+is skipped), tix reads this file to resolve `@source` annotations — without
+it, hover docs still work but go-to-definition can't map `nixpkgs:...`
+paths to real files. Stubs generated before this file existed need to be
+re-generated (e.g. `just gen-stubs`) for go-to-definition to work.
+
 ## Using stubs in your code
 
 Assign stub types to imports via doc comments:
