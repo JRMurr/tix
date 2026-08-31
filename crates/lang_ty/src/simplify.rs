@@ -77,7 +77,7 @@ fn analyze(
     path: &mut Vec<PathSegment>,
     vars: &mut FxHashMap<u32, VarInfo>,
 ) {
-    stacker::maybe_grow(256 * 1024, 1024 * 1024, || {
+    lang_ast::stack::with_stack(|| {
         let pol = if positive {
             Polarity::Positive
         } else {
@@ -229,7 +229,7 @@ fn apply_simplification(
     removable: &FxHashSet<u32>,
 ) -> TyRef {
     let node = arena[ty].clone();
-    stacker::maybe_grow(256 * 1024, 1024 * 1024, || match &node {
+    lang_ast::stack::with_stack(|| match &node {
         OutputTy::TyVar(v) => {
             let resolved = substitution.get(v).copied().unwrap_or(*v);
             arena.intern(OutputTy::TyVar(resolved))

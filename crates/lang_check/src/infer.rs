@@ -759,7 +759,7 @@ impl CheckCtx<'_> {
         }
 
         // Guard against stack overflow on deeply nested type graphs.
-        stacker::maybe_grow(256 * 1024, 1024 * 1024, || {
+        lang_ast::stack::with_stack(|| {
             // For polymorphic variables and structural concrete types, clone to
             // release the borrow on storage before calling &mut self methods.
             let entry = self.types.storage.get(ty_id).clone();
@@ -1492,16 +1492,18 @@ impl CheckCtx<'_> {
     /// are treated as polymorphic and get fresh copies — preventing use-site
     /// constraints from leaking back through shared expression slots.
     fn lift_expr_slots(&mut self, expr: lang_ast::ExprId) {
-        let slot = self.ty_for_expr(expr);
-        self.types
-            .storage
-            .set_var_level(slot, self.types.storage.current_level);
-        // Collect child ExprIds (all Copy) to avoid cloning the full Expr.
-        let mut children = Vec::new();
-        self.module[expr].walk_child_exprs(|child| children.push(child));
-        for child in children {
-            self.lift_expr_slots(child);
-        }
+        lang_ast::stack::with_stack(|| {
+            let slot = self.ty_for_expr(expr);
+            self.types
+                .storage
+                .set_var_level(slot, self.types.storage.current_level);
+            // Collect child ExprIds (all Copy) to avoid cloning the full Expr.
+            let mut children = Vec::new();
+            self.module[expr].walk_child_exprs(|child| children.push(child));
+            for child in children {
+                self.lift_expr_slots(child);
+            }
+        })
     }
 
     /// Walk the type graph reachable from `ty_id` and lift any variables
@@ -1518,7 +1520,10 @@ impl CheckCtx<'_> {
         if !visited.insert(ty_id) {
             return;
         }
+        lang_ast::stack::with_stack(|| self.lift_reachable_vars_guarded(ty_id, visited))
+    }
 
+    fn lift_reachable_vars_guarded(&mut self, ty_id: TyId, visited: &mut FxHashSet<TyId>) {
         // Variable-free subtrees contain no type variables to lift.
         if self.types.variable_free.contains(&ty_id) {
             return;

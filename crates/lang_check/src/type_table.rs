@@ -328,7 +328,7 @@ impl TypeTable {
         if !visited.insert(ty_id) {
             return None; // Cycle detected.
         }
-        match self.storage.get(ty_id) {
+        lang_ast::stack::with_stack(|| match self.storage.get(ty_id) {
             TypeEntry::Concrete(_) => Some(ty_id),
             TypeEntry::Variable(v) => {
                 let bounds = v.lower_bounds.clone();
@@ -339,7 +339,7 @@ impl TypeTable {
                 }
                 None
             }
-        }
+        })
     }
 
     /// Like `resolve_to_concrete_id`, but returns `None` when lower bounds

@@ -69,3 +69,33 @@ pub fn parse_multi_file(
     }
     (entry.expect("at least one file required"), map)
 }
+
+#[cfg(test)]
+mod recursion_guard_tests {
+    // Depth is capped at 15k: rowan's green-tree Drop recurses without a
+    // guard and overflows around ~25k nesting on an 8MB stack. Our own
+    // (guarded) walks have much larger frames, so 15k is still deep enough
+    // to overflow without the stacker guards.
+
+    /// Deep left-leaning binop chain: rnix parses it iteratively, but
+    /// lowering and name resolution recurse down the left spine. Without
+    /// stacker guards this overflows the stack.
+    #[test]
+    fn deep_binop_chain_no_overflow() {
+        let src = format!("let x = 1; in x{}", " + x".repeat(15_000));
+        let r = crate::run_syntax_pipeline(&src);
+        assert!(r.module.exprs().count() > 15_000);
+    }
+
+    /// Deep `&&` chain as an if-condition: narrowing analysis recurses
+    /// through the condition tree.
+    #[test]
+    fn deep_narrow_condition_no_overflow() {
+        let src = format!(
+            "let a = true; in if a{} then 1 else 2",
+            " && a".repeat(15_000)
+        );
+        let r = crate::run_syntax_pipeline(&src);
+        assert!(r.module.exprs().count() > 15_000);
+    }
+}

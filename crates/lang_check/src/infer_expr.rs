@@ -82,7 +82,7 @@ impl CheckCtx<'_> {
         // Guard against stack overflow: infer_expr recurses through the AST
         // via infer_expr_inner, which can be very deep on large generated files
         // (e.g. hackage-packages.nix with 769k lines).
-        stacker::maybe_grow(256 * 1024, 1024 * 1024, || {
+        lang_ast::stack::with_stack(|| {
             // Track the current expression so errors from constrain() and
             // sub-calls are attributed to the correct source location.
             self.current_expr = e;

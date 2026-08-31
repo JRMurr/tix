@@ -189,6 +189,15 @@ pub fn analyze_condition(
     binding_exprs: &BindingExprs,
     cond: ExprId,
 ) -> NarrowInfo {
+    crate::stack::with_stack(|| analyze_condition_inner(module, name_res, binding_exprs, cond))
+}
+
+fn analyze_condition_inner(
+    module: &Mod,
+    name_res: &NameRes,
+    binding_exprs: &BindingExprs,
+    cond: ExprId,
+) -> NarrowInfo {
     let expr = &module[cond];
     match expr {
         // ── x == literal / literal == x / x != literal / literal != x ─

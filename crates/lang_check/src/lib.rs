@@ -1096,7 +1096,9 @@ impl<'db> CheckCtx<'db> {
     /// For `x: y: body`, this returns 2. For a non-lambda, returns 0.
     fn expr_lambda_arity(&self, expr: ExprId) -> usize {
         match &self.module[expr] {
-            Expr::Lambda { body, .. } => 1 + self.expr_lambda_arity(*body),
+            Expr::Lambda { body, .. } => {
+                lang_ast::stack::with_stack(|| 1 + self.expr_lambda_arity(*body))
+            }
             _ => 0,
         }
     }
@@ -1177,10 +1179,20 @@ impl<'db> CheckCtx<'db> {
         // Preserve DAG sharing: if we already interned this TyRef, reuse it.
         // Without this, shared subtrees in the TypeArena expand exponentially
         // (e.g. common.nix's output type caused a 1.5GB allocation on chromium).
+        // Checked before the stack guard so cache hits skip it.
         if let Some(&cached) = ref_cache.get(&ty) {
             return cached;
         }
+        lang_ast::stack::with_stack(|| self.intern_output_ty_guarded(arena, ty, var_map, ref_cache))
+    }
 
+    fn intern_output_ty_guarded(
+        &mut self,
+        arena: &TypeArena,
+        ty: TyRef,
+        var_map: &mut HashMap<u32, TyId>,
+        ref_cache: &mut HashMap<TyRef, TyId>,
+    ) -> TyId {
         let result = match &arena[ty] {
             OutputTy::TyVar(n) => *var_map.entry(*n).or_insert_with(|| self.new_var()),
             OutputTy::Primitive(prim) => self.alloc_prim(*prim),

@@ -175,6 +175,10 @@ impl ModuleScopes {
     }
 
     fn traverse_expr(&mut self, module: &Module, expr: ExprId, scope: ScopeId) {
+        crate::stack::with_stack(|| self.traverse_expr_inner(module, expr, scope))
+    }
+
+    fn traverse_expr_inner(&mut self, module: &Module, expr: ExprId, scope: ScopeId) {
         self.scope_by_expr.insert(expr, scope);
 
         match &module[expr] {
@@ -376,6 +380,21 @@ impl NameDependencies {
     }
 
     fn traverse_expr(
+        &mut self,
+        module: &Module,
+        name_res: &NameResolution,
+        binding_exprs: &HashMap<NameId, ExprId>,
+        expr: ExprId,
+        curr_binding: Option<NameId>,
+        active: &[crate::narrow::NarrowBinding],
+    ) {
+        crate::stack::with_stack(|| {
+            self.traverse_expr_inner(module, name_res, binding_exprs, expr, curr_binding, active)
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn traverse_expr_inner(
         &mut self,
         module: &Module,
         name_res: &NameResolution,

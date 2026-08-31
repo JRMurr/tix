@@ -1016,6 +1016,7 @@ dependencies = [
  "rnix",
  "rowan",
  "smol_str",
+ "stacker",
  "tracing",
 ]
 

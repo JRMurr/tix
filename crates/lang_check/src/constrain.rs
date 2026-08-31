@@ -100,7 +100,7 @@ impl CheckCtx<'_> {
         // Guard against stack overflow: constrain() recurses through variable
         // bounds chains and structural children, which can be very deep on
         // complex type graphs.
-        stacker::maybe_grow(256 * 1024, 1024 * 1024, || {
+        lang_ast::stack::with_stack(|| {
             // Check entry discriminants without cloning. We only clone the data
             // we actually need for each case: bounds Vecs for variables (cheap —
             // Vec<TyId> is Vec<u32>), or the full Ty for concrete types.
@@ -470,8 +470,9 @@ impl CheckCtx<'_> {
                 // Check the Inter itself first (unlikely to match, but handles
                 // exotic cases). Then recurse into members.
                 are_types_disjoint(ty, sup)
-                    || self.is_disjoint_from_sup(a, sup)
-                    || self.is_disjoint_from_sup(b, sup)
+                    || lang_ast::stack::with_stack(|| {
+                        self.is_disjoint_from_sup(a, sup) || self.is_disjoint_from_sup(b, sup)
+                    })
             }
             TypeEntry::Concrete(ty) => are_types_disjoint(ty, sup),
             _ => false,
@@ -490,7 +491,9 @@ impl CheckCtx<'_> {
             TypeEntry::Variable(_) => true,
             TypeEntry::Concrete(Ty::Inter(a, b)) => {
                 let (a, b) = (*a, *b);
-                self.inter_contains_var(a) || self.inter_contains_var(b)
+                lang_ast::stack::with_stack(|| {
+                    self.inter_contains_var(a) || self.inter_contains_var(b)
+                })
             }
             TypeEntry::Concrete(Ty::Named(_, inner)) => {
                 let inner = *inner;
@@ -522,7 +525,9 @@ impl CheckCtx<'_> {
         let result = match self.types.storage.get(id) {
             TypeEntry::Concrete(Ty::Union(a, b)) => {
                 let (a, b) = (*a, *b);
-                self.union_contains_member(a, target) || self.union_contains_member(b, target)
+                lang_ast::stack::with_stack(|| {
+                    self.union_contains_member(a, target) || self.union_contains_member(b, target)
+                })
             }
             TypeEntry::Concrete(Ty::Named(_, inner)) => {
                 let inner = *inner;

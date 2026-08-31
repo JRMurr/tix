@@ -110,6 +110,10 @@ impl LowerCtx {
     }
 
     fn lower_expr(&mut self, rnix_expr: ast::Expr) -> ExprId {
+        crate::stack::with_stack(|| self.lower_expr_inner(rnix_expr))
+    }
+
+    fn lower_expr_inner(&mut self, rnix_expr: ast::Expr) -> ExprId {
         let ptr = AstPtr::new(rnix_expr.syntax());
 
         let expr: Expr = match &rnix_expr {
