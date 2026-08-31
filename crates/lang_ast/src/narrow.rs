@@ -319,17 +319,15 @@ fn analyze_condition_inner(
         // a builtin type predicate and arg is a reference to a local name.
         // ── is* builtins: isNull, isString, isInt, isAttrs, etc. ────
         Expr::Apply { fun, arg } => {
-            // Try each known type-predicate builtin as a direct call.
-            let all_predicate_names = TYPE_PREDICATES
-                .iter()
-                .map(|&(n, _)| n)
-                .chain(COMPOUND_PREDICATES.iter().map(|(n, _)| *n));
-            for builtin_name in all_predicate_names {
-                if is_builtin_call(module, name_res, binding_exprs, *fun, builtin_name) {
+            // Resolve the callee's builtin name once, then a single table
+            // lookup — instead of one recursive alias-tracing walk per
+            // known predicate name.
+            if let Some(callee) = builtin_callee_name(module, name_res, binding_exprs, *fun, 0) {
+                if is_predicate_name(&callee) {
                     let Some(name) = expr_as_local_name(module, name_res, *arg) else {
                         return NarrowInfo::default();
                     };
-                    if let Some(info) = narrow_info_for_predicate(builtin_name, name) {
+                    if let Some(info) = narrow_info_for_predicate(&callee, name) {
                         return info;
                     }
                 }
@@ -574,6 +572,65 @@ fn try_select_chain_predicate(
 
     let name = expr_as_local_name(module, name_res, arg_expr)?;
     Some((leaf_name.clone(), name))
+}
+
+/// Whether `name` is one of the recognized narrowing predicates.
+fn is_predicate_name(name: &str) -> bool {
+    TYPE_PREDICATES.iter().any(|&(n, _)| n == name)
+        || COMPOUND_PREDICATES.iter().any(|(n, _)| *n == name)
+}
+
+/// Resolve the builtin name `expr` refers to, if any: a direct builtin
+/// reference (`isNull`), a `builtins.<name>` access, or a same-named local
+/// alias chain (`let isNull = builtins.isNull; in isNull x`). Mirrors
+/// `is_builtin_expr`'s semantics — an alias only counts when its own name
+/// matches the resolved builtin — but resolves the name in one walk instead
+/// of one walk per candidate.
+fn builtin_callee_name(
+    module: &Mod,
+    name_res: &NameRes,
+    binding_exprs: &BindingExprs,
+    expr: ExprId,
+    depth: u8,
+) -> Option<SmolStr> {
+    if depth > MAX_ALIAS_TRACE_DEPTH {
+        return None;
+    }
+
+    match &module[expr] {
+        Expr::Reference(name) => match name_res.get(expr) {
+            Some(ResolveResult::Builtin(b)) if *b == name => Some(SmolStr::from(*b)),
+            Some(ResolveResult::Definition(name_id)) => {
+                let &binding_expr = binding_exprs.get(name_id)?;
+                let resolved =
+                    builtin_callee_name(module, name_res, binding_exprs, binding_expr, depth + 1)?;
+                // The alias must be named like the builtin it forwards to.
+                (resolved == *name).then_some(resolved)
+            }
+            _ => None,
+        },
+        Expr::Select {
+            set,
+            attrpath,
+            default_expr: None,
+        } => {
+            if attrpath.len() != 1 {
+                return None;
+            }
+            let is_builtins_ref = matches!(
+                &module[*set],
+                Expr::Reference(name) if name == "builtins"
+            );
+            if !is_builtins_ref {
+                return None;
+            }
+            match &module[attrpath[0]] {
+                Expr::Literal(Literal::String(s)) => Some(s.clone()),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 /// Check if `fun_expr` is a reference to a specific builtin function.
