@@ -206,9 +206,7 @@ impl CheckCtx<'_> {
                         {
                             Ok(ty) => ty,
                             Err(err) => {
-                                if lambda_error.is_none() {
-                                    lambda_error = Some(err);
-                                }
+                                lambda_error.get_or_insert(err);
                                 None
                             }
                         };
@@ -230,9 +228,7 @@ impl CheckCtx<'_> {
                             // polymorphism.
                             self.types.storage.mark_default_param(name_ty);
                             if let Err(err) = self.constrain_at(default_ty, name_ty) {
-                                if lambda_error.is_none() {
-                                    lambda_error = Some(err);
-                                }
+                                lambda_error.get_or_insert(err);
                             }
                         }
                         // Apply doc comment type annotations and context args, unless
@@ -240,21 +236,12 @@ impl CheckCtx<'_> {
                         // (to avoid double-applying and creating redundant constraint paths).
                         let field_text = self.module[name].text.clone();
                         if !self.pre_annotated_params.contains(&name) {
-                            if let Err(err) = self.apply_type_annotation(name, name_ty) {
-                                if lambda_error.is_none() {
-                                    lambda_error = Some(err);
-                                }
-                            }
-
-                            if let Some(ref ctx_args) = effective_context {
-                                if let Some(ctx_ty) = ctx_args.get(&field_text).cloned() {
-                                    let interned = self.intern_fresh_ty(ctx_ty);
-                                    if let Err(err) = self.constrain_equal(interned, name_ty) {
-                                        if lambda_error.is_none() {
-                                            lambda_error = Some(err);
-                                        }
-                                    }
-                                }
+                            if let Err(err) = self.apply_param_annotations(
+                                name,
+                                name_ty,
+                                effective_context.as_ref(),
+                            ) {
+                                lambda_error.get_or_insert(err);
                             }
                         }
 
@@ -274,18 +261,14 @@ impl CheckCtx<'_> {
                     }));
 
                     if let Err(err) = self.constrain_equal(param_ty, attr) {
-                        if lambda_error.is_none() {
-                            lambda_error = Some(err);
-                        }
+                        lambda_error.get_or_insert(err);
                     }
                 }
 
                 let body_ty = match self.infer_expr(body) {
                     Ok(ty) => ty,
                     Err(err) => {
-                        if lambda_error.is_none() {
-                            lambda_error = Some(err);
-                        }
+                        lambda_error.get_or_insert(err);
                         // Use a fresh unconstrained tyvar for the return type
                         // so the lambda still has a function type.
                         self.new_var()
