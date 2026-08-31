@@ -2,39 +2,14 @@
 // .tix declaration file grammar
 // =============================================================================
 //
-// Separate grammar from comment.pest because .tix files need newlines as
-// whitespace (multi-line type bodies), whereas doc comment parsing needs
-// newlines as terminators.
+// Type-expression rules come from type_expr.pest (shared with comment.pest
+// via a second #[grammar] attribute). WHITESPACE here includes newlines, so
+// declarations and type bodies may span multiple lines.
 
 WHITESPACE = _{ " " | "\t" | "\r\n" | "\n" }
 
 // Regular comments start with `#` but NOT `##` (which are doc comments).
 COMMENT    = _{ !("##") ~ "#" ~ (!"\n" ~ ANY)* }
-
-// =============================================================================
-// Doc comments
-// =============================================================================
-//
-// `##` lines are doc comments that attach to the next declaration or field.
-// Multiple consecutive `##` lines form a doc block. The `## ` prefix (with
-// trailing space) is stripped during collection; bare `##` lines become empty.
-
-doc_comment = @{ "##" ~ (!"\n" ~ ANY)* }
-doc_block   = { doc_comment+ }
-
-// =============================================================================
-// Source location annotations
-// =============================================================================
-//
-// `@source <loc>` annotations record the original source location of a
-// declaration (e.g. in nixpkgs or home-manager). Format:
-//   @source <source-id>:<relative-path>:<line>:<column>
-// Example:
-//   @source nixpkgs:lib/trivial.nix:61:8
-//   val id :: a -> a;
-
-source_annotation = { "@source" ~ source_loc }
-source_loc        = @{ (!NEWLINE ~ ANY)+ }
 
 // Entry point
 tix_file = { SOI ~ tix_declaration* ~ EOI }
@@ -44,109 +19,3 @@ tix_declaration = _{ type_alias_decl | val_decl | module_decl }
 type_alias_decl = { doc_block? ~ source_annotation? ~ "type" ~ user_type ~ "=" ~ type_expr ~ ";" }
 val_decl        = { doc_block? ~ source_annotation? ~ "val" ~ identifier ~ "::" ~ type_expr ~ ";" }
 module_decl     = { doc_block? ~ source_annotation? ~ "module" ~ identifier ~ "{" ~ tix_declaration* ~ "}" }
-
-// -------------------------------------------------------------------------
-// Type expressions (duplicated from comment.pest to keep grammars decoupled)
-// -------------------------------------------------------------------------
-
-type_expr     = { arrow_segment ~ ("->" ~ arrow_segment)* }
-arrow_segment = { union_type }
-union_type    = { isect_type ~ ("|" ~ isect_type)* }
-isect_type    = { postfix_type ~ ("&" ~ postfix_type)* }
-
-// Postfix field access: `Config.name`, `(typeof foo).key`
-postfix_type = { atom_type ~ ("." ~ field_access_key)* }
-field_access_key = @{ ASCII_ALPHA ~ (ASCII_ALPHANUMERIC | "_" | "-")* }
-
-// Order matters: import_type/typeof_expr/applied_type must precede type_ref
-// since their keywords would otherwise match generic_ident or user_type.
-atom_type     = { paren_type | list_type | attrset_type | import_type | typeof_expr | applied_type | type_ref }
-
-// -------------------------------------------------------------------------
-// Type-level operators
-// -------------------------------------------------------------------------
-
-// typeof — reference the inferred type of a local variable or imported file
-typeof_expr = { typeof_kw ~ (import_path | identifier) }
-typeof_kw   = @{ "typeof" ~ !(ASCII_ALPHANUMERIC | "_") }
-
-// import("./path.nix") — used in typeof and import type contexts
-import_path    = { import_kw ~ "(" ~ string_literal ~ ")" }
-import_kw      = @{ "import" ~ !(ASCII_ALPHANUMERIC | "_") }
-string_literal = @{ "\"" ~ (!"\"" ~ ANY)* ~ "\"" }
-
-// import("./path.nix").TypeName — cross-file type import
-import_type = { import_kw ~ "(" ~ string_literal ~ ")" ~ "." ~ user_type }
-
-// Param(T), Return(T) — extract parameter/return type from a function type
-applied_type = { type_func ~ "(" ~ type_expr ~ ")" }
-type_func    = @{ ("Param" | "Return") ~ !(ASCII_ALPHANUMERIC | "_") }
-
-paren_type = { "(" ~ type_expr ~ ")" }
-list_type  = { "[" ~ type_expr ~ "]" }
-
-// Attrset types — same rules as comment.pest Phase 1.
-attrset_type = { "{" ~ attrset_inner? ~ "}" }
-attrset_inner = _{
-    open_marker
-  | dyn_field ~ ("," ~ open_marker)? ~ ","?
-  | named_field ~ ("," ~ named_field)* ~ ("," ~ (dyn_field ~ ("," ~ open_marker)? | open_marker))? ~ ","?
-}
-named_field = { doc_block? ~ source_annotation? ~ field_name ~ optional_marker? ~ ":" ~ type_expr }
-optional_marker = { "?" }
-field_name = _{ quoted_field | identifier }
-// Quoted identifiers for field names containing dots or other special characters
-// (e.g. NixOS sysctl keys like "net.core.rmem_max").
-quoted_field = @{ "\"" ~ (!"\"" ~ ANY)* ~ "\"" }
-dyn_field   = { "_" ~ ":" ~ type_expr }
-open_marker = { "..." }
-
-// Type references
-type_ref = {
-    primitive_ref
-  | any_ref
-  | never_ref
-  | user_type
-  | generic_ident
-}
-
-generic_ident = @{
-    ASCII_ALPHA_LOWER ~ (ASCII_ALPHA_LOWER | ASCII_DIGIT | "_")*
-}
-
-user_type = @{
-    ASCII_ALPHA_UPPER ~ (ASCII_ALPHANUMERIC | "_")*
-}
-
-// Nix attribute names can be arbitrary strings, so identifiers in .tix files
-// need broad coverage. Allows: letters, digits, underscores, hyphens, apostrophes.
-// Leading digits are fine in field position (e.g. `2bwm: { ... }`) since the
-// colon disambiguates from number literals.
-// Bare `_` is reserved for dyn_field, so underscore-led names need a continuation.
-identifier = @{
-    ASCII_ALPHA ~ (ASCII_ALPHANUMERIC | "_" | "'" | "-")*
-  | "_" ~ (ASCII_ALPHANUMERIC | "_" | "'" | "-")+
-  | ASCII_DIGIT ~ (ASCII_ALPHANUMERIC | "_" | "'" | "-")*
-}
-
-primitive_ref = {
-    string_ref
-  | number_ref
-  | int_ref
-  | bool_ref
-  | float_ref
-  | path_ref
-  | null_ref
-}
-
-string_ref = @{ "string" ~ !(ASCII_ALPHANUMERIC | "_") }
-number_ref = @{ "number" ~ !(ASCII_ALPHANUMERIC | "_") }
-int_ref    = @{ "int" ~ !(ASCII_ALPHANUMERIC | "_") }
-bool_ref   = @{ "bool" ~ !(ASCII_ALPHANUMERIC | "_") }
-float_ref  = @{ "float" ~ !(ASCII_ALPHANUMERIC | "_") }
-path_ref   = @{ "path" ~ !(ASCII_ALPHANUMERIC | "_") }
-null_ref   = @{ "null" ~ !(ASCII_ALPHANUMERIC | "_") }
-
-// Top and bottom types
-any_ref   = @{ "any" ~ !(ASCII_ALPHANUMERIC | "_") }
-never_ref = @{ "never" ~ !(ASCII_ALPHANUMERIC | "_") }

@@ -1,3 +1,12 @@
+// =============================================================================
+// Doc comment annotation grammar
+// =============================================================================
+//
+// Type-expression rules come from type_expr.pest (shared with tix_decl.pest
+// via a second #[grammar] attribute). WHITESPACE here deliberately excludes
+// newlines: doc comment annotations treat newlines as terminators, so type
+// bodies (including attrset types) must be single-line.
+
 WHITESPACE     = _{ " " | "\t" }
 NEWLINE        = _{ "\r\n" | "\n" }
 ANY_WHITESPACE = _{ WHITESPACE | NEWLINE }
@@ -32,121 +41,3 @@ block_content = {
 type_line = {
     (ANY_WHITESPACE)* ~ identifier ~ "::" ~ type_expr ~ (NEWLINE | EOI)
 }
-
-// Nix attribute names can be arbitrary strings, so identifiers need broad coverage.
-// Leading underscores and digits are allowed; bare `_` is reserved for dyn_field.
-identifier = @{
-    ASCII_ALPHA ~ (ASCII_ALPHANUMERIC | "_" | "-")*
-  | "_" ~ (ASCII_ALPHANUMERIC | "_" | "-")+
-  | ASCII_DIGIT ~ (ASCII_ALPHANUMERIC | "_" | "-")*
-}
-
-// A minimal arrow-based type expression, e.g. `Int -> String`, `[a] -> (a -> b) -> [b]`.
-// Precedence (lowest to highest): `->` > `|` > `&` > atoms.
-type_expr = {
-    arrow_segment ~ ("->" ~ arrow_segment)*
-}
-
-// One segment in an arrow chain. Union has lower precedence than intersection.
-arrow_segment = { union_type }
-
-// Union type: `int | string | null`
-union_type = { isect_type ~ ("|" ~ isect_type)* }
-
-// Intersection type: `{ foo: int } & { bar: string }`
-isect_type = { postfix_type ~ ("&" ~ postfix_type)* }
-
-// Postfix field access: `Config.name`, `(typeof foo).key`
-postfix_type = { atom_type ~ ("." ~ field_access_key)* }
-field_access_key = @{ ASCII_ALPHA ~ (ASCII_ALPHANUMERIC | "_" | "-")* }
-
-// Atoms: parenthesized, list, attrset, or a simple/base type reference.
-// Order matters: import_type/typeof_expr/applied_type must precede type_ref
-// since their keywords would otherwise match generic_ident or user_type.
-atom_type = { paren_type | list_type | attrset_type | import_type | typeof_expr | applied_type | type_ref }
-
-// -------------------------------------------------------------------------
-// Type-level operators
-// -------------------------------------------------------------------------
-
-// typeof — reference the inferred type of a local variable or imported file
-typeof_expr = { typeof_kw ~ (import_path | identifier) }
-typeof_kw   = @{ "typeof" ~ !(ASCII_ALPHANUMERIC | "_") }
-
-// import("./path.nix") — used in typeof and import type contexts
-import_path    = { import_kw ~ "(" ~ string_literal ~ ")" }
-import_kw      = @{ "import" ~ !(ASCII_ALPHANUMERIC | "_") }
-string_literal = @{ "\"" ~ (!"\"" ~ ANY)* ~ "\"" }
-
-// import("./path.nix").TypeName — cross-file type import
-import_type = { import_kw ~ "(" ~ string_literal ~ ")" ~ "." ~ user_type }
-
-// Param(T), Return(T) — extract parameter/return type from a function type
-applied_type = { type_func ~ "(" ~ type_expr ~ ")" }
-type_func    = @{ ("Param" | "Return") ~ !(ASCII_ALPHANUMERIC | "_") }
-
-// Attrset type: `{ name: string, age: int }` or `{ name: string, ... }` or `{ _: int }`.
-// Bodies must be single-line since WHITESPACE only covers " " | "\t" in this grammar.
-attrset_type = { "{" ~ attrset_inner? ~ "}" }
-attrset_inner = _{
-    open_marker
-  | dyn_field ~ ("," ~ open_marker)? ~ ","?
-  | named_field ~ ("," ~ named_field)* ~ ("," ~ (dyn_field ~ ("," ~ open_marker)? | open_marker))? ~ ","?
-}
-named_field = { identifier ~ optional_marker? ~ ":" ~ type_expr }
-optional_marker = { "?" }
-dyn_field = { "_" ~ ":" ~ type_expr }
-open_marker = { "..." }
-
-paren_type = {
-    "(" ~ type_expr ~ ")"
-}
-
-list_type = {
-    "[" ~ type_expr ~ "]"
-}
-
-// a type var or reference to another type
-type_ref = {
-    primitive_ref
-  | any_ref
-  | never_ref
-  | user_type
-  | generic_ident
-}
-
-// generic params are lowercased
-generic_ident = @{
-    ASCII_ALPHA_LOWER ~ (ASCII_ALPHA_LOWER | ASCII_DIGIT | "_")*
-}
-
-// a reference to some user type alias must be uppercase
-user_type = @{
-    ASCII_ALPHA_UPPER ~ (ASCII_ALPHANUMERIC | "_")*
-}
-
-primitive_ref = {
-    string_ref
-  | number_ref
-  | int_ref
-  | bool_ref
-  | float_ref
-  | path_ref
-  | null_ref
-}
-
-// TODO: not sure if these should be uppercase
-// typescript does these as lowercase but since we have implicit generics as lowercase
-// maybe making them uppercase is fine?
-// the only reservation I have now is that nixpkgs lib does these are lowercase
-string_ref = @{ "string" ~ !(ASCII_ALPHANUMERIC | "_") }
-number_ref = @{ "number" ~ !(ASCII_ALPHANUMERIC | "_") }
-int_ref    = @{ "int" ~ !(ASCII_ALPHANUMERIC | "_") }
-bool_ref   = @{ "bool" ~ !(ASCII_ALPHANUMERIC | "_") }
-float_ref  = @{ "float" ~ !(ASCII_ALPHANUMERIC | "_") }
-path_ref   = @{ "path" ~ !(ASCII_ALPHANUMERIC | "_") }
-null_ref   = @{ "null" ~ !(ASCII_ALPHANUMERIC | "_") }
-
-// Top and bottom types
-any_ref   = @{ "any" ~ !(ASCII_ALPHANUMERIC | "_") }
-never_ref = @{ "never" ~ !(ASCII_ALPHANUMERIC | "_") }

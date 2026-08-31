@@ -2,6 +2,7 @@ mod collect;
 mod collect_shared;
 pub mod tix_collect;
 pub mod tix_parser;
+mod type_expr_collect;
 
 use std::fmt;
 use std::sync::Arc;
@@ -20,6 +21,7 @@ use smol_str::SmolStr;
 
 #[derive(Parser)]
 #[grammar = "comment.pest"]
+#[grammar = "type_expr.pest"]
 pub struct CommentParser;
 
 // Box the error since the raw pest error type is large (clippy::result_large_err).
