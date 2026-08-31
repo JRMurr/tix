@@ -87,7 +87,7 @@ impl FileSnapshot {
 /// All fields are owned values — safe to hold across mutex releases.
 pub struct SyntaxIntermediate {
     pub path: PathBuf,
-    pub source_text: String,
+    pub source_text: Arc<str>,
     pub module: Module,
     pub module_indices: ModuleIndices,
     pub name_res: NameResolution,
@@ -108,7 +108,7 @@ pub struct SyntaxIntermediate {
 pub struct LspInferenceInputs {
     pub core: lang_check::InferenceInputs,
     // LSP-specific fields for FileAnalysis/FileSnapshot:
-    pub source_text: String,
+    pub source_text: Arc<str>,
     pub line_index: LineIndex,
     pub parsed: rnix::Parse<rnix::Root>,
     pub source_map: ModuleSourceMap,
@@ -374,7 +374,7 @@ pub struct FileAnalysis {
     /// Source text used for this analysis pass. Stored so that
     /// `reload_registry` and `ReanalyzeFile` can re-run analysis without
     /// reading from disk (which might miss unsaved editor changes).
-    pub source_text: String,
+    pub source_text: Arc<str>,
     pub line_index: LineIndex,
     /// Cached parse result. Call `.tree()` to get an rnix::Root.
     /// We store the Parse (which contains the Send-safe green tree) rather
@@ -498,6 +498,10 @@ impl AnalysisState {
     /// available. The production analysis loop in `server.rs` uses
     /// `resolve_imports_phase_b()` instead, which adds demand-driven inference
     /// for unopened dependencies.
+    // Only tests drive analysis through this synchronous path now — the
+    // production loop uses the phase A/B/C split, and reload_registry queues
+    // ReanalyzeFile events instead of re-checking inline.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn update_file(
         &mut self,
         path: PathBuf,
@@ -513,10 +517,12 @@ impl AnalysisState {
     ) -> (&FileAnalysis, AnalysisTiming) {
         // Path is expected to be pre-canonicalized by uri_to_path() at the LSP boundary.
         let t_total = Instant::now();
+        // One shared buffer for line_index + source_text.
+        let contents: Arc<str> = contents.into();
 
         // -- Phase 1: Parse --
         let t0 = Instant::now();
-        let line_index = LineIndex::new(&contents);
+        let line_index = LineIndex::new(Arc::clone(&contents));
         let parsed = rnix::Root::parse(&contents);
         let t_parse = t0.elapsed();
 
@@ -649,9 +655,11 @@ impl AnalysisState {
         contents: String,
     ) -> (SyntaxData, SyntaxIntermediate, Duration) {
         let t0 = Instant::now();
+        // One shared buffer for line_index + source_text.
+        let contents: Arc<str> = contents.into();
 
         // -- Parse --
-        let line_index = LineIndex::new(&contents);
+        let line_index = LineIndex::new(Arc::clone(&contents));
         let parsed = rnix::Root::parse(&contents);
 
         // -- Lower to Tix AST + name resolution --
@@ -805,19 +813,14 @@ impl AnalysisState {
         self.coordinator.remove_signature(path)
     }
 
-    /// Replace the type alias registry and re-analyze all open files.
-    /// Used when stubs configuration changes at runtime.
-    pub fn reload_registry(&mut self, registry: TypeAliasRegistry) {
+    /// Replace the type alias registry and clear cached signatures. Returns
+    /// the open files that need re-analysis — callers queue ReanalyzeFile
+    /// events for them so the re-check runs in the analysis loop rather than
+    /// synchronously under the state mutex.
+    pub fn reload_registry(&mut self, registry: TypeAliasRegistry) -> Vec<PathBuf> {
         self.registry = Arc::new(registry);
         self.coordinator.clear();
-
-        // Re-analyze every open file with the new registry.
-        let paths: Vec<PathBuf> = self.files.keys().cloned().collect();
-        for path in paths {
-            let contents = self.files.get(&path).unwrap().source_text.clone();
-            let (_analysis, timing) = self.update_file(path.clone(), contents);
-            log::info!("re-analyzed {}: {timing}", path.display());
-        }
+        self.files.keys().cloned().collect()
     }
 }
 
@@ -842,6 +845,10 @@ pub(crate) fn build_name_to_import(
                     find_path_literal_target(module, typedef.expr(), dir)
                 });
             if let Some(path) = target {
+                // Canonicalize once here so per-request consumers (e.g.
+                // import_nav's pass-through scans) can compare directly
+                // instead of canonicalizing per element.
+                let path = path.canonicalize().unwrap_or(path);
                 name_to_import.insert(typedef.name(), path);
             }
         }

@@ -2,9 +2,11 @@
 // tower-lsp LanguageServer implementation
 // ==============================================================================
 //
-// Lifecycle (initialize/shutdown) and request dispatch. Analysis runs inside
-// spawn_blocking because rnix::Root is !Send + !Sync. The AnalysisState is
-// behind a parking_lot::Mutex and all access happens within the blocking task.
+// Lifecycle (initialize/shutdown) and request dispatch. The analysis loop is
+// a tokio task that coalesces events; its CPU-bound phases (syntax, import
+// resolution, inference) each run on the blocking pool via spawn_blocking so
+// tokio workers stay free for interactive requests. The AnalysisState is
+// behind a parking_lot::Mutex.
 //
 // Event coalescing (inspired by rust-analyzer): didChange/didOpen notifications
 // are cheap — they just send an event to a single analysis loop. The loop
@@ -61,9 +63,14 @@ enum AnalysisEvent {
     FileClosed { path: PathBuf },
     /// Re-analyze a file because one of its imports' ephemeral stub changed.
     ReanalyzeFile { path: PathBuf },
-    /// Batch warmup completed. Carry results for the analysis loop to merge.
+    /// Batch warmup completed. Carry results for the analysis loop to merge,
+    /// plus the registry accumulated during warmup (context stubs may have
+    /// been lazily loaded) and the base registry warmup started from, so the
+    /// loop can write the accumulated one back if nothing changed meanwhile.
     WarmupComplete {
         results: Vec<crate::warmup::WarmupFileResult>,
+        registry: Arc<TypeAliasRegistry>,
+        base_registry: Arc<TypeAliasRegistry>,
     },
 }
 
@@ -360,7 +367,7 @@ fn spawn_analysis_loop(
                             // fully-analyzed text.
                             let text = pending_text.lock().get(&path).cloned().or_else(|| {
                                 let st = state.lock();
-                                st.files.get(&path).map(|a| a.source_text.clone())
+                                st.files.get(&path).map(|a| a.source_text.to_string())
                             });
                             if let Some(text) = text {
                                 // or_insert: a FileChanged coalesced earlier in this
@@ -373,8 +380,25 @@ fn spawn_analysis_loop(
                                 );
                             }
                         }
-                        AnalysisEvent::WarmupComplete { results } => {
+                        AnalysisEvent::WarmupComplete {
+                            results,
+                            registry,
+                            base_registry,
+                        } => {
                             warmup_results.extend(results);
+                            // Write the warmup-accumulated registry (lazily
+                            // loaded context stubs) back, but only if the live
+                            // registry is still the one warmup started from —
+                            // a concurrent stubs reload must not be clobbered.
+                            let mut st = state.lock();
+                            if Arc::ptr_eq(&st.registry, &base_registry) {
+                                st.registry = registry;
+                            } else {
+                                log::info!(
+                                    "warmup: registry changed during warmup; \
+                                     discarding accumulated context stubs"
+                                );
+                            }
                         }
                     }
                 };
@@ -450,36 +474,53 @@ fn spawn_analysis_loop(
                         continue;
                     }
 
+                    // Destructure so the snapshot and legacy state take the
+                    // parts by move — no per-file deep clones.
+                    let crate::warmup::WarmupFileResult {
+                        path,
+                        syntax_data,
+                        inference_data,
+                        file_analysis,
+                        diagnostics,
+                        import_paths,
+                    } = result;
+
                     // Write snapshot to DashMap (handlers can read immediately).
-                    _snapshots.insert(result.path.clone(), result.to_snapshot());
+                    _snapshots.insert(
+                        path.clone(),
+                        FileSnapshot {
+                            syntax: syntax_data,
+                            inference: Some(inference_data),
+                        },
+                    );
 
                     // Record import deps and store in legacy state.files.
                     {
                         let mut st = state.lock();
-                        st.record_import_deps(&result.path, &result.import_paths);
+                        st.record_import_deps(&path, &import_paths);
 
                         // Signature is already in the coordinator (set during warmup).
-                        st.files.insert(result.path.clone(), result.file_analysis);
+                        st.files.insert(path.clone(), file_analysis);
                     }
 
                     // Buffer diagnostics for quiescence publication.
                     if dc.enable {
-                        if let Some(snap) = _snapshots.get(&result.path) {
+                        if let Some(snap) = _snapshots.get(&path) {
                             let module = &snap.syntax.module;
                             let diags = if module.nocheck {
                                 vec![]
                             } else {
                                 let root = snap.syntax.parsed.tree();
-                                let file_uri = Url::from_file_path(&result.path)
+                                let file_uri = Url::from_file_path(&path)
                                     .unwrap_or_else(|_| Url::parse("file:///unknown").unwrap());
 
                                 // Apply # tix-ignore filtering before LSP conversion.
                                 let filtered_diags = if module.ignore_lines.is_empty() {
-                                    result.diagnostics.clone()
+                                    diagnostics
                                 } else {
                                     let source_text = root.syntax().text().to_string();
                                     lang_check::diagnostic::filter_ignored_diagnostics(
-                                        result.diagnostics.clone(),
+                                        diagnostics,
                                         &module.ignore_lines,
                                         &snap.syntax.source_map,
                                         root.syntax(),
@@ -494,8 +535,13 @@ fn spawn_analysis_loop(
                                     &root,
                                     &file_uri,
                                 );
+                                let check_result = &snap
+                                    .inference
+                                    .as_ref()
+                                    .expect("snapshot just inserted with inference")
+                                    .check_result;
                                 diags.extend(crate::diagnostics::unknown_type_diagnostics(
-                                    &result.inference_data.check_result,
+                                    check_result,
                                     module,
                                     &snap.syntax.source_map,
                                     &snap.syntax.line_index,
@@ -504,7 +550,7 @@ fn spawn_analysis_loop(
                                 ));
                                 diags
                             };
-                            pending_diags.insert(result.path.clone(), diags);
+                            pending_diags.insert(path.clone(), diags);
                         }
                     }
                 }
@@ -552,10 +598,18 @@ fn spawn_analysis_loop(
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_else(|| path.display().to_string());
 
-                // Phase A: Syntax update (mutex held ~5-50ms).
+                // Phase A: Syntax update (mutex held ~5-50ms). Runs on the
+                // blocking pool — parse/lower/nameres are CPU-bound and would
+                // otherwise stall this tokio worker.
                 let (syntax_data, intermediate, syntax_duration) = {
-                    let mut st = state.lock();
-                    st.update_syntax_phase_a(path.clone(), text.clone())
+                    let state = Arc::clone(&state);
+                    let (path, text) = (path.clone(), text.clone());
+                    tokio::task::spawn_blocking(move || {
+                        let mut st = state.lock();
+                        st.update_syntax_phase_a(path, text)
+                    })
+                    .await
+                    .expect("syntax phase task panicked")
                 };
                 // mutex released here
 
@@ -583,13 +637,21 @@ fn spawn_analysis_loop(
 
                 // Phase B: Import resolution with demand-driven inference.
                 // No state lock needed — uses the coordinator Arc directly.
-                // Unopened imported files are inferred from disk on demand.
-                let (inference_inputs, import_targets, name_to_import, import_duration) =
-                    crate::state::resolve_imports_phase_b(
-                        &coordinator,
-                        Some(&*lsp_syntax_provider),
-                        &intermediate,
-                    );
+                // Unopened imported files are inferred from disk on demand
+                // (CPU-bound), so this also runs on the blocking pool.
+                let (inference_inputs, import_targets, name_to_import, import_duration) = {
+                    let coordinator = Arc::clone(&coordinator);
+                    let lsp_syntax_provider = Arc::clone(&lsp_syntax_provider);
+                    tokio::task::spawn_blocking(move || {
+                        crate::state::resolve_imports_phase_b(
+                            &coordinator,
+                            Some(&*lsp_syntax_provider),
+                            &intermediate,
+                        )
+                    })
+                    .await
+                    .expect("import phase task panicked")
+                };
 
                 // Update DashMap with import data from Phase B.
                 if let Some(mut snap) = _snapshots.get_mut(path) {
@@ -597,12 +659,19 @@ fn spawn_analysis_loop(
                     snap.syntax.name_to_import = name_to_import;
                 }
 
-                // Phase C: Type inference (NO mutex held).
+                // Phase C: Type inference (NO mutex held). CPU-bound — runs
+                // on the blocking pool so hover/completion stay responsive.
                 // User-triggered files skip the RSS limit so editing works
                 // even when RSS is high. Background files go through warmup.
                 let mut inference_inputs = inference_inputs;
                 inference_inputs.core.rss_limit_mb = None;
-                let (check_result, infer_duration) = crate::state::run_inference(&inference_inputs);
+                let (inference_inputs, check_result, infer_duration) =
+                    tokio::task::spawn_blocking(move || {
+                        let (result, duration) = crate::state::run_inference(&inference_inputs);
+                        (inference_inputs, result, duration)
+                    })
+                    .await
+                    .expect("inference task panicked");
 
                 let was_cancelled = cancel_flag.load(Ordering::Relaxed);
                 let total = syntax_duration + import_duration + infer_duration;
@@ -691,13 +760,12 @@ fn spawn_analysis_loop(
                             let filtered_diags = if module.ignore_lines.is_empty() {
                                 check_result.diagnostics.clone()
                             } else {
-                                let source_text = root.syntax().text().to_string();
                                 lang_check::diagnostic::filter_ignored_diagnostics(
                                     check_result.diagnostics.clone(),
                                     &module.ignore_lines,
                                     &snap.syntax.source_map,
                                     root.syntax(),
-                                    &source_text,
+                                    text,
                                 )
                             };
 
@@ -792,7 +860,12 @@ impl LanguageServer for TixLanguageServer {
                         // Rebuild the registry to include both CLI and
                         // editor-configured stubs.
                         let registry = self.build_registry(&init_config);
-                        self.state.lock().reload_registry(registry);
+                        let reanalyze = self.state.lock().reload_registry(registry);
+                        for path in reanalyze {
+                            self.event_tx
+                                .send(AnalysisEvent::ReanalyzeFile { path })
+                                .ok();
+                        }
                     }
                     *self.config.lock() = init_config;
                 }
@@ -958,7 +1031,8 @@ impl LanguageServer for TixLanguageServer {
                                 let event_tx = self.event_tx.clone();
 
                                 tokio::task::spawn_blocking(move || {
-                                    let results = crate::warmup::run_batch_warmup(
+                                    let base_registry = Arc::clone(&warmup_registry);
+                                    let (results, registry) = crate::warmup::run_batch_warmup(
                                         files,
                                         warmup_registry,
                                         &warmup_coordinator,
@@ -968,7 +1042,11 @@ impl LanguageServer for TixLanguageServer {
                                     );
                                     if !results.is_empty() {
                                         event_tx
-                                            .send(AnalysisEvent::WarmupComplete { results })
+                                            .send(AnalysisEvent::WarmupComplete {
+                                                results,
+                                                registry,
+                                                base_registry,
+                                            })
                                             .ok();
                                     }
                                 });
@@ -1106,67 +1184,17 @@ impl LanguageServer for TixLanguageServer {
         // Update the shared diagnostics config so the analysis loop picks it up.
         *self.diag_config.lock() = new_config.diagnostics.clone();
 
-        // Collect diagnostics to publish while holding the lock, then
-        // release the lock before awaiting the publish calls.
-        let file_diagnostics = if stubs_changed {
+        // Swap the registry and queue re-analysis for open files. Fresh
+        // diagnostics are published by the analysis loop when each file's
+        // re-analysis completes — no synchronous re-check under the mutex.
+        if stubs_changed {
             let registry = self.build_registry(&new_config);
-            let mut state = self.state.lock();
-            state.reload_registry(registry);
-
-            let dc = new_config.diagnostics.clone();
-            state
-                .files
-                .iter()
-                .filter_map(|(path, analysis)| {
-                    let uri = Url::from_file_path(path).ok()?;
-                    let diags = if dc.enable {
-                        if analysis.module.nocheck {
-                            vec![]
-                        } else {
-                            let root = analysis.parsed.tree();
-
-                            let filtered_diags = if analysis.module.ignore_lines.is_empty() {
-                                analysis.check_result.diagnostics.clone()
-                            } else {
-                                let source_text = root.syntax().text().to_string();
-                                lang_check::diagnostic::filter_ignored_diagnostics(
-                                    analysis.check_result.diagnostics.clone(),
-                                    &analysis.module.ignore_lines,
-                                    &analysis.source_map,
-                                    root.syntax(),
-                                    &source_text,
-                                )
-                            };
-
-                            let mut diags = crate::diagnostics::to_lsp_diagnostics(
-                                &filtered_diags,
-                                &analysis.source_map,
-                                &analysis.line_index,
-                                &root,
-                                &uri,
-                            );
-                            diags.extend(crate::diagnostics::unknown_type_diagnostics(
-                                &analysis.check_result,
-                                &analysis.module,
-                                &analysis.source_map,
-                                &analysis.line_index,
-                                &root,
-                                dc.unknown_type,
-                            ));
-                            diags
-                        }
-                    } else {
-                        vec![]
-                    };
-                    Some((uri, diags))
-                })
-                .collect::<Vec<_>>()
-        } else {
-            vec![]
-        };
-
-        for (uri, diags) in file_diagnostics {
-            self.client.publish_diagnostics(uri, diags, None).await;
+            let reanalyze = self.state.lock().reload_registry(registry);
+            for path in reanalyze {
+                self.event_tx
+                    .send(AnalysisEvent::ReanalyzeFile { path })
+                    .ok();
+            }
         }
 
         *self.config.lock() = new_config;
@@ -1263,7 +1291,7 @@ impl LanguageServer for TixLanguageServer {
         let fresh_text = self.pending_text.lock().get(&path).cloned();
         if let Some(ref text) = fresh_text {
             let root = rnix::Root::parse(text).tree();
-            let line_index = crate::convert::LineIndex::new(text);
+            let line_index = crate::convert::LineIndex::new(text.as_str());
             Ok(crate::completion::completion(
                 &snap_ref,
                 pos,

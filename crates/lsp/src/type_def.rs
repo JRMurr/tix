@@ -117,7 +117,7 @@ fn resolve_decl_locations(
             // Fall back to the .tix stub file location (with header-trimmed span).
             let source = std::fs::read_to_string(&loc.file_path).ok()?;
             let span_end = trim_to_header(&source, loc.span);
-            let line_index = crate::convert::LineIndex::new(&source);
+            let line_index = crate::convert::LineIndex::new(source.as_str());
             let start = line_index.position(loc.span.0 as u32);
             let end = line_index.position(span_end as u32);
             let uri = Url::from_file_path(&loc.file_path).ok()?;

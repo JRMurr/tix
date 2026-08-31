@@ -761,6 +761,19 @@ pub fn import_from_arena(
     result
 }
 
+/// Like [`import_from_arena`], but for a detached `OutputTy` node whose
+/// children reference `source`. Interns the node into `target` after
+/// importing its children.
+pub fn import_node_from_arena(
+    target: &mut TypeArena,
+    source: &TypeArena,
+    node: OutputTy,
+    cache: &mut FxHashMap<TyRef, TyRef>,
+) -> TyRef {
+    let new_node = node.map_children(&mut |child| import_from_arena(target, source, child, cache));
+    target.intern(new_node)
+}
+
 // ==============================================================================
 // OwnedTy — arena + index bundle for cross-file boundaries
 // ==============================================================================

@@ -20,6 +20,12 @@ pub fn inlay_hints(analysis: &FileSnapshot, range: Range, root: &rnix::Root) -> 
     };
 
     let mut hints = Vec::new();
+    // One scratch arena per request: normalization interns new nodes and
+    // needs `&mut`, but cloning the full inference arena per binding is
+    // wasteful. Each displayed subtree is imported (O(subtree), shared
+    // nodes cached) instead.
+    let mut scratch = lang_ty::TypeArena::new();
+    let mut import_cache = rustc_hash::FxHashMap::default();
 
     for (name_id, name) in analysis.syntax.module.names() {
         // Skip inherit-style attrset keys where there's no binding value to
@@ -70,9 +76,10 @@ pub fn inlay_hints(analysis: &FileSnapshot, range: Range, root: &rnix::Root) -> 
         let ty_str = if matches!(name.kind, NameKind::Param | NameKind::PatField) {
             inference.arena.display_truncated(*ty, &dc)
         } else if inference.arena.needs_var_normalization(*ty) {
-            let mut tmp = (*inference.arena).clone();
-            let normalized = tmp.normalize_replacing_unknown(*ty);
-            tmp.display_truncated(normalized, &dc)
+            let local =
+                lang_ty::import_from_arena(&mut scratch, &inference.arena, *ty, &mut import_cache);
+            let normalized = scratch.normalize_replacing_unknown(local);
+            scratch.display_truncated(normalized, &dc)
         } else {
             inference.arena.display_truncated(*ty, &dc)
         };

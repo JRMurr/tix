@@ -120,8 +120,9 @@ pub struct TypeAliasRegistry {
     /// Top-level val declarations (e.g. `mkDerivation` -> `{ name: string, ... } -> Derivation`)
     global_vals: HashMap<SmolStr, ParsedTy>,
 
-    /// Documentation extracted from .tix stub files.
-    pub docs: DocIndex,
+    /// Documentation extracted from .tix stub files. Arc so LSP handlers can
+    /// snapshot it per request without deep-cloning the maps.
+    pub docs: Arc<DocIndex>,
 
     /// Override directory for built-in context stubs. When set,
     /// `load_context_by_name("nixos")` checks for `<dir>/nixos.tix` before
@@ -346,7 +347,7 @@ impl TypeAliasRegistry {
                 } => {
                     self.aliases.insert(name.clone(), body.clone());
                     if let Some(doc) = doc {
-                        self.docs.insert_decl_doc(name.clone(), doc.clone());
+                        Arc::make_mut(&mut self.docs).insert_decl_doc(name.clone(), doc.clone());
                     }
                 }
                 TixDeclaration::ValDecl { name, ty, doc, .. } => {
@@ -359,7 +360,7 @@ impl TypeAliasRegistry {
                         }
                     }
                     if let Some(doc) = doc {
-                        self.docs.insert_decl_doc(name.clone(), doc.clone());
+                        Arc::make_mut(&mut self.docs).insert_decl_doc(name.clone(), doc.clone());
                     }
                 }
                 TixDeclaration::Module {
@@ -387,7 +388,8 @@ impl TypeAliasRegistry {
                     self.aliases.insert(alias_name.clone(), merged);
 
                     if let Some(doc) = doc {
-                        self.docs.insert_decl_doc(alias_name.clone(), doc.clone());
+                        Arc::make_mut(&mut self.docs)
+                            .insert_decl_doc(alias_name.clone(), doc.clone());
                     }
 
                     // Module val docs become field docs on the capitalized alias.
@@ -411,8 +413,11 @@ impl TypeAliasRegistry {
             if field_doc.path.len() >= 2 {
                 let alias = field_doc.path[0].clone();
                 let field_path = field_doc.path[1..].to_vec();
-                self.docs
-                    .insert_field_doc(alias, field_path, field_doc.doc.clone());
+                Arc::make_mut(&mut self.docs).insert_field_doc(
+                    alias,
+                    field_path,
+                    field_doc.doc.clone(),
+                );
             }
         }
     }
@@ -445,8 +450,11 @@ impl TypeAliasRegistry {
                     if let Some(doc) = doc {
                         let mut path = prefix.to_vec();
                         path.push(name.clone());
-                        self.docs
-                            .insert_field_doc(alias_name.clone(), path, doc.clone());
+                        Arc::make_mut(&mut self.docs).insert_field_doc(
+                            alias_name.clone(),
+                            path,
+                            doc.clone(),
+                        );
                     }
                 }
                 TixDeclaration::Module {
@@ -458,8 +466,11 @@ impl TypeAliasRegistry {
                     if let Some(doc) = doc {
                         let mut path = prefix.to_vec();
                         path.push(name.clone());
-                        self.docs
-                            .insert_field_doc(alias_name.clone(), path, doc.clone());
+                        Arc::make_mut(&mut self.docs).insert_field_doc(
+                            alias_name.clone(),
+                            path,
+                            doc.clone(),
+                        );
                     }
                     let mut child_prefix = prefix.to_vec();
                     child_prefix.push(name.clone());

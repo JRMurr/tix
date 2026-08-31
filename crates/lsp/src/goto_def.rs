@@ -173,7 +173,7 @@ pub(crate) fn decl_location_to_lsp(
 
     // Fall back to the .tix stub file location.
     let source = std::fs::read_to_string(&loc.file_path).ok()?;
-    let line_index = crate::convert::LineIndex::new(&source);
+    let line_index = crate::convert::LineIndex::new(source.as_str());
     let start = line_index.position(loc.span.0 as u32);
     let end = line_index.position(loc.span.1 as u32);
     let uri = Url::from_file_path(&loc.file_path).ok()?;
@@ -501,7 +501,7 @@ mod tests {
 
         // Verify the target position points to the `x` definition in lib.nix.
         let lib_contents = std::fs::read_to_string(&lib_path).unwrap();
-        let lib_line_index = crate::convert::LineIndex::new(&lib_contents);
+        let lib_line_index = crate::convert::LineIndex::new(lib_contents.as_str());
         let expected_offset = find_offset(&lib_contents, "x = 1");
         let expected_pos = lib_line_index.position(expected_offset);
         assert_eq!(loc.range.start, expected_pos);
@@ -541,7 +541,7 @@ mod tests {
 
         // Verify the target position points to the `name` definition in lib.nix.
         let lib_contents = std::fs::read_to_string(&lib_path).unwrap();
-        let lib_line_index = crate::convert::LineIndex::new(&lib_contents);
+        let lib_line_index = crate::convert::LineIndex::new(lib_contents.as_str());
         let expected_offset = find_offset(&lib_contents, "name = x");
         let expected_pos = lib_line_index.position(expected_offset);
         assert_eq!(loc.range.start, expected_pos);
@@ -580,7 +580,7 @@ mod tests {
         assert_eq!(loc.uri, pkg_uri, "should jump to pkg.nix");
 
         let pkg_contents = std::fs::read_to_string(&pkg_path).unwrap();
-        let pkg_line_index = crate::convert::LineIndex::new(&pkg_contents);
+        let pkg_line_index = crate::convert::LineIndex::new(pkg_contents.as_str());
         let expected_offset = find_offset(&pkg_contents, "name = a");
         let expected_pos = pkg_line_index.position(expected_offset);
         assert_eq!(loc.range.start, expected_pos);
@@ -618,7 +618,7 @@ mod tests {
         assert_eq!(loc.uri, pkg_uri, "should jump to pkg/default.nix");
 
         let pkg_contents = std::fs::read_to_string(&pkg_path).unwrap();
-        let pkg_line_index = crate::convert::LineIndex::new(&pkg_contents);
+        let pkg_line_index = crate::convert::LineIndex::new(pkg_contents.as_str());
         let expected_offset = find_offset(&pkg_contents, "name = a");
         let expected_pos = pkg_line_index.position(expected_offset);
         assert_eq!(loc.range.start, expected_pos);

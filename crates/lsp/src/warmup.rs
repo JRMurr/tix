@@ -30,7 +30,7 @@ use smol_str::SmolStr;
 
 use crate::convert::LineIndex;
 use crate::project_config::ProjectConfig;
-use crate::state::{FileSnapshot, InferenceData, SyntaxData};
+use crate::state::{InferenceData, SyntaxData};
 
 /// Result of batch warmup for a single file. The caller (analysis loop) uses
 /// these to populate state.files, DashMap snapshots, and publish diagnostics.
@@ -57,9 +57,9 @@ pub fn run_batch_warmup(
     project_config: Option<&ProjectConfig>,
     config_dir: Option<&Path>,
     rss_limit_mb: Option<f64>,
-) -> Vec<WarmupFileResult> {
+) -> (Vec<WarmupFileResult>, Arc<TypeAliasRegistry>) {
     if files.is_empty() {
-        return vec![];
+        return (vec![], registry);
     }
 
     let t_total = Instant::now();
@@ -99,7 +99,7 @@ pub fn run_batch_warmup(
 
         let parsed = rnix::Root::parse(source_text);
         let syntax = lang_ast::run_syntax_pipeline_for_file(file_path, source_text);
-        let line_index = LineIndex::new(source_text);
+        let line_index = LineIndex::new(source_text.as_str());
 
         // Scan imports for dependency graph.
         let base_dir = file_path.parent().unwrap_or(Path::new("/"));
@@ -264,7 +264,7 @@ pub fn run_batch_warmup(
         };
 
         let file_analysis = crate::state::FileAnalysis {
-            source_text: pp.source_text,
+            source_text: pp.source_text.into(),
             line_index: syntax_data.line_index.clone(),
             parsed: syntax_data.parsed.clone(),
             module: syntax_data.module.clone(),
@@ -328,13 +328,18 @@ pub fn run_batch_warmup(
         layers.len(),
     );
 
-    all_results
+    // Return the accumulated registry too: context resolution may have
+    // lazily loaded context stubs, which the caller writes back so open
+    // files don't redo that work.
+    (all_results, registry)
 }
 
-/// Convert warmup results into FileSnapshots for direct DashMap insertion.
+/// Convert warmup results into FileSnapshots. The production merge path in
+/// server.rs destructures the result by move instead; tests use this.
+#[cfg(test)]
 impl WarmupFileResult {
-    pub fn to_snapshot(&self) -> FileSnapshot {
-        FileSnapshot {
+    pub fn to_snapshot(&self) -> crate::state::FileSnapshot {
+        crate::state::FileSnapshot {
             syntax: self.syntax_data.clone(),
             inference: Some(self.inference_data.clone()),
         }
@@ -377,7 +382,8 @@ mod tests {
         let registry = Arc::new(TypeAliasRegistry::with_builtins());
         let coordinator = InferenceCoordinator::new();
 
-        let results = run_batch_warmup(files.clone(), registry, &coordinator, None, None, None);
+        let (results, _registry) =
+            run_batch_warmup(files.clone(), registry, &coordinator, None, None, None);
 
         assert_eq!(results.len(), 3, "should get results for all 3 files");
 
@@ -412,7 +418,8 @@ mod tests {
         let registry = Arc::new(TypeAliasRegistry::with_builtins());
         let coordinator = InferenceCoordinator::new();
 
-        let results = run_batch_warmup(files.clone(), registry, &coordinator, None, None, None);
+        let (results, _registry) =
+            run_batch_warmup(files.clone(), registry, &coordinator, None, None, None);
 
         assert_eq!(results.len(), 2);
 
@@ -444,7 +451,8 @@ mod tests {
         let registry = Arc::new(TypeAliasRegistry::with_builtins());
         let coordinator = InferenceCoordinator::new();
 
-        let results = run_batch_warmup(vec![], registry, &coordinator, None, None, None);
+        let (results, _registry) =
+            run_batch_warmup(vec![], registry, &coordinator, None, None, None);
         assert!(results.is_empty());
     }
 
@@ -457,7 +465,8 @@ mod tests {
         let registry = Arc::new(TypeAliasRegistry::with_builtins());
         let coordinator = InferenceCoordinator::new();
 
-        let results = run_batch_warmup(files, registry, &coordinator, None, None, None);
+        let (results, _registry) =
+            run_batch_warmup(files, registry, &coordinator, None, None, None);
         assert_eq!(results.len(), 1);
 
         let snap = results[0].to_snapshot();
@@ -480,13 +489,14 @@ mod tests {
         let registry = Arc::new(TypeAliasRegistry::with_builtins());
         let coordinator = InferenceCoordinator::new();
 
-        let results = run_batch_warmup(files, registry, &coordinator, None, None, None);
+        let (results, _registry) =
+            run_batch_warmup(files, registry, &coordinator, None, None, None);
         assert_eq!(results.len(), 3);
 
         for result in &results {
             let text = std::fs::read_to_string(&result.path).unwrap();
             assert_eq!(
-                result.file_analysis.source_text,
+                &*result.file_analysis.source_text,
                 text,
                 "warmup should store source text in FileAnalysis for {}",
                 result.path.display()

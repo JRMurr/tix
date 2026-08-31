@@ -137,23 +137,19 @@ pub fn completion(
         }
     } else {
         // No inference available (cold start) — offer scope-based identifier
-        // completion without type details.
+        // completion without type details. (This branch only runs when
+        // inference_result() is None, so there is no arena to display
+        // types from.)
         let scope_id = scope_at_token(analysis, &token)?;
         let visible = collect_visible_names_no_inference(analysis, scope_id);
 
-        // Arena may come from stale inference; without it we can't display types.
-        let stale_arena = analysis.inference_result().map(|inf| inf.arena.clone());
-        let dc = lang_ty::DisplayConfig::completion();
         let items: Vec<CompletionItem> = visible
             .into_iter()
-            .map(|(name, ty)| {
-                let arena_ref = stale_arena.as_deref();
-                CompletionItem {
-                    label: name.to_string(),
-                    kind: Some(completion_kind_for_ty(arena_ref, ty)),
-                    detail: ty.and_then(|t| arena_ref.map(|a| a.display_truncated(t, &dc))),
-                    ..Default::default()
-                }
+            .map(|(name, ty)| CompletionItem {
+                label: name.to_string(),
+                kind: Some(completion_kind_for_ty(None, ty)),
+                detail: None,
+                ..Default::default()
             })
             .collect();
 

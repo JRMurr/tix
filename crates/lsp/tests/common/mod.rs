@@ -781,7 +781,7 @@ impl LspTestHarness {
     pub fn markers(&self, name: &str) -> BTreeMap<u32, Position> {
         let text = self.workspace.read_file(name);
         let byte_offsets = parse_markers(&text);
-        let line_index = LineIndex::new(&text);
+        let line_index = LineIndex::new(text.as_str());
 
         byte_offsets
             .into_iter()

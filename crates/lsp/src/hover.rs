@@ -66,8 +66,13 @@ pub fn hover(
                 let ty_str = if is_param_kind(kind) {
                     inference.arena.display_truncated(ty_ref, &dc)
                 } else if inference.arena.needs_var_normalization(ty_ref) {
-                    let mut tmp = (*inference.arena).clone();
-                    let normalized = tmp.normalize_replacing_unknown(ty_ref);
+                    // Import only the displayed subtree into a small scratch
+                    // arena — O(subtree) instead of cloning the whole arena.
+                    let mut tmp = lang_ty::TypeArena::new();
+                    let mut cache = rustc_hash::FxHashMap::default();
+                    let local =
+                        lang_ty::import_from_arena(&mut tmp, &inference.arena, ty_ref, &mut cache);
+                    let normalized = tmp.normalize_replacing_unknown(local);
                     tmp.display_truncated(normalized, &dc)
                 } else {
                     inference.arena.display_truncated(ty_ref, &dc)
@@ -126,16 +131,20 @@ pub fn hover(
                 let is_param_ref = param_name_id.is_some();
                 let dc = lang_ty::DisplayConfig::hover();
                 // normalize_replacing_unknown / normalize_vars both need &mut
-                // TypeArena; clone to a temporary to avoid mutating the shared Arc.
-                // Skip the clone when no normalization is needed (common case).
+                // TypeArena; import the displayed subtree into a small scratch
+                // arena (O(subtree)) instead of cloning the whole shared arena.
+                // Skip entirely when no normalization is needed (common case).
                 let ty_str = if !is_param_ref && !inference.arena.needs_var_normalization(ty_ref) {
                     inference.arena.display_truncated(ty_ref, &dc)
                 } else {
-                    let mut tmp = (*inference.arena).clone();
+                    let mut tmp = lang_ty::TypeArena::new();
+                    let mut cache = rustc_hash::FxHashMap::default();
+                    let local =
+                        lang_ty::import_from_arena(&mut tmp, &inference.arena, ty_ref, &mut cache);
                     let normalized = if is_param_ref {
-                        tmp.normalize_vars(ty_ref)
+                        tmp.normalize_vars(local)
                     } else {
-                        tmp.normalize_replacing_unknown(ty_ref)
+                        tmp.normalize_replacing_unknown(local)
                     };
 
                     // Same-level parameter references degrade in expr_ty_map:
@@ -154,7 +163,9 @@ pub fn hover(
                         if let Some(name_ty) =
                             param_name_id.and_then(|nid| inference.name_ty_map.get(nid).copied())
                         {
-                            tmp.display_truncated(name_ty, &dc)
+                            // name_ty indexes the original arena; display it
+                            // there (it was never normalized before either).
+                            inference.arena.display_truncated(name_ty, &dc)
                         } else {
                             tmp.display_truncated(normalized, &dc)
                         }
@@ -292,9 +303,11 @@ fn try_attrpath_key_hover(
     let last_segment = res.full_path.last()?;
     let range = analysis.syntax.line_index.range(token.text_range());
     let dc = lang_ty::DisplayConfig::hover();
-    // Clone the config_arena to get a mutable tmp for intern+display.
-    let mut tmp = (*res.config_arena).clone();
-    let resolved_ref = tmp.intern(resolved_ty);
+    // Import the resolved node's subtree into a small scratch arena for
+    // intern+display — no full config_arena clone.
+    let mut tmp = lang_ty::TypeArena::new();
+    let mut cache = rustc_hash::FxHashMap::default();
+    let resolved_ref = lang_ty::import_node_from_arena(&mut tmp, arena, resolved_ty, &mut cache);
     let type_display = format!(
         "{last_segment} :: {}",
         tmp.display_truncated(resolved_ref, &dc)
