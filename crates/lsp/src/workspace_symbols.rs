@@ -149,8 +149,6 @@ mod tests {
     use lang_check::aliases::TypeAliasRegistry;
     use tower_lsp::lsp_types::SymbolKind;
 
-    use crate::state::AnalysisState;
-
     /// Helper: create an AnalysisState with multiple files and query workspace symbols.
     fn query_workspace(files: &[(&str, &str)], query: &str) -> Vec<SymbolInformation> {
         let mut state = crate::state::AnalysisState::new(TypeAliasRegistry::default());

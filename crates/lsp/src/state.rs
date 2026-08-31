@@ -18,7 +18,7 @@ use lang_ast::{
 };
 use lang_check::aliases::TypeAliasRegistry;
 use lang_check::coordinator::{InferenceCoordinator, SyntaxProvider, TypeofLookup};
-#[cfg(any(test, feature = "test_support"))]
+#[cfg(test)]
 use lang_check::diagnostic::{TixDiagnostic, TixDiagnosticKind};
 use lang_check::imports::{import_errors_to_diagnostics, resolve_import_types};
 #[cfg(test)]
@@ -308,7 +308,7 @@ pub fn resolve_imports_phase_b(
     )
 }
 
-#[cfg(any(test, feature = "test_support"))]
+#[cfg(test)]
 impl FileAnalysis {
     /// Convert a FileAnalysis into a FileSnapshot for test harnesses.
     pub fn to_snapshot(&self) -> FileSnapshot {
@@ -334,7 +334,7 @@ impl FileAnalysis {
 }
 
 /// Cached analysis output for a single open file.
-#[cfg(any(test, feature = "test_support"))]
+#[cfg(test)]
 pub struct FileAnalysis {
     /// Source text used for this analysis pass. Stored so that
     /// `reload_registry` and `ReanalyzeFile` can re-run analysis without
@@ -367,7 +367,7 @@ pub struct FileAnalysis {
     pub context_arg_arena: Arc<lang_ty::TypeArena>,
 }
 
-#[cfg(any(test, feature = "test_support"))]
+#[cfg(test)]
 impl FileAnalysis {
     #[cfg(test)]
     pub fn inference(&self) -> Option<&InferenceResult> {
@@ -406,7 +406,7 @@ pub struct AnalysisState {
     /// Cached per-file analysis, keyed by canonical path. Test-only: the
     /// production server reads exclusively from the snapshots DashMap; unit
     /// tests drive analysis through `update_file` and read back snapshots.
-    #[cfg(any(test, feature = "test_support"))]
+    #[cfg(test)]
     pub files: HashMap<PathBuf, FileAnalysis>,
     /// Project-level tix.toml configuration (if discovered).
     pub project_config: Option<ProjectConfig>,
@@ -430,7 +430,7 @@ impl AnalysisState {
     pub fn new(registry: TypeAliasRegistry) -> Self {
         Self {
             registry: Arc::new(registry),
-            #[cfg(any(test, feature = "test_support"))]
+            #[cfg(test)]
             files: HashMap::default(),
             project_config: None,
             config_dir: None,
@@ -471,7 +471,7 @@ impl AnalysisState {
     // Only tests drive analysis through this synchronous path — the
     // production loop uses the phase A/B/C split, and reload_registry queues
     // ReanalyzeFile events instead of re-checking inline.
-    #[cfg(any(test, feature = "test_support"))]
+    #[cfg(test)]
     pub fn update_file(
         &mut self,
         path: PathBuf,
@@ -480,7 +480,7 @@ impl AnalysisState {
         self.update_file_inner(path, contents)
     }
 
-    #[cfg(any(test, feature = "test_support"))]
+    #[cfg(test)]
     fn update_file_inner(
         &mut self,
         path: PathBuf,
@@ -609,7 +609,7 @@ impl AnalysisState {
         (self.files.get(&path).unwrap(), timing)
     }
 
-    #[cfg(any(test, feature = "test_support"))]
+    #[cfg(test)]
     pub fn get_file(&self, path: &PathBuf) -> Option<&FileAnalysis> {
         self.files.get(path)
     }
