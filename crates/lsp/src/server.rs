@@ -238,6 +238,52 @@ impl TixLanguageServer {
     }
 }
 
+/// Build the LSP diagnostics for one analyzed file: honors the diagnostics
+/// config and the module's `# tix: nocheck` directive, applies `# tix-ignore`
+/// line filtering, and appends unknown-type hints.
+fn build_diagnostics(
+    syntax: &crate::state::SyntaxData,
+    diagnostics: Vec<lang_check::diagnostic::TixDiagnostic>,
+    check_result: &lang_check::CheckResult,
+    uri: &Url,
+    source_text: &str,
+    dc: &DiagnosticsConfig,
+) -> Vec<Diagnostic> {
+    if !dc.enable || syntax.module.nocheck {
+        return vec![];
+    }
+    let root = syntax.parsed.tree();
+
+    let filtered = if syntax.module.ignore_lines.is_empty() {
+        diagnostics
+    } else {
+        lang_check::diagnostic::filter_ignored_diagnostics(
+            diagnostics,
+            &syntax.module.ignore_lines,
+            &syntax.source_map,
+            root.syntax(),
+            source_text,
+        )
+    };
+
+    let mut diags = crate::diagnostics::to_lsp_diagnostics(
+        &filtered,
+        &syntax.source_map,
+        &syntax.line_index,
+        &root,
+        uri,
+    );
+    diags.extend(crate::diagnostics::unknown_type_diagnostics(
+        check_result,
+        &syntax.module,
+        &syntax.source_map,
+        &syntax.line_index,
+        &root,
+        dc.unknown_type,
+    ));
+    diags
+}
+
 /// Single analysis loop task (like rust-analyzer's `GlobalState::run()`).
 ///
 /// Receives `AnalysisEvent`s from `schedule_analysis` / `did_close` and
@@ -494,6 +540,9 @@ fn spawn_analysis_loop(
                         },
                     );
 
+                    // Keep the (Arc-shared) text for ignore-line filtering below.
+                    let source_text = Arc::clone(&file_analysis.source_text);
+
                     // Record import deps and store in legacy state.files.
                     {
                         let mut st = state.lock();
@@ -506,50 +555,21 @@ fn spawn_analysis_loop(
                     // Buffer diagnostics for quiescence publication.
                     if dc.enable {
                         if let Some(snap) = _snapshots.get(&path) {
-                            let module = &snap.syntax.module;
-                            let diags = if module.nocheck {
-                                vec![]
-                            } else {
-                                let root = snap.syntax.parsed.tree();
-                                let file_uri = Url::from_file_path(&path)
-                                    .unwrap_or_else(|_| Url::parse("file:///unknown").unwrap());
-
-                                // Apply # tix-ignore filtering before LSP conversion.
-                                let filtered_diags = if module.ignore_lines.is_empty() {
-                                    diagnostics
-                                } else {
-                                    let source_text = root.syntax().text().to_string();
-                                    lang_check::diagnostic::filter_ignored_diagnostics(
-                                        diagnostics,
-                                        &module.ignore_lines,
-                                        &snap.syntax.source_map,
-                                        root.syntax(),
-                                        &source_text,
-                                    )
-                                };
-
-                                let mut diags = crate::diagnostics::to_lsp_diagnostics(
-                                    &filtered_diags,
-                                    &snap.syntax.source_map,
-                                    &snap.syntax.line_index,
-                                    &root,
-                                    &file_uri,
-                                );
-                                let check_result = &snap
-                                    .inference
-                                    .as_ref()
-                                    .expect("snapshot just inserted with inference")
-                                    .check_result;
-                                diags.extend(crate::diagnostics::unknown_type_diagnostics(
-                                    check_result,
-                                    module,
-                                    &snap.syntax.source_map,
-                                    &snap.syntax.line_index,
-                                    &root,
-                                    dc.unknown_type,
-                                ));
-                                diags
-                            };
+                            let file_uri = Url::from_file_path(&path)
+                                .unwrap_or_else(|_| Url::parse("file:///unknown").unwrap());
+                            let check_result = &snap
+                                .inference
+                                .as_ref()
+                                .expect("snapshot just inserted with inference")
+                                .check_result;
+                            let diags = build_diagnostics(
+                                &snap.syntax,
+                                diagnostics,
+                                check_result,
+                                &file_uri,
+                                &source_text,
+                                &dc,
+                            );
                             pending_diags.insert(path.clone(), diags);
                         }
                     }
@@ -747,46 +767,18 @@ fn spawn_analysis_loop(
                 }
 
                 let dc = diag_config.lock().clone();
-                let diags = if dc.enable && !was_cancelled {
+                let diags = if !was_cancelled {
                     if let Some(snap) = _snapshots.get(path) {
-                        let module = &snap.syntax.module;
-                        if module.nocheck {
-                            vec![]
-                        } else {
-                            let root = snap.syntax.parsed.tree();
-                            let file_uri = Url::from_file_path(path)
-                                .unwrap_or_else(|_| Url::parse("file:///unknown").unwrap());
-
-                            let filtered_diags = if module.ignore_lines.is_empty() {
-                                check_result.diagnostics.clone()
-                            } else {
-                                lang_check::diagnostic::filter_ignored_diagnostics(
-                                    check_result.diagnostics.clone(),
-                                    &module.ignore_lines,
-                                    &snap.syntax.source_map,
-                                    root.syntax(),
-                                    text,
-                                )
-                            };
-
-                            let mut diags = crate::diagnostics::to_lsp_diagnostics(
-                                &filtered_diags,
-                                &snap.syntax.source_map,
-                                &snap.syntax.line_index,
-                                &root,
-                                &file_uri,
-                            );
-                            // Append unknown-type diagnostics for `?`-typed bindings.
-                            diags.extend(crate::diagnostics::unknown_type_diagnostics(
-                                &check_result,
-                                module,
-                                &snap.syntax.source_map,
-                                &snap.syntax.line_index,
-                                &root,
-                                dc.unknown_type,
-                            ));
-                            diags
-                        }
+                        let file_uri = Url::from_file_path(path)
+                            .unwrap_or_else(|_| Url::parse("file:///unknown").unwrap());
+                        build_diagnostics(
+                            &snap.syntax,
+                            check_result.diagnostics.clone(),
+                            &check_result,
+                            &file_uri,
+                            text,
+                            &dc,
+                        )
                     } else {
                         vec![]
                     }
