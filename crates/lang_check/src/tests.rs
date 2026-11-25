@@ -913,6 +913,58 @@ test_case!(
     String
 );
 
+// ==============================================================================
+// Annotations on non-rec attrset fields (GitHub issue #24)
+// ==============================================================================
+
+// Non-rec fields are not SCC groups, so annotations must be applied in the
+// attrset inference path rather than the per-group loop.
+error_case!(
+    non_rec_attrset_field_annotation_mismatch,
+    "
+    {
+        # type: a :: int
+        a = ''test'';
+    }
+    ",
+    matches TixDiagnosticKind::TypeMismatch { .. }
+);
+
+test_case!(
+    non_rec_attrset_field_annotation_constrains,
+    "
+    {
+        /** type: f :: int -> int */
+        f = x: x;
+    }
+    ",
+    { "f": (Int -> Int) }
+);
+
+error_case!(
+    non_rec_attrset_field_annotation_nested_mismatch,
+    "
+    {
+        outer = {
+            # type: inner :: string
+            inner = 1;
+        };
+    }
+    ",
+    matches TixDiagnosticKind::TypeMismatch { .. }
+);
+
+error_case!(
+    rec_attrset_field_annotation_mismatch,
+    "
+    rec {
+        # type: a :: int
+        a = ''test'';
+    }
+    ",
+    matches TixDiagnosticKind::TypeMismatch { .. }
+);
+
 /// Look up the type of a named binding by text name, with aliases loaded.
 /// When the same name has multiple NameIds (e.g. definition + inherit reference),
 /// prefer the version without unions/intersections (the clean early-canonicalized form).

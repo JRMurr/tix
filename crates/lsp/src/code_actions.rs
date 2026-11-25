@@ -535,8 +535,9 @@ fn add_invalid_interpolation_actions(
 // "Add type annotation" refactoring
 // ==============================================================================
 //
-// When the cursor is on a let-binding name that has an inferred type, offers to
-// insert a `/** type: name :: <type> */` doc comment above the binding.
+// When the cursor is on a let-binding or attrset-field name that has an
+// inferred type, offers to insert a `/** type: name :: <type> */` doc comment
+// above the binding.
 
 fn add_type_annotation_actions(
     analysis: &FileSnapshot,
@@ -553,8 +554,11 @@ fn add_type_annotation_actions(
     let request_range = params.range;
 
     for (name_id, name) in analysis.syntax.module.names() {
-        // Only offer annotations for let-bindings and rec-attrset fields.
-        if !matches!(name.kind, NameKind::LetIn | NameKind::RecAttrset) {
+        // Only offer annotations for let-bindings and attrset fields.
+        if !matches!(
+            name.kind,
+            NameKind::LetIn | NameKind::RecAttrset | NameKind::PlainAttrset
+        ) {
             continue;
         }
 
@@ -945,6 +949,21 @@ mod tests {
         assert!(
             new_text.contains("int"),
             "annotation should contain 'int' for an integer literal, got: {new_text}"
+        );
+    }
+
+    #[test]
+    fn add_type_annotation_plain_attrset_field() {
+        let src = indoc! {"
+            { port = 8080; }
+            # ^1
+        "};
+        let actions = actions_at_marker(src, 1);
+        let titles = action_titles(&actions);
+
+        assert!(
+            titles.iter().any(|t| t.contains("Add type annotation")),
+            "expected 'Add type annotation' on a plain attrset field, got: {titles:?}"
         );
     }
 

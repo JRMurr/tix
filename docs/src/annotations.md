@@ -54,6 +54,15 @@ Line comments work too — handy for attrset pattern parameters where `/**` feel
 
 The `type:` prefix distinguishes annotations from regular comments.
 
+Annotations attach to the binding directly below them: `let` bindings, attrset fields (both `{ ... }` and `rec { ... }`), and lambda pattern fields.
+
+```nix
+{
+  # type: port :: int
+  port = 8080;
+}
+```
+
 ### Assigning type aliases
 
 When you import something typed by stubs, you assign it a type alias:

@@ -1065,6 +1065,10 @@ impl CheckCtx<'_> {
             // Named types flow through constrain_equal automatically.
             self.constrain_equal(value_ty, name_ty)?;
 
+            // Non-rec fields never go through the SCC group loop, so doc
+            // comment annotations must be applied here (GitHub issue #24).
+            self.apply_type_annotation(name, value_ty)?;
+
             fields.insert(name_text, value_ty);
         }
 
